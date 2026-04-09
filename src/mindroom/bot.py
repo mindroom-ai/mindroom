@@ -648,6 +648,71 @@ def _merge_response_extra_content(
     return merged_extra_content if extra_content is not None or attachment_ids else None
 
 
+def _collect_sync_timeline_cache_updates(
+    response: nio.SyncResponse,
+) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, str]]]:
+    """Extract cacheable timeline events and redactions from one sync response."""
+    cached_events: list[tuple[str, str, dict[str, Any]]] = []
+    redacted_events: list[tuple[str, str]] = []
+    redacted_event_ids_by_room: dict[str, set[str]] = {}
+
+    for room_id, room_info in response.rooms.join.items():
+        _collect_room_sync_timeline_cache_updates(
+            room_id=room_id,
+            room_info=room_info,
+            cached_events=cached_events,
+            redacted_events=redacted_events,
+            redacted_event_ids_by_room=redacted_event_ids_by_room,
+        )
+
+    filtered_cached_events = [
+        (event_id, room_id, event_source)
+        for event_id, room_id, event_source in cached_events
+        if event_id not in redacted_event_ids_by_room.get(room_id, set())
+    ]
+    return filtered_cached_events, redacted_events
+
+
+def _collect_room_sync_timeline_cache_updates(
+    *,
+    room_id: str,
+    room_info: nio.RoomInfo,
+    cached_events: list[tuple[str, str, dict[str, Any]]],
+    redacted_events: list[tuple[str, str]],
+    redacted_event_ids_by_room: dict[str, set[str]],
+) -> None:
+    """Collect cache writes for one joined room timeline."""
+    for event in room_info.timeline.events:
+        if not isinstance(event, nio.Event):
+            continue
+        if not isinstance(event.source, dict):
+            continue
+        if not isinstance(event.event_id, str):
+            continue
+        if isinstance(event, nio.RedactionEvent):
+            if not isinstance(event.redacts, str):
+                continue
+            redacted_events.append((room_id, event.redacts))
+            redacted_event_ids_by_room.setdefault(room_id, set()).add(event.redacts)
+            continue
+
+        server_timestamp = event.server_timestamp
+        cached_events.append(
+            (
+                event.event_id,
+                room_id,
+                normalize_event_source_for_cache(
+                    event.source,
+                    event_id=event.event_id,
+                    sender=event.sender if isinstance(event.sender, str) else None,
+                    origin_server_ts=server_timestamp
+                    if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
+                    else None,
+                ),
+            ),
+        )
+
+
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
@@ -1716,45 +1781,9 @@ class AgentBot:
         if event_cache is None:
             return
 
-        cached_events: list[tuple[str, str, dict[str, Any]]] = []
-        redacted_events: list[tuple[str, str]] = []
-        redacted_event_ids_by_room: dict[str, set[str]] = {}
-        for room_id, room_info in response.rooms.join.items():
-            for event in room_info.timeline.events:
-                if not isinstance(event, nio.Event):
-                    continue
-                if not isinstance(event.source, dict):
-                    continue
-                if not isinstance(event.event_id, str):
-                    continue
-                if isinstance(event, nio.RedactionEvent):
-                    if isinstance(event.redacts, str):
-                        redacted_events.append((room_id, event.redacts))
-                        redacted_event_ids_by_room.setdefault(room_id, set()).add(event.redacts)
-                    continue
-                server_timestamp = event.server_timestamp
-                cached_events.append(
-                    (
-                        event.event_id,
-                        room_id,
-                        normalize_event_source_for_cache(
-                            event.source,
-                            event_id=event.event_id,
-                            sender=event.sender if isinstance(event.sender, str) else None,
-                            origin_server_ts=server_timestamp
-                            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-                            else None,
-                        ),
-                    ),
-                )
-        if not cached_events and not redacted_events:
+        filtered_cached_events, redacted_events = _collect_sync_timeline_cache_updates(response)
+        if not filtered_cached_events and not redacted_events:
             return
-
-        filtered_cached_events = [
-            (event_id, room_id, event_source)
-            for event_id, room_id, event_source in cached_events
-            if event_id not in redacted_event_ids_by_room.get(room_id, set())
-        ]
 
         try:
             if filtered_cached_events:

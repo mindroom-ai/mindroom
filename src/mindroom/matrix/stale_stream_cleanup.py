@@ -103,6 +103,7 @@ def _requester_resolution_message(
     content: dict[str, Any] | None,
     body: str | None,
     timestamp: int | None,
+    thread_id: str | None = None,
 ) -> ResolvedVisibleMessage:
     """Build a typed visible message for requester-resolution fetches."""
     normalized_content = {key: value for key, value in (content or {}).items() if isinstance(key, str)}
@@ -113,6 +114,7 @@ def _requester_resolution_message(
         event_id=event_id,
         timestamp=timestamp or 0,
         content=normalized_content or None,
+        thread_id=thread_id,
     )
 
 
@@ -447,11 +449,10 @@ async def _scan_room_message_states(
         now_ms=now_ms,
     )
 
-    resolved_messages = await resolve_latest_visible_messages(message_events, client)
+    bot_message_events = [event for event in message_events if event.sender == bot_user_id]
+    resolved_messages = await resolve_latest_visible_messages(bot_message_events, client)
     bot_resolved_messages = {
-        event_id: message
-        for event_id, message in resolved_messages.items()
-        if message.sender == bot_user_id
+        event_id: message for event_id, message in resolved_messages.items() if message.sender == bot_user_id
     }
     scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
@@ -469,7 +470,11 @@ async def _scan_room_message_states(
         bot_user_id=bot_user_id,
         requester_ids_by_event_id=requester_ids_by_event_id,
     )
-    _assign_latest_thread_event_ids(message_states, resolved_messages)
+    _assign_latest_thread_event_ids(
+        message_states,
+        resolved_messages,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
+    )
 
     return message_states
 
@@ -477,12 +482,18 @@ async def _scan_room_message_states(
 def _assign_latest_thread_event_ids(
     message_states: dict[str, _MessageState],
     resolved_messages: dict[str, ResolvedVisibleMessage],
+    *,
+    scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> None:
     """Record the latest visible event ID seen for each explicit thread."""
-    thread_root_ids = {message.thread_id for message in resolved_messages.values() if message.thread_id is not None}
+    all_messages = [
+        *resolved_messages.values(),
+        *scanned_message_data_by_event_id.values(),
+    ]
+    thread_root_ids = {message.thread_id for message in all_messages if message.thread_id is not None}
     latest_event_id_by_thread: dict[str, tuple[int, str]] = {}
 
-    for message in resolved_messages.values():
+    for message in all_messages:
         thread_key = message.thread_id
         if thread_key is None and message.event_id in thread_root_ids:
             thread_key = message.event_id
@@ -609,12 +620,14 @@ def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText])
             continue
 
         raw_content = _as_string_keyed_dict(event.source.get("content")) or {}
+        event_info = EventInfo.from_event(event.source)
         message_data_by_event_id[event_id] = _requester_resolution_message(
             event_id=event_id,
             sender=sender,
             content=raw_content,
             body=event.body,
             timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
+            thread_id=event_info.thread_id,
         )
     return message_data_by_event_id
 
@@ -1028,7 +1041,6 @@ async def _edit_stale_message(
         runtime_paths=runtime_paths,
         sender_domain=sender_domain,
         extra_content=extra_content,
-        latest_thread_event_id=latest_thread_event_id,
     )
 
     response_event_id = await edit_message(

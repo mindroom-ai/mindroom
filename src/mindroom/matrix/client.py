@@ -1270,6 +1270,202 @@ async def _resolve_thread_history_from_event_sources(
     return messages
 
 
+async def _fetch_thread_history_without_cache(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> list[ResolvedVisibleMessage]:
+    """Fetch thread history directly from the homeserver when no cache is active."""
+    try:
+        return await _fetch_thread_history_via_relations(client, room_id, thread_id)
+    except _ThreadHistoryFastPathUnavailableError as exc:
+        logger.info(
+            "Falling back to room scan for thread history",
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=str(exc),
+        )
+        return await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
+
+
+async def _load_cached_thread_history(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: EventCache,
+) -> list[ResolvedVisibleMessage] | None:
+    """Return cached thread history when it can be refreshed and resolved safely."""
+    try:
+        cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
+    except Exception as exc:
+        logger.warning(
+            "Event cache read failed; falling back to homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        return None
+
+    if cached_event_sources is None:
+        return None
+
+    cached_event_ids = {
+        event_id
+        for event_source in cached_event_sources
+        if (event_id := _event_id_from_source(event_source)) is not None
+    }
+    if not cached_event_ids:
+        logger.warning(
+            "Cached thread payload was missing event IDs; refetching from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+        return None
+
+    refreshed_event_sources = await _refresh_cached_thread_event_sources(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        cached_event_ids=cached_event_ids,
+        event_cache=event_cache,
+        cached_event_sources=cached_event_sources,
+    )
+    return await _resolve_cached_thread_history(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+        cached_event_sources=refreshed_event_sources,
+    )
+
+
+async def _refresh_cached_thread_event_sources(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    cached_event_ids: Collection[str],
+    event_cache: EventCache,
+    cached_event_sources: Sequence[dict[str, Any]],
+) -> Sequence[dict[str, Any]]:
+    """Apply incremental refreshes to one cached thread payload when possible."""
+    try:
+        new_event_sources, redactions = await _fetch_incremental_thread_events(
+            client,
+            room_id,
+            thread_id,
+            cached_event_ids=cached_event_ids,
+        )
+        if new_event_sources:
+            await event_cache.store_thread_events(room_id, thread_id, new_event_sources)
+        for redacted_event_id, redaction_event in redactions:
+            await event_cache.redact_event(
+                room_id,
+                redacted_event_id,
+                thread_id=thread_id,
+                redaction_event=redaction_event,
+            )
+        if not new_event_sources and not redactions:
+            return cached_event_sources
+
+        refreshed_event_sources = await event_cache.get_thread_events(room_id, thread_id)
+    except Exception as exc:
+        logger.warning(
+            "Incremental thread cache refresh failed; serving stale cache",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        return cached_event_sources
+    else:
+        if refreshed_event_sources is not None:
+            return refreshed_event_sources
+        return []
+
+
+async def _resolve_cached_thread_history(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: EventCache,
+    cached_event_sources: Sequence[dict[str, Any]],
+) -> list[ResolvedVisibleMessage] | None:
+    """Resolve cached thread history or invalidate the cache entry on corruption."""
+    try:
+        return await _resolve_thread_history_from_event_sources(
+            client,
+            thread_id=thread_id,
+            event_sources=cached_event_sources,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Cached thread payload could not be resolved; refetching from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+        return None
+
+
+async def _invalidate_thread_cache_entry(
+    event_cache: EventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> None:
+    """Best-effort invalidation for one broken cached thread entry."""
+    try:
+        await event_cache.invalidate_thread(room_id, thread_id)
+    except Exception:
+        logger.warning(
+            "Failed to invalidate broken event cache entry",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+
+
+async def _fetch_thread_history_with_events(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> tuple[list[ResolvedVisibleMessage], list[dict[str, Any]]]:
+    """Fetch thread history and raw event sources from the homeserver."""
+    try:
+        return await _fetch_thread_history_via_relations_with_events(client, room_id, thread_id)
+    except _ThreadHistoryFastPathUnavailableError as exc:
+        logger.info(
+            "Falling back to room scan for thread history",
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=str(exc),
+        )
+        return await _fetch_thread_history_via_room_messages_with_events(client, room_id, thread_id)
+
+
+async def _store_thread_history_cache(
+    event_cache: EventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_sources: Sequence[dict[str, Any]],
+) -> None:
+    """Best-effort replacement of one cached thread snapshot."""
+    try:
+        await event_cache.invalidate_thread(room_id, thread_id)
+        await event_cache.store_thread_events(room_id, thread_id, list(event_sources))
+    except Exception as exc:
+        logger.warning(
+            "Event cache write failed; continuing without cache",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+
+
 def _bundled_replacement_event(
     event_source: dict[str, Any],
 ) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
@@ -1573,7 +1769,7 @@ async def resolve_latest_visible_messages(
     return messages_by_event_id
 
 
-async def fetch_thread_history(  # noqa: C901
+async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -1582,126 +1778,24 @@ async def fetch_thread_history(  # noqa: C901
     """Fetch all messages in a thread."""
     active_event_cache = event_cache or get_event_cache(client)
     if active_event_cache is None:
-        try:
-            return await _fetch_thread_history_via_relations(client, room_id, thread_id)
-        except _ThreadHistoryFastPathUnavailableError as exc:
-            logger.info(
-                "Falling back to room scan for thread history",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=str(exc),
-            )
-            return await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
+        return await _fetch_thread_history_without_cache(client, room_id, thread_id)
 
-    try:
-        cached_event_sources = await active_event_cache.get_thread_events(room_id, thread_id)
-    except Exception as exc:
-        logger.warning(
-            "Event cache read failed; falling back to homeserver",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-    else:
-        if cached_event_sources is not None:
-            cached_event_ids = {
-                event_id
-                for event_source in cached_event_sources
-                if (event_id := _event_id_from_source(event_source)) is not None
-            }
-            if not cached_event_ids:
-                logger.warning(
-                    "Cached thread payload was missing event IDs; refetching from homeserver",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                )
-                try:
-                    await active_event_cache.invalidate_thread(room_id, thread_id)
-                except Exception:
-                    logger.warning(
-                        "Failed to invalidate broken event cache entry",
-                        room_id=room_id,
-                        thread_id=thread_id,
-                    )
-            else:
-                try:
-                    new_event_sources, redactions = await _fetch_incremental_thread_events(
-                        client,
-                        room_id,
-                        thread_id,
-                        cached_event_ids=cached_event_ids,
-                    )
-                    if new_event_sources:
-                        await active_event_cache.store_thread_events(room_id, thread_id, new_event_sources)
-                    for redacted_event_id, redaction_event in redactions:
-                        await active_event_cache.redact_event(
-                            room_id,
-                            redacted_event_id,
-                            thread_id=thread_id,
-                            redaction_event=redaction_event,
-                        )
-                    if new_event_sources or redactions:
-                        refreshed_event_sources = await active_event_cache.get_thread_events(room_id, thread_id)
-                        cached_event_sources = refreshed_event_sources if refreshed_event_sources is not None else []
-                except Exception as exc:
-                    logger.warning(
-                        "Incremental thread cache refresh failed; serving stale cache",
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        error=str(exc),
-                    )
+    cached_history = await _load_cached_thread_history(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=active_event_cache,
+    )
+    if cached_history is not None:
+        return cached_history
 
-                try:
-                    return await _resolve_thread_history_from_event_sources(
-                        client,
-                        thread_id=thread_id,
-                        event_sources=cached_event_sources,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Cached thread payload could not be resolved; refetching from homeserver",
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        error=str(exc),
-                    )
-                    try:
-                        await active_event_cache.invalidate_thread(room_id, thread_id)
-                    except Exception:
-                        logger.warning(
-                            "Failed to invalidate broken event cache entry",
-                            room_id=room_id,
-                            thread_id=thread_id,
-                        )
-
-    try:
-        thread_messages, event_sources = await _fetch_thread_history_via_relations_with_events(
-            client,
-            room_id,
-            thread_id,
-        )
-    except _ThreadHistoryFastPathUnavailableError as exc:
-        logger.info(
-            "Falling back to room scan for thread history",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=str(exc),
-        )
-        thread_messages, event_sources = await _fetch_thread_history_via_room_messages_with_events(
-            client,
-            room_id,
-            thread_id,
-        )
-
-    try:
-        await active_event_cache.invalidate_thread(room_id, thread_id)
-        await active_event_cache.store_thread_events(room_id, thread_id, event_sources)
-    except Exception as exc:
-        logger.warning(
-            "Event cache write failed; continuing without cache",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
+    thread_messages, event_sources = await _fetch_thread_history_with_events(client, room_id, thread_id)
+    await _store_thread_history_cache(
+        active_event_cache,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_sources=event_sources,
+    )
 
     return thread_messages
 
