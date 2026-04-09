@@ -1247,6 +1247,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
         tool_trace: list[object] | None = None,
         extra_content: dict[str, object] | None = None,
         thread_mode_override: str | None = None,
+        target: object | None = None,
     ) -> str:
         captured_send["room_id"] = room_id
         captured_send["reply_to_event_id"] = reply_to_event_id
@@ -1257,6 +1258,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
         captured_send["tool_trace"] = tool_trace
         captured_send["extra_content"] = extra_content
         captured_send["thread_mode_override"] = thread_mode_override
+        captured_send["target"] = target
         return "$thinking"
 
     monkeypatch.setattr(bot, "_send_response", AsyncMock(side_effect=fake_send_response))

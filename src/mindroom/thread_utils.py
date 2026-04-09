@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client import ResolvedVisibleMessage
-
 # Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
 # Accepts both single and double quotes (mautrix bridges use single quotes).
 # Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.
@@ -103,7 +102,7 @@ def get_agents_in_thread(
     seen_ids: set[str] = set()
 
     for msg in thread_history:
-        sender = msg.sender or ""
+        sender = msg.sender
         agent_name = extract_agent_name(sender, config, runtime_paths)
 
         # Skip router agent and invalid senders
@@ -176,7 +175,7 @@ def has_multiple_non_agent_users_in_thread(
     """
     non_agent_senders: set[str] = set()
     for msg in thread_history:
-        sender = msg.sender or ""
+        sender = msg.sender
         if sender and not _is_bot_or_agent(sender, config, runtime_paths):
             non_agent_senders.add(sender)
             if len(non_agent_senders) > 1:
@@ -216,7 +215,7 @@ def _has_any_agent_mentions_in_thread(
 ) -> bool:
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
-        content = msg.content or {}
+        content = msg.content
         user_ids = _extract_mentioned_user_ids(content)
         if _agents_from_user_ids(user_ids, config, runtime_paths):
             return True
@@ -236,7 +235,7 @@ def get_all_mentioned_agents_in_thread(
     seen_ids: set[str] = set()
 
     for msg in thread_history:
-        content = msg.content or {}
+        content = msg.content
         user_ids = _extract_mentioned_user_ids(content)
         agents = _agents_from_user_ids(user_ids, config, runtime_paths)
 

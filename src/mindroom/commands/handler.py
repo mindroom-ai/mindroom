@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
 from mindroom.authorization import get_available_agents_for_sender
@@ -32,7 +32,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     import nio
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
-    from mindroom.hooks.context import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_tracker import ResponseTracker
@@ -59,82 +58,25 @@ class CommandEvent(Protocol):
     source: dict[str, Any]
 
 
-class CommandHandlingBot(Protocol):
-    """Minimal AgentBot surface required by command handling."""
+@dataclass(frozen=True)
+class CommandHandlerContext:
+    """Dependencies required by command handling."""
 
-    client: nio.AsyncClient | None
+    client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
     storage_path: Path
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
-
-    async def _derive_conversation_context(
-        self,
-        room_id: str,
-        event_info: EventInfo,
-    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
-        """Return the normalized conversation context for one event."""
-
-    def _resolve_reply_thread_id(
-        self,
-        thread_id: str | None,
-        event_id: str | None = None,
-        *,
-        room_id: str | None = None,
-        event_source: dict[str, Any] | None = None,
-        thread_mode_override: Literal["thread", "room"] | None = None,
-    ) -> str | None:
-        """Resolve one reply into the canonical thread root."""
-
-    def _build_tool_runtime_context(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str | None,
-        user_id: str | None,
-        session_id: str | None = None,
-        *,
-        agent_name: str | None = None,
-        active_model_name: str | None = None,
-        attachment_ids: list[str] | None = None,
-        correlation_id: str | None = None,
-        resolved_thread_id: str | None = None,
-        source_envelope: MessageEnvelope | None = None,
-    ) -> ToolRuntimeContext | None:
-        """Build the shared tool runtime context for one response."""
-
-    async def _send_response(
-        self,
-        room_id: str,
-        reply_to_event_id: str,
-        prompt: str,
-        thread_id: str | None,
-        *,
-        user_id: str | None = None,
-        is_system_message: bool = False,
-        update_history: bool = True,
-        attachment_ids: list[str] | None = None,
-        correlation_id: str | None = None,
-        reply_to_event: nio.RoomMessageText | None = None,
-        skip_mentions: bool = False,
-    ) -> str | None:
-        """Send one command response."""
-
-    async def _send_skill_command_response(
-        self,
-        *,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        prompt: str,
-        agent_name: str,
-        user_id: str | None,
-        reply_to_event: nio.RoomMessageText | None = None,
-        source_envelope: MessageEnvelope | None = None,
-    ) -> str | None:
-        """Send one model-backed !skill response."""
+    derive_conversation_context: Callable[
+        [str, EventInfo],
+        Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
+    ]
+    requester_user_id_for_event: Callable[[CommandEvent], str]
+    build_message_target: Callable[..., MessageTarget]
+    send_response: Callable[..., Awaitable[str | None]]
+    send_skill_command_response: Callable[..., Awaitable[str | None]]
+    run_skill_command_tool: Callable[..., Awaitable[str]]
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -525,66 +467,28 @@ async def _run_skill_command_tool(
     return str(result)
 
 
-async def _run_bot_skill_command_tool(
-    *,
-    bot: CommandHandlingBot,
-    source_envelope: MessageEnvelope | None,
-    agent_name: str,
-    command_tool: str,
-    skill_name: str,
-    args_text: str,
-    requester_user_id: str | None = None,
-    room_id: str | None = None,
-    thread_id: str | None = None,
-    reply_to_event_id: str | None = None,
-) -> str:
-    runtime_context = None
-    if room_id is not None:
-        runtime_context = bot._build_tool_runtime_context(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            user_id=requester_user_id,
-            agent_name=agent_name,
-            source_envelope=source_envelope,
-        )
-    return await _run_skill_command_tool(
-        config=bot.config,
-        runtime_paths=bot.runtime_paths,
-        agent_name=agent_name,
-        storage_path=bot.storage_path,
-        command_tool=command_tool,
-        skill_name=skill_name,
-        args_text=args_text,
-        requester_user_id=requester_user_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        runtime_context=runtime_context,
-    )
-
-
 async def handle_command(  # noqa: C901, PLR0912, PLR0915
     *,
-    bot: CommandHandlingBot,
+    context: CommandHandlerContext,
     room: nio.MatrixRoom,
     event: CommandEvent,
     command: Command,
     requester_user_id: str,
-    source_envelope: MessageEnvelope | None = None,
 ) -> None:
-    """Dispatch chat commands using one bot's concrete runtime surface."""
-    bot.logger.info("Handling command", command_type=command.type.value)
+    """Dispatch chat commands using injected bot context."""
+    context.logger.info("Handling command", command_type=command.type.value)
 
     event_info = EventInfo.from_event(event.source)
-    _, thread_id, thread_history = await bot._derive_conversation_context(room.room_id, event_info)
+    _, thread_id, thread_history = await context.derive_conversation_context(room.room_id, event_info)
 
     # Commands/tools that persist conversation context should use the same
     # thread-root policy as outgoing replies.
-    effective_thread_id = bot._resolve_reply_thread_id(thread_id, event.event_id, room_id=room.room_id)
-    client = bot.client
-    assert client is not None
-    response_tracker = bot.response_tracker
-    reply_to_event = cast("nio.RoomMessageText | None", event)
+    effective_thread_id = context.build_message_target(
+        room_id=room.room_id,
+        thread_id=thread_id,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    ).resolved_thread_id
 
     response_text = ""
 
@@ -594,32 +498,32 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.HI:
         # Generate the welcome message for this room
-        response_text = _generate_welcome_message(room.room_id, bot.config, bot.runtime_paths)
+        response_text = _generate_welcome_message(room.room_id, context.config, context.runtime_paths)
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
         # Get mentioned agents from the command text
-        mentioned_agents, _, _ = check_agent_mentioned(event.source, None, bot.config, bot.runtime_paths)
+        mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
 
         _, response_text = await schedule_task(
-            client=client,
+            client=context.client,
             room_id=room.room_id,
             thread_id=effective_thread_id,
             scheduled_by=requester_user_id,
             full_text=full_text,
-            config=bot.config,
-            runtime_paths=bot.runtime_paths,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
             room=room,
             mentioned_agents=mentioned_agents,
         )
 
     elif command.type == CommandType.LIST_SCHEDULES:
         response_text = await list_scheduled_tasks(
-            client=client,
+            client=context.client,
             room_id=room.room_id,
             thread_id=effective_thread_id,
-            config=bot.config,
+            config=context.config,
         )
 
     elif command.type == CommandType.CANCEL_SCHEDULE:
@@ -628,14 +532,14 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         if cancel_all:
             # Cancel all scheduled tasks
             response_text = await cancel_all_scheduled_tasks(
-                client=client,
+                client=context.client,
                 room_id=room.room_id,
             )
         else:
             # Cancel specific task
             task_id = command.args["task_id"]
             response_text = await cancel_scheduled_task(
-                client=client,
+                client=context.client,
                 room_id=room.room_id,
                 task_id=task_id,
             )
@@ -644,13 +548,13 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         task_id = command.args["task_id"]
         full_text = command.args["full_text"]
         response_text = await edit_scheduled_task(
-            client=client,
+            client=context.client,
             room_id=room.room_id,
             task_id=task_id,
             full_text=full_text,
             scheduled_by=requester_user_id,
-            config=bot.config,
-            runtime_paths=bot.runtime_paths,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
             room=room,
             thread_id=effective_thread_id,
         )
@@ -660,18 +564,18 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         args_text = command.args.get("args_text", "")
         response_text, change_info = await handle_config_command(
             args_text,
-            runtime_paths=bot.runtime_paths,
+            runtime_paths=context.runtime_paths,
         )
 
         # If we have change_info, this is a config set that needs confirmation
         if change_info:
             # Send the preview message
-            event_id = await bot._send_response(
+            event_id = await context.send_response(
                 room.room_id,
                 event.event_id,
                 response_text,
                 effective_thread_id,
-                reply_to_event=reply_to_event,
+                reply_to_event=event,
                 skip_mentions=True,
             )
 
@@ -693,15 +597,15 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 # Store in Matrix state for persistence
                 if pending_change:
                     await config_confirmation.store_pending_change_in_matrix(
-                        client,
+                        context.client,
                         event_id,
                         pending_change,
                     )
 
                 # Add reaction buttons
-                await config_confirmation.add_confirmation_reactions(client, room.room_id, event_id)
+                await config_confirmation.add_confirmation_reactions(context.client, room.room_id, event_id)
 
-            response_tracker.mark_responded(event.event_id)
+            context.response_tracker.mark_responded(event.event_id)
             return  # Exit early since we've handled the response
 
     elif command.type == CommandType.SKILL:
@@ -713,30 +617,28 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             mentioned_agents, _, _ = check_agent_mentioned(
                 event.source,
                 None,
-                bot.config,
-                bot.runtime_paths,
+                context.config,
+                context.runtime_paths,
             )
             target_agent, error = _resolve_skill_command_agent(
                 skill_name,
-                config=bot.config,
+                config=context.config,
                 room=room,
                 mentioned_agents=mentioned_agents,
                 requester_user_id=requester_user_id,
-                runtime_paths=bot.runtime_paths,
+                runtime_paths=context.runtime_paths,
             )
             if error:
                 response_text = error
             else:
                 assert target_agent is not None
-                spec = resolve_skill_command_spec(skill_name, bot.config, bot.runtime_paths, target_agent)
+                spec = resolve_skill_command_spec(skill_name, context.config, context.runtime_paths, target_agent)
                 if spec is None:
                     response_text = f"❌ Skill '{skill_name}' not found or not enabled for agent '{target_agent}'."
                 elif not spec.user_invocable:
                     response_text = f"❌ Skill '{spec.name}' is not user-invocable."
                 elif spec.dispatch and spec.dispatch.kind == "tool":
-                    response_text = await _run_bot_skill_command_tool(
-                        bot=bot,
-                        source_envelope=source_envelope,
+                    response_text = await context.run_skill_command_tool(
                         agent_name=target_agent,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,
@@ -744,7 +646,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         requester_user_id=requester_user_id,
                         room_id=room.room_id,
                         thread_id=effective_thread_id,
-                        reply_to_event_id=event.event_id,
                     )
                 elif spec.disable_model_invocation:
                     response_text = (
@@ -752,7 +653,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     )
                 else:
                     prompt = _build_skill_command_prompt(spec.name, args_text)
-                    event_id = await bot._send_skill_command_response(
+                    event_id = await context.send_skill_command_response(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
                         thread_id=effective_thread_id,
@@ -760,11 +661,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         prompt=prompt,
                         agent_name=target_agent,
                         user_id=requester_user_id,
-                        reply_to_event=reply_to_event,
-                        source_envelope=source_envelope,
+                        reply_to_event=event,
                     )
                     if event_id:
-                        response_tracker.mark_responded(event.event_id, event_id)
+                        context.response_tracker.mark_responded(event.event_id, event_id)
                     return
 
     elif command.type == CommandType.UNKNOWN:
@@ -772,12 +672,12 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = "❌ Unknown command. Try !help for available commands."
 
     if response_text:
-        await bot._send_response(
+        await context.send_response(
             room.room_id,
             event.event_id,
             response_text,
             effective_thread_id,
-            reply_to_event=reply_to_event,
+            reply_to_event=event,
             skip_mentions=True,
         )
-        response_tracker.mark_responded(event.event_id)
+        context.response_tracker.mark_responded(event.event_id)

@@ -13,6 +13,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.hooks import HookRegistry
+from mindroom.message_target import MessageTarget
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -42,7 +43,9 @@ def _mock_bot(tmp_path: Path) -> MagicMock:
     bot._append_matrix_prompt_context = MagicMock(side_effect=lambda prompt, **_kwargs: prompt)
     bot._build_tool_runtime_context = MagicMock(return_value=None)
     bot._build_tool_execution_identity = MagicMock(return_value=None)
-    bot._resolve_reply_thread_id = MagicMock(return_value=None)
+    bot._build_message_target = MagicMock(
+        return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
+    )
     bot._apply_before_response_hooks = AgentBot._apply_before_response_hooks.__get__(bot, AgentBot)
     bot._emit_after_response_hooks = AgentBot._emit_after_response_hooks.__get__(bot, AgentBot)
     bot._deliver_generated_response = AgentBot._deliver_generated_response.__get__(bot, AgentBot)

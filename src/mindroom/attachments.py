@@ -102,10 +102,7 @@ def parse_attachment_ids_from_thread_history(thread_history: Sequence[ResolvedVi
     """Extract attachment IDs referenced by message metadata in thread history."""
     attachment_ids: list[str] = []
     for message in thread_history:
-        content = message.content
-        if content is None:
-            continue
-        message_attachment_ids = parse_attachment_ids_from_event_source({"content": content})
+        message_attachment_ids = parse_attachment_ids_from_event_source({"content": message.content})
         for attachment_id in message_attachment_ids:
             if attachment_id not in attachment_ids:
                 attachment_ids.append(attachment_id)

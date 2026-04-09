@@ -41,7 +41,7 @@ def _build_conversation_messages(
     messages: list[dict] = []
     for message in thread_history:
         role = "user" if message.sender == user_id else "assistant"
-        body = (message.body or "").strip()
+        body = message.body.strip()
         if not body:
             continue
         messages.append({"role": role, "content": body})

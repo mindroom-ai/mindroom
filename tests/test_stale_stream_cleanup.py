@@ -16,7 +16,6 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, STREAM_ST
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
-    _scanned_thread_tail_event_ids,
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
 )
@@ -674,29 +673,6 @@ async def test_cleanup_returns_thread_requester_for_auto_resume(tmp_path: Path) 
             original_sender_id=USER_ID,
         ),
     ]
-
-
-def test_scanned_thread_tail_event_ids_prefers_edit_seen_before_original_message() -> None:
-    """Newest edits should still become the scanned visible thread tail when seen first."""
-    message_events = [
-        _make_message_event(
-            event_id="$reply-edit",
-            body="* Edited reply",
-            timestamp_ms=200,
-            sender=USER_ID,
-            relates_to={"rel_type": "m.replace", "event_id": "$reply"},
-            new_content={"body": "Edited reply", "msgtype": "m.text"},
-        ),
-        _make_message_event(
-            event_id="$reply",
-            body="Original reply",
-            timestamp_ms=100,
-            sender=USER_ID,
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-        ),
-    ]
-
-    assert _scanned_thread_tail_event_ids(message_events) == {"$thread-root": "$reply-edit"}
 
 
 @pytest.mark.asyncio
