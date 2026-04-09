@@ -1736,15 +1736,13 @@ class ResponseCoordinator:
         existing_event_is_placeholder: bool = False,
     ) -> str | None:
         """Resolve the final response event id across send, edit, and placeholder reuse."""
-        if delivery_result is not None and delivery_result.event_id is not None:
+        if delivery_result is None:
+            return tracked_event_id or existing_event_id
+        if delivery_result.event_id is not None:
             return delivery_result.event_id
-        if delivery_result is not None and existing_event_is_placeholder:
+        if delivery_result.suppressed or existing_event_is_placeholder:
             return None
-        if delivery_result is not None and delivery_result.suppressed:
-            return None
-        if delivery_result is not None and existing_event_id is not None:
-            return existing_event_id
-        return tracked_event_id or existing_event_id
+        return existing_event_id or tracked_event_id
 
     async def generate_response(self, request: ResponseRequest) -> str | None:
         """Generate and send/edit an agent response with lifecycle locking."""
