@@ -165,11 +165,11 @@ async def auto_resume_interrupted_threads(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    max_resumes: int = 10,
+    max_resumes: int | None = None,
     delay: float = 2.0,
 ) -> int:
     """Send resume prompts for interrupted threaded conversations."""
-    if not interrupted or max_resumes <= 0:
+    if not interrupted or (max_resumes is not None and max_resumes <= 0):
         return 0
 
     selected_threads = _select_threads_to_resume(interrupted, max_resumes=max_resumes)
@@ -1218,9 +1218,9 @@ def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_
 def _select_threads_to_resume(
     interrupted: list[InterruptedThread],
     *,
-    max_resumes: int,
+    max_resumes: int | None,
 ) -> list[InterruptedThread]:
-    """Return the newest unique threaded interruptions up to the resume cap."""
+    """Return the newest unique threaded interruptions, optionally capped."""
     latest_by_key: dict[tuple[str, str, str], InterruptedThread] = {}
 
     for interrupted_thread in interrupted:
@@ -1240,7 +1240,7 @@ def _select_threads_to_resume(
             interrupted_thread.agent_name,
         ),
     )
-    if max_resumes >= len(unique_threads):
+    if max_resumes is None or max_resumes >= len(unique_threads):
         return unique_threads
     return unique_threads[-max_resumes:]
 
