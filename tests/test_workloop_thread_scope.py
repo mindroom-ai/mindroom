@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
 import shutil
 import sys
@@ -9,28 +11,40 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import mindroom.tool_system.plugins as plugin_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    FinalDeliveryRequest,
+    ResponseHookService,
+)
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
+    EVENT_MESSAGE_CANCELLED,
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_RECEIVED,
     EVENT_SCHEDULE_FIRED,
     AfterResponseContext,
+    CancelledResponseContext,
     HookRegistry,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
     ResponseResult,
     ScheduleFiredContext,
+    hook,
 )
+from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
 from mindroom.hooks.execution import emit, emit_collect
+from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import ScheduledWorkflow
@@ -42,6 +56,7 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from types import ModuleType
 
     from mindroom.constants import RuntimePaths
 
@@ -51,6 +66,7 @@ class _LoadedWorkloop:
     config: Config
     runtime_paths: RuntimePaths
     registry: HookRegistry
+    poke_module: ModuleType
 
 
 def _plugin_root() -> Path:
@@ -67,11 +83,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _plugin(name: str, callbacks: list[object]) -> object:
+    return type(
+        "PluginStub",
+        (),
+        {
+            "name": name,
+            "discovered_hooks": tuple(callbacks),
+            "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
+            "plugin_order": 0,
+        },
+    )()
+
+
 def _copy_plugin_root(tmp_path: Path) -> Path:
     """Copy the live workloop plugin into tmp_path and patch known fixture drift."""
-    source_root = _plugin_root()
     copied_root = tmp_path / "plugins" / "workloop"
-    shutil.copytree(source_root, copied_root)
+    shutil.copytree(_plugin_root(), copied_root)
     (tmp_path / "plugins" / "__init__.py").write_text("", encoding="utf-8")
     (copied_root / "__init__.py").write_text("", encoding="utf-8")
     package_prefix = "plugins.workloop"
@@ -157,21 +185,36 @@ def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _only_todos_state(loaded: _LoadedWorkloop) -> dict[str, object]:
-    todo_files = sorted((_state_root(loaded) / "threads").glob("*/todos.json"))
-    assert len(todo_files) == 1
-    return _read_json(todo_files[0])
+def _todo_state_path(loaded: _LoadedWorkloop, *, room_id: str, thread_id: str) -> Path:
+    return _state_root(loaded) / "rooms" / room_id / "threads" / thread_id / "todos.json"
+
+
+def _todo_state(loaded: _LoadedWorkloop, *, room_id: str, thread_id: str) -> dict[str, object]:
+    return _read_json(_todo_state_path(loaded, room_id=room_id, thread_id=thread_id))
+
+
+def _registry_callbacks(registry: HookRegistry) -> list[object]:
+    callbacks: list[object] = []
+    seen_callbacks: set[object] = set()
+    for hooks in registry._hooks_by_event.values():
+        for registered_hook in hooks:
+            if registered_hook.callback in seen_callbacks:
+                continue
+            seen_callbacks.add(registered_hook.callback)
+            callbacks.append(registered_hook.callback)
+    return callbacks
 
 
 def _tool_context(
     loaded: _LoadedWorkloop,
     *,
+    room_id: str = "!room:localhost",
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread_root",
 ) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:localhost",
+        room_id=room_id,
         thread_id=thread_id,
         resolved_thread_id=resolved_thread_id,
         requester_id="@user:localhost",
@@ -188,20 +231,23 @@ def _message_envelope(
     *,
     body: str,
     agent_name: str,
+    room_id: str = "!room:localhost",
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread_root",
+    room_mode: bool = False,
 ) -> MessageEnvelope:
     target = MessageTarget.resolve(
-        room_id="!room:localhost",
+        room_id=room_id,
         thread_id=thread_id,
         reply_to_event_id="$event",
         safe_thread_root=resolved_thread_id if thread_id is None else None,
+        room_mode=room_mode,
     )
     if thread_id is not None:
         target = target.with_thread_root(resolved_thread_id)
     return MessageEnvelope(
         source_event_id="$event",
-        room_id="!room:localhost",
+        room_id=room_id,
         target=target,
         requester_id="@user:localhost",
         sender_id="@user:localhost",
@@ -236,14 +282,17 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
     try:
         plugins = load_plugins(config, runtime_paths_for(config))
         registry = HookRegistry.from_plugins(plugins)
-        if not registry._hooks_by_event:
-            pytest.skip("workloop plugin checkout is not compatible with the current hook API")
+        poke_module = importlib.import_module("plugins.workloop.poke")
         yield _LoadedWorkloop(
             config=config,
             runtime_paths=runtime_paths_for(config),
             registry=registry,
+            poke_module=poke_module,
         )
     finally:
+        for module_name in list(sys.modules):
+            if module_name == "plugins.workloop" or module_name.startswith("plugins.workloop."):
+                sys.modules.pop(module_name, None)
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
@@ -269,7 +318,7 @@ def test_tool_scope_uses_resolved_thread_id(loaded_workloop: _LoadedWorkloop) ->
         result = tool.plan(agent=MagicMock(), tasks="Investigate threaded schedule poke")
 
     assert "Created 1 item" in result
-    state = _only_todos_state(loaded_workloop)
+    state = _todo_state(loaded_workloop, room_id="!room:localhost", thread_id="$thread_root")
     assert state["thread_id"] == "$thread_root"
 
 
@@ -379,7 +428,7 @@ async def test_schedule_fired_auto_poke_uses_thread_from_stored_state(
 
 @pytest.mark.asyncio
 async def test_room_level_todo_command_stays_in_main_scope(loaded_workloop: _LoadedWorkloop) -> None:
-    """Room-level commands should keep using the shared main scope."""
+    """Room-level commands should keep using the room's main scope."""
     sender = AsyncMock(return_value="$todo-event")
     command_context = MessageReceivedContext(
         event_name=EVENT_MESSAGE_RECEIVED,
@@ -399,6 +448,338 @@ async def test_room_level_todo_command_stays_in_main_scope(loaded_workloop: _Loa
     await emit(loaded_workloop.registry, EVENT_MESSAGE_RECEIVED, command_context)
 
     assert command_context.suppress is True
-    state = _only_todos_state(loaded_workloop)
+    state = _todo_state(loaded_workloop, room_id="!room:localhost", thread_id="main")
     assert state["thread_id"] == "main"
     assert sender.await_args.args[2] is None
+
+
+@pytest.mark.asyncio
+async def test_room_level_todos_are_isolated_per_room(loaded_workloop: _LoadedWorkloop) -> None:
+    """Room-level main scopes must stay isolated between rooms."""
+    room_a = "!room-a:localhost"
+    room_b = "!room-b:localhost"
+    sender = AsyncMock(return_value="$todo-event")
+    tool = get_tool_by_name(
+        "workloop_todo_manager",
+        loaded_workloop.runtime_paths,
+        worker_target=None,
+    )
+
+    room_a_context = MessageReceivedContext(
+        event_name=EVENT_MESSAGE_RECEIVED,
+        plugin_name="",
+        settings={},
+        config=loaded_workloop.config,
+        runtime_paths=loaded_workloop.runtime_paths,
+        logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_RECEIVED),
+        correlation_id="corr-command-room-a",
+        message_sender=sender,
+        envelope=_message_envelope(
+            body="!todo add Room A regression guard",
+            agent_name=ROUTER_AGENT_NAME,
+            room_id=room_a,
+            resolved_thread_id=None,
+            room_mode=True,
+        ),
+    )
+    await emit(loaded_workloop.registry, EVENT_MESSAGE_RECEIVED, room_a_context)
+
+    with tool_runtime_context(
+        _tool_context(loaded_workloop, room_id=room_b, resolved_thread_id=None),
+    ):
+        tool.plan(agent=MagicMock(), tasks="Room B regression guard")
+
+    room_a_state = _todo_state(loaded_workloop, room_id=room_a, thread_id="main")
+    room_b_state = _todo_state(loaded_workloop, room_id=room_b, thread_id="main")
+    assert room_a_state["tasks"] == ["Room A regression guard"]
+    assert room_b_state["tasks"] == ["Room B regression guard"]
+
+    room_a_items = await emit_collect(
+        loaded_workloop.registry,
+        EVENT_MESSAGE_ENRICH,
+        MessageEnrichContext(
+            event_name=EVENT_MESSAGE_ENRICH,
+            plugin_name="",
+            settings={},
+            config=loaded_workloop.config,
+            runtime_paths=loaded_workloop.runtime_paths,
+            logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_ENRICH),
+            correlation_id="corr-enrich-room-a",
+            envelope=_message_envelope(
+                body="status",
+                agent_name="code",
+                room_id=room_a,
+                resolved_thread_id=None,
+                room_mode=True,
+            ),
+            target_entity_name="code",
+            target_member_names=None,
+        ),
+    )
+    room_b_items = await emit_collect(
+        loaded_workloop.registry,
+        EVENT_MESSAGE_ENRICH,
+        MessageEnrichContext(
+            event_name=EVENT_MESSAGE_ENRICH,
+            plugin_name="",
+            settings={},
+            config=loaded_workloop.config,
+            runtime_paths=loaded_workloop.runtime_paths,
+            logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_ENRICH),
+            correlation_id="corr-enrich-room-b",
+            envelope=_message_envelope(
+                body="status",
+                agent_name="code",
+                room_id=room_b,
+                resolved_thread_id=None,
+                room_mode=True,
+            ),
+            target_entity_name="code",
+            target_member_names=None,
+        ),
+    )
+
+    assert [item.text for item in room_a_items] == ["Room A regression guard"]
+    assert [item.text for item in room_b_items] == ["Room B regression guard"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_response_clears_active_run_without_updating_last_response(
+    loaded_workloop: _LoadedWorkloop,
+) -> None:
+    """message:cancelled should clear the active run but NOT update last_response_at."""
+    tool = get_tool_by_name(
+        "workloop_todo_manager",
+        loaded_workloop.runtime_paths,
+        worker_target=None,
+    )
+
+    with tool_runtime_context(_tool_context(loaded_workloop)):
+        tool.plan(agent=MagicMock(), tasks="Task that will be cancelled")
+
+    # Trigger enrichment to mark agent as busy
+    enrich_context = MessageEnrichContext(
+        event_name=EVENT_MESSAGE_ENRICH,
+        plugin_name="",
+        settings={},
+        config=loaded_workloop.config,
+        runtime_paths=loaded_workloop.runtime_paths,
+        logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_ENRICH),
+        correlation_id="corr-enrich-cancel",
+        envelope=_message_envelope(body="hello", agent_name="code"),
+        target_entity_name="code",
+        target_member_names=None,
+    )
+
+    await emit_collect(loaded_workloop.registry, EVENT_MESSAGE_ENRICH, enrich_context)
+
+    agent_state_path = _state_root(loaded_workloop) / "agents" / "code.json"
+    agent_state = _read_json(agent_state_path)
+    assert "!room:localhost:$thread_root" in agent_state["active_runs"]
+
+    # Record any existing last_response_at
+    last_response_before = agent_state.get("last_response_at")
+
+    # Fire message:cancelled — should clear active_run but NOT set last_response_at
+    cancelled_context = CancelledResponseContext(
+        event_name=EVENT_MESSAGE_CANCELLED,
+        plugin_name="",
+        settings={},
+        config=loaded_workloop.config,
+        runtime_paths=loaded_workloop.runtime_paths,
+        logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_CANCELLED),
+        correlation_id="corr-cancelled",
+        info=CancelledResponseInfo(
+            envelope=_message_envelope(body="hello", agent_name="code"),
+            visible_response_event_id="$partial",
+            response_kind="ai",
+        ),
+    )
+
+    await emit(loaded_workloop.registry, EVENT_MESSAGE_CANCELLED, cancelled_context)
+
+    cleared_state = _read_json(agent_state_path)
+    assert cleared_state["active_runs"] == {}, "active_run should be cleared on cancellation"
+    assert cleared_state.get("last_response_at") == last_response_before, (
+        "last_response_at must NOT be updated on cancellation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_then_poke_scan_can_repoke(
+    loaded_workloop: _LoadedWorkloop,
+) -> None:
+    """After cancellation clears the active run, the next poke scan should be able to re-poke."""
+    tool = get_tool_by_name(
+        "workloop_todo_manager",
+        loaded_workloop.runtime_paths,
+        worker_target=None,
+    )
+
+    with tool_runtime_context(_tool_context(loaded_workloop)):
+        tool.plan(agent=MagicMock(), tasks="Re-pokeable task")
+
+    # Enrich to mark busy
+    enrich_context = MessageEnrichContext(
+        event_name=EVENT_MESSAGE_ENRICH,
+        plugin_name="",
+        settings={},
+        config=loaded_workloop.config,
+        runtime_paths=loaded_workloop.runtime_paths,
+        logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_ENRICH),
+        correlation_id="corr-enrich-repoke",
+        envelope=_message_envelope(body="do work", agent_name="code"),
+        target_entity_name="code",
+        target_member_names=None,
+    )
+    await emit_collect(loaded_workloop.registry, EVENT_MESSAGE_ENRICH, enrich_context)
+
+    # Fire cancellation
+    cancelled_context = CancelledResponseContext(
+        event_name=EVENT_MESSAGE_CANCELLED,
+        plugin_name="",
+        settings={},
+        config=loaded_workloop.config,
+        runtime_paths=loaded_workloop.runtime_paths,
+        logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_CANCELLED),
+        correlation_id="corr-cancelled-repoke",
+        info=CancelledResponseInfo(
+            envelope=_message_envelope(body="do work", agent_name="code"),
+        ),
+    )
+    await emit(loaded_workloop.registry, EVENT_MESSAGE_CANCELLED, cancelled_context)
+
+    # Verify agent state is cleared
+    agent_state_path = _state_root(loaded_workloop) / "agents" / "code.json"
+    cleared_state = _read_json(agent_state_path)
+    assert cleared_state["active_runs"] == {}
+
+    # Now a poke scan should consider the agent idle and pokeable
+    # (The _should_poke_agent check won't block on active_runs since they're cleared)
+    now = datetime.now(UTC)
+    can_poke = loaded_workloop.poke_module._should_poke_agent(
+        _state_root(loaded_workloop),
+        "code",
+        now,
+        cooldown=0,
+        grace=0,
+        stale_busy=600,
+        scope_key="!room:localhost:$thread_root",
+        min_idle=0,
+    )
+    assert can_poke, "agent should be pokeable after cancellation clears active_run"
+
+
+@pytest.mark.asyncio
+async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
+    loaded_workloop: _LoadedWorkloop,
+) -> None:
+    """Late cancellation during after_response should still clear busy state as delivered."""
+    tool = get_tool_by_name(
+        "workloop_todo_manager",
+        loaded_workloop.runtime_paths,
+        worker_target=None,
+    )
+    response_envelope = _message_envelope(body="hello", agent_name="code")
+
+    with tool_runtime_context(_tool_context(loaded_workloop)):
+        tool.plan(agent=MagicMock(), tasks="Task that must clear after late cancellation")
+
+    await emit_collect(
+        loaded_workloop.registry,
+        EVENT_MESSAGE_ENRICH,
+        MessageEnrichContext(
+            event_name=EVENT_MESSAGE_ENRICH,
+            plugin_name="",
+            settings={},
+            config=loaded_workloop.config,
+            runtime_paths=loaded_workloop.runtime_paths,
+            logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_ENRICH),
+            correlation_id="corr-enrich-late-cancel",
+            envelope=response_envelope,
+            target_entity_name="code",
+            target_member_names=None,
+        ),
+    )
+
+    agent_state_path = _state_root(loaded_workloop) / "agents" / "code.json"
+    agent_state = _read_json(agent_state_path)
+    assert "!room:localhost:$thread_root" in agent_state["active_runs"]
+    assert agent_state.get("last_response_at") is None
+
+    after_started = asyncio.Event()
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE, priority=50)
+    async def slow_after_response(ctx: AfterResponseContext) -> None:
+        del ctx
+        after_started.set()
+        await asyncio.Event().wait()
+
+    registry = HookRegistry.from_plugins(
+        [
+            _plugin("slow-after", [slow_after_response]),
+            _plugin("workloop", _registry_callbacks(loaded_workloop.registry)),
+        ],
+    )
+    hook_context = HookContextSupport(
+        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": loaded_workloop.config})(),
+        logger=get_logger("tests.workloop.delivery"),
+        runtime_paths=loaded_workloop.runtime_paths,
+        agent_name="code",
+        hook_registry_state=HookRegistryState(registry),
+        hook_send_message=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=hook_context.runtime,
+            runtime_paths=loaded_workloop.runtime_paths,
+            agent_name="code",
+            logger=get_logger("tests.workloop.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=ResponseHookService(hook_context=hook_context),
+        ),
+    )
+
+    parsed = MagicMock()
+    parsed.formatted_text = "visible response"
+    parsed.option_map = None
+    parsed.options_list = None
+
+    delivery_result = None
+
+    async def deliver_response() -> None:
+        nonlocal delivery_result
+        delivery_result = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                target=response_envelope.target,
+                existing_event_id=None,
+                response_text="visible response",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-late-workloop-cleanup",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    with (
+        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")),
+    ):
+        task = asyncio.create_task(deliver_response())
+        await asyncio.wait_for(after_started.wait(), timeout=1)
+        task.cancel()
+        await task
+
+    assert delivery_result is not None
+    assert delivery_result.event_id == "$response"
+    assert delivery_result.delivery_kind == "sent"
+
+    cleared_state = _read_json(agent_state_path)
+    assert cleared_state["active_runs"] == {}
+    assert isinstance(cleared_state.get("last_response_at"), str)

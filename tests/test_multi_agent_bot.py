@@ -2209,6 +2209,7 @@ class TestAgentBot:
                     ),
                 ),
                 emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
             ),
         )
 
@@ -2278,6 +2279,7 @@ class TestAgentBot:
                     ),
                 ),
                 emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
             ),
         )
 
@@ -2343,6 +2345,7 @@ class TestAgentBot:
                     ),
                 ),
                 emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
             ),
         )
 
@@ -2406,6 +2409,7 @@ class TestAgentBot:
                     ),
                 ),
                 emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
             ),
         )
 

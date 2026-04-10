@@ -140,6 +140,7 @@ async def block_secret_reads(ctx):
 | `system:enrich` | Collector | `SystemEnrichContext` | After message enrichment; before AI generation | `add_instruction()` |
 | `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before Matrix send (streaming: after stream completes, before final edit) | `draft.response_text`, `draft.suppress` |
 | `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
+| `message:cancelled` | Observer | `CancelledResponseContext` | After a response is cancelled before final delivery completes | None (frozen) |
 | `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
 | `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
@@ -158,6 +159,7 @@ async def block_secret_reads(ctx):
 | `system:enrich` | 2000 |
 | `message:before_response` | 200 |
 | `message:after_response` | 3000 |
+| `message:cancelled` | 3000 |
 | `reaction:received` | 500 |
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
