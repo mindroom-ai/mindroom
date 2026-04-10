@@ -94,6 +94,17 @@ authorization:
       # Replace with your Matrix user ID (example: @alice:mindroom.chat).
       - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 
+# Optional tool approval rules.
+# tool_approval:
+#   default: auto_approve
+#   timeout_days: 7
+#   rules:
+#     - match: slack_*
+#       action: require_approval
+#     - match: run_shell_command
+#       script: ./approval_scripts/shell_review.py
+#       timeout_days: 3
+
 # Default settings for all agents
 defaults:
   tools:

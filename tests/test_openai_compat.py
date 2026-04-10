@@ -52,10 +52,14 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
+from mindroom.hooks import HookRegistry
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
+from mindroom.tool_approval import get_approval_store, shutdown_approval_store
+from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -158,6 +162,14 @@ def _prepared_team_execution_context(
         compaction_outcomes=[],
         post_response_compaction_checks=post_response_compaction_checks or [],
     )
+
+
+@pytest.fixture(autouse=True)
+def reset_approval_store() -> Iterator[None]:
+    """Keep the module-level approval store isolated per test."""
+    asyncio.run(shutdown_approval_store())
+    yield
+    asyncio.run(shutdown_approval_store())
 
 
 @pytest.fixture
@@ -355,6 +367,98 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
 
     assert response.status_code == 200
     assert captured_runtime_paths == [runtime_a]
+
+
+def test_chat_completions_uses_the_same_tool_approval_gate(test_config: Config) -> None:
+    """OpenAI-compatible chat completions should hit the shared tool-approval bridge."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(router)
+    runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+    initialize_api_app(app, runtime_paths)
+    config = Config.validate_with_runtime(
+        {
+            **test_config.authored_model_dump(),
+            "tool_approval": {
+                "rules": [{"match": "run_shell_command", "action": "require_approval"}],
+            },
+        },
+        runtime_paths,
+    )
+    seen_request_ids: list[str] = []
+
+    async def fake_ai_response(
+        *,
+        agent_name: str,
+        prompt: str,
+        session_id: str,
+        runtime_paths: RuntimePaths,
+        config: Config,
+        thread_history: object,
+        room_id: object,
+        knowledge: object,
+        user_id: object,
+        include_interactive_questions: bool,
+        include_openai_compat_guidance: bool,
+        active_event_ids: object,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> str:
+        del (
+            prompt,
+            session_id,
+            thread_history,
+            room_id,
+            knowledge,
+            user_id,
+            include_interactive_questions,
+            include_openai_compat_guidance,
+            active_event_ids,
+        )
+        assert execution_identity is not None
+        assert execution_identity.channel == "openai_compat"
+        bridge = build_tool_hook_bridge(
+            HookRegistry.empty(),
+            agent_name=agent_name,
+            dispatch_context=ToolDispatchContext(execution_identity=execution_identity),
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        assert bridge is not None
+
+        store = get_approval_store()
+        assert store is None
+        return await bridge(
+            "run_shell_command",
+            lambda **kwargs: kwargs["command"],
+            {"command": "echo from openai compat"},
+        )
+
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.openai_compat._ensure_knowledge_initialized", new=AsyncMock()),
+        patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=None),
+        patch("mindroom.api.openai_compat.ai_response", side_effect=fake_ai_response),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "general",
+                "messages": [{"role": "user", "content": "Run a shell command."}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: run_shell_command\n"
+        "Reason: Tool approval is required but the approval store is not initialized.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    assert seen_request_ids == []
 
 
 def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path: Path) -> None:

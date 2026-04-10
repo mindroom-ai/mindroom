@@ -8,9 +8,10 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
 
+import nio
 import uvicorn
 
 from mindroom import constants
@@ -54,6 +55,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
+from mindroom.tool_approval import initialize_approval_store, shutdown_approval_store
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
@@ -318,6 +320,95 @@ class MultiAgentOrchestrator:
         shutdown_event = asyncio.Event()
         self._runtime_shutdown_event = shutdown_event
         return shutdown_event
+
+    def _get_bot_by_agent_name(self, agent_name: str) -> AgentBot | TeamBot | None:
+        """Return the managed bot that owns a given approval request."""
+        return self.agent_bots.get(agent_name)
+
+    @staticmethod
+    def _approval_thread_relation(thread_id: str) -> dict[str, object]:
+        """Return a threaded relation payload for approval events."""
+        return {
+            "rel_type": "m.thread",
+            "event_id": thread_id,
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": thread_id},
+        }
+
+    async def _send_approval_event(
+        self,
+        room_id: str,
+        thread_id: str,
+        agent_name: str,
+        content: dict[str, Any],
+    ) -> str | None:
+        """Send one custom approval event into the active Matrix thread."""
+        bot = self._get_bot_by_agent_name(agent_name)
+        if bot is None or bot.client is None:
+            return None
+        response = await bot.client.room_send(
+            room_id=room_id,
+            message_type="io.mindroom.tool_approval",
+            content={
+                **content,
+                "m.relates_to": self._approval_thread_relation(thread_id),
+            },
+        )
+        if isinstance(response, nio.RoomSendResponse):
+            return str(response.event_id)
+        logger.warning(
+            "Failed to send approval Matrix event",
+            room_id=room_id,
+            thread_id=thread_id,
+            agent_name=agent_name,
+            response=str(response),
+        )
+        return None
+
+    async def _edit_approval_event(
+        self,
+        room_id: str,
+        event_id: str,
+        agent_name: str,
+        new_content: dict[str, Any],
+    ) -> None:
+        """Edit one previously sent approval event."""
+        bot = self._get_bot_by_agent_name(agent_name)
+        if bot is None:
+            return
+        if bot.client is None:
+            msg = f"Approval Matrix client is unavailable for agent '{agent_name}'"
+            raise RuntimeError(msg)
+
+        thread_id = new_content.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            logger.warning(
+                "Skipping approval Matrix edit without thread_id",
+                room_id=room_id,
+                event_id=event_id,
+                agent_name=agent_name,
+            )
+            return
+
+        replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
+        replacement_content["m.relates_to"] = self._approval_thread_relation(thread_id)
+        response = await bot.client.room_send(
+            room_id=room_id,
+            message_type="io.mindroom.tool_approval",
+            content={
+                **replacement_content,
+                "m.new_content": replacement_content,
+                "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+            },
+        )
+        if not isinstance(response, nio.RoomSendResponse):
+            logger.warning(
+                "Failed to edit approval Matrix event",
+                room_id=room_id,
+                event_id=event_id,
+                agent_name=agent_name,
+                response=str(response),
+            )
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -893,6 +984,11 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
+        initialize_approval_store(
+            self.runtime_paths,
+            sender=self._send_approval_event,
+            editor=self._edit_approval_event,
+        )
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         await self._prepare_user_account(config, update_runtime_state=True)
@@ -1623,6 +1719,7 @@ class MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.running = False
 
+        await shutdown_approval_store()
         stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()

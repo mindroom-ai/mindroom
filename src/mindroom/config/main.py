@@ -22,6 +22,7 @@ from mindroom.agent_policy import (
     unsupported_team_agent_message,
 )
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.approval import ToolApprovalConfig, validate_raw_tool_approval_config
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import CacheConfig, MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
@@ -376,6 +377,10 @@ class Config(BaseModel):
         description="MCP server configurations keyed by server id",
     )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
+    tool_approval: ToolApprovalConfig = Field(
+        default_factory=ToolApprovalConfig,
+        description="Tool-approval rules for agent-initiated tool calls",
+    )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
@@ -403,6 +408,15 @@ class Config(BaseModel):
         default_factory=list,
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_raw_root_config(cls, data: object) -> object:
+        """Normalize optional sections and reject invalid raw tool-approval config."""
+        normalized_data = _normalized_config_data(data)
+        if isinstance(normalized_data, dict):
+            validate_raw_tool_approval_config(cast("dict[str, object]", normalized_data))
+        return normalized_data
 
     @field_validator("plugins", mode="before")
     @classmethod
