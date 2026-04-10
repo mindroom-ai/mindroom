@@ -68,14 +68,14 @@ View and manage rooms that agents have joined but are not in the configuration:
 - **Bulk selection** and **Leave rooms** functionality
 - **Open in Matrix** - Link to view in your Matrix client
 
-### Models & API Keys
+### Models & Connections
 
 Configure AI model providers:
 
-- **Add/edit models** with provider, model ID, host URL, and advanced settings
+- **Add/edit models** with provider, model ID, host URL, named connection, and advanced settings
 - **Provider filter** to show models by provider
 - **Test connection** to verify model accessibility
-- **Provider API keys** section for configuring credentials
+- **Connection summary** showing whether a model uses an explicit connection or the provider default
 
 **Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
@@ -112,13 +112,14 @@ Git-backed knowledge bases are supported, but Git settings are currently configu
 
 ### Credentials
 
-Manage service credentials directly from the dashboard:
+Manage the credential services that named connections point to:
 
 - **List configured credential services** from `CredentialsManager`
-- **Create/select service names** (for example `github_private` or `model:sonnet`)
+- **Create/select service names** (for example `github_private`, `openai_team_a`, or `google_oauth_client`)
 - **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
+- **Route models, memory, voice, and integrations through named connections** such as `openai/default`, `openai/embeddings`, `openai/stt`, `vertexai_claude/default`, and `google/oauth`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
 - `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
 

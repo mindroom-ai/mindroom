@@ -16,7 +16,7 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { showSaveFailureToastIfNeeded } from '@/components/shared';
 import { useConfigStore } from '@/store/configStore';
-import { VoiceConfig as VoiceConfigType } from '@/types/config';
+import { defaultConnectionIdForPurpose, VoiceConfig as VoiceConfigType } from '@/types/config';
 
 const OPENAI_TRANSCRIPTION_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
 
@@ -26,7 +26,7 @@ const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
   stt: {
     provider: 'openai',
     model: 'whisper-1',
-    api_key: '',
+    connection: '',
     host: '',
   },
   intelligence: {
@@ -55,6 +55,11 @@ function normalizeHost(host?: string): string {
   return host.trim().replace(/\/+$/, '');
 }
 
+function normalizeOptionalConnection(connection?: string | null): string | undefined {
+  const trimmed = connection?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export function VoiceConfig() {
   const { config, isLoading, saveConfig, updateVoiceConfig } = useConfigStore();
   const { toast } = useToast();
@@ -77,8 +82,16 @@ export function VoiceConfig() {
   };
 
   const handleSTTChange = (updates: Partial<VoiceConfigType['stt']>) => {
+    const nextConnection = Object.prototype.hasOwnProperty.call(updates, 'connection')
+      ? normalizeOptionalConnection(updates.connection)
+      : voiceConfig.stt.connection;
     handleVoiceConfigChange({
-      stt: { ...voiceConfig.stt, ...updates, provider: 'openai' },
+      stt: {
+        ...voiceConfig.stt,
+        ...updates,
+        provider: 'openai',
+        connection: nextConnection,
+      },
     });
   };
 
@@ -95,10 +108,14 @@ export function VoiceConfig() {
     ? `${normalizedHost}/v1/audio/transcriptions`
     : OPENAI_TRANSCRIPTION_ENDPOINT;
   const effectiveMode = normalizedHost ? 'OpenAI-compatible API' : 'OpenAI API';
-  const keySource = voiceConfig.stt.api_key?.trim()
-    ? 'Stored in voice settings'
-    : 'OPENAI_API_KEY environment variable';
   const providerLabel = 'OpenAI';
+  const defaultSttConnection = defaultConnectionIdForPurpose(
+    voiceConfig.stt.provider,
+    'voice_stt',
+    config?.connections
+  );
+  const effectiveConnection =
+    voiceConfig.stt.connection || defaultSttConnection || 'not configured';
 
   const handleSave = async () => {
     updateVoiceConfig({
@@ -107,6 +124,7 @@ export function VoiceConfig() {
         ...voiceConfig.stt,
         provider: 'openai',
         host: normalizeHost(voiceConfig.stt.host),
+        connection: normalizeOptionalConnection(voiceConfig.stt.connection),
       },
     });
     const result = await saveConfig();
@@ -187,8 +205,8 @@ export function VoiceConfig() {
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
-                <span className="text-muted-foreground">API Key Source:</span>
-                <span className="font-mono text-right text-foreground">{keySource}</span>
+                <span className="text-muted-foreground">Connection:</span>
+                <span className="font-mono text-right text-foreground">{effectiveConnection}</span>
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Command Model:</span>
@@ -245,17 +263,26 @@ export function VoiceConfig() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="stt-api-key">API Key (Optional)</Label>
+                <Label htmlFor="stt-connection">Connection (Optional)</Label>
                 <Input
-                  id="stt-api-key"
-                  type="password"
-                  value={voiceConfig.stt.api_key || ''}
-                  onChange={e => handleSTTChange({ api_key: e.target.value })}
-                  placeholder="Uses OPENAI_API_KEY env var if not set"
+                  id="stt-connection"
+                  value={voiceConfig.stt.connection || ''}
+                  onChange={e => handleSTTChange({ connection: e.target.value })}
+                  placeholder={defaultSttConnection ?? 'explicit connection id'}
                 />
-                <p className="text-xs text-muted-foreground">
-                  Leave empty to use the OPENAI_API_KEY environment variable
-                </p>
+                {defaultSttConnection ? (
+                  <p className="text-xs text-muted-foreground">
+                    Leave empty to use{' '}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+                      {defaultSttConnection}
+                    </code>
+                    .
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No default connection is configured. Set an explicit connection id if needed.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">

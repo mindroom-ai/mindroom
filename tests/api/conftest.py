@@ -16,6 +16,28 @@ def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
     config_dir = tmp_path / "api-runtime"
     config_dir.mkdir()
     config_data = {
+        "connections": {
+            "openai/default": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
+            },
+            "openai/embeddings": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
+            },
+            "openai/stt": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
+            },
+            "google/oauth": {
+                "provider": "google",
+                "service": "google_oauth_client",
+                "auth_kind": "oauth_client",
+            },
+        },
         "models": {"default": {"provider": "ollama", "id": "test-model"}},
         "agents": {
             "test_agent": {

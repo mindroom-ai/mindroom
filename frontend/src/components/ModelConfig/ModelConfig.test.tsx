@@ -12,32 +12,24 @@ vi.mock('@/components/ui/toaster', () => ({
   toast: vi.fn(),
 }));
 
-type KeyStatusResponse = {
-  has_key: boolean;
-  source?: string;
-  masked_key?: string;
-  api_key?: string;
-};
-
-function extractService(url: string): string {
-  const marker = '/api/credentials/';
-  const start = url.indexOf(marker);
-  if (start === -1) return '';
-  const rest = url.slice(start + marker.length);
-  const end = rest.indexOf('/api-key');
-  const service = end === -1 ? rest : rest.slice(0, end);
-  const queryIndex = service.indexOf('?');
-  return queryIndex === -1 ? service : service.slice(0, queryIndex);
-}
-
 describe('ModelConfig', () => {
   const mockStore = {
     config: {
+      connections: {
+        'anthropic/default': {
+          provider: 'anthropic',
+          service: 'anthropic',
+          auth_kind: 'api_key',
+        },
+      },
       models: {
         default: { provider: 'ollama', id: 'devstral:24b' },
-        anthropic: { provider: 'anthropic', id: 'claude-3-5-haiku-latest' },
+        anthropic: {
+          provider: 'anthropic',
+          id: 'claude-3-5-haiku-latest',
+          connection: 'anthropic/team-a',
+        },
         openrouter: { provider: 'openrouter', id: 'z-ai/glm-4.5-air:free' },
-        openrouter_backup: { provider: 'openrouter', id: 'openai/gpt-4o-mini' },
         openai_local: {
           provider: 'openai',
           id: 'gpt-4.1-mini',
@@ -52,11 +44,8 @@ describe('ModelConfig', () => {
     updateModel: vi.fn(),
     deleteModel: vi.fn(),
     saveConfig: vi.fn().mockResolvedValue({ status: 'saved' }),
+    isLoading: false,
   };
-
-  let keyStatusByService: Record<string, KeyStatusResponse>;
-  let fetchMock: ReturnType<typeof vi.fn>;
-  const writeTextMock = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -65,62 +54,27 @@ describe('ModelConfig', () => {
       mockReturnValue: (value: unknown) => void;
     };
     mockedUseConfigStore.mockReturnValue(mockStore);
-
-    keyStatusByService = {
-      'model:openrouter_backup': {
-        has_key: true,
-        source: 'ui',
-        masked_key: 'sk-ob...9999',
-        api_key: 'sk-openrouter-backup-real',
-      },
-    };
-    fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const method = init?.method || 'GET';
-      const url = typeof input === 'string' ? input : input.toString();
-
-      if (method === 'GET' && url.includes('/api-key')) {
-        const service = extractService(url);
-        const payload = keyStatusByService[service] || { has_key: false };
-        return {
-          ok: true,
-          json: async () => payload,
-        };
-      }
-
-      return {
-        ok: true,
-        json: async () => ({ status: 'success' }),
-      };
-    });
-
-    Object.defineProperty(global, 'fetch', {
-      value: fetchMock,
-      writable: true,
-      configurable: true,
-    });
-
-    Object.defineProperty(globalThis, 'navigator', {
-      value: { clipboard: { writeText: writeTextMock } },
-      writable: true,
-      configurable: true,
-    });
   });
 
-  it('renders configured rows', () => {
+  it('renders configured rows and keeps the table scrollable', () => {
     render(<ModelConfig />);
 
     expect(screen.getByText('default')).toBeTruthy();
     expect(screen.getByText('anthropic')).toBeTruthy();
     expect(screen.getByText('openrouter')).toBeTruthy();
     expect(screen.getByText('openai_local')).toBeTruthy();
-  });
-
-  it('keeps the models table horizontally scrollable', () => {
-    render(<ModelConfig />);
 
     const scrollContainer = screen.getByTestId('models-table-scroll-container');
     expect(scrollContainer).toHaveClass('overflow-x-auto');
     expect(within(scrollContainer).getByRole('table')).toBeTruthy();
+  });
+
+  it('shows explicit and default connection summaries', () => {
+    render(<ModelConfig />);
+
+    expect(screen.getByText('anthropic/team-a')).toBeInTheDocument();
+    expect(screen.getByText('openrouter/default')).toBeInTheDocument();
+    expect(screen.getByText('openai/default')).toBeInTheDocument();
   });
 
   it('starts inline editing when a row is clicked', () => {
@@ -130,9 +84,10 @@ describe('ModelConfig', () => {
 
     expect(screen.getByDisplayValue('anthropic')).toBeTruthy();
     expect(screen.getByDisplayValue('claude-3-5-haiku-latest')).toBeTruthy();
+    expect(screen.getByDisplayValue('anthropic/team-a')).toBeTruthy();
   });
 
-  it('saves inline name and model-id edits', async () => {
+  it('saves inline name, model id, and connection edits', async () => {
     render(<ModelConfig />);
 
     fireEvent.click(screen.getByText('anthropic'));
@@ -146,70 +101,23 @@ describe('ModelConfig', () => {
     fireEvent.change(within(row).getByDisplayValue('claude-3-5-haiku-latest'), {
       target: { value: 'claude-3-5-sonnet-latest' },
     });
+    fireEvent.change(within(row).getByDisplayValue('anthropic/team-a'), {
+      target: { value: 'anthropic/research' },
+    });
 
     fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       expect(mockStore.updateModel).toHaveBeenCalledWith(
         'anthropic-fast',
-        expect.objectContaining({ provider: 'anthropic', id: 'claude-3-5-sonnet-latest' })
+        expect.objectContaining({
+          provider: 'anthropic',
+          id: 'claude-3-5-sonnet-latest',
+          connection: 'anthropic/research',
+        })
       );
       expect(mockStore.deleteModel).toHaveBeenCalledWith('anthropic');
     });
-  });
-
-  it('deletes old custom credential when renaming a model', async () => {
-    keyStatusByService['model:anthropic'] = {
-      has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
-    };
-
-    render(<ModelConfig />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
-    });
-
-    fireEvent.click(screen.getByText('anthropic'));
-
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    fireEvent.change(within(row).getByDisplayValue('anthropic'), {
-      target: { value: 'anthropic-renamed' },
-    });
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic-renamed/copy-from/model:anthropic',
-        { method: 'POST' }
-      );
-      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
-        method: 'DELETE',
-      });
-    });
-  });
-
-  it('keeps focus in model id input while typing', () => {
-    render(<ModelConfig />);
-
-    fireEvent.click(screen.getByText('anthropic'));
-
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    const modelIdInput = within(row).getByDisplayValue('claude-3-5-haiku-latest');
-    modelIdInput.focus();
-    expect(modelIdInput).toHaveFocus();
-
-    fireEvent.change(modelIdInput, { target: { value: 'claude-3-5-haiku-latesta' } });
-
-    const updatedInput = within(row).getByDisplayValue('claude-3-5-haiku-latesta');
-    expect(updatedInput).toBe(modelIdInput);
-    expect(updatedInput).toHaveFocus();
   });
 
   it('shows OpenAI endpoint details and allows editing base URL', async () => {
@@ -240,6 +148,9 @@ describe('ModelConfig', () => {
     fireEvent.change(within(row).getByDisplayValue('16384'), {
       target: { value: '32768' },
     });
+    fireEvent.change(within(row).getByPlaceholderText('openai/default'), {
+      target: { value: 'openai/lab' },
+    });
     fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
@@ -248,6 +159,7 @@ describe('ModelConfig', () => {
         expect.objectContaining({
           provider: 'openai',
           id: 'gpt-4.1-mini',
+          connection: 'openai/lab',
           context_window: 32768,
           extra_kwargs: { base_url: 'http://localhost:11434/v1' },
         })
@@ -276,95 +188,12 @@ describe('ModelConfig', () => {
     });
   });
 
-  it('shows API key source labels', async () => {
-    keyStatusByService['model:anthropic'] = {
-      has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
-    };
-    keyStatusByService['openrouter'] = {
-      has_key: true,
-      source: 'env',
-      masked_key: 'sk-en...5678',
-      api_key: 'sk-openrouter-env-real',
-    };
-
-    render(<ModelConfig />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
-      expect(
-        screen.getAllByText((_, element) => element?.textContent?.includes('Source: .env') ?? false)
-          .length
-      ).toBeGreaterThan(0);
-    });
-  });
-
-  it('reuses key from another same-provider model', async () => {
-    render(<ModelConfig />);
-
-    fireEvent.click(screen.getByText('openrouter'));
-
-    const row = screen.getByDisplayValue('openrouter').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    await waitFor(() => {
-      expect(within(row).getByText('Reuse from same provider')).toBeTruthy();
-    });
-
-    const reuseTrigger = within(row).getByText('Reuse from same provider').closest('button');
-    if (!reuseTrigger) throw new Error('reuse trigger not found');
-
-    fireEvent.click(reuseTrigger);
-    fireEvent.click(screen.getByRole('option', { name: /openrouter_backup/i }));
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:openrouter/copy-from/model:openrouter_backup',
-        { method: 'POST' }
-      );
-    });
-  });
-
-  it('copies API key via copy button', async () => {
-    keyStatusByService['model:anthropic'] = {
-      has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
-    };
-
-    render(<ModelConfig />);
-
-    const row = screen.getByText('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    await waitFor(() => {
-      expect(within(row).getByTitle('Copy API key')).toBeTruthy();
-    });
-
-    fireEvent.click(within(row).getByTitle('Copy API key'));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true'
-      );
-      expect(writeTextMock).toHaveBeenCalledWith('sk-anthropic-real');
-    });
-  });
-
   it('adds a model using the top add row', async () => {
     render(<ModelConfig />);
 
     fireEvent.click(screen.getByRole('button', { name: /add model/i }));
 
-    expect(
-      screen.getByText(
-        'No custom key provided. This model will use the provider key (for example from .env) when available.'
-      )
-    ).toBeTruthy();
+    expect(screen.getAllByText('openrouter/default').length).toBeGreaterThan(0);
 
     fireEvent.change(screen.getByPlaceholderText('model name'), {
       target: { value: 'new-model' },
@@ -375,6 +204,9 @@ describe('ModelConfig', () => {
     fireEvent.change(screen.getByPlaceholderText('optional context window'), {
       target: { value: '200000' },
     });
+    fireEvent.change(screen.getByPlaceholderText('openrouter/default'), {
+      target: { value: 'openrouter/research' },
+    });
 
     fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
 
@@ -382,12 +214,13 @@ describe('ModelConfig', () => {
       expect(mockStore.updateModel).toHaveBeenCalledWith('new-model', {
         provider: 'openrouter',
         id: 'gpt-4o-mini',
+        connection: 'openrouter/research',
         context_window: 200000,
       });
     });
   });
 
-  it('accepts empty base URL for OpenAI and uses default endpoint', async () => {
+  it('accepts empty base URL for OpenAI and uses the default connection placeholder', async () => {
     render(<ModelConfig />);
 
     fireEvent.click(screen.getByRole('button', { name: /add model/i }));
@@ -395,7 +228,7 @@ describe('ModelConfig', () => {
     if (!addRow) throw new Error('add row not found');
 
     fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/i }));
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI/i }));
 
     fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
       target: { value: 'openai_default' },
@@ -405,6 +238,8 @@ describe('ModelConfig', () => {
     });
 
     expect(within(addRow).getByPlaceholderText('https://api.openai.com/v1')).toBeTruthy();
+    expect(within(addRow).getByPlaceholderText('openai/default')).toBeTruthy();
+
     fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
 
     await waitFor(() => {
@@ -425,7 +260,7 @@ describe('ModelConfig', () => {
     if (!addRow) throw new Error('add row not found');
 
     fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/i }));
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI/i }));
 
     fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
       target: { value: 'openai_compat' },
@@ -446,108 +281,6 @@ describe('ModelConfig', () => {
           description: 'Base URL must be a valid http(s) URL',
           variant: 'destructive',
         })
-      );
-    });
-  });
-
-  it('saves custom OpenAI base URL on add', async () => {
-    render(<ModelConfig />);
-
-    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
-    const addRow = screen.getByPlaceholderText('model name').closest('tr');
-    if (!addRow) throw new Error('add row not found');
-
-    fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/i }));
-
-    fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
-      target: { value: 'openai_compat' },
-    });
-    fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
-      target: { value: 'gpt-4.1-mini' },
-    });
-    fireEvent.change(within(addRow).getByPlaceholderText('https://api.openai.com/v1'), {
-      target: { value: 'http://localhost:9292/v1' },
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
-
-    await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith('openai_compat', {
-        provider: 'openai',
-        id: 'gpt-4.1-mini',
-        extra_kwargs: { base_url: 'http://localhost:9292/v1' },
-      });
-    });
-  });
-
-  it('shows immediate feedback when clearing a custom key', async () => {
-    keyStatusByService['model:anthropic'] = {
-      has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
-    };
-
-    render(<ModelConfig />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
-    });
-
-    fireEvent.click(screen.getByText('anthropic'));
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    fireEvent.click(within(row).getByRole('button', { name: 'Clear custom key' }));
-
-    expect(within(row).getByText('Custom key will be removed on save.')).toBeTruthy();
-    expect(within(row).getByRole('button', { name: 'Undo clear key' })).toBeTruthy();
-
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
-        method: 'DELETE',
-      });
-    });
-  });
-
-  it('deletes custom key only once when clearing key and renaming model', async () => {
-    keyStatusByService['model:anthropic'] = {
-      has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
-    };
-
-    render(<ModelConfig />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
-    });
-
-    fireEvent.click(screen.getByText('anthropic'));
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    fireEvent.change(within(row).getByDisplayValue('anthropic'), {
-      target: { value: 'anthropic-cleared' },
-    });
-    fireEvent.click(within(row).getByRole('button', { name: 'Clear custom key' }));
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => {
-      const deleteCalls = fetchMock.mock.calls.filter(
-        ([url, init]) =>
-          url === '/api/credentials/model:anthropic' &&
-          typeof init === 'object' &&
-          init?.method === 'DELETE'
-      );
-      expect(deleteCalls).toHaveLength(1);
-      expect(fetchMock).not.toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic-cleared/copy-from/model:anthropic',
-        { method: 'POST' }
       );
     });
   });

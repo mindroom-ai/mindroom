@@ -47,6 +47,7 @@ memory:
     provider: openai
     config:
       model: text-embedding-3-small
+      connection: openai/embeddings
       dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
 
@@ -87,6 +88,21 @@ memory:
     provider: ollama    # ollama, openai, or anthropic
     config:
       model: llama3.2
+```
+
+When you use a credentialed memory LLM or embedder, set `connection` on that consuming config.
+OpenAI embedders default to `openai/embeddings`.
+Memory LLMs default to `provider/default`.
+
+Example with an explicit OpenAI memory LLM connection:
+
+```yaml
+memory:
+  llm:
+    provider: openai
+    connection: openai/default
+    config:
+      model: gpt-4.1-mini
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
