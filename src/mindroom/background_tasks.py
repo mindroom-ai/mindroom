@@ -74,7 +74,7 @@ async def wait_for_background_tasks(timeout: float | None = None) -> None:  # no
     try:
         await asyncio.wait_for(asyncio.gather(*_background_tasks, return_exceptions=True), timeout=timeout)
     except TimeoutError:
-        logger.warning(f"Background tasks did not complete within {timeout} seconds")
+        logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
         # Cancel remaining tasks
         for task in _background_tasks:
             task.cancel()

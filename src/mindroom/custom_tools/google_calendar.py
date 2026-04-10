@@ -9,14 +9,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarTools
-from loguru import logger
 
 from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+logger = get_logger(__name__)
 
 
 class GoogleCalendarTools(ScopedGoogleOAuthMixin, AgnoGoogleCalendarTools):

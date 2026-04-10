@@ -491,13 +491,16 @@ Return the mode and a one-sentence reason why."""
         response = await agent.arun(prompt, session_id="team_mode_decision")
         decision = response.content
         if isinstance(decision, _TeamModeDecision):
-            logger.info(f"Team mode: {decision.mode} - {decision.reasoning}")
+            logger.info("team_mode_decided", mode=decision.mode, reasoning=decision.reasoning)
             return TeamMode.COORDINATE if decision.mode == "coordinate" else TeamMode.COLLABORATE
         # Fallback if response is unexpected
-        logger.debug(f"Unexpected response type from AI: {type(decision).__name__}, defaulting to collaborate")
+        logger.debug(
+            "team_mode_decision_unexpected_type",
+            response_type=type(decision).__name__,
+        )
         return TeamMode.COLLABORATE  # noqa: TRY300
     except Exception as e:
-        logger.debug(f"AI team mode decision failed (will use default): {e}")
+        logger.debug("team_mode_decision_failed", error=str(e))
         return TeamMode.COLLABORATE
 
 
@@ -581,7 +584,7 @@ async def decide_team_formation(
         # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
         # Use COLLABORATE when agents are from thread history (likely discussing same topic)
         mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
-        logger.info(f"Using hardcoded mode selection: {mode.value}")
+        logger.info("team_mode_selected_hardcoded", mode=mode.value)
 
     return replace(resolution, mode=mode)
 
@@ -644,17 +647,29 @@ def _select_team_request(
     """Return the normalized team request implied by one message context."""
     normalized_tagged_agents = _normalize_team_request_members(tagged_agents, config, runtime_paths)
     if len(normalized_tagged_agents) > 1:
-        logger.info(f"Team formation needed for tagged agents: {normalized_tagged_agents}")
+        logger.info(
+            "team_formation_requested",
+            trigger="tagged_agents",
+            agents=[agent.full_id for agent in normalized_tagged_agents],
+        )
         return _SelectedTeamRequest(TeamIntent.EXPLICIT_MEMBERS, normalized_tagged_agents)
 
     normalized_mentioned_agents = _normalize_team_request_members(all_mentioned_in_thread, config, runtime_paths)
     if not normalized_tagged_agents and len(normalized_mentioned_agents) > 1:
-        logger.info(f"Team formation needed for previously mentioned agents: {normalized_mentioned_agents}")
+        logger.info(
+            "team_formation_requested",
+            trigger="previously_mentioned_agents",
+            agents=[agent.full_id for agent in normalized_mentioned_agents],
+        )
         return _SelectedTeamRequest(TeamIntent.IMPLICIT_THREAD_TEAM, normalized_mentioned_agents)
 
     normalized_thread_agents = _normalize_team_request_members(agents_in_thread, config, runtime_paths)
     if not normalized_tagged_agents and len(normalized_thread_agents) > 1:
-        logger.info(f"Team formation needed for thread agents: {normalized_thread_agents}")
+        logger.info(
+            "team_formation_requested",
+            trigger="thread_agents",
+            agents=[agent.full_id for agent in normalized_thread_agents],
+        )
         return _SelectedTeamRequest(TeamIntent.IMPLICIT_THREAD_TEAM, normalized_thread_agents)
 
     if not (is_dm_room and not is_thread and not normalized_tagged_agents and room and config):
@@ -667,7 +682,11 @@ def _select_team_request(
     if len(normalized_available_agents) <= 1:
         return _SelectedTeamRequest(None, [])
 
-    logger.info(f"Team formation needed for DM room with multiple agents: {normalized_available_agents}")
+    logger.info(
+        "team_formation_requested",
+        trigger="dm_room_multiple_agents",
+        agents=[agent.full_id for agent in normalized_available_agents],
+    )
     return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_agents)
 
 
@@ -1214,11 +1233,11 @@ def select_model_for_team(
     ).model_name
     room_alias = get_room_alias_from_id(room_id, runtime_paths)
     if room_alias and room_alias in config.room_models:
-        logger.info(f"Using room-specific model for {team_name} in {room_alias}: {model_name}")
+        logger.info("using_room_specific_team_model", team_name=team_name, room_alias=room_alias, model_name=model_name)
     elif team_name in config.teams and config.teams[team_name].model:
-        logger.info(f"Using team-specific model for {team_name}: {model_name}")
+        logger.info("using_team_specific_model", team_name=team_name, model_name=model_name)
     else:
-        logger.info(f"Using default model for {team_name}")
+        logger.info("using_default_team_model", team_name=team_name)
     return model_name
 
 
@@ -1416,8 +1435,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             )
             prompt = prepared_execution.prepared_prompt
             run_metadata = prepared_execution.run_metadata
-            logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
-            logger.info(f"TEAM PROMPT: {prompt[:500]}")
+            logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
+            logger.info("team_prompt_preview", agents=agent_list, prompt_preview=prompt[:500])
 
             async def _run(
                 current_prompt: str,
@@ -1459,7 +1478,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                         attempt_run_id = _next_retry_run_id(run_id)
                         continue
 
-                    logger.exception(f"Error in team response with agents {agent_list}")
+                    logger.exception("team_response_failed", agents=agent_list)
                     return get_user_friendly_error_message(e, team_name)
 
                 if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
@@ -1506,19 +1525,30 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 
             if isinstance(response, TeamRunOutput):
                 if response.member_responses:
-                    logger.debug(f"Team had {len(response.member_responses)} member responses")
+                    logger.debug("team_member_response_count", response_count=len(response.member_responses))
 
-                logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
+                logger.info(
+                    "team_consensus_preview",
+                    content_preview=response.content[:200] if response.content else None,
+                )
 
                 parts = format_team_response(response)
                 team_response_text = "\n\n".join(parts) if parts else "No team response generated."
             else:
-                logger.warning(f"Unexpected response type: {type(response)}", response=response)
+                logger.warning(
+                    "team_response_unexpected_type",
+                    response_type=type(response).__name__,
+                    response=response,
+                )
                 team_response_text = str(response)
 
-            logger.info(f"TEAM RESPONSE ({agent_list}): {team_response_text[:_MAX_LOG_MESSAGE_LENGTH]}")
+            logger.info(
+                "team_response_preview",
+                agents=agent_list,
+                response_preview=team_response_text[:_MAX_LOG_MESSAGE_LENGTH],
+            )
             if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
-                logger.debug(f"TEAM RESPONSE (full): {team_response_text}")
+                logger.debug("team_response_full", agents=agent_list, response=team_response_text)
 
             team_header = _format_team_header(team_members.display_names)
             return team_header + team_response_text
@@ -1559,10 +1589,12 @@ async def _team_response_stream_raw(
 
     media_inputs = media or MediaInputs()
     logger.info(
-        f"Created team with {len(agents)} agents in {(team.delegate_to_all_members and 'collaborate') or 'coordinate'} mode",
+        "team_created",
+        agent_count=len(agents),
+        mode=(team.delegate_to_all_members and "collaborate") or "coordinate",
     )
     for agent in agents:
-        logger.debug(f"Team member: {agent.name}")
+        logger.debug("team_member", agent=agent.name)
 
     def _start_stream(current_prompt: str, current_media_inputs: MediaInputs) -> AsyncIterator[Any]:
         return team.arun(
@@ -1582,7 +1614,7 @@ async def _team_response_stream_raw(
     try:
         return _start_stream(prompt, media_inputs)
     except Exception as e:
-        logger.exception(f"Error in team streaming with agents {team_members.display_names}")
+        logger.exception("team_streaming_failed", agents=team_members.display_names)
         error_text = str(e)
 
         async def _error(content: str = error_text) -> AsyncIterator[TeamRunErrorEvent]:
@@ -1703,7 +1735,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             prepared_prompt = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
-            logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
+            logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
             media_inputs = media or MediaInputs()
             attempt_prompt = prepared_prompt
             attempt_media_inputs = media_inputs
@@ -1963,7 +1995,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 tool=event.tool,
                             )
                         else:
-                            logger.debug(f"Ignoring event type: {type(event).__name__}")
+                            logger.debug("ignoring_team_stream_event_type", event_type=type(event).__name__)
                             continue
 
                         parts: list[str] = []

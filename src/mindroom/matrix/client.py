@@ -376,7 +376,7 @@ async def login(
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
-        logger.info(f"Successfully logged in: {user_id}")
+        logger.info("matrix_login_succeeded", user_id=user_id)
         return client
     await client.close()
     msg = f"Failed to login {user_id}: {response}"
@@ -401,9 +401,9 @@ async def invite_to_room(
     """
     response = await client.room_invite(room_id, user_id)
     if isinstance(response, nio.RoomInviteResponse):
-        logger.info(f"Invited {user_id} to room {room_id}")
+        logger.info("matrix_room_invited", room_id=room_id, user_id=user_id)
         return True
-    logger.error(f"Failed to invite {user_id} to room {room_id}: {response}")
+    logger.error("matrix_room_invite_failed", room_id=room_id, user_id=user_id, error=str(response))
     return False
 
 
@@ -450,7 +450,7 @@ async def create_room(
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
-        logger.info(f"Created room: {name} ({response.room_id})")
+        logger.info("matrix_room_created", room_id=str(response.room_id), name=name)
         room_id = str(response.room_id)
 
         # Invite power users to the room
@@ -461,7 +461,7 @@ async def create_room(
                     await invite_to_room(client, room_id, user_id)
 
         return room_id
-    logger.error(f"Failed to create room {name}: {response}")
+    logger.error("matrix_room_creation_failed", name=name, error=str(response))
     return None
 
 
@@ -553,10 +553,10 @@ async def create_space(
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
-        logger.info(f"Created space: {name} ({response.room_id})")
+        logger.info("matrix_space_created", room_id=str(response.room_id), name=name)
         return str(response.room_id)
 
-    logger.error(f"Failed to create space {name}: {response}")
+    logger.error("matrix_space_creation_failed", name=name, error=str(response))
     return None
 
 
@@ -823,10 +823,10 @@ async def _create_dm_room(
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
-        logger.info(f"Created DM room: {response.room_id}")
+        logger.info("matrix_dm_room_created", room_id=str(response.room_id))
         return str(response.room_id)
 
-    logger.error(f"Failed to create DM room: {response}")
+    logger.error("matrix_dm_room_creation_failed", error=str(response))
     return None
 
 
@@ -843,9 +843,9 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     """
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
-        logger.info(f"Joined room: {room_id}")
+        logger.info("matrix_room_joined", room_id=room_id)
         return True
-    logger.warning(f"Could not join room {room_id}: {response}")
+    logger.warning("matrix_room_join_failed", room_id=room_id, error=str(response))
     return False
 
 
@@ -863,7 +863,7 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
     response = await client.joined_members(room_id)
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
-    logger.warning(f"⚠️ Could not check members for room {room_id}")
+    logger.warning("matrix_room_members_fetch_failed", room_id=room_id)
     return set()
 
 
@@ -880,7 +880,7 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     response = await client.joined_rooms()
     if isinstance(response, nio.JoinedRoomsResponse):
         return list(response.rooms)
-    logger.error(f"Failed to get joined rooms: {response}")
+    logger.error("matrix_joined_rooms_fetch_failed", error=str(response))
     return None
 
 
@@ -937,9 +937,9 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
     """
     response = await client.room_leave(room_id)
     if isinstance(response, nio.RoomLeaveResponse):
-        logger.info(f"Left room {room_id}")
+        logger.info("matrix_room_left", room_id=room_id)
         return True
-    logger.error(f"Failed to leave room {room_id}: {response}")
+    logger.error("matrix_room_leave_failed", room_id=room_id, error=str(response))
     return False
 
 
@@ -967,9 +967,9 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         content=content,
     )
     if isinstance(response, nio.RoomSendResponse):
-        logger.debug(f"Sent message to {room_id}: {response.event_id}")
+        logger.debug("matrix_message_sent", room_id=room_id, event_id=str(response.event_id))
         return str(response.event_id)
-    logger.error(f"Failed to send message to {room_id}: {response}")
+    logger.error("matrix_message_send_failed", room_id=room_id, error=str(response))
     return None
 
 

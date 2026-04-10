@@ -102,11 +102,15 @@ Generate the topic:"""
             session_id=session_id,
         )
     except Exception:
-        logger.exception(f"Error generating topic for room {room_key}")
+        logger.exception("room_topic_generation_failed", room_key=room_key, session_id=session_id)
         return None
     content = response.content
     if not isinstance(content, _RoomTopic):
-        logger.warning(f"Topic generation returned unexpected type: {type(content)}")
+        logger.warning(
+            "room_topic_generation_unexpected_type",
+            room_key=room_key,
+            content_type=type(content).__name__,
+        )
         return str(content) if content else None
     return content.topic
 
@@ -135,14 +139,19 @@ async def ensure_room_has_topic(
     """
     response = await client.room_get_state_event(room_id, "m.room.topic")
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("topic"):
-        logger.debug(f"Room {room_key} already has topic: {response.content['topic']}")
+        logger.debug(
+            "room_topic_already_present",
+            room_id=room_id,
+            room_key=room_key,
+            topic=response.content["topic"],
+        )
         return True
 
     # Generate and set topic
-    logger.info(f"Generating AI topic for existing room {room_key}")
+    logger.info("generate_room_topic", room_id=room_id, room_key=room_key, room_name=room_name)
     topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
     if topic is None:
-        logger.warning(f"Failed to generate topic for room {room_key}")
+        logger.warning("generate_room_topic_failed", room_id=room_id, room_key=room_key)
         return False
 
     # Set the topic
@@ -153,8 +162,8 @@ async def ensure_room_has_topic(
     )
 
     if isinstance(response, nio.RoomPutStateResponse):
-        logger.info(f"Set topic for room {room_key}: {topic}")
+        logger.info("room_topic_set", room_id=room_id, room_key=room_key, topic=topic)
         return True
 
-    logger.warning(f"Failed to set topic for room {room_key}: {response}")
+    logger.warning("set_room_topic_failed", room_id=room_id, room_key=room_key, error=response)
     return False

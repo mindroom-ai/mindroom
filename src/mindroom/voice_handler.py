@@ -300,7 +300,7 @@ async def _handle_voice_message(
             logger.warning("Failed to transcribe audio or empty transcription")
             return None
 
-        logger.info(f"Raw transcription: {transcription}")
+        logger.info("voice_transcription_received", transcription=transcription)
 
         available_agent_names, available_team_names = _get_available_entities_for_sender(
             room,
@@ -318,7 +318,7 @@ async def _handle_voice_message(
             available_team_names=available_team_names,
         )
 
-        logger.info(f"Formatted message: {formatted_message}")
+        logger.info("voice_message_formatted", formatted_message=formatted_message)
 
         if formatted_message:
             # Add a note that this was transcribed from voice
@@ -370,7 +370,11 @@ async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: Ru
         async with httpx.AsyncClient(verify=False) as http_client:  # noqa: S501
             response = await http_client.post(url, headers=headers, files=files, data=form_data)
             if response.status_code != 200:
-                logger.error(f"STT API error: {response.status_code} - {response.text}")
+                logger.error(
+                    "stt_api_error",
+                    status_code=response.status_code,
+                    error=response.text,
+                )
                 return None
 
             result = response.json()

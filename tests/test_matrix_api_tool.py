@@ -1027,13 +1027,13 @@ async def test_matrix_api_audit_logs_real_writes(
 
     assert payload["status"] == "ok"
     mock_warning.assert_called_once()
-    assert mock_warning.call_args.args[0] == "matrix_api write audit: {}"
-    audit_payload = json.loads(mock_warning.call_args.args[1])
+    assert mock_warning.call_args.args[0] == "matrix_api_write_audit"
+    audit_payload = mock_warning.call_args.kwargs
     assert audit_payload["action"] == action
-    assert audit_payload["agent_name"] == ctx.agent_name
-    assert audit_payload["requester_id"] == ctx.requester_id
+    assert audit_payload["agent"] == ctx.agent_name
+    assert audit_payload["user_id"] == ctx.requester_id
     assert audit_payload["room_id"] == ctx.room_id
     assert audit_payload["status"] == "ok"
-    assert set(audit_payload).issuperset({"action", "agent_name", "requester_id", "room_id", "status"})
+    assert set(audit_payload).issuperset({"action", "agent", "user_id", "room_id", "status"})
     assert set(audit_payload).issuperset(expected_summary)
-    assert "dont-log-me" not in mock_warning.call_args.args[1]
+    assert "dont-log-me" not in repr(audit_payload)

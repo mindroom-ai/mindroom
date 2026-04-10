@@ -41,7 +41,12 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
     agent_prefix = f"[{agent_name}] " if agent_name else ""
 
     # Log the full error for debugging
-    logger.error(f"Error in {agent_name or 'agent'}: {error!r}")
+    logger.error(
+        "agent_error",
+        agent=agent_name or "agent",
+        error_type=type(error).__name__,
+        error=repr(error),
+    )
 
     # Only distinguish the most important error types
     if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]):

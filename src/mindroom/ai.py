@@ -644,7 +644,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         # Priority: model config > env/CredentialsManager > default
         # This allows per-model host configuration in config.yaml
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
-        logger.debug(f"Using Ollama host: {host}")
+        logger.debug("using_ollama_host", host=host)
         return Ollama(id=model_id, host=host, **extra_kwargs)
 
     # Handle OpenRouter separately due to API key capture timing issue
@@ -1318,9 +1318,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                         pipeline_timing.mark("model_first_token")
                     if os.environ.get("MINDROOM_TIMING") == "1":
                         elapsed_seconds = time.monotonic() - request_started_at
-                        prefix = f"[{timing_scope}] " if timing_scope else ""
                         logger.info(
-                            f"TIMING {prefix}model_request_to_first_token: {elapsed_seconds:.3f}s",
+                            "timing_model_request_to_first_token",
                             timing_scope=timing_scope,
                             timing_step="model_request_to_first_token",
                             elapsed_s=round(elapsed_seconds, 3),

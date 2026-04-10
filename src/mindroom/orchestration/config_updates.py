@@ -102,13 +102,13 @@ def _get_changed_agents(
         if (agents_differ or culture_differ) and (agent_name in agent_bots or new_agent is not None):
             if old_agent and new_agent:
                 if agents_differ:
-                    logger.debug(f"Agent {agent_name} configuration changed, will restart")
+                    logger.debug("agent_configuration_changed_restart_required", agent=agent_name)
                 else:
-                    logger.debug(f"Agent {agent_name} culture assignment changed, will restart")
+                    logger.debug("agent_culture_changed_restart_required", agent=agent_name)
             elif new_agent:
-                logger.info(f"Agent {agent_name} is new, will start")
+                logger.info("new_agent_will_start", agent=agent_name)
             else:
-                logger.info(f"Agent {agent_name} was removed, will stop")
+                logger.info("removed_agent_will_stop", agent=agent_name)
             changed.add(agent_name)
 
     return changed

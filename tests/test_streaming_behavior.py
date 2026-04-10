@@ -232,7 +232,7 @@ class TestStreamingBehavior:
             mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
 
             # Debug: let's see what happens
-            calc_bot.logger.info(f"Processing initial message: '{initial_event.body}'")
+            calc_bot.logger.info("processing_initial_message", body=initial_event.body)
 
             # Add more logging to understand the flow
             with patch("mindroom.bot.extract_agent_name") as mock_extract:

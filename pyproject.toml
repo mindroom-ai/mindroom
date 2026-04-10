@@ -31,7 +31,6 @@ dependencies = [
   "httpx>=0.27",
   "humanize>=4.12.3",
   "json5>=0.13",
-  "loguru>=0.7.3",
   "markdown-it-py>=4",
   "matrix-nio>=0.25",
   "mcp[cli]>=1.12.4",

@@ -83,7 +83,12 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         router_model_name = config.router.model
 
         model = get_model_instance(config, runtime_paths, router_model_name)
-        logger.info(f"Using router model: {router_model_name} -> {model.__class__.__name__}(id={model.id})")
+        logger.info(
+            "using_router_model",
+            model_name=router_model_name,
+            model_class=model.__class__.__name__,
+            model_id=model.id,
+        )
 
         agent = Agent(
             name="Router",

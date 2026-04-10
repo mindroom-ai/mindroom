@@ -198,7 +198,7 @@ def _load_context_files(
                 ),
             )
         else:
-            logger.warning(f"Context file not found: {resolved_path}")
+            logger.warning("context_file_not_found", agent=agent_name, path=str(resolved_path))
     return loaded_parts
 
 
@@ -462,13 +462,16 @@ def build_agent_toolkit(  # noqa: PLR0911
 
         if not agent_config.delegate_to:
             logger.warning(
-                f"Skipping 'delegate' tool for agent '{agent_name}': delegate_to is empty",
+                "Skipping delegate tool because delegate_to is empty",
+                agent=agent_name,
             )
             return None
         if delegation_depth >= delegate.MAX_DELEGATION_DEPTH:
             logger.warning(
-                f"Skipping explicit 'delegate' tool for agent '{agent_name}': "
-                f"delegation depth {delegation_depth} >= max {delegate.MAX_DELEGATION_DEPTH}",
+                "Skipping delegate tool because delegation depth limit was reached",
+                agent=agent_name,
+                delegation_depth=delegation_depth,
+                max_delegation_depth=delegate.MAX_DELEGATION_DEPTH,
             )
             return None
         return delegate.DelegateTools(
@@ -1112,19 +1115,24 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     # Use rich prompt if available, otherwise use YAML config
     if agent_name in _RICH_PROMPTS:
-        logger.info(f"Using rich prompt for agent: {agent_name}")
+        logger.info("using_rich_prompt", agent=agent_name)
         # Prepend full context to the rich prompt
         role = full_context + _RICH_PROMPTS[agent_name]
         instructions = []  # Instructions are in the rich prompt
     else:
-        logger.info(f"Using YAML config for agent: {agent_name}")
+        logger.info("using_yaml_agent_config", agent=agent_name)
         # For YAML agents, prepend full context to role and keep original instructions
         role = full_context + agent_config.role
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
     model = _load_agent_model_instance(config, runtime_paths, model_name)
-    logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
+    logger.info(
+        "create_agent",
+        agent=agent_name,
+        model_class=model.__class__.__name__,
+        model_id=model.id,
+    )
 
     skills = _load_agent_skills(agent_name, config, runtime_paths)
     if skills and skills.get_skill_names():

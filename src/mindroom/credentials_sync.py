@@ -72,6 +72,33 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
     return True
 
 
+def _sync_service_credentials(
+    *,
+    service: str,
+    credentials: dict[str, str],
+    runtime_paths: RuntimePaths,
+    env_var: str | None = None,
+) -> bool:
+    """Seed or update one env-backed named service."""
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    existing = creds_manager.load_credentials(service)
+    if existing is not None:
+        source = existing.get("_source")
+        if source != "env":
+            logger.debug("credential_env_sync_skipped", service=service, source=source)
+            return False
+
+    creds_manager.save_credentials(service, {**credentials, "_source": "env"})
+    log_context = {"service": service}
+    if env_var is not None:
+        log_context["env_var"] = env_var
+    if existing is None:
+        logger.info("credential_seeded_from_env", **log_context)
+    else:
+        logger.info("credential_updated_from_env", **log_context)
+    return True
+
+
 def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     """Sync supported shared provider/bootstrap env values into CredentialsManager.
 
@@ -84,44 +111,57 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     This keeps conventional provider/bootstrap `.env` support without treating
     arbitrary tool-specific env vars as a supported tool configuration path.
     """
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     synced_count = 0
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
         env_value = get_secret_from_env(env_var, runtime_paths=runtime_paths)
 
         if not env_value:
-            logger.debug(f"No value found for {env_var} or {env_var}_FILE")
+            logger.debug("credential_env_value_missing", env_var=env_var)
             continue
 
-        logger.debug(f"Found value for {env_var}: length={len(env_value)}")
+        logger.debug("credential_env_value_found", env_var=env_var, value_length=len(env_value))
 
-        # Check existing credentials and their source
-        existing = creds_manager.load_credentials(service)
-        if existing is not None:
-            source = existing.get("_source")
-            if source != "env":
-                # UI-set or legacy (no _source) — don't overwrite
-                logger.debug(f"Credentials for {service} not env-sourced, skipping env sync")
-                continue
+        credentials = {"host": env_value} if service == "ollama" else {"api_key": env_value}
+        if _sync_service_credentials(
+            service=service,
+            credentials=credentials,
+            runtime_paths=runtime_paths,
+            env_var=env_var,
+        ):
+            synced_count += 1
 
-        if service == "ollama":
-            new_creds = {"host": env_value, "_source": "env"}
-        else:
-            new_creds = {"api_key": env_value, "_source": "env"}
+    adc_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+    if adc_path is not None:
+        if _sync_service_credentials(
+            service="google_vertex_adc",
+            credentials={"application_credentials_path": str(adc_path)},
+            runtime_paths=runtime_paths,
+            env_var="GOOGLE_APPLICATION_CREDENTIALS",
+        ):
+            synced_count += 1
+    else:
+        logger.debug("No GOOGLE_APPLICATION_CREDENTIALS path found for google_vertex_adc")
 
-        creds_manager.save_credentials(service, new_creds)
-        if existing is None:
-            logger.info(f"Seeded {service} credentials from environment")
-        else:
-            logger.info(f"Updated {service} credentials from environment")
+    client_id = get_secret_from_env("GOOGLE_CLIENT_ID", runtime_paths=runtime_paths)
+    client_secret = get_secret_from_env("GOOGLE_CLIENT_SECRET", runtime_paths=runtime_paths)
+    if (
+        client_id
+        and client_secret
+        and _sync_service_credentials(
+            service="google_oauth_client",
+            credentials={"client_id": client_id, "client_secret": client_secret},
+            runtime_paths=runtime_paths,
+            env_var="GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET",
+        )
+    ):
         synced_count += 1
 
     if _sync_github_private_credentials(runtime_paths=runtime_paths):
         synced_count += 1
 
     if synced_count > 0:
-        logger.info(f"Synced {synced_count} credentials from environment")
+        logger.info("credentials_synced_from_env", synced_count=synced_count)
     else:
         logger.debug("No credentials to sync from environment")
 

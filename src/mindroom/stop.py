@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 import nio
 from agno.run.cancel import acancel_run
 
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from nio import AsyncClient
 
-import structlog
-
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 _GRACEFUL_CANCEL_FALLBACK_SECONDS = 10.0
 _GRACEFUL_CANCEL_PROBE_SECONDS = 0.25
 
@@ -230,7 +230,7 @@ class StopManager:
                         )
                         tracked.reaction_event_id = None
                     except Exception as e:
-                        logger.warning(f"Failed to remove stop button in cleanup: {e}")
+                        logger.warning("stop_button_cleanup_failed", message_id=message_id, error=str(e))
 
             await asyncio.sleep(delay)
             if message_id in self.tracked_messages:

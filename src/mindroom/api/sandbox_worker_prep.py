@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
-from loguru import logger
 
 from mindroom.api import sandbox_exec
+from mindroom.logging_config import get_logger
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
@@ -31,6 +31,8 @@ from mindroom.workers.models import WorkerHandle, WorkerSpec
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
@@ -260,7 +262,7 @@ def prepare_worker_request(
     try:
         worker_handle = prepare_worker(worker_key, runtime_paths, runner_token=runner_token)
     except WorkerBackendError as exc:
-        logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=worker_key)
+        logger.warning("sandbox_worker_initialization_failed", worker_key=worker_key, exc_info=True)
         raise WorkerRequestPreparationError(str(exc)) from exc
 
     try:

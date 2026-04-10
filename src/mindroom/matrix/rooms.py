@@ -275,14 +275,14 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
     response = await client.room_resolve_alias(full_alias)
     if isinstance(response, nio.RoomResolveAliasResponse):
         room_id = str(response.room_id)
-        logger.debug(f"Room alias {full_alias} exists on server, room ID: {room_id}")
+        logger.debug("managed_room_alias_resolved", room_key=room_key, room_alias=full_alias, room_id=room_id)
 
         # Update our state if needed
         if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
             _add_room(room_key, room_id, full_alias, room_name, runtime_paths)
-            logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
+            logger.info("managed_room_state_updated", room_key=room_key, room_id=room_id, room_alias=full_alias)
 
         # Room existence and room membership are separate concerns. Existing
         # private rooms may be managed outside MindRoom, so don't force a join
@@ -332,7 +332,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
     # Room alias doesn't exist on server, so we can create it
     if room_key in existing_rooms:
         # Remove stale entry from state
-        logger.debug(f"Removing stale room {room_key} from state")
+        logger.debug("managed_room_state_entry_removed", room_key=room_key)
         _remove_room(room_key, runtime_paths=runtime_paths)
 
     # Create the room
@@ -341,7 +341,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
 
     # Generate a contextual topic for the room using AI
     topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
-    logger.info(f"Creating room {room_key} with topic: {topic}")
+    logger.info("managed_room_creation_started", room_key=room_key, topic=topic)
 
     created_room_id = await create_room(
         client=client,
@@ -354,7 +354,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
     if created_room_id:
         # Save room info
         _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
-        logger.info(f"Created room {room_key} with ID {created_room_id}")
+        logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
         if config.matrix_room_access.is_multi_user_mode():
             await _configure_managed_room_access(
@@ -386,7 +386,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         )
 
         return created_room_id
-    logger.error(f"Failed to create room {room_key}")
+    logger.error("managed_room_creation_failed", room_key=room_key, room_alias=full_alias)
     return None
 
 
@@ -558,18 +558,23 @@ async def ensure_user_in_rooms(
         # Login as the user
         login_response = await user_client.login(password=user_account.password)
         if not isinstance(login_response, nio.LoginResponse):
-            logger.error(f"Failed to login as user {user_id}: {login_response}")
+            logger.error("matrix_user_login_failed", user_id=user_id, error=str(login_response))
             return
 
-        logger.info(f"User {user_id} logged in to join rooms")
+        logger.info("matrix_user_logged_in", user_id=user_id)
 
         for room_key, room_id in room_ids.items():
             # Try to join the room (will work if invited or room is public)
             join_success = await join_room(user_client, room_id)
             if join_success:
-                logger.info(f"User {user_id} joined room {room_key}")
+                logger.info("matrix_user_joined_room", user_id=user_id, room_id=room_id, room_key=room_key)
             else:
-                logger.warning(f"User {user_id} failed to join room {room_key} - may need invitation")
+                logger.warning(
+                    "matrix_user_room_join_failed",
+                    user_id=user_id,
+                    room_id=room_id,
+                    room_key=room_key,
+                )
 
 
 _DM_ROOM_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
@@ -694,10 +699,10 @@ async def leave_non_dm_rooms(
     """Leave all rooms in *room_ids* that are not DM rooms."""
     for room_id in room_ids:
         if await is_dm_room(client, room_id):
-            logger.debug(f"Preserving DM room {room_id}")
+            logger.debug("dm_room_preserved", room_id=room_id)
             continue
         success = await leave_room(client, room_id)
         if success:
-            logger.info(f"Left room {room_id}")
+            logger.info("room_left", room_id=room_id)
         else:
-            logger.error(f"Failed to leave room {room_id}")
+            logger.error("room_leave_failed", room_id=room_id)

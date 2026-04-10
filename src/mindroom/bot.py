@@ -171,7 +171,7 @@ from .knowledge.utils import (
     KnowledgeAccessSupport,
     MultiKnowledgeVectorDb,
 )
-from .logging_config import emoji, get_logger
+from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     PermanentMatrixStartupError,
@@ -643,7 +643,7 @@ class AgentBot:
     @cached_property
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Get a logger with agent context bound."""
-        return logger.bind(agent=emoji(self.agent_name))
+        return logger.bind(agent=self.agent_name)
 
     @cached_property
     def matrix_id(self) -> MatrixID:
@@ -1056,11 +1056,15 @@ class AgentBot:
 
         restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config, self.runtime_paths)
         if restored_tasks > 0:
-            self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
+            self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
 
         restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
         if restored_configs > 0:
-            self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
+            self.logger.info(
+                "restored_pending_config_changes",
+                room_id=room_id,
+                restored_config_count=restored_configs,
+            )
 
         await self._send_welcome_message_if_empty(room_id)
 
@@ -1104,7 +1108,7 @@ class AgentBot:
             self.agent_user.display_name,  # Use existing display name if available
             runtime_paths=self.runtime_paths,
         )
-        self.logger.info(f"Ensured Matrix user account: {self.agent_user.user_id}")
+        self.logger.info("ensured_matrix_user_account", user_id=self.agent_user.user_id)
 
     async def _set_avatar_if_available(self) -> None:
         """Set avatar for the agent if an avatar file exists."""
@@ -1118,11 +1122,11 @@ class AgentBot:
             try:
                 success = await check_and_set_avatar(self.client, avatar_path)
                 if success:
-                    self.logger.info(f"Successfully set avatar for {self.agent_name}")
+                    self.logger.info("avatar_set")
                 else:
-                    self.logger.warning(f"Failed to set avatar for {self.agent_name}")
+                    self.logger.warning("avatar_set_failed")
             except Exception as e:
-                self.logger.warning(f"Failed to set avatar: {e}")
+                self.logger.warning("avatar_set_failed", error=str(e))
 
     async def _set_presence_with_model_info(self) -> None:
         """Set presence status with model information."""
@@ -1255,10 +1259,10 @@ class AgentBot:
             try:
                 await cleanup_all_orphaned_bots(client, self.config, self.runtime_paths)
             except Exception as e:
-                self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
+                self.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
 
         # Note: Room joining is deferred until after invitations are handled
-        self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
+        self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
     async def try_start(self) -> bool:
@@ -1285,9 +1289,9 @@ class AgentBot:
             return True  # noqa: TRY300
         except Exception as exc:
             if isinstance(exc, PermanentMatrixStartupError):
-                logger.error(f"Failed to start agent {self.agent_name}: {exc}")  # noqa: TRY400
+                logger.error("agent_start_failed_permanently", agent=self.agent_name, error=str(exc))  # noqa: TRY400
                 raise
-            logger.exception(f"Failed to start agent {self.agent_name}")
+            logger.exception("agent_start_failed", agent=self.agent_name)
             return False
 
     async def cleanup(self) -> None:
@@ -1323,7 +1327,7 @@ class AgentBot:
             await wait_for_background_tasks(timeout=5.0)  # 5 second timeout
             self.logger.info("Background tasks completed")
         except Exception as e:
-            self.logger.warning(f"Some background tasks did not complete: {e}")
+            self.logger.warning("background_tasks_incomplete", error=str(e))
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
@@ -1866,7 +1870,7 @@ class AgentBot:
             self.runtime_paths,
             room_alias=room.canonical_alias,
         ):
-            self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
+            self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return
 
         if not self._dispatch_planner.can_reply_to_sender(event.sender):
@@ -2768,7 +2772,7 @@ class AgentBot:
         # Skip edits from other agents
         sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
         if sender_agent_name:
-            self.logger.debug(f"Ignoring edit from other agent: {sender_agent_name}")
+            self.logger.debug("ignoring_edit_from_other_agent", agent=sender_agent_name)
             return
 
         # Known limitations for edit regeneration (ISSUE-110 Phase 5):
@@ -2813,7 +2817,7 @@ class AgentBot:
             else turn_record.response_event_id
         )
         if response_event_id is None:
-            self.logger.debug(f"No previous response found for edited message {original_event_id}")
+            self.logger.debug("missing_previous_response_for_edit", event_id=original_event_id)
             return
         regeneration_target = turn_record.conversation_target or self._conversation_resolver.build_message_target(
             room_id=room.room_id,

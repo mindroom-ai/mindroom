@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import logging.config
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -13,7 +13,7 @@ import structlog
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-__all__ = ["emoji", "get_logger", "setup_logging"]
+__all__ = ["get_logger", "setup_logging"]
 
 
 class _NioValidationFilter(logging.Filter):
@@ -39,44 +39,6 @@ class _NioValidationFilter(logging.Filter):
         return True
 
 
-def emoji(agent_name: str) -> str:
-    """Get an emoji-prefixed agent name string with consistent emoji based on the name.
-
-    Args:
-        agent_name: The agent name to add emoji to
-
-    Returns:
-        The agent name with a unique emoji prefix
-
-    """
-    # Emojis for different agents
-    emojis = [
-        "🤖",  # robot
-        "🧮",  # abacus
-        "💡",  # light bulb
-        "🔧",  # wrench
-        "📊",  # chart
-        "🎯",  # target
-        "🚀",  # rocket
-        "⚡",  # lightning
-        "🔍",  # magnifying glass
-        "📝",  # memo
-        "🎨",  # artist palette
-        "🧪",  # test tube
-        "🎪",  # circus tent
-        "🌟",  # star
-        "🔮",  # crystal ball
-        "🛠️",  # hammer and wrench
-    ]
-
-    # Use hash to get consistent emoji for each agent
-    hash_value = int(hashlib.sha256(agent_name.encode()).hexdigest(), 16)
-    emoji_index = hash_value % len(emojis)
-    emoji = emojis[emoji_index]
-
-    return f"{emoji} {agent_name}"
-
-
 def setup_logging(
     *,
     level: str = "INFO",
@@ -100,8 +62,31 @@ def setup_logging(
     # Shared processors that don't affect output format
     timestamper = structlog.processors.TimeStamper(fmt="iso")
     pre_chain = [
+        structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         timestamper,
+    ]
+    log_format = os.getenv("MINDROOM_LOG_FORMAT", "text").strip().lower()
+    renderer_name = "json" if log_format == "json" else "text"
+
+    text_processors = [
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.dev.ConsoleRenderer(colors=False),
+    ]
+    colored_processors = [
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.dev.ConsoleRenderer(
+            colors=True,
+            exception_formatter=structlog.dev.RichTracebackFormatter(
+                # The locals can be very large, so we hide them by default
+                show_locals=False,
+            ),
+        ),
+    ]
+    json_processors = [
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.processors.ExceptionRenderer(),
+        structlog.processors.JSONRenderer(),
     ]
 
     # Configure logging with both console and file handlers
@@ -110,26 +95,19 @@ def setup_logging(
             "version": 1,
             "disable_existing_loggers": False,
             "formatters": {
-                "plain": {
+                "text": {
                     "()": structlog.stdlib.ProcessorFormatter,
-                    "processors": [
-                        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                        structlog.dev.ConsoleRenderer(colors=False),
-                    ],
+                    "processors": text_processors,
                     "foreign_pre_chain": pre_chain,
                 },
                 "colored": {
                     "()": structlog.stdlib.ProcessorFormatter,
-                    "processors": [
-                        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                        structlog.dev.ConsoleRenderer(
-                            colors=True,
-                            exception_formatter=structlog.dev.RichTracebackFormatter(
-                                # The locals can be very large, so we hide them by default
-                                show_locals=False,
-                            ),
-                        ),
-                    ],
+                    "processors": colored_processors,
+                    "foreign_pre_chain": pre_chain,
+                },
+                "json": {
+                    "()": structlog.stdlib.ProcessorFormatter,
+                    "processors": json_processors,
                     "foreign_pre_chain": pre_chain,
                 },
             },
@@ -143,7 +121,7 @@ def setup_logging(
                     "level": level.upper(),
                     "class": "logging.StreamHandler",
                     "stream": "ext://sys.stderr",
-                    "formatter": "colored",
+                    "formatter": "json" if renderer_name == "json" else "colored",
                     "filters": ["nio_validation"],
                 },
                 "file": {
@@ -152,7 +130,7 @@ def setup_logging(
                     "filename": str(log_file),
                     "mode": "a",
                     "encoding": "utf-8",
-                    "formatter": "plain",
+                    "formatter": "json" if renderer_name == "json" else "text",
                     "filters": ["nio_validation"],
                 },
             },
@@ -197,7 +175,7 @@ def setup_logging(
 
     # Log startup message
     logger = get_logger(__name__)
-    logger.info("Logging initialized", log_file=str(log_file), level=level)
+    logger.info("Logging initialized", log_file=str(log_file), level=level, log_format=renderer_name)
 
 
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:

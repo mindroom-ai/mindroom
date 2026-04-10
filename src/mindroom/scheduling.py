@@ -885,13 +885,13 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             await _execute_scheduled_workflow(client, workflow, config, runtime_paths, task_id=task_id)
             if task_id not in running_tasks:
-                logger.info(f"Task {task_id} no longer in running tasks, stopping")
+                logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
                 return
     except asyncio.CancelledError:
-        logger.info(f"Cron task {task_id} was cancelled")
+        logger.info("cron_task_cancelled", task_id=task_id)
         raise
     except Exception as e:
-        logger.exception(f"Error in cron task {task_id}")
+        logger.exception("cron_task_failed", task_id=task_id)
         if workflow.room_id:
             error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
             error_content = await _build_scheduled_failure_content(
@@ -977,10 +977,10 @@ async def _run_once_task(  # noqa: C901, PLR0912
                 status=final_status,
             )
     except asyncio.CancelledError:
-        logger.info(f"One-time task {task_id} was cancelled")
+        logger.info("one_time_task_cancelled", task_id=task_id)
         raise
     except Exception as e:
-        logger.exception(f"Error in one-time task {task_id}")
+        logger.exception("one_time_task_failed", task_id=task_id)
         if workflow.room_id:
             error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
             error_content = await _build_scheduled_failure_content(
@@ -1438,9 +1438,9 @@ async def cancel_all_scheduled_tasks(
                         state_key=task_id,
                     )
                     cancelled_count += 1
-                    logger.info(f"Cancelled task {task_id}")
+                    logger.info("scheduled_task_cancelled", task_id=task_id)
                 except Exception:
-                    logger.exception(f"Failed to cancel task {task_id}")
+                    logger.exception("scheduled_task_cancel_failed", task_id=task_id)
                     failed_count += 1
 
     if cancelled_count == 0:
@@ -1488,7 +1488,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
             # Validate workflow has required fields
             if workflow.schedule_type == "once":
                 if not workflow.execute_at:
-                    logger.warning(f"Skipping one-time task {task_id} without execution time")
+                    logger.warning("skipping_one_time_task_without_execution_time", task_id=task_id)
                     continue
                 # Handle past one-time tasks: execute if within grace period, fail if too old
                 if workflow.execute_at <= datetime.now(UTC):
@@ -1524,10 +1524,10 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                     continue
             elif workflow.schedule_type == "cron":
                 if not workflow.cron_schedule:
-                    logger.warning(f"Skipping recurring task {task_id} without cron schedule")
+                    logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task_id)
                     continue
             else:
-                logger.warning(f"Unknown schedule type for task {task_id}: {workflow.schedule_type}")
+                logger.warning("unknown_schedule_type", task_id=task_id, schedule_type=workflow.schedule_type)
                 continue
 
             # Start the appropriate task
