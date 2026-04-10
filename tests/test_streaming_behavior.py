@@ -862,7 +862,7 @@ class TestStreamingBehavior:
                 typing_indicator=noop_typing,
             ),
         ):
-            delivery = await bot._process_and_respond_streaming(
+            delivery = await bot._response_coordinator.process_and_respond_streaming(
                 ResponseRequest(
                     room_id="!test:localhost",
                     reply_to_event_id="$reply_plain:localhost",

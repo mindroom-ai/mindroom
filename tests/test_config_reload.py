@@ -131,7 +131,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         await release_response.wait()
 
     response_task = asyncio.create_task(
-        bot._run_cancellable_response(
+        bot._response_coordinator.run_cancellable_response(
             room_id="!room:localhost",
             reply_to_event_id="$reply",
             thread_id=None,
@@ -1155,7 +1155,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         pass
 
     task = asyncio.create_task(
-        bot._run_cancellable_response(
+        bot._response_coordinator.run_cancellable_response(
             room_id="!room:localhost",
             reply_to_event_id="$reply",
             thread_id=None,
@@ -1207,7 +1207,7 @@ async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
     async def response_function(message_id: str | None) -> None:
         assert message_id is None
 
-    await bot._run_cancellable_response(
+    await bot._response_coordinator.run_cancellable_response(
         room_id="!room:localhost",
         reply_to_event_id="$reply",
         thread_id=None,
@@ -1268,7 +1268,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
     async def response_function(message_id: str | None) -> None:
         assert message_id == "$thinking"
 
-    await bot._run_cancellable_response(
+    await bot._response_coordinator.run_cancellable_response(
         room_id="!room:localhost",
         reply_to_event_id="$reply",
         thread_id=None,

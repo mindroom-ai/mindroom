@@ -80,10 +80,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot._conversation_state_writer.create_team_history_storage = MagicMock(return_value=MagicMock())
     bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
     bot._conversation_state_writer.history_session_type = MagicMock(return_value=SessionType.AGENT)
-    bot._request_with_resolved_thread_target = AgentBot._request_with_resolved_thread_target.__get__(
-        bot,
-        AgentBot,
-    )
     bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
     return bot
 
@@ -143,8 +139,6 @@ class TestAIErrorDisplay:
             edited_messages.append((event_id, text))
             return "$edit"
 
-        process_method = AgentBot._process_and_respond
-
         with (
             patch("mindroom.response_coordinator.ai_response") as mock_ai,
             patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(side_effect=mock_gateway_edit_message)),
@@ -153,8 +147,7 @@ class TestAIErrorDisplay:
             error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
             mock_ai.return_value = error_msg
 
-            await process_method(
-                bot,
+            await bot._response_coordinator.process_and_respond(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -184,9 +177,6 @@ class TestAIErrorDisplay:
         bot._edit_message = mock_edit_message
         bot._handle_interactive_question = AsyncMock()
 
-        # Create the actual _process_and_respond_streaming method bound to our mock bot
-        streaming_method = AgentBot._process_and_respond_streaming
-
         # Mock stream_agent_response to yield an error message
         with patch("mindroom.response_coordinator.stream_agent_response") as mock_stream:
 
@@ -202,8 +192,7 @@ class TestAIErrorDisplay:
                 mock_send_streaming.return_value = ("$msg_id", error_text)
 
                 # Call the method with an existing_event_id
-                await streaming_method(
-                    bot,
+                await bot._response_coordinator.process_and_respond_streaming(
                     _response_request(existing_event_id="$thinking_msg"),
                 )
 
@@ -226,9 +215,6 @@ class TestAIErrorDisplay:
             edited_messages.append((event_id, text))
             return "$edit"
 
-        # Create the actual _process_and_respond method bound to our mock bot
-        process_method = AgentBot._process_and_respond
-
         # Mock ai_response to raise CancelledError
         with (
             patch("mindroom.response_coordinator.ai_response") as mock_ai,
@@ -239,8 +225,7 @@ class TestAIErrorDisplay:
 
             # Call the method and expect it to raise CancelledError
             with pytest.raises(asyncio.CancelledError):
-                await process_method(
-                    bot,
+                await bot._response_coordinator.process_and_respond(
                     _response_request(existing_event_id="$thinking_msg"),
                 )
 
@@ -267,8 +252,6 @@ class TestAIErrorDisplay:
             edited_messages.append(text)
             return "$edit"
 
-        process_method = AgentBot._process_and_respond
-
         error_messages = [
             "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
             "[test_agent] 🔴 Rate limited. Please wait before trying again.",
@@ -287,8 +270,7 @@ class TestAIErrorDisplay:
                 _build_response_coordinator(bot)
                 mock_ai.return_value = error_msg
 
-                await process_method(
-                    bot,
+                await bot._response_coordinator.process_and_respond(
                     _response_request(
                         prompt="Help me",
                         existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
@@ -329,8 +311,6 @@ class TestAIErrorDisplay:
             edited_messages.append((event_id, content, text))
             return "$edit"
 
-        process_method = AgentBot._process_and_respond
-
         with (
             patch("mindroom.response_coordinator.ai_response") as mock_ai,
             patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(side_effect=mock_gateway_edit_message)),
@@ -339,8 +319,7 @@ class TestAIErrorDisplay:
             mock_ai.side_effect = asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
             with pytest.raises(asyncio.CancelledError):
-                await process_method(
-                    bot,
+                await bot._response_coordinator.process_and_respond(
                     _response_request(existing_event_id="$thinking_msg"),
                 )
 
@@ -356,8 +335,6 @@ class TestAIErrorDisplay:
         bot = _mock_bot(tmp_path)
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
 
-        process_method = AgentBot._process_and_respond
-
         with (
             patch(
                 "mindroom.response_coordinator.ensure_request_knowledge_managers",
@@ -370,8 +347,7 @@ class TestAIErrorDisplay:
             _build_response_coordinator(bot)
             mock_ai.return_value = "Response without knowledge"
 
-            delivery = await process_method(
-                bot,
+            delivery = await bot._response_coordinator.process_and_respond(
                 _response_request(),
             )
 

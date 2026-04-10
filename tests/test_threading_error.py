@@ -406,7 +406,7 @@ class TestThreadingBehavior:
 
         try:
             with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
-                first_context = await bot._extract_message_context(room, event)
+                first_context = await bot._conversation_resolver.extract_message_context(room, event)
 
             assert first_context.is_thread is True
             assert first_context.thread_id == "$msg1:localhost"
@@ -422,7 +422,7 @@ class TestThreadingBehavior:
             bot.client.room_get_event = AsyncMock(side_effect=AssertionError("should use persisted cache"))
 
             with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch_again:
-                second_context = await bot._extract_message_context(room, event)
+                second_context = await bot._conversation_resolver.extract_message_context(room, event)
 
             assert second_context.is_thread is True
             assert second_context.thread_id == "$msg1:localhost"
