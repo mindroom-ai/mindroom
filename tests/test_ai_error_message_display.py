@@ -15,10 +15,13 @@ from agno.db.base import SessionType
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_coordinator import ResponseRequest
+from mindroom.streaming import build_restart_interrupted_body
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -305,6 +308,47 @@ class TestAIErrorDisplay:
                     assert "unavailable" in displayed_msg
                 elif "Invalid model" in error_msg:
                     assert "Invalid model" in displayed_msg
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_sync_restart_edits_thinking_message_with_restart_status(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Sync restarts should not render as user-initiated cancellation."""
+        bot = _mock_bot(tmp_path)
+
+        edited_messages: list[tuple[str, dict[str, object], str]] = []
+
+        async def mock_gateway_edit_message(
+            client: object,  # noqa: ARG001
+            room_id: str,  # noqa: ARG001
+            event_id: str,
+            content: dict[str, object],
+            text: str,
+        ) -> str:
+            edited_messages.append((event_id, content, text))
+            return "$edit"
+
+        process_method = AgentBot._process_and_respond
+
+        with (
+            patch("mindroom.response_coordinator.ai_response") as mock_ai,
+            patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(side_effect=mock_gateway_edit_message)),
+        ):
+            _build_response_coordinator(bot)
+            mock_ai.side_effect = asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+
+            with pytest.raises(asyncio.CancelledError):
+                await process_method(
+                    bot,
+                    _response_request(existing_event_id="$thinking_msg"),
+                )
+
+        assert len(edited_messages) == 1
+        event_id, content, text = edited_messages[0]
+        assert event_id == "$thinking_msg"
+        assert text == build_restart_interrupted_body("")
+        assert content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
     @pytest.mark.asyncio
     async def test_knowledge_init_failure_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:

@@ -22,6 +22,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import is_sync_restart_cancel
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -274,6 +275,7 @@ class StreamingResponse:
         client: nio.AsyncClient,
         *,
         cancelled: bool = False,
+        restart_interrupted: bool = False,
         error: Exception | None = None,
     ) -> None:
         """Send final message update."""
@@ -281,6 +283,8 @@ class StreamingResponse:
             stripped_text = self.accumulated_text.rstrip()
             error_note = _format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
+        elif restart_interrupted:
+            self.accumulated_text = build_restart_interrupted_body(self.accumulated_text)
         elif cancelled:
             stripped_text = self.accumulated_text.rstrip()
             self.accumulated_text = (
@@ -293,7 +297,7 @@ class StreamingResponse:
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
         final_stream_status = STREAM_STATUS_COMPLETED
-        if error is not None:
+        if error is not None or restart_interrupted:
             final_stream_status = STREAM_STATUS_ERROR
         elif cancelled:
             final_stream_status = STREAM_STATUS_CANCELLED
@@ -580,13 +584,17 @@ async def send_streaming_response(
 
     try:
         await _consume_streaming_chunks(client, response_stream, streaming)
-    except asyncio.CancelledError:
-        logger.warning(
-            "Streaming response cancelled — traceback for diagnosis",
-            message_id=streaming.event_id,
-            exc_info=True,
-        )
-        await streaming.finalize(client, cancelled=True)
+    except asyncio.CancelledError as exc:
+        if is_sync_restart_cancel(exc):
+            logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
+            await streaming.finalize(client, restart_interrupted=True)
+        else:
+            logger.warning(
+                "Streaming response cancelled — traceback for diagnosis",
+                message_id=streaming.event_id,
+                exc_info=True,
+            )
+            await streaming.finalize(client, cancelled=True)
         raise
     except Exception as e:
         logger.exception("Streaming response failed", error=str(e))

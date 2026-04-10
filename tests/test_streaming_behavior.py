@@ -17,11 +17,12 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
-from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_coordinator import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -29,6 +30,7 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
+    build_restart_interrupted_body,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
     send_streaming_response,
@@ -1002,6 +1004,48 @@ class TestStreamingBehavior:
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
         assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+
+    @pytest.mark.asyncio
+    async def test_sync_restart_stream_preserves_partial_text_with_restart_suffix(self) -> None:
+        """Sync-restart cancellation should keep streamed text and append the restart marker."""
+        mock_client = _make_matrix_client_mock()
+        edited_messages: list[tuple[dict[str, object], str]] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            new_content: dict[str, object],
+            new_text: str,
+        ) -> str:
+            edited_messages.append((new_content, new_text))
+            return "$edit"
+
+        async def cancelling_stream() -> AsyncIterator[str]:
+            yield "Partial answer"
+            raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+
+        with (
+            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=cancelling_stream(),
+                existing_event_id="$thinking_123",
+                room_mode=True,
+            )
+
+        assert len(edited_messages) == 2
+        final_content, final_text = edited_messages[-1]
+        assert final_text == build_restart_interrupted_body("Partial answer")
+        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
     @pytest.mark.asyncio
     async def test_stream_error_preserves_partial_text_and_appends_error_hint(self) -> None:
