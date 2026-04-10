@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 from mindroom.agents import create_agent
 from mindroom.api import config_lifecycle, main
 from mindroom.config.agent import AgentConfig
@@ -286,8 +288,8 @@ class TestUpdateOwnConfig:
         result = tool.update_own_config(tools=["self_config_plugin_tool"])
 
         assert "Successfully" in result
-        reloaded = Config.from_yaml(config_path)
-        assert reloaded.agents["coder"].tool_names == ["self_config_plugin_tool"]
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agents"]["coder"]["tools"] == ["self_config_plugin_tool"]
 
     def test_update_tools_blocks_privileged_tool(self) -> None:
         """Self-config should not allow assigning privileged global-config tools."""

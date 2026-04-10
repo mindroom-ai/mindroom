@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -115,7 +113,8 @@ async def test_agent_processes_direct_mention(
         config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
-        await bot.start()
+        bot.client = mock_client
+        bot.running = True
 
         # Create a message mentioning the calculator agent
         message_body = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
@@ -142,47 +141,48 @@ async def test_agent_processes_direct_mention(
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        with aioresponses() as m:
-            # Mock the HTTP endpoint for sending messages
-            m.put(
-                re.compile(rf".*{re.escape(test_room_id)}/send/m\.room\.message/.*"),
-                status=200,
-                payload={"event_id": "$response_event:localhost"},
-            )
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "15% of 200 is 30"
 
-            async def mock_streaming_response() -> AsyncGenerator[str, None]:
-                yield "15% of 200 is 30"
-
-            mock_ai = AsyncMock(return_value=mock_streaming_response())
-            with patch_response_coordinator_module(
+        mock_ai = AsyncMock(return_value=mock_streaming_response())
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_streaming_response",
+                new_callable=AsyncMock,
+            ) as mock_send_streaming_response,
+            patch_response_coordinator_module(
                 stream_agent_response=mock_ai,
                 should_use_streaming=AsyncMock(return_value=True),
-            ):
-                await bot._on_message(room, message_event)
+            ),
+        ):
+            mock_send_streaming_response.return_value = ("$response", "15% of 200 is 30")
+            await bot._on_message(room, message_event)
 
-            # Verify AI was called with correct parameters (full message body as prompt)
-            mock_ai.assert_called_once()
-            ai_kwargs = mock_ai.call_args.kwargs
-            assert ai_kwargs["agent_name"] == "calculator"
-            assert ai_kwargs["prompt"].startswith("[")
-            assert ai_kwargs["prompt"].endswith(
-                f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?",
-            )
-            assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
-            assert ai_kwargs["thread_history"] == []
-            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-            assert ai_kwargs["config"] == config
-            assert ai_kwargs["room_id"] == test_room_id
-            assert ai_kwargs["knowledge"] is None
-            assert ai_kwargs["user_id"] == test_user_id
-            assert ai_kwargs["media"] == MediaInputs()
-            assert ai_kwargs["reply_to_event_id"] == "$test_event:localhost"
-            assert ai_kwargs["show_tool_calls"] is True
-            assert ai_kwargs["run_metadata_collector"] == {}
+        # Verify AI was called with correct parameters (full message body as prompt)
+        mock_ai.assert_called_once()
+        ai_kwargs = mock_ai.call_args.kwargs
+        assert ai_kwargs["agent_name"] == "calculator"
+        assert ai_kwargs["prompt"].startswith("[")
+        assert ai_kwargs["prompt"].endswith(
+            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?",
+        )
+        assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
+        assert ai_kwargs["thread_history"] == []
+        assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
+        assert ai_kwargs["config"] == config
+        assert ai_kwargs["room_id"] == test_room_id
+        assert ai_kwargs["knowledge"] is None
+        assert ai_kwargs["user_id"] == test_user_id
+        assert ai_kwargs["media"] == MediaInputs()
+        assert ai_kwargs["reply_to_event_id"] == "$test_event:localhost"
+        assert ai_kwargs["show_tool_calls"] is True
+        assert ai_kwargs["run_metadata_collector"] == {}
 
-            # Verify message was sent (thinking + streaming updates)
-            # With streaming: 1 thinking message + streaming updates
-            assert bot.client.room_send.call_count >= 1
+        mock_send_streaming_response.assert_awaited_once()
+        send_args = mock_send_streaming_response.await_args.args
+        assert send_args[1] == test_room_id
+        assert send_args[2] == "$test_event:localhost"
+        assert send_args[3] == "$thread_root:localhost"
 
 
 @pytest.mark.asyncio

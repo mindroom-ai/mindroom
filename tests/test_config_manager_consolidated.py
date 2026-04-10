@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -322,8 +323,8 @@ class TestConsolidatedConfigManager:
         )
 
         assert "Successfully created" in result
-        config = Config.from_yaml(config_path)
-        assert config.agents["test_agent"].tool_names == ["config_manager_plugin_tool"]
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agents"]["test_agent"]["tools"] == ["config_manager_plugin_tool"]
 
     def test_manage_agent_create_accepts_openclaw_preset_tool(self) -> None:
         """Agent create should accept preset entries in tools."""

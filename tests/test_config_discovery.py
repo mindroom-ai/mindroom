@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import os
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,17 @@ def _runtime_source_files() -> list[Path]:
     return sorted((_repo_root() / "src" / "mindroom").rglob("*.py"))
 
 
+@cache
+def _runtime_source_contexts() -> tuple[tuple[str, ast.AST, set[str]], ...]:
+    repo_root = _repo_root()
+    contexts: list[tuple[str, ast.AST, set[str]]] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(repo_root).as_posix()
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        contexts.append((relative_path, tree, _runtime_constant_aliases(tree)))
+    return tuple(contexts)
+
+
 def _runtime_constant_aliases(tree: ast.AST) -> set[str]:
     aliases: set[str] = set()
     for node in ast.walk(tree):
@@ -140,13 +152,9 @@ def _runtime_global_attr_violations(tree: ast.AST, relative_path: str, constant_
 
 def _collect_runtime_global_violations() -> list[str]:
     violations: list[str] = []
-    for source_path in _runtime_source_files():
-        relative_path = source_path.relative_to(_repo_root()).as_posix()
+    for relative_path, tree, constant_aliases in _runtime_source_contexts():
         if relative_path in _RUNTIME_GLOBAL_ALLOWLIST:
             continue
-
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-        constant_aliases = _runtime_constant_aliases(tree)
         violations.extend(_runtime_global_import_violations(tree, relative_path))
         violations.extend(_runtime_global_attr_violations(tree, relative_path, constant_aliases))
 
@@ -155,12 +163,9 @@ def _collect_runtime_global_violations() -> list[str]:
 
 def _collect_runtime_env_violations() -> list[str]:
     violations: list[str] = []
-    for source_path in _runtime_source_files():
-        relative_path = source_path.relative_to(_repo_root()).as_posix()
+    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
         if relative_path in _RUNTIME_ENV_ALLOWLIST:
             continue
-
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
@@ -212,9 +217,7 @@ def _call_name(node: ast.Call) -> str | None:
 
 def _collect_execution_identity_keyword_violations() -> list[str]:
     violations: list[str] = []
-    for source_path in _runtime_source_files():
-        relative_path = source_path.relative_to(_repo_root()).as_posix()
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -230,9 +233,7 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
 
 def _collect_execution_identity_default_violations() -> list[str]:
     violations: list[str] = []
-    for source_path in _runtime_source_files():
-        relative_path = source_path.relative_to(_repo_root()).as_posix()
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
@@ -258,11 +259,9 @@ def _collect_execution_identity_default_violations() -> list[str]:
 
 def _collect_ambient_execution_identity_read_violations() -> list[str]:
     violations: list[str] = []
-    for source_path in _runtime_source_files():
-        relative_path = source_path.relative_to(_repo_root()).as_posix()
+    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
         if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
             continue
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -274,11 +273,9 @@ def _collect_ambient_execution_identity_read_violations() -> list[str]:
 
 def _collect_ambient_execution_identity_write_violations() -> list[str]:
     violations: list[str] = []
-    for source_path in _runtime_source_files():
-        relative_path = source_path.relative_to(_repo_root()).as_posix()
+    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
         if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
             continue
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -290,12 +287,9 @@ def _collect_ambient_execution_identity_write_violations() -> list[str]:
 
 def _collect_execution_identity_env_violations() -> list[str]:
     violations: list[str] = []
-    for source_path in _runtime_source_files():
-        relative_path = source_path.relative_to(_repo_root()).as_posix()
+    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
         if relative_path in _EXECUTION_IDENTITY_ENV_ALLOWLIST:
             continue
-
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue

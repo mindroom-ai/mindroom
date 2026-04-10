@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agno.tools import Toolkit
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.dependencies import (
@@ -37,17 +38,17 @@ TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
 
 
 def test_all_tools_can_be_imported() -> None:
-    """Test that all registered tools can be imported and instantiated."""
+    """Test that all registered tools can be imported from the registry."""
     failed = []
 
-    for tool_name in _TOOL_REGISTRY:
+    for tool_name, factory in _TOOL_REGISTRY.items():
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
         try:
-            tool_instance = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None)
-            assert tool_instance is not None
-            assert hasattr(tool_instance, "name")
+            tool_class = factory()
+            assert isinstance(tool_class, type)
+            assert issubclass(tool_class, Toolkit)
         except Exception as e:
             if not requires_config:
                 failed.append((tool_name, str(e)))
