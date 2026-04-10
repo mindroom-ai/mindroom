@@ -514,7 +514,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 continue
             text_chunk = ""
         else:
-            logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
+            logger.debug("unhandled_streaming_event_type", event_type=type(chunk).__name__)
             continue
 
         if text_chunk:

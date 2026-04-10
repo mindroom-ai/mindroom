@@ -6,12 +6,12 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import structlog
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 
 async def watch_file(

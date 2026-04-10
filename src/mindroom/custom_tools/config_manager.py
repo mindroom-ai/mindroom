@@ -176,7 +176,7 @@ class ConfigManagerTools(Toolkit):
                 return self._generate_agent_template(name)
             return f"Error: Unknown info_type '{info_type}'. Valid options: {', '.join([t.value for t in _InfoType])}"
         except Exception as e:
-            logger.exception(f"Failed to get info for type {info_type}")
+            logger.exception("config_info_lookup_failed", info_type=info_type)
             return f"Error getting {info_type}: {e}"
 
     def manage_agent(
@@ -287,7 +287,7 @@ class ConfigManagerTools(Toolkit):
                 with readme_path.open() as f:
                     self._mindroom_docs = f.read()
             except Exception as e:
-                logger.warning(f"Could not load README.md: {e}")
+                logger.warning("mindroom_readme_load_failed", error=str(e))
                 self._mindroom_docs = "README.md not available"
         return self._mindroom_docs
 

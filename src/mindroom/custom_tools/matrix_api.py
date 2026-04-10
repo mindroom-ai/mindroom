@@ -10,10 +10,12 @@ from typing import ClassVar
 
 import nio
 from agno.tools import Toolkit
-from loguru import logger
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+logger = get_logger(__name__)
 
 
 class MatrixApiTools(Toolkit):
@@ -289,7 +291,22 @@ class MatrixApiTools(Toolkit):
             audit_payload["response"] = normalized_response
         if status_code is not None:
             audit_payload["status_code"] = status_code
-        logger.warning("matrix_api write audit: {}", json.dumps(audit_payload, sort_keys=True))
+        logger.warning(
+            "matrix_api_write_audit",
+            agent=context.agent_name,
+            user_id=context.requester_id,
+            room_id=room_id,
+            action=action,
+            status=status,
+            event_type=event_type,
+            event_id=target_event_id,
+            state_key=state_key,
+            reason=reason,
+            dangerous=dangerous,
+            **(content_summary or {}),
+            response=normalized_response,
+            status_code=status_code,
+        )
 
     @classmethod
     def _state_write_policy_error(

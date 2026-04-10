@@ -857,7 +857,7 @@ class TestCommandHandling:
             bot._generate_response.assert_not_called()
             # Check log calls - should be caught by the general agent message check
             debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-            assert "Ignoring message from other agent (not mentioned)" in debug_calls
+            assert "ignore_unmentioned_agent_event" in debug_calls
 
     @pytest.mark.asyncio
     async def test_router_error_without_mentions_ignored_by_other_agents(self) -> None:
@@ -989,7 +989,7 @@ class TestCommandHandling:
 
         # Verify it was caught early by the agent message check
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        assert "Ignoring message from other agent (not mentioned)" in debug_calls
+        assert "ignore_unmentioned_agent_event" in debug_calls
 
     @pytest.mark.asyncio
     async def test_router_error_prevents_team_formation(self) -> None:
@@ -1109,7 +1109,7 @@ class TestCommandHandling:
         # Verify it was logged as being ignored
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
         # The general "agent without mentions" check catches this first
-        assert "Ignoring message from other agent (not mentioned)" in debug_calls
+        assert "ignore_unmentioned_agent_event" in debug_calls
 
     @pytest.mark.asyncio
     async def test_full_router_error_flow_integration(self) -> None:
@@ -1232,7 +1232,7 @@ class TestCommandHandling:
 
         # Verify it was logged as being ignored
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        assert "Ignoring message from other agent (not mentioned)" in debug_calls
+        assert "ignore_unmentioned_agent_event" in debug_calls
 
     @pytest.mark.asyncio
     async def test_agents_ignore_any_agent_messages_without_mentions(self) -> None:
@@ -1301,7 +1301,7 @@ class TestCommandHandling:
         bot._generate_response.assert_not_called()
         # Check debug calls for the new log message
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        assert "Ignoring message from other agent (not mentioned)" in debug_calls
+        assert "ignore_unmentioned_agent_event" in debug_calls
 
 
 class TestRouterSkipsSingleAgent:

@@ -110,7 +110,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
     if mxc_url in _mxc_cache:
         content, timestamp = _mxc_cache[mxc_url]
         if current_time - timestamp < _cache_ttl:
-            logger.debug(f"Cache hit for MXC URL: {mxc_url}")
+            logger.debug("mxc_cache_hit", mxc_url=mxc_url)
             return content
         # Expired, remove from cache
         del _mxc_cache[mxc_url]
@@ -118,19 +118,19 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
     try:
         # Parse MXC URL
         if not mxc_url.startswith("mxc://"):
-            logger.error(f"Invalid MXC URL: {mxc_url}")
+            logger.error("invalid_mxc_url", mxc_url=mxc_url)
             return None
 
         # Validate the MXC URL structure before issuing the download.
         parts = mxc_url[6:].split("/", 1)
         if len(parts) != 2 or not parts[0] or not parts[1]:
-            logger.error(f"Invalid MXC URL format: {mxc_url}")
+            logger.error("invalid_mxc_url_format", mxc_url=mxc_url)
             return None
 
         response = await client.download(mxc=mxc_url)
 
         if not isinstance(response, nio.DownloadResponse):
-            logger.error(f"Failed to download MXC content: {response}", mxc_url=mxc_url)
+            logger.error("mxc_download_failed", mxc_url=mxc_url, error=str(response))
             return None
 
         # Handle encryption if needed
@@ -158,7 +158,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
             return None
         # Cache the result
         _mxc_cache[mxc_url] = (decoded_text, time.time())
-        logger.debug(f"Cached MXC content for: {mxc_url}")
+        logger.debug("mxc_content_cached", mxc_url=mxc_url)
 
         # Clean old entries if cache is getting large
         if len(_mxc_cache) > 100:
@@ -274,7 +274,7 @@ def _clean_expired_cache() -> None:
     for key in expired_keys:
         del _mxc_cache[key]
     if expired_keys:
-        logger.debug(f"Cleaned {len(expired_keys)} expired cache entries")
+        logger.debug("mxc_cache_cleaned", expired_entries=len(expired_keys))
 
 
 def _clear_mxc_cache() -> None:

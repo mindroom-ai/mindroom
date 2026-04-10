@@ -502,7 +502,12 @@ class DispatchPlanner:
 
         sender_agent_name = extract_agent_name(requester_user_id, self.deps.runtime.config, self.deps.runtime_paths)
         if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
-            self.deps.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
+            self.deps.logger.debug(
+                "ignore_unmentioned_agent_event",
+                agent=sender_agent_name,
+                event_label=event_label,
+                user_id=requester_user_id,
+            )
             return None
 
         return PreparedDispatch(

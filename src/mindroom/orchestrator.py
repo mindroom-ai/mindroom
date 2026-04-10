@@ -271,7 +271,7 @@ class MultiAgentOrchestrator:
             username=config.mindroom_user.username,
             runtime_paths=self.runtime_paths,
         )
-        logger.info(f"User account ready: {user_account.user_id}")
+        logger.info("user_account_ready", user_id=user_account.user_id)
 
     def _require_config(self) -> Config:
         """Return the active config or fail fast if it has not been loaded."""
@@ -815,9 +815,11 @@ class MultiAgentOrchestrator:
         """Log degraded startup status for failed non-router bots."""
         if failed_agents:
             logger.warning(
-                f"System starting in degraded mode. "
-                f"Failed agents: {', '.join(failed_agents)} "
-                f"({len(self.agent_bots) - len(failed_agents)}/{len(self.agent_bots)} operational)",
+                "System starting in degraded mode",
+                failed_agents=failed_agents,
+                failed_agent_count=len(failed_agents),
+                operational_agent_count=len(self.agent_bots) - len(failed_agents),
+                total_agent_count=len(self.agent_bots),
             )
             return
         logger.info("All agent bots started successfully")
@@ -951,7 +953,7 @@ class MultiAgentOrchestrator:
             bot.enable_streaming = plan.new_config.defaults.enable_streaming
             bot.hook_registry = self.hook_registry
             await bot._set_presence_with_model_info()
-            logger.debug(f"Updated config for {entity_name}")
+            logger.debug("bot_config_updated", agent=entity_name)
 
     @staticmethod
     def _plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
@@ -1130,7 +1132,10 @@ class MultiAgentOrchestrator:
         self.config = new_config
         self._activate_hook_registry(new_hook_registry)
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
-        logger.info(f"Updating config. New authorization: {new_config.authorization.global_users}")
+        logger.info(
+            "updating_config_authorization",
+            authorized_user_ids=new_config.authorization.global_users,
+        )
         if changed_runtime_mcp_servers:
             plan = replace(
                 plan,
@@ -1177,7 +1182,8 @@ class MultiAgentOrchestrator:
         )
 
         logger.info(
-            f"Configuration update complete: {len(plan.entities_to_restart) + len(plan.new_entities)} bots affected",
+            "configuration_update_complete",
+            affected_bot_count=len(plan.entities_to_restart) + len(plan.new_entities),
         )
         return True
 
@@ -1250,7 +1256,7 @@ class MultiAgentOrchestrator:
 
         config = self._require_config()
         room_ids = await ensure_all_rooms_exist(router_bot.client, config, self.runtime_paths)
-        logger.info(f"Ensured existence of {len(room_ids)} rooms")
+        logger.info("ensured_room_existence", room_count=len(room_ids))
         return room_ids
 
     async def _ensure_root_space(self, room_ids: dict[str, str] | None = None) -> None:
@@ -1284,9 +1290,9 @@ class MultiAgentOrchestrator:
                 continue
             success = await invite_to_room(router_bot.client, root_space_id, user_id)
             if success:
-                logger.info(f"Invited user {user_id} to root space {root_space_id}")
+                logger.info("invited_user_to_root_space", user_id=user_id, room_id=root_space_id)
             else:
-                logger.warning(f"Failed to invite user {user_id} to root space {root_space_id}")
+                logger.warning("invite_user_to_root_space_failed", user_id=user_id, room_id=root_space_id)
 
     async def _invite_user_if_missing(
         self,
@@ -1569,7 +1575,7 @@ async def main(
 
         if api:
             # Optionally run the bundled dashboard/API server alongside the orchestrator.
-            logger.info("Starting bundled dashboard/API server on %s:%d", api_host, api_port)
+            logger.info("starting_bundled_dashboard_api_server", host=api_host, port=api_port)
             auxiliary_specs.append(
                 (
                     "bundled API server",

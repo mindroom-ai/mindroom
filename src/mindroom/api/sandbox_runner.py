@@ -18,13 +18,13 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
-from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
 from mindroom.config.main import Config, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.logging_config import get_logger
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -51,6 +51,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.workers.models import WorkerHandle
+
+logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
@@ -460,8 +462,11 @@ async def _execute_request_inprocess(
             else:
                 result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
         except Exception as exc:
-            logger.opt(exception=True).warning(
-                f"Sandbox tool execution failed: {request.tool_name}.{request.function_name}",
+            logger.warning(
+                "sandbox_tool_execution_failed",
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+                exc_info=True,
             )
             return SandboxRunnerExecuteResponse(
                 ok=False,

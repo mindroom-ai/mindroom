@@ -281,7 +281,7 @@ async def run_with_retry(
             raise
         except Exception as exc:
             if permanent_error_check is not None and permanent_error_check(exc):
-                logger.error("%s failed with a permanent error: %s", step_name, exc)  # noqa: TRY400
+                logger.error("startup_step_failed_permanently", step_name=step_name, error=str(exc))  # noqa: TRY400
                 raise
             attempt += 1
             retry_in_seconds = retry_delay_seconds(
@@ -290,8 +290,8 @@ async def run_with_retry(
                 max_delay_seconds=max_delay_seconds,
             )
             logger.warning(
-                "%s failed; retrying",
-                step_name,
+                "startup_step_retrying",
+                step_name=step_name,
                 attempt=attempt,
                 retry_in_seconds=retry_in_seconds,
                 exc_info=True,
@@ -434,21 +434,21 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
     while bot.running and (max_retries < 0 or retry_count < max_retries):
         iteration: _SyncIteration | None = None
         try:
-            logger.info(f"Starting sync loop for {bot.agent_name}")
+            logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
             await iteration.wait()
             # sync_forever returned normally, so the bot was stopped intentionally.
             break
         except asyncio.CancelledError:
             # Task cancellation is part of normal shutdown.
-            logger.info(f"Sync task for {bot.agent_name} was cancelled")
+            logger.info("sync_task_cancelled", agent=bot.agent_name)
             break
         except MatrixSyncStalledError:
             retry_count += 1
-            logger.warning(f"Restarting stalled sync loop for {bot.agent_name} (retry {retry_count})")
+            logger.warning("restarting_stalled_sync_loop", agent=bot.agent_name, retry_count=retry_count)
         except Exception:
             retry_count += 1
-            logger.exception(f"Sync loop failed for {bot.agent_name} (retry {retry_count})")
+            logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=retry_count)
         finally:
             if iteration is not None:
                 await bot.prepare_for_sync_shutdown()
@@ -462,5 +462,5 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             initial_delay_seconds=5.0,
             max_delay_seconds=60.0,
         )
-        logger.info(f"Restarting sync loop for {bot.agent_name} in {wait_time:.0f} seconds...")
+        logger.info("restarting_sync_loop", agent=bot.agent_name, retry_count=retry_count, wait_seconds=wait_time)
         await asyncio.sleep(wait_time)

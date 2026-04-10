@@ -113,7 +113,9 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
                 llm_config["config"]["api_key"] = api_key
 
         logger.info(
-            f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory",
+            "Configured memory LLM",
+            provider=app_config.memory.llm.provider,
+            model=app_config.memory.llm.config.get("model"),
         )
     else:
         # Fallback if no LLM configured
@@ -173,5 +175,5 @@ async def create_memory_instance(
     # Mem0 expects a dict for configuration, not config objects
     memory = await AsyncMemory.from_config(config_dict)
 
-    logger.info(f"Created memory instance with ChromaDB at {config_dict['vector_store']['config']['path']}")
+    logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
     return memory

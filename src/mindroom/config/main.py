@@ -903,8 +903,8 @@ class Config(BaseModel):
 
         runtime_paths = resolve_runtime_paths(config_path=path)
         config = cls.validate_with_runtime(data, runtime_paths)
-        logger.info(f"Loaded agent configuration from {path}")
-        logger.info(f"Found {len(config.agents)} agent configurations")
+        logger.info("loaded_agent_configuration", path=str(path))
+        logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
         return config
 
     def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
@@ -1712,7 +1712,7 @@ class Config(BaseModel):
                 width=120,  # Wider lines to reduce wrapping
             )
         safe_replace(tmp_path, path_obj)
-        logger.info(f"Saved configuration to {config_path}")
+        logger.info("saved_configuration", path=str(config_path))
 
 
 def load_config(
@@ -1734,8 +1734,8 @@ def load_config(
         runtime_paths,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    logger.info(f"Loaded agent configuration from {path}")
-    logger.info(f"Found {len(config.agents)} agent configurations")
+    logger.info("loaded_agent_configuration", path=str(path))
+    logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config
 
 

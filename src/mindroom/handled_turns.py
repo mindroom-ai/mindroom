@@ -266,7 +266,7 @@ class HandledTurnLedger:
                     conversation_target=conversation_target,
                 )
             self._save_responses_locked()
-        logger.debug(f"Recorded handled outcome for {len(normalized_source_event_ids)} source events")
+        logger.debug("handled_turn_recorded", source_event_count=len(normalized_source_event_ids))
 
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo without marking the turn terminally handled."""
@@ -290,7 +290,12 @@ class HandledTurnLedger:
                 conversation_target=conversation_target,
             )
             self._save_responses_locked()
-        logger.debug(f"Tracked visible echo for event {source_event_id} on agent {self.agent_name}")
+        logger.debug(
+            "visible_echo_tracked",
+            agent=self.agent_name,
+            event_id=source_event_id,
+            visible_echo_event_id=echo_event_id,
+        )
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether the source event has a terminal recorded outcome."""
@@ -378,7 +383,11 @@ class HandledTurnLedger:
                 max_age_days=max_age_days,
             )
             self._save_responses_locked()
-        logger.info(f"Cleaned up old events for {self.agent_name}, keeping {len(self._responses)} events")
+        logger.info(
+            "handled_turn_cleanup_completed",
+            agent=self.agent_name,
+            kept_event_count=len(self._responses),
+        )
 
     @contextmanager
     def _file_lock(self, *, exclusive: bool) -> typing.Iterator[None]:

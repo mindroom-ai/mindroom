@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import os
 import re
 import signal
@@ -17,6 +16,7 @@ from pathlib import Path
 from agno.tools.toolkit import Toolkit
 
 from mindroom.constants import RuntimePaths, shell_execution_runtime_env_values
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
@@ -431,7 +431,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
     return MindRoomShellTools
 
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 
 async def _read_stream(stream: asyncio.StreamReader | None, buf: deque[str]) -> None:

@@ -70,18 +70,18 @@ async def _cleanup_orphaned_bots_in_room(
     # and no agents are explicitly configured for it, so every bot looks orphaned.
     state = MatrixState.load(runtime_paths=runtime_paths)
     if state.space_room_id and room_id == state.space_room_id:
-        logger.debug(f"Skipping root space {room_id} cleanup")
+        logger.debug("orphaned_bot_cleanup_skipped_root_space", room_id=room_id)
         return []
 
     # When DM mode is enabled, check if this is actually a DM room
     if await is_dm_room(client, room_id):
-        logger.debug(f"Skipping DM room {room_id} cleanup")
+        logger.debug("orphaned_bot_cleanup_skipped_dm_room", room_id=room_id)
         return []
 
     # Get room members
     member_ids = await get_room_members(client, room_id)
     if not member_ids:
-        logger.warning(f"No members found or failed to get members for room {room_id}")
+        logger.warning("orphaned_bot_cleanup_members_unavailable", room_id=room_id)
         return []
 
     # Get configured bots for this room
@@ -96,18 +96,26 @@ async def _cleanup_orphaned_bots_in_room(
         # Check if this is a mindroom bot and shouldn't be in this room
         if matrix_id.username in known_bot_usernames and matrix_id.username not in configured_bots:
             logger.info(
-                f"Found orphaned bot {matrix_id.username} in room {room_id} "
-                f"(configured bots for this room: {configured_bots})",
+                "orphaned_bot_found",
+                agent=matrix_id.username,
+                room_id=room_id,
+                configured_bots=sorted(configured_bots),
             )
 
             # Kick the bot
             kick_response = await client.room_kick(room_id, user_id, reason="Bot no longer configured for this room")
 
             if isinstance(kick_response, nio.RoomKickResponse):
-                logger.info(f"Kicked {matrix_id.username} from {room_id}")
+                logger.info("orphaned_bot_kicked", agent=matrix_id.username, room_id=room_id, user_id=user_id)
                 kicked_bots.append(matrix_id.username)
             else:
-                logger.error(f"Failed to kick {matrix_id.username} from {room_id}: {kick_response}")
+                logger.error(
+                    "orphaned_bot_kick_failed",
+                    agent=matrix_id.username,
+                    room_id=room_id,
+                    user_id=user_id,
+                    error=str(kick_response),
+                )
 
     return kicked_bots
 
@@ -134,7 +142,7 @@ async def cleanup_all_orphaned_bots(
     if joined_rooms is None:
         return kicked_bots
 
-    logger.info(f"Checking {len(joined_rooms)} rooms for orphaned bots")
+    logger.info("orphaned_bot_cleanup_started", room_count=len(joined_rooms))
 
     for room_id in joined_rooms:
         room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config, runtime_paths)
@@ -144,7 +152,11 @@ async def cleanup_all_orphaned_bots(
     # Summary
     total_kicked = sum(len(bots) for bots in kicked_bots.values())
     if total_kicked > 0:
-        logger.info(f"Kicked {total_kicked} orphaned bots from {len(kicked_bots)} rooms")
+        logger.info(
+            "orphaned_bot_cleanup_completed",
+            total_kicked=total_kicked,
+            room_count=len(kicked_bots),
+        )
     else:
         logger.info("No orphaned bots found in any room")
 

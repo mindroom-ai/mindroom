@@ -15,7 +15,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from loguru import Logger
+    from structlog.stdlib import BoundLogger
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -36,7 +36,7 @@ class ScopedGoogleOAuthMixin:
     _oauth_tool_name: str
     _oauth_log_name: str
     DEFAULT_SCOPES: list[str] | dict[str, str]
-    _oauth_logger: Logger
+    _oauth_logger: BoundLogger
     _runtime_paths: RuntimePaths
     _creds_manager: CredentialsManager
     _worker_target: ResolvedWorkerTarget | None
@@ -49,7 +49,7 @@ class ScopedGoogleOAuthMixin:
         *,
         worker_target: ResolvedWorkerTarget | None,
         provided_creds: Any,  # noqa: ANN401
-        logger: Logger,
+        logger: BoundLogger,
     ) -> Any:  # noqa: ANN401
         """Validate scope and prepare initial Google credentials for the tool."""
         worker_scope = worker_target.worker_scope if worker_target is not None else None
@@ -113,10 +113,10 @@ class ScopedGoogleOAuthMixin:
         try:
             creds = self._build_credentials(token_data)
         except Exception:
-            self._oauth_logger.exception(f"Failed to load {self._oauth_log_name} credentials")
+            self._oauth_logger.exception("google_oauth_credentials_load_failed", tool_name=self._oauth_tool_name)
             return None
 
-        self._oauth_logger.info(f"Loaded {self._oauth_log_name} credentials from MindRoom storage")
+        self._oauth_logger.info("google_oauth_credentials_loaded", tool_name=self._oauth_tool_name)
         return creds
 
     def _should_fallback_to_original_auth(self) -> bool:
@@ -154,9 +154,15 @@ class ScopedGoogleOAuthMixin:
                     token_data["token"] = self.creds.token
                     self._save_token_data(token_data)
 
-                self._oauth_logger.info(f"{self._oauth_log_name} authentication successful")
+                self._oauth_logger.info(
+                    "google_oauth_authentication_succeeded",
+                    tool_name=self._oauth_tool_name,
+                )
             except Exception:
-                self._oauth_logger.exception(f"Failed to authenticate with {self._oauth_log_name}")
+                self._oauth_logger.exception(
+                    "google_oauth_authentication_failed",
+                    tool_name=self._oauth_tool_name,
+                )
                 raise
             return
 

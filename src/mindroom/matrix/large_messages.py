@@ -204,7 +204,11 @@ async def _upload_text_as_mxc(  # noqa: C901
 
         # Check if upload was successful
         if not isinstance(upload_result, nio.UploadResponse):
-            logger.error(f"Failed to upload text: {upload_result}")
+            logger.error(
+                "large_message_sidecar_upload_failed",
+                room_id=room_id,
+                error=str(upload_result),
+            )
             return None, None
 
         if not upload_result.content_uri:
@@ -279,7 +283,12 @@ async def prepare_large_message(
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
-    logger.info(f"Message too large ({current_size} bytes), uploading full content JSON to MXC")
+    logger.info(
+        "large_message_sidecar_upload_started",
+        room_id=room_id,
+        original_size_bytes=current_size,
+        is_edit=is_edit,
+    )
 
     mxc_uri, file_info, modified_content = await _build_file_content(
         client,
@@ -318,11 +327,20 @@ async def prepare_large_message(
 
     final_size = _calculate_event_size(modified_content)
     if final_size > 64000:
-        logger.warning(f"Large message still exceeds 64KB after preparation ({final_size} bytes)")
+        logger.warning(
+            "large_message_still_exceeds_limit",
+            room_id=room_id,
+            final_size_bytes=final_size,
+            size_limit_bytes=64000,
+        )
 
     inner: dict[str, Any] = modified_content.get("m.new_content", modified_content)  # type: ignore[assignment]
     logger.info(
-        f"Large message prepared: {current_size} bytes -> {len(inner['body'])} preview + JSON sidecar",
+        "large_message_prepared",
+        room_id=room_id,
+        original_size_bytes=current_size,
+        preview_length=len(inner["body"]),
+        is_edit=is_edit,
     )
 
     return modified_content

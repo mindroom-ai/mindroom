@@ -32,9 +32,20 @@ async def set_presence_status(
     response = await client.set_presence(presence, status_msg)
 
     if isinstance(response, nio.PresenceSetResponse):
-        logger.info(f"Set presence status: {status_msg}")
+        logger.info(
+            "presence_status_set",
+            user_id=client.user_id,
+            presence=presence,
+            status=status_msg,
+        )
     else:
-        logger.warning(f"Failed to set presence: {response}")
+        logger.warning(
+            "presence_status_set_failed",
+            user_id=client.user_id,
+            presence=presence,
+            status=status_msg,
+            error=str(response),
+        )
 
 
 def build_agent_status_message(

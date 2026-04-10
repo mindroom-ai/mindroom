@@ -100,7 +100,7 @@ def _save_agent_credentials(
     agent_key = _account_key_for_agent(agent_name)
     state.add_account(agent_key, username, password)
     state.save(runtime_paths=runtime_paths)
-    logger.info(f"Saved credentials for agent {agent_name}")
+    logger.info("agent_credentials_saved", agent=agent_name)
 
 
 async def _homeserver_requires_registration_token(
@@ -191,9 +191,9 @@ async def _register_user_with_token(
 
     detail, errcode = _registration_http_error_details(response)
     if response.is_success:
-        logger.info(f"✅ Successfully registered user with token: {user_id}")
+        logger.info("matrix_user_registered_with_token", user_id=user_id)
     elif errcode == "M_USER_IN_USE":
-        logger.info(f"User {user_id} already exists")
+        logger.info("matrix_user_already_exists", user_id=user_id)
     else:
         permanent_error = _direct_token_registration_error(username=username, errcode=errcode, detail=detail)
         if permanent_error is not None:
@@ -313,7 +313,11 @@ async def _login_and_sync_display_name(
     if isinstance(login_response, nio.LoginResponse):
         display_response = await client.set_displayname(display_name)
         if isinstance(display_response, nio.ErrorResponse):
-            logger.warning(f"Failed to set display name for existing user: {display_response}")
+            logger.warning(
+                "matrix_user_display_name_sync_failed",
+                user_id=client.user_id,
+                error=str(display_response),
+            )
     return login_response
 
 
@@ -391,18 +395,22 @@ async def _handle_register_response(
 ) -> str:
     """Handle a matrix-nio register response and finalize account setup."""
     if isinstance(response, nio.RegisterResponse):
-        logger.info(f"✅ Successfully registered user: {user_id}")
+        logger.info("matrix_user_registered", user_id=user_id)
         client.user_id = response.user_id
         client.access_token = response.access_token
         client.device_id = response.device_id
 
         display_response = await client.set_displayname(display_name)
         if isinstance(display_response, nio.ErrorResponse):
-            logger.warning(f"Failed to set display name: {display_response}")
+            logger.warning(
+                "matrix_user_display_name_set_failed",
+                user_id=user_id,
+                error=str(display_response),
+            )
 
         return user_id
     if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
-        logger.info(f"User {user_id} already exists")
+        logger.info("matrix_user_already_exists", user_id=user_id)
         return await _login_existing_user_with_client_or_raise_collision(
             client=client,
             user_id=user_id,
@@ -515,7 +523,7 @@ async def _register_user_via_provisioning_if_configured(
         runtime_paths=runtime_paths,
     )
     if provisioning_result.status == "created":
-        logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
+        logger.info("matrix_user_registered_via_provisioning", user_id=provisioning_result.user_id)
         return provisioning_result.user_id
 
     login_user_id = user_id
@@ -525,7 +533,7 @@ async def _register_user_via_provisioning_if_configured(
             provisioning_user_id=provisioning_result.user_id,
             expected_user_id=user_id,
         )
-    logger.info(f"User {login_user_id} already exists (provisioning service)")
+    logger.info("matrix_user_already_exists_via_provisioning", user_id=login_user_id)
     return await _login_existing_user_or_raise_collision(
         homeserver=homeserver,
         user_id=login_user_id,
@@ -608,13 +616,13 @@ async def create_agent_user(
     if existing_creds and (preferred_username is None or existing_creds["username"] == preferred_username):
         matrix_username = existing_creds["username"]
         password = existing_creds["password"]
-        logger.info(f"Using existing credentials for agent {agent_name} from matrix_state.yaml")
+        logger.info("agent_credentials_loaded", agent=agent_name)
         registration_needed = False
     else:
         # Generate new credentials
         matrix_username = preferred_username or agent_username_localpart(agent_name, runtime_paths=runtime_paths)
         password = secrets.token_urlsafe(24)
-        logger.info(f"Generated new credentials for agent {agent_name}")
+        logger.info("agent_credentials_generated", agent=agent_name)
         registration_needed = True
 
     # Extract server name from homeserver URL
@@ -654,7 +662,7 @@ async def create_agent_user(
     # Save credentials only after registration/verification succeeds.
     if registration_needed:
         _save_agent_credentials(agent_name, matrix_username, password, runtime_paths)
-        logger.info(f"Saved credentials for agent {agent_name} after successful registration")
+        logger.info("agent_credentials_saved_after_registration", agent=agent_name)
 
     return AgentMatrixUser(
         agent_name=agent_name,
@@ -722,7 +730,7 @@ async def _ensure_all_agent_users(
             runtime_paths=runtime_paths,
         )
         agent_users[ROUTER_AGENT_NAME] = router_user
-        logger.info(f"Ensured Matrix user for built-in router agent: {router_user.user_id}")
+        logger.info("matrix_user_ensured_for_router", agent=ROUTER_AGENT_NAME, user_id=router_user.user_id)
     except Exception:
         logger.exception("Failed to create Matrix user for built-in router agent")
 
@@ -736,7 +744,7 @@ async def _ensure_all_agent_users(
                 runtime_paths=runtime_paths,
             )
             agent_users[agent_name] = agent_user
-            logger.info(f"Ensured Matrix user for agent: {agent_name} -> {agent_user.user_id}")
+            logger.info("matrix_user_ensured_for_agent", agent=agent_name, user_id=agent_user.user_id)
         except Exception:
             # Continue with other agents even if one fails
             logger.exception("Failed to create Matrix user for agent", agent_name=agent_name)
@@ -751,7 +759,7 @@ async def _ensure_all_agent_users(
                 runtime_paths=runtime_paths,
             )
             agent_users[team_name] = team_user
-            logger.info(f"Ensured Matrix user for team: {team_name} -> {team_user.user_id}")
+            logger.info("matrix_user_ensured_for_team", agent=team_name, user_id=team_user.user_id)
         except Exception:
             # Continue with other teams even if one fails
             logger.exception("Failed to create Matrix user for team", team_name=team_name)

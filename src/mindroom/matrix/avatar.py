@@ -43,7 +43,7 @@ async def _upload_avatar_file(
 
     """
     if not avatar_path.exists():
-        logger.warning(f"Avatar file not found: {avatar_path}")
+        logger.warning("avatar_file_missing", path=str(avatar_path))
         return None
 
     content_type = _guess_avatar_content_type(avatar_path)
@@ -67,17 +67,17 @@ async def _upload_avatar_file(
     if isinstance(upload_result, tuple):
         upload_response, error = upload_result
         if error:
-            logger.error(f"Upload error: {error}")
+            logger.error("avatar_upload_failed", path=str(avatar_path), error=str(error))
             return None
     else:
         upload_response = upload_result
 
     if not isinstance(upload_response, nio.UploadResponse):
-        logger.error(f"Failed to upload avatar: {upload_response}")
+        logger.error("avatar_upload_failed", path=str(avatar_path), error=str(upload_response))
         return None
 
     if not upload_response.content_uri:
-        logger.error("Upload response missing content_uri")
+        logger.error("avatar_upload_missing_content_uri", path=str(avatar_path))
         return None
 
     return str(upload_response.content_uri)
@@ -104,10 +104,10 @@ async def _set_avatar_from_file(
     response = await client.set_avatar(avatar_url)
 
     if isinstance(response, nio.ProfileSetAvatarResponse):
-        logger.info(f"✅ Successfully set avatar for {client.user_id}")
+        logger.info("user_avatar_set", user_id=client.user_id)
         return True
 
-    logger.error(f"Failed to set avatar for {client.user_id}: {response}")
+    logger.error("user_avatar_set_failed", user_id=client.user_id, error=str(response))
     return False
 
 
@@ -134,7 +134,7 @@ async def check_and_set_avatar(
     # Check user avatar
     response = await client.get_profile(client.user_id)
     if isinstance(response, nio.ProfileGetResponse) and response.avatar_url:
-        logger.debug(f"Avatar already set for {client.user_id}")
+        logger.debug("user_avatar_already_set", user_id=client.user_id)
         return True
     # Set user avatar
     return await _set_avatar_from_file(client, avatar_path)
@@ -168,10 +168,10 @@ async def set_room_avatar_from_file(
     )
 
     if isinstance(response, nio.RoomPutStateResponse):
-        logger.info(f"✅ Successfully set avatar for room {room_id}")
+        logger.info("room_avatar_set", room_id=room_id)
         return True
 
-    logger.error(f"Failed to set avatar for room {room_id}: {response}")
+    logger.error("room_avatar_set_failed", room_id=room_id, error=str(response))
     return False
 
 
@@ -179,6 +179,6 @@ async def room_has_avatar(client: nio.AsyncClient, room_id: str) -> bool:
     """Return whether the Matrix room already has an avatar URL configured."""
     response = await client.room_get_state_event(room_id, "m.room.avatar")
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content and response.content.get("url"):
-        logger.debug(f"Avatar already set for room {room_id}")
+        logger.debug("room_avatar_already_set", room_id=room_id)
         return True
     return False

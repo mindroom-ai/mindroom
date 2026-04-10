@@ -203,7 +203,7 @@ class _CommandParser:
             )
 
         # Unknown command - return a special Command indicating it's unknown
-        logger.debug(f"Unknown command: {message}")
+        logger.debug("unknown_command", command=message)
         return Command(
             type=CommandType.UNKNOWN,
             args={"raw_command": message},

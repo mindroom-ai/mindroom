@@ -5,19 +5,20 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import logging
 import os
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
     from structlog.stdlib import BoundLogger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -147,7 +148,7 @@ def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:  # noqa: C9
     Log format: TIMING [<scope>] <label>: <elapsed>s  (scope omitted if not set)
     """
 
-    def decorator(fn: Callable[P, R]) -> Callable[P, R]:
+    def decorator(fn: Callable[P, R]) -> Callable[P, R]:  # noqa: C901
         if not _is_enabled():
             return fn
 
@@ -155,8 +156,14 @@ def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:  # noqa: C9
             scope = kwargs.get("timing_scope")
             if not isinstance(scope, str) or not scope:
                 scope = timing_scope.get()
-            prefix = f"[{scope}] " if scope else ""
-            logger.info("TIMING %s%s: %.3fs", prefix, label, time.monotonic() - start)
+            duration_ms = round((time.monotonic() - start) * 1000, 1)
+            event_data: dict[str, object] = {
+                "label": label,
+                "duration_ms": duration_ms,
+            }
+            if scope:
+                event_data["timing_scope"] = scope
+            logger.info("timing_elapsed", **event_data)
 
         if inspect.isasyncgenfunction(fn):
 
