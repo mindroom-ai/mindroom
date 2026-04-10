@@ -15,6 +15,7 @@ from .context import (
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
+    CancelledResponseContext,
     CustomEventContext,
     HookContext,
     MessageEnrichContext,
@@ -73,6 +74,8 @@ def _scope_agent_name(context: HookExecutionContext) -> str | None:  # noqa: PLR
         return context.draft.envelope.agent_name
     if isinstance(context, AfterResponseContext):
         return context.result.envelope.agent_name
+    if isinstance(context, CancelledResponseContext):
+        return context.info.envelope.agent_name
     if isinstance(context, AgentLifecycleContext):
         return context.entity_name
     return None
@@ -87,6 +90,8 @@ def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: 
         return (context.draft.envelope.room_id,)
     if isinstance(context, AfterResponseContext):
         return (context.result.envelope.room_id,)
+    if isinstance(context, CancelledResponseContext):
+        return (context.info.envelope.room_id,)
     if isinstance(context, ScheduleFiredContext | ReactionReceivedContext):
         return (context.room_id,)
     if isinstance(context, AgentLifecycleContext):

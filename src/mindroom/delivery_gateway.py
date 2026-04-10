@@ -12,13 +12,19 @@ from mindroom import constants, interactive
 from mindroom.hooks import (
     AfterResponseContext,
     BeforeResponseContext,
+    CancelledResponseContext,
+    CancelledResponseInfo,
     HookContextSupport,
     ResponseDraft,
     ResponseResult,
     emit,
     emit_transform,
 )
-from mindroom.hooks.types import EVENT_MESSAGE_AFTER_RESPONSE, EVENT_MESSAGE_BEFORE_RESPONSE
+from mindroom.hooks.types import (
+    EVENT_MESSAGE_AFTER_RESPONSE,
+    EVENT_MESSAGE_BEFORE_RESPONSE,
+    EVENT_MESSAGE_CANCELLED,
+)
 from mindroom.matrix.client import (
     build_threaded_edit_content,
     edit_message,
@@ -113,6 +119,28 @@ class ResponseHookService:
             ),
         )
         await emit(self.hook_context.registry, EVENT_MESSAGE_AFTER_RESPONSE, context)
+
+    async def emit_cancelled_response(
+        self,
+        *,
+        correlation_id: str,
+        envelope: MessageEnvelope,
+        visible_response_event_id: str | None = None,
+        response_kind: str = "ai",
+    ) -> None:
+        """Emit message:cancelled when a response is cancelled mid-stream."""
+        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_CANCELLED):
+            return
+
+        context = CancelledResponseContext(
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_CANCELLED, correlation_id),
+            info=CancelledResponseInfo(
+                envelope=envelope,
+                visible_response_event_id=visible_response_event_id,
+                response_kind=response_kind,
+            ),
+        )
+        await emit(self.hook_context.registry, EVENT_MESSAGE_CANCELLED, context)
 
 
 @dataclass(frozen=True)

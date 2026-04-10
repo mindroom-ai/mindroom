@@ -1049,6 +1049,13 @@ class ResponseCoordinator:
             run_id=response_run_id,
             pipeline_timing=request.pipeline_timing,
         )
+        if delivery_result is None:
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=resolved_correlation_id,
+                envelope=resolved_response_envelope,
+                visible_response_event_id=tracked_event_id,
+                response_kind="team",
+            )
         if resolved_event_id is None:
             resolved_event_id = self.resolve_response_event_id(
                 delivery_result=delivery_result,
@@ -2031,6 +2038,13 @@ class ResponseCoordinator:
             run_id=response_run_id,
             pipeline_timing=request.pipeline_timing,
         )
+        if delivery_result is None:
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=self._correlation_id_for_request(request),
+                envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
+                visible_response_event_id=tracked_event_id,
+                response_kind="ai",
+            )
         if resolved_event_id is None:
             resolved_event_id = self.resolve_response_event_id(
                 delivery_result=delivery_result,

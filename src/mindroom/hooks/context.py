@@ -376,6 +376,22 @@ class AfterResponseContext(HookContext):
     result: ResponseResult
 
 
+@dataclass(frozen=True, slots=True)
+class CancelledResponseInfo:
+    """Facts available when a response is cancelled mid-stream."""
+
+    envelope: MessageEnvelope
+    visible_response_event_id: str | None = None
+    response_kind: str = "ai"
+
+
+@dataclass(slots=True)
+class CancelledResponseContext(HookContext):
+    """Context for message:cancelled hooks."""
+
+    info: CancelledResponseInfo
+
+
 @dataclass(slots=True)
 class AgentLifecycleContext(HookContext):
     """Context for agent lifecycle observer hooks."""
@@ -653,6 +669,8 @@ def _requester_id_for_hook_send(
         requester_id = context.draft.envelope.requester_id
     elif isinstance(context, AfterResponseContext):
         requester_id = context.result.envelope.requester_id
+    elif isinstance(context, CancelledResponseContext):
+        requester_id = context.info.envelope.requester_id
     elif isinstance(context, ScheduleFiredContext):
         requester_id = context.created_by
     elif isinstance(context, ReactionReceivedContext | CustomEventContext):
@@ -679,6 +697,8 @@ def _current_message_received_depth(context: object) -> int:
         return context.draft.envelope.message_received_depth
     if isinstance(context, AfterResponseContext):
         return context.result.envelope.message_received_depth
+    if isinstance(context, CancelledResponseContext):
+        return context.info.envelope.message_received_depth
     if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
         return context.message_received_depth
     return 0
