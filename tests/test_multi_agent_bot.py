@@ -204,7 +204,6 @@ def _response_request(
     target: MessageTarget | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-    received_monotonic: float | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
@@ -224,7 +223,6 @@ def _response_request(
         target=target,
         matrix_run_metadata=matrix_run_metadata,
         system_enrichment_items=system_enrichment_items,
-        received_monotonic=received_monotonic,
     )
 
 

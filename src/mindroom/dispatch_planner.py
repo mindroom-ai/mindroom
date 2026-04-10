@@ -219,16 +219,6 @@ class DispatchHookService:
         return await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context)
 
 
-def _received_monotonic_from_source(source: dict[str, Any] | None) -> float | None:
-    """Return the inbound receipt timestamp persisted on one event source."""
-    if not isinstance(source, dict):
-        return None
-    raw_received_monotonic = source.get("com.mindroom.received_monotonic")
-    if isinstance(raw_received_monotonic, float | int):
-        return float(raw_received_monotonic)
-    return None
-
-
 @dataclass(frozen=True)
 class ResponseAction:
     """Result of the shared team-formation and should-respond decision."""
@@ -1016,6 +1006,7 @@ class DispatchPlanner:
                 handled_turn.with_response_event_id(response_event_id),
             )
             if dispatch_timing is not None and response_event_id is not None:
+                dispatch_timing.mark_first_visible_reply("final")
                 dispatch_timing.mark("response_complete")
                 dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
             return
@@ -1073,6 +1064,7 @@ class DispatchPlanner:
                     handled_turn.with_response_event_id(response_event_id),
                 )
                 if dispatch_timing is not None:
+                    dispatch_timing.mark_first_visible_reply("final")
                     dispatch_timing.mark("response_complete")
                     dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
             return
@@ -1086,7 +1078,6 @@ class DispatchPlanner:
         )
 
         self.deps.logger.info(processing_log, event_id=event.event_id)
-        received_monotonic = _received_monotonic_from_source(event.source)
         try:
             if action.kind == "team":
                 assert action.form_team is not None
@@ -1108,7 +1099,6 @@ class DispatchPlanner:
                         matrix_run_metadata=matrix_run_metadata,
                         system_enrichment_items=prepared_payload.system_enrichment_items,
                         strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                        received_monotonic=received_monotonic,
                         pipeline_timing=dispatch_timing,
                     ),
                     team_agents=action.form_team.eligible_members,
@@ -1132,7 +1122,6 @@ class DispatchPlanner:
                         matrix_run_metadata=matrix_run_metadata,
                         system_enrichment_items=prepared_payload.system_enrichment_items,
                         strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                        received_monotonic=received_monotonic,
                         pipeline_timing=dispatch_timing,
                     ),
                 )

@@ -219,7 +219,6 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 # Constants
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
-_RECEIVED_MONOTONIC_KEY = "com.mindroom.received_monotonic"
 
 
 def _thread_summary_message_count_hint(
@@ -1565,8 +1564,6 @@ class AgentBot:
         }:
             return
 
-        if isinstance(event.source, dict):
-            event.source[_RECEIVED_MONOTONIC_KEY] = time.monotonic()
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return
@@ -2558,7 +2555,6 @@ class AgentBot:
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
-        received_monotonic: float | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
@@ -2586,7 +2582,6 @@ class AgentBot:
             target: Optional canonical response target used for lifecycle locking and delivery.
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
                 for unseen-message tracking, coalesced edit regeneration, and cleanup.
-            received_monotonic: Optional receive timestamp used for queued-message signaling.
             on_lifecycle_lock_acquired: Optional callback that runs after the response
                 lifecycle lock is acquired and before response generation starts.
 
@@ -2613,7 +2608,6 @@ class AgentBot:
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
-                received_monotonic=received_monotonic,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
         )
@@ -3087,11 +3081,9 @@ class TeamBot(AgentBot):
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
-        received_monotonic: float | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
-        del received_monotonic
         if not prompt.strip():
             return None
 

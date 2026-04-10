@@ -396,7 +396,7 @@ class StreamingResponse:
                     if response_event_id:
                         self.event_id = response_event_id
                         if self.pipeline_timing is not None and self.accumulated_text.strip():
-                            self.pipeline_timing.mark("first_visible_stream_update")
+                            self.pipeline_timing.mark_first_visible_reply("stream_update")
                         logger.debug("Initial streaming message sent", event_id=self.event_id)
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
@@ -405,7 +405,7 @@ class StreamingResponse:
                     response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
                     if response_event_id:
                         if self.pipeline_timing is not None and self.accumulated_text.strip():
-                            self.pipeline_timing.mark("first_visible_stream_update")
+                            self.pipeline_timing.mark_first_visible_reply("stream_update")
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
             except Exception:

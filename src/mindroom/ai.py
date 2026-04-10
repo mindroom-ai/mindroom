@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import os
-import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -1305,10 +1303,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     media_inputs: MediaInputs,
     retried_without_inline_media: bool,
     timing_scope: str,
-    request_started_at: float,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
+    del timing_scope
     try:
         async for event in stream_generator:
             if isinstance(event, RunContentEvent) and event.content:
@@ -1316,16 +1314,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     state.first_token_logged = True
                     if pipeline_timing is not None:
                         pipeline_timing.mark("model_first_token")
-                    if os.environ.get("MINDROOM_TIMING") == "1":
-                        elapsed_seconds = time.monotonic() - request_started_at
-                        logger.info(
-                            "timing_model_request_to_first_token",
-                            timing_scope=timing_scope,
-                            timing_step="model_request_to_first_token",
-                            elapsed_s=round(elapsed_seconds, 3),
-                            retried_without_inline_media=retried_without_inline_media,
-                            agent=agent_name,
-                        )
                 chunk_text = str(event.content)
                 state.full_response += chunk_text
                 yield event
@@ -1535,7 +1523,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     state = _StreamingAttemptState()
 
                     try:
-                        request_started_at = time.monotonic()
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
@@ -1560,7 +1547,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             media_inputs=attempt_media_inputs,
                             retried_without_inline_media=retried_without_inline_media,
                             timing_scope=timing_scope,
-                            request_started_at=request_started_at,
                             pipeline_timing=pipeline_timing,
                         ):
                             yield stream_chunk
