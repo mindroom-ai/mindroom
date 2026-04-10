@@ -131,7 +131,7 @@ text = "Inter"
 code = "JetBrains Mono"
 
 [project.theme.icon]
-repo = "lucide/github"
+repo = "fontawesome/brands/github"
 
 [project.extra]
 generator = false

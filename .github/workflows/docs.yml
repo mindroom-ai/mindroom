@@ -35,6 +35,9 @@ jobs:
       - name: Build docs
         run: uv run zensical build
 
+      - name: Verify docs output
+        run: test -f site/index.html
+
       - name: Setup Pages
         if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
