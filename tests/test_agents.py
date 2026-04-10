@@ -21,6 +21,7 @@ from mindroom.agents import (
     _PRIVATE_CULTURE_MANAGER_CACHE,
     create_agent,
     get_agent_runtime_sqlite_dbs,
+    get_agent_toolkit_names,
 )
 from mindroom.config.agent import (
     AgentConfig,
@@ -1161,7 +1162,7 @@ def test_create_agent_uses_default_worker_tool_policy_when_unset(
 
 @patch("mindroom.agents.SqliteDb")
 def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """openclaw_compat should stay in the list and imply matrix_message."""
+    """openclaw_compat should stay in the runtime toolkit list and imply matrix_message."""
     config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
@@ -1170,9 +1171,9 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
-    agent = _create_agent_for_test("summary", config=config)
-    tool_names = [tool.name for tool in agent.tools]
-    assert "matrix_message" in tool_names
+    runtime_toolkits = get_agent_toolkit_names("summary", config)
+    assert "openclaw_compat" in runtime_toolkits
+    assert "matrix_message" in runtime_toolkits
 
 
 def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
