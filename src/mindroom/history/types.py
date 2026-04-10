@@ -9,7 +9,7 @@ _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
 _CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
-_ReplayPlanMode = Literal["configured", "limited", "summary_only", "disabled"]
+_ReplayPlanMode = Literal["configured", "limited", "disabled"]
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,6 @@ class ResolvedReplayPlan:
     mode: _ReplayPlanMode
     estimated_tokens: int
     add_history_to_context: bool
-    add_session_summary_to_context: bool
     num_history_runs: int | None = None
     num_history_messages: int | None = None
     history_limit_mode: Literal["runs", "messages"] | None = None

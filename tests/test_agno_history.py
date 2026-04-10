@@ -41,7 +41,6 @@ from mindroom.history.compaction import (
     estimate_agent_static_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
-    estimate_session_summary_tokens,
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
@@ -303,7 +302,6 @@ def _agent(
         model=model or FakeModel(id="fake-model", provider="fake"),
         db=db,
         add_history_to_context=True,
-        add_session_summary_to_context=True,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
         store_history_messages=False,
@@ -468,7 +466,6 @@ def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None
         )
 
     assert agent.add_history_to_context is True
-    assert agent.add_session_summary_to_context is True
     assert agent.num_history_runs == 2
     assert agent.num_history_messages is None
     assert agent.store_history_messages is False
@@ -600,7 +597,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert state.force_compact_before_next_run is False
     assert state.last_compacted_at is not None
 
-    assert prepared.replays_persisted_history is True
+    assert prepared.replays_persisted_history is False
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
 
@@ -983,7 +980,6 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
-    assert prepared.replay_plan.add_session_summary_to_context is True
     assert prepared.replay_plan.num_history_runs == 2
     assert prepared.replay_plan.num_history_messages is None
 
@@ -1040,7 +1036,6 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
-    assert prepared.replay_plan.add_session_summary_to_context is True
     assert prepared.replay_plan.num_history_runs == 1
     assert prepared.replay_plan.num_history_messages is None
 
@@ -1192,7 +1187,6 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
-    assert prepared.replay_plan.add_session_summary_to_context is True
     assert prepared.replay_plan.num_history_runs == 1
     assert prepared.replay_plan.num_history_messages is None
 
@@ -1652,11 +1646,8 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
         )
 
     assert alpha.add_history_to_context is False
-    assert alpha.add_session_summary_to_context is False
     assert zeta.add_history_to_context is False
-    assert zeta.add_session_summary_to_context is False
     assert team.add_history_to_context is True
-    assert team.add_session_summary_to_context is True
     assert team.num_history_messages == 2
     assert team.store_history_messages is False
 
@@ -2665,7 +2656,6 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
             ),
         ),
         add_history_to_context=True,
-        add_session_summary_to_context=True,
         num_history_runs=2,
         num_history_messages=None,
     )
@@ -2721,7 +2711,9 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summary_only(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_forced_compaction_leaves_no_effective_replay_when_no_runs_fit(
+    tmp_path: Path,
+) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -2789,20 +2781,16 @@ async def test_prepare_history_for_run_forced_compaction_can_fall_back_to_summar
     assert prepared.compaction_outcomes[0].runs_after == 0
     assert prepared.compaction_outcomes[0].summary == "merged summary"
     assert prepared.replay_plan is not None
-    assert prepared.replay_plan.mode == "disabled"
-    assert prepared.replay_plan.add_history_to_context is False
-    assert prepared.replay_plan.add_session_summary_to_context is False
+    assert prepared.replay_plan.mode == "configured"
+    assert prepared.replay_plan.estimated_tokens == 0
+    assert prepared.replays_persisted_history is False
 
 
-def test_plan_replay_that_fits_disables_summary_only_when_wrapped_summary_exceeds_budget() -> None:
-    summary_text = "s" * 360
-    available_history_budget = estimate_text_tokens(summary_text)
-    assert estimate_session_summary_tokens(summary_text) > available_history_budget
-
+def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:
+    available_history_budget = estimate_text_tokens("budget")
     agent = _agent()
     session = _session(
         "session-1",
-        summary=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC)),
         runs=[
             _completed_run(
                 "run-1",
@@ -2827,7 +2815,6 @@ def test_plan_replay_that_fits_disables_summary_only_when_wrapped_summary_exceed
 
     assert replay_plan.mode == "disabled"
     assert agent.add_history_to_context is False
-    assert agent.add_session_summary_to_context is False
     assert agent.num_history_runs is None
     assert agent.num_history_messages is None
 
@@ -2991,7 +2978,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_native_agno_replays_summary_and_recent_raw_history_without_persisting_replay(
+async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -3016,13 +3003,13 @@ async def test_native_agno_replays_summary_and_recent_raw_history_without_persis
     response = await agent.arun("Current prompt", session_id="session-1")
 
     assert response.content == "ok"
-    assert model.seen_messages[0].role == "system"
-    assert "stored summary" in str(model.seen_messages[0].content)
-    assert [message.content for message in model.seen_messages[1:3]] == [
+    assert [message.role for message in model.seen_messages[:2]] == ["user", "assistant"]
+    assert "stored summary" not in str(model.seen_messages)
+    assert [message.content for message in model.seen_messages[:2]] == [
         "run-2 question",
         "run-2 answer",
     ]
-    assert [message.from_history for message in model.seen_messages[1:3]] == [True, True]
+    assert [message.from_history for message in model.seen_messages[:2]] == [True, True]
     assert model.seen_messages[-1].role == "user"
     assert model.seen_messages[-1].content == "Current prompt"
 
@@ -3031,7 +3018,6 @@ async def test_native_agno_replays_summary_and_recent_raw_history_without_persis
     latest_run = persisted.runs[-1]
     assert isinstance(latest_run, RunOutput)
     assert [message.content for message in latest_run.messages or []] == [
-        model.seen_messages[0].content,
         "Current prompt",
         "ok",
     ]
@@ -3091,9 +3077,9 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     response = await agent.arun(full_prompt, session_id="session-1")
 
     assert response.content == "ok"
-    assert recording_model.seen_messages[0].role == "system"
-    assert "stored summary" in str(recording_model.seen_messages[0].content)
-    assert [message.content for message in recording_model.seen_messages[1:3]] == [
+    assert [message.role for message in recording_model.seen_messages[:2]] == ["user", "assistant"]
+    assert "stored summary" not in str(recording_model.seen_messages)
+    assert [message.content for message in recording_model.seen_messages[:2]] == [
         "run-2 question",
         "run-2 answer",
     ]

@@ -2905,7 +2905,6 @@ class TestTeamCompletion:
         mock_team = _make_test_team()
         mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
         mock_team.add_history_to_context = True
-        mock_team.add_session_summary_to_context = True
         mock_team.num_history_runs = 3
         mock_team.num_history_messages = None
         mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
@@ -2962,7 +2961,6 @@ class TestTeamCompletion:
                     mode="limited",
                     estimated_tokens=100,
                     add_history_to_context=True,
-                    add_session_summary_to_context=True,
                     num_history_runs=1,
                     num_history_messages=None,
                     history_limit_mode="runs",

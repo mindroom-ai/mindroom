@@ -910,14 +910,13 @@ def estimate_prompt_visible_history_tokens(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> int:
-    """Estimate the persisted summary plus raw history Agno would replay for one run."""
-    summary_tokens = estimate_session_summary_tokens(session.summary.summary if session.summary is not None else None)
+    """Estimate the raw persisted history Agno would replay for one run."""
     history_messages = _history_messages_for_session(
         session=session,
         scope=scope,
         history_settings=history_settings,
     )
-    return summary_tokens + estimate_history_messages_tokens(history_messages)
+    return estimate_history_messages_tokens(history_messages)
 
 
 def estimate_history_messages_tokens(messages: list[Message]) -> int:
@@ -1026,20 +1025,6 @@ def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] 
     if history_settings.system_message_role in _STANDARD_HISTORY_ROLES:
         return None
     return [history_settings.system_message_role]
-
-
-def estimate_session_summary_tokens(summary_text: str | None) -> int:
-    """Estimate replay-visible tokens for one stored Agno session summary."""
-    if summary_text is None or summary_text.strip() == "":
-        return 0
-    wrapper = (
-        "Here is a brief summary of your previous interactions:\n\n"
-        "<summary_of_previous_interactions>\n"
-        f"{summary_text.strip()}\n"
-        "</summary_of_previous_interactions>\n\n"
-        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
-    )
-    return estimate_text_tokens(wrapper)
 
 
 def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
