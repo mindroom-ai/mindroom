@@ -16,7 +16,13 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_context_thread_id,
     room_access_allowed,
 )
-from mindroom.custom_tools.attachments import send_context_attachments
+from mindroom.custom_tools.attachments import (
+    # Intentional cross-module reuse: matrix_message controls attachment auto-threading
+    # directly here without widening the higher-level attachments tool API.
+    _resolve_send_attachments,
+    _send_attachment_paths,
+    send_context_attachments,
+)
 from mindroom.custom_tools.matrix_helpers import check_rate_limit, message_preview
 from mindroom.interactive import (
     add_reaction_buttons,
@@ -32,6 +38,7 @@ from mindroom.matrix.client import (
     edit_message,
     get_latest_thread_event_id_if_needed,
     get_room_threads_page,
+    send_file_message,
     send_message,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -213,7 +220,7 @@ class MatrixMessageTools(Toolkit):
             response.options_list,
         )
 
-    async def _message_send_or_reply(
+    async def _message_send_or_reply(  # noqa: C901, PLR0911, PLR0912
         self,
         context: ToolRuntimeContext,
         *,
@@ -265,47 +272,130 @@ class MatrixMessageTools(Toolkit):
         attachment_event_ids: list[str] = []
         resolved_attachment_ids: list[str] = []
         newly_registered_attachment_ids: list[str] = []
+        attachment_thread_id: str | None = None
         if attachment_ids or attachment_file_paths:
-            send_result, send_error = await send_context_attachments(
-                context,
-                attachment_ids=attachment_ids,
-                attachment_file_paths=attachment_file_paths,
-                room_id=room_id,
-                thread_id=effective_thread_id,
-                require_joined_room=False,
-                inherit_context_thread=False,
+            room_mode = (
+                context.config.get_entity_thread_mode(
+                    context.agent_name,
+                    context.runtime_paths,
+                    room_id=room_id,
+                )
+                == "room"
             )
-            if send_error is not None:
-                if send_result is None:
+            attachment_count = len(attachment_ids) + len(attachment_file_paths)
+            if text is None and attachment_count > 1 and effective_thread_id is None and not room_mode:
+                attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
+                    _resolve_send_attachments(
+                        context,
+                        attachment_ids=attachment_ids,
+                        attachment_file_paths=attachment_file_paths,
+                    )
+                )
+                if resolve_error is not None:
                     return self._payload(
                         "error",
                         action=action,
                         room_id=room_id,
                         thread_id=effective_thread_id,
+                        attachment_thread_id=attachment_thread_id,
                         event_id=event_id,
+                        message=resolve_error,
+                    )
+
+                first_attachment_path = attachment_paths[0]
+                remaining_attachment_paths = attachment_paths[1:]
+                first_attachment_event_id = await send_file_message(
+                    context.client,
+                    room_id,
+                    first_attachment_path,
+                    thread_id=effective_thread_id,
+                )
+                if first_attachment_event_id is None:
+                    return self._payload(
+                        "error",
+                        action=action,
+                        room_id=room_id,
+                        thread_id=effective_thread_id,
+                        attachment_thread_id=attachment_thread_id,
+                        event_id=event_id,
+                        attachment_event_ids=[],
+                        resolved_attachment_ids=resolved_attachment_ids,
+                        newly_registered_attachment_ids=newly_registered_attachment_ids,
+                        message=f"Failed to send attachment: {first_attachment_path}",
+                    )
+
+                attachment_event_ids = [first_attachment_event_id]
+                attachment_thread_id = first_attachment_event_id
+                remaining_attachment_event_ids, send_error = await _send_attachment_paths(
+                    context,
+                    room_id=room_id,
+                    thread_id=attachment_thread_id,
+                    attachment_paths=remaining_attachment_paths,
+                )
+                attachment_event_ids.extend(remaining_attachment_event_ids)
+                if send_error is not None:
+                    return self._payload(
+                        "error",
+                        action=action,
+                        room_id=room_id,
+                        thread_id=effective_thread_id,
+                        attachment_thread_id=attachment_thread_id,
+                        event_id=event_id,
+                        attachment_event_ids=attachment_event_ids,
+                        resolved_attachment_ids=resolved_attachment_ids,
+                        newly_registered_attachment_ids=newly_registered_attachment_ids,
                         message=send_error,
                     )
-                return self._payload(
-                    "error",
-                    action=action,
-                    room_id=send_result.room_id,
-                    thread_id=send_result.thread_id,
-                    event_id=event_id,
-                    attachment_event_ids=send_result.attachment_event_ids,
-                    resolved_attachment_ids=send_result.resolved_attachment_ids,
-                    newly_registered_attachment_ids=send_result.newly_registered_attachment_ids,
-                    message=send_error,
+            else:
+                attachment_thread_id = effective_thread_id
+                if event_id is not None and not room_mode:
+                    attachment_thread_id = effective_thread_id or event_id
+
+                send_result, send_error = await send_context_attachments(
+                    context,
+                    attachment_ids=attachment_ids,
+                    attachment_file_paths=attachment_file_paths,
+                    room_id=room_id,
+                    thread_id=attachment_thread_id,
+                    require_joined_room=False,
+                    inherit_context_thread=False,
                 )
-            assert send_result is not None
-            attachment_event_ids = send_result.attachment_event_ids
-            resolved_attachment_ids = send_result.resolved_attachment_ids
-            newly_registered_attachment_ids = send_result.newly_registered_attachment_ids
+                if send_result is not None:
+                    attachment_thread_id = send_result.thread_id
+                if send_error is not None:
+                    if send_result is None:
+                        return self._payload(
+                            "error",
+                            action=action,
+                            room_id=room_id,
+                            thread_id=effective_thread_id,
+                            attachment_thread_id=attachment_thread_id,
+                            event_id=event_id,
+                            message=send_error,
+                        )
+                    return self._payload(
+                        "error",
+                        action=action,
+                        room_id=send_result.room_id,
+                        thread_id=effective_thread_id,
+                        attachment_thread_id=attachment_thread_id,
+                        event_id=event_id,
+                        attachment_event_ids=send_result.attachment_event_ids,
+                        resolved_attachment_ids=send_result.resolved_attachment_ids,
+                        newly_registered_attachment_ids=send_result.newly_registered_attachment_ids,
+                        message=send_error,
+                    )
+                assert send_result is not None
+                attachment_event_ids = send_result.attachment_event_ids
+                resolved_attachment_ids = send_result.resolved_attachment_ids
+                newly_registered_attachment_ids = send_result.newly_registered_attachment_ids
 
         return self._payload(
             "ok",
             action=action,
             room_id=room_id,
             thread_id=effective_thread_id,
+            attachment_thread_id=attachment_thread_id,
             event_id=event_id,
             attachment_event_ids=attachment_event_ids,
             resolved_attachment_ids=resolved_attachment_ids,
@@ -855,7 +945,10 @@ class MatrixMessageTools(Toolkit):
 
         Actions:
         - send: Send text and optional attachments to a room.
-          It defaults to the current room and stays room-level unless you explicitly pass `thread_id`.
+          It defaults to the current room.
+          When the effective target is room-level, text+attachment sends post the text to the room timeline and thread attachments under that text event.
+          When the effective target is room-level and you send multiple attachments without text, the first attachment is posted to the room timeline and the remaining attachments are threaded under it.
+          In `thread_mode: room`, room-level sends stay plain room messages and do not auto-thread attachments unless you pass an explicit `thread_id`.
         - reply: Send text and optional attachments into a thread.
           It defaults to the current thread when one can be resolved and errors if no thread is available.
         - thread-reply: Same threading behavior as `reply`, kept as a separate action name for agent convenience.
@@ -870,6 +963,10 @@ class MatrixMessageTools(Toolkit):
 
         Thread targeting:
         - `send` is room-level by default even if the current conversation is inside a thread.
+        - `send` only creates a new attachment thread when its effective thread target is room-level.
+          If you pass an explicit `thread_id`, both text and attachments stay in that existing thread.
+        - `thread_mode: room` disables implicit attachment auto-threading for room-level sends.
+          Pass an explicit `thread_id` when you intentionally want threaded output from the tool.
         - `reply` and `thread-reply` inherit the current thread when possible.
         - `read`, `edit`, and `context` also inherit the current thread when possible.
         - `thread_id="room"` is a sentinel meaning "force room-level scope and do not inherit the current thread."
