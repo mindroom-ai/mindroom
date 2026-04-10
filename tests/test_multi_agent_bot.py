@@ -934,8 +934,8 @@ class TestAgentBot:
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert (
-            mock_client.add_event_callback.call_count == 12
-        )  # invite, message, redaction, reaction, audio, image/file/video callbacks
+            mock_client.add_event_callback.call_count == 13
+        )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event callbacks
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")

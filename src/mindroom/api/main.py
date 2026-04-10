@@ -20,6 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
+
+# Import routers
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult
 from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runtime_paths
 from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
@@ -33,8 +35,6 @@ from mindroom.api.config_lifecycle import request_snapshot as request_api_snapsh
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
 from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
 from mindroom.api.config_lifecycle import write_committed_config as write_api_committed_config
-
-# Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
@@ -63,6 +63,8 @@ from mindroom.workers.runtime import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+
+    from starlette.requests import HTTPConnection
 
     from mindroom.config.main import Config
 
@@ -681,19 +683,19 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     return token or None
 
 
-def _get_request_token(
-    request: Request,
+def _get_connection_token(
+    connection: HTTPConnection,
     authorization: str | None,
     *,
     cookie_names: tuple[str, ...],
 ) -> str | None:
-    """Return the request auth token from bearer auth or one of the allowed cookies."""
+    """Return the auth token from bearer auth or one of the allowed cookies."""
     bearer_token = _extract_bearer_token(authorization)
     if bearer_token:
         return bearer_token
 
     for cookie_name in cookie_names:
-        cookie_value = request.cookies.get(cookie_name)
+        cookie_value = connection.cookies.get(cookie_name)
         if cookie_value:
             return cookie_value
 
@@ -771,14 +773,14 @@ def _request_has_frontend_access(request: Request) -> bool:
     if auth_state.supabase_auth is None:
         if not mindroom_api_key:
             return True
-        token = _get_request_token(
+        token = _get_connection_token(
             request,
             authorization,
             cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
         )
         return token is not None and secrets.compare_digest(token, mindroom_api_key)
 
-    token = _get_request_token(
+    token = _get_connection_token(
         request,
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
@@ -926,7 +928,7 @@ async def verify_user(
             return auth_user
 
         if mindroom_api_key:
-            token = _get_request_token(
+            token = _get_connection_token(
                 request,
                 authorization,
                 cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
@@ -939,7 +941,7 @@ async def verify_user(
         request.scope["auth_user"] = auth_user
         return auth_user
 
-    token = _get_request_token(
+    token = _get_connection_token(
         request,
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),

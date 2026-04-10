@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures for dashboard backend tests."""
 
 # Import the app after we can mock the config path
+import asyncio
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -59,8 +60,18 @@ def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
     temp_path.unlink(missing_ok=True)
 
 
+@pytest.fixture(autouse=True)
+def reset_approval_store() -> Generator[None, None, None]:
+    """Keep the module-level approval store isolated per API test."""
+    from mindroom.tool_approval import shutdown_approval_store  # noqa: PLC0415
+
+    asyncio.run(shutdown_approval_store())
+    yield
+    asyncio.run(shutdown_approval_store())
+
+
 @pytest.fixture
-def test_client(temp_config_file: Path) -> TestClient:
+def test_client(temp_config_file: Path) -> Generator[TestClient, None, None]:
     """Create a test client with mocked config file."""
     from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
@@ -71,8 +82,8 @@ def test_client(temp_config_file: Path) -> TestClient:
     # Force reload of config
     main._load_config_from_file(main._app_runtime_paths(main.app), main.app)
 
-    # Create test client
-    return TestClient(main.app)
+    with TestClient(main.app) as client:
+        yield client
 
 
 @pytest.fixture
