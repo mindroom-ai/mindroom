@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -16,6 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
@@ -229,6 +231,139 @@ class TestVoiceHandler:
         assert result.content == b"decrypted_audio_data"
         assert result.mime_type == "audio/mpeg"
         mock_download.assert_awaited_once_with(client, event)
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_uses_explicit_named_voice_connection(self) -> None:
+        """Voice transcription should resolve API keys through the configured STT connection."""
+        config = _runtime_bound_config(
+            Config(
+                connections={
+                    "openai/voice": {
+                        "provider": "openai",
+                        "service": "openai-voice",
+                        "auth_kind": "api_key",
+                    },
+                },
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=_VoiceSTTConfig(
+                        provider="openai",
+                        model="whisper-1",
+                        connection="openai/voice",
+                    ),
+                    intelligence=_VoiceLLMConfig(model="default"),
+                ),
+            ),
+        )
+        runtime_paths = runtime_paths_for(config)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "openai-voice",
+            {"api_key": "voice-key", "_source": "test"},
+        )
+        captured: dict[str, object] = {}
+
+        class _FakeResponse:
+            status_code = 200
+            text = ""
+
+            @staticmethod
+            def json() -> dict[str, str]:
+                return {"text": "transcribed"}
+
+        class _FakeAsyncClient:
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> _FakeResponse:
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["files"] = files
+                captured["data"] = data
+                return _FakeResponse()
+
+        with patch("mindroom.voice_handler.httpx.AsyncClient", return_value=_FakeAsyncClient()):
+            transcription = await voice_handler._transcribe_audio(b"audio-bytes", config, runtime_paths)
+
+        assert transcription == "transcribed"
+        assert captured["url"] == "https://api.openai.com/v1/audio/transcriptions"
+        assert captured["headers"] == {"Authorization": "Bearer voice-key"}
+        assert captured["data"] == {"model": "whisper-1"}
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_allows_auth_free_voice_connection(self) -> None:
+        """Voice transcription should skip auth headers for auth-free OpenAI-compatible STT connections."""
+        config = _runtime_bound_config(
+            Config(
+                connections={
+                    "openai/local": {
+                        "provider": "openai",
+                        "auth_kind": "none",
+                    },
+                },
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=_VoiceSTTConfig(
+                        provider="openai",
+                        model="whisper-1",
+                        host="http://localhost:9292",
+                        connection="openai/local",
+                    ),
+                    intelligence=_VoiceLLMConfig(model="default"),
+                ),
+            ),
+        )
+        captured: dict[str, object] = {}
+
+        class _FakeResponse:
+            status_code = 200
+            text = ""
+
+            @staticmethod
+            def json() -> dict[str, str]:
+                return {"text": "transcribed"}
+
+        class _FakeAsyncClient:
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> _FakeResponse:
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["files"] = files
+                captured["data"] = data
+                return _FakeResponse()
+
+        with patch("mindroom.voice_handler.httpx.AsyncClient", return_value=_FakeAsyncClient()):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert transcription == "transcribed"
+        assert captured["url"] == "http://localhost:9292/v1/audio/transcriptions"
+        assert captured["headers"] == {}
+        assert captured["data"] == {"model": "whisper-1"}
 
     @pytest.mark.asyncio
     async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:

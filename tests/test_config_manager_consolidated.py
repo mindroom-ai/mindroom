@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
@@ -272,9 +272,10 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_manage_agent_create_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
-        """Write config-manager flows should keep runtime plugin validation in the invalid-config channel."""
-        cm = _config_manager(_invalid_plugin_config_path(tmp_path, with_agent=False))
+    def test_manage_agent_create_tolerates_invalid_plugin_manifest(self, tmp_path: Path) -> None:
+        """Write config-manager flows should keep working when an unrelated plugin is broken."""
+        config_path = _invalid_plugin_config_path(tmp_path, with_agent=False)
+        cm = _config_manager(config_path)
 
         result = cm.manage_agent(
             operation="create",
@@ -285,9 +286,11 @@ class TestConsolidatedConfigManager:
             model="default",
         )
 
-        assert "Invalid configuration" in result
-        assert "Invalid plugin name" in result
-        assert "Changes were NOT applied." in result
+        assert "Successfully created" in result
+        runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+        assert config.agents["test_agent"].display_name == "Test Agent"
+        assert config.plugins[0].path == "./plugins/bad-name"
 
     def test_manage_agent_create_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
         """Malformed YAML should be reported through the invalid-config path for mutating flows."""

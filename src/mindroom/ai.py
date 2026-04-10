@@ -38,6 +38,12 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agents import create_agent
+from mindroom.connections import (
+    canonical_connection_provider,
+    connection_api_key,
+    connection_google_application_credentials_path,
+    resolve_connection,
+)
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -46,10 +52,8 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    runtime_env_path,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     build_prompt_with_thread_history,
@@ -432,7 +436,7 @@ class _StreamingAttemptState:
 
 def _canonical_provider(provider: str) -> str:
     """Return normalized provider key for model dispatch."""
-    return provider.strip().lower().replace("-", "_")
+    return canonical_connection_provider(provider)
 
 
 def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
@@ -609,6 +613,7 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
 
 
 def _create_model_for_provider(  # noqa: C901, PLR0912
+    config: Config,
     provider: str,
     model_id: str,
     model_config: ModelConfig,
@@ -618,6 +623,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
     """Create a model instance for a specific provider.
 
     Args:
+        config: Application configuration used to resolve named connections.
         provider: The AI provider name
         model_id: The model identifier
         model_config: The model configuration object
@@ -632,11 +638,32 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
 
     """
     canonical_provider = _canonical_provider(provider)
+    supported_providers = {
+        "openai",
+        "anthropic",
+        "google",
+        "vertexai_claude",
+        "cerebras",
+        "groq",
+        "deepseek",
+        "openrouter",
+        "ollama",
+    }
+    if canonical_provider not in supported_providers:
+        msg = f"Unsupported AI provider: {provider}"
+        raise ValueError(msg)
 
-    if canonical_provider not in {"ollama", "vertexai_claude"} and "api_key" not in extra_kwargs:
-        api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-        if api_key:
-            extra_kwargs["api_key"] = api_key
+    resolved_connection = resolve_connection(
+        config,
+        provider=provider,
+        purpose="chat_model",
+        connection_name=model_config.connection,
+        runtime_paths=runtime_paths,
+    )
+    api_key = connection_api_key(resolved_connection)
+
+    if canonical_provider not in {"ollama", "vertexai_claude"} and api_key:
+        extra_kwargs["api_key"] = api_key
 
     if canonical_provider == "vertexai_claude":
         if "project_id" not in extra_kwargs:
@@ -652,13 +679,12 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
             if base_url:
                 extra_kwargs["base_url"] = base_url
         client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
-        if "credentials" not in client_params and (
-            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        ):
+        google_application_credentials = connection_google_application_credentials_path(resolved_connection)
+        if "credentials" not in client_params and google_application_credentials:
             google_auth = importlib.import_module("google.auth")
             load_credentials_from_file = google_auth.load_credentials_from_file
             credentials, _project_id = load_credentials_from_file(
-                str(google_application_credentials),
+                google_application_credentials,
                 scopes=["https://www.googleapis.com/auth/cloud-platform"],
             )
             client_params["credentials"] = credentials
@@ -677,11 +703,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
     if canonical_provider == "openrouter":
         # OpenRouter needs the API key passed explicitly because it captures
         # the environment variable at import time, not at instantiation time
-        api_key = extra_kwargs.pop("api_key", None)
+        api_key = extra_kwargs.pop("api_key", None) or api_key
         if not api_key:
-            api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-        if not api_key:
-            logger.warning("No OpenRouter API key found in environment or CredentialsManager")
+            logger.warning("No OpenRouter API key found for configured connection")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
 
     # Map providers to their model classes for simple instantiation
@@ -696,12 +720,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         "deepseek": DeepSeek,
     }
 
-    model_class = provider_map.get(canonical_provider)
-    if model_class is not None:
-        return model_class(id=model_id, **extra_kwargs)
-
-    msg = f"Unsupported AI provider: {provider}"
-    raise ValueError(msg)
+    model_class = provider_map[canonical_provider]
+    return model_class(id=model_id, **extra_kwargs)
 
 
 def get_model_instance(
@@ -737,15 +757,8 @@ def get_model_instance(
     # Get extra kwargs if specified
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
-    # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    model_creds = creds_manager.load_credentials(f"model:{model_name}")
-    model_api_key = model_creds.get("api_key") if model_creds else None
-
-    if model_api_key:
-        extra_kwargs["api_key"] = model_api_key
-
     model = _create_model_for_provider(
+        config,
         provider,
         model_id,
         model_config,

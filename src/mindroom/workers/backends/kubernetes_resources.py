@@ -6,14 +6,18 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom import constants
-from mindroom.constants import RuntimePaths
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
+from mindroom.credentials import (
+    SHARED_CREDENTIALS_PATH_ENV,
+    get_runtime_credentials_manager,
+    get_runtime_shared_credentials_manager,
+)
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
@@ -236,7 +240,6 @@ class KubernetesResourceManager:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
-        worker_grantable_credentials: frozenset[str],
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
         self.runtime_paths = runtime_paths
@@ -244,7 +247,6 @@ class KubernetesResourceManager:
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
         self.tool_validation_snapshot = tool_validation_snapshot
-        self.worker_grantable_credentials = worker_grantable_credentials
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -587,10 +589,12 @@ class KubernetesResourceManager:
 
     def _worker_env(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
+        local_dedicated_root = (self.storage_root / state_subpath).resolve()
         venv_path = f"{dedicated_root}/venv"
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=Path(dedicated_root),
+            local_dedicated_root=local_dedicated_root,
         )
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
@@ -599,7 +603,7 @@ class KubernetesResourceManager:
             {
                 "name": _STARTUP_RUNTIME_PATHS_ENV,
                 "value": json.dumps(
-                    constants.serialize_runtime_paths(startup_runtime_paths),
+                    serialize_public_runtime_paths(startup_runtime_paths),
                     separators=(",", ":"),
                     sort_keys=True,
                 ),
@@ -647,11 +651,48 @@ class KubernetesResourceManager:
             env.append({"name": name, "value": value})
         return env
 
+    def _worker_google_application_credentials_path(
+        self,
+        worker_key: str,
+        dedicated_root: Path,
+        *,
+        local_dedicated_root: Path,
+    ) -> str | None:
+        """Return a worker-visible ADC file path and rewrite the mirrored credential payload."""
+        worker_shared_manager = (
+            get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key).shared_manager()
+        )
+        credentials = get_runtime_shared_credentials_manager(self.runtime_paths).load_credentials("google_vertex_adc")
+        raw_path = credentials.get("application_credentials_path") if isinstance(credentials, dict) else None
+        if not isinstance(raw_path, str) or not raw_path.strip() or not self.storage_root.exists():
+            worker_shared_manager.delete_credentials("google_vertex_adc")
+            return None
+        if not isinstance(credentials, dict):
+            worker_shared_manager.delete_credentials("google_vertex_adc")
+            return None
+        source_path = Path(raw_path).expanduser().resolve()
+        if not source_path.is_file():
+            worker_shared_manager.delete_credentials("google_vertex_adc")
+            return None
+
+        runtime_dir = local_dedicated_root / ".runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        target_path = runtime_dir / source_path.name
+        if source_path.resolve() != target_path.resolve():
+            shutil.copyfile(source_path, target_path)
+            target_path.chmod(0o600)
+        worker_visible_path = str(dedicated_root / ".runtime" / source_path.name)
+        worker_credentials = dict(cast("dict[str, object]", credentials))
+        worker_credentials["application_credentials_path"] = worker_visible_path
+        worker_shared_manager.save_credentials("google_vertex_adc", worker_credentials)
+        return worker_visible_path
+
     def _worker_runtime_paths(
         self,
         *,
         worker_key: str,
         dedicated_root: Path,
+        local_dedicated_root: Path,
     ) -> RuntimePaths:
         config_path = (
             Path(self.config.config_path)
@@ -662,6 +703,12 @@ class KubernetesResourceManager:
         process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         env_file_values = dict(self.runtime_paths.env_file_values)
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        if google_application_credentials := self._worker_google_application_credentials_path(
+            worker_key,
+            dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+        ):
+            process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
         process_env.update(
             {
                 "MINDROOM_SANDBOX_RUNNER_MODE": "true",
@@ -676,15 +723,13 @@ class KubernetesResourceManager:
             },
         )
         process_env.update(self.config.extra_env)
-        return constants.isolated_runtime_paths(
-            RuntimePaths(
-                config_path=config_path,
-                config_dir=config_path.parent,
-                env_path=config_path.parent / ".env",
-                storage_root=dedicated_root.resolve(),
-                process_env=MappingProxyType(process_env),
-                env_file_values=MappingProxyType(env_file_values),
-            ),
+        return RuntimePaths(
+            config_path=config_path,
+            config_dir=config_path.parent,
+            env_path=config_path.parent / ".env",
+            storage_root=dedicated_root.resolve(),
+            process_env=MappingProxyType(process_env),
+            env_file_values=MappingProxyType(env_file_values),
         )
 
     def _volume_mounts(

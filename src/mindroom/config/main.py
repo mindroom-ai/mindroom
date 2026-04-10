@@ -9,7 +9,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
@@ -22,6 +31,7 @@ from mindroom.agent_policy import (
 )
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.connections import ConnectionConfig  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import CacheConfig, MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
@@ -37,6 +47,13 @@ from mindroom.config.models import (
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
+from mindroom.connections import (
+    allowed_connection_auth_kinds,
+    canonical_connection_provider,
+    default_connection_config,
+    default_connection_id,
+    required_connection_auth_kind,
+)
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
@@ -83,6 +100,7 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
 logger = get_logger(__name__)
 
 _OPTIONAL_DICT_SECTION_NAMES = (
+    "connections",
     "teams",
     "cultures",
     "room_models",
@@ -354,10 +372,15 @@ class Config(BaseModel):
     IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {
         "matrix_message": ("attachments", "matrix_room"),
     }
+    _implicit_connection_ids: set[str] = PrivateAttr(default_factory=set)
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
+    connections: dict[str, ConnectionConfig] = Field(
+        default_factory=dict,
+        description="Named shared credential connections",
+    )
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     toolkits: dict[str, ToolkitDefinition] = Field(
         default_factory=dict,
@@ -448,6 +471,128 @@ class Config(BaseModel):
         if unknown_entities:
             msg = f"authorization.agent_reply_permissions contains unknown entities: {', '.join(unknown_entities)}"
             raise ValueError(msg)
+        return self
+
+    def _inherited_connection_defaults(self, *, provider: str) -> ConnectionConfig | None:
+        """Reuse one authored conventional default connection when synthesizing provider defaults."""
+        canonical_provider = canonical_connection_provider(provider)
+        preferred_connection_id = default_connection_id(provider=provider, purpose="chat_model")
+        if preferred_connection_id is None or preferred_connection_id in self._implicit_connection_ids:
+            return None
+
+        preferred_connection = self.connections.get(preferred_connection_id)
+        if (
+            preferred_connection is None
+            or canonical_connection_provider(preferred_connection.provider) != canonical_provider
+        ):
+            return None
+
+        return preferred_connection
+
+    def _validate_connection_reference(
+        self,
+        *,
+        provider: str,
+        purpose: Literal["chat_model", "embedder", "memory_llm", "voice_stt", "google_oauth_client"],
+        connection_id: str | None,
+        field_path: str,
+        strict_missing_connection: bool,
+    ) -> None:
+        """Ensure one resolved connection exists and matches the configured consumer."""
+        resolved_connection_id = connection_id
+        expected_auth_kind = required_connection_auth_kind(provider=provider, purpose=purpose)
+        conventional_default_id = default_connection_id(provider=provider, purpose=purpose)
+        should_use_default_connection = (
+            resolved_connection_id is None or resolved_connection_id == conventional_default_id
+        )
+        if should_use_default_connection and conventional_default_id is not None:
+            if conventional_default_id not in self.connections:
+                synthesized_connection = default_connection_config(provider=provider, purpose=purpose)
+                if synthesized_connection is None:
+                    if strict_missing_connection and expected_auth_kind not in {None, "none"}:
+                        msg = (
+                            f"{field_path}: Provider '{provider}' used for purpose '{purpose}' requires a configured "
+                            f"connection. Add connections.{conventional_default_id} or set an explicit connection name."
+                        )
+                        raise ValueError(msg)
+                    return
+                inherited_connection = self._inherited_connection_defaults(provider=provider)
+                if inherited_connection is not None:
+                    synthesized_connection = synthesized_connection.model_copy(
+                        update={
+                            "service": inherited_connection.service,
+                            "auth_kind": inherited_connection.auth_kind,
+                        },
+                    )
+                self.connections[conventional_default_id] = synthesized_connection
+                self._implicit_connection_ids.add(conventional_default_id)
+            resolved_connection_id = conventional_default_id
+        if resolved_connection_id is None:
+            return
+        connection = self.connections.get(resolved_connection_id)
+        if connection is None:
+            msg = f"{field_path}: Unknown connection '{resolved_connection_id}'"
+            raise ValueError(msg)
+        if canonical_connection_provider(connection.provider) != canonical_connection_provider(provider):
+            msg = (
+                f"{field_path}: Connection '{resolved_connection_id}' is for provider "
+                f"'{connection.provider}', not '{provider}'"
+            )
+            raise ValueError(msg)
+        allowed_auth_kinds = allowed_connection_auth_kinds(provider=provider, purpose=purpose)
+        if allowed_auth_kinds and connection.auth_kind not in allowed_auth_kinds:
+            allowed_auth_kind_text = " or ".join(f"'{auth_kind}'" for auth_kind in allowed_auth_kinds)
+            msg = (
+                f"{field_path}: Connection '{resolved_connection_id}' has auth_kind '{connection.auth_kind}', "
+                f"but provider '{provider}' used for purpose '{purpose}' requires {allowed_auth_kind_text}"
+            )
+            raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def validate_connection_references(self, info: ValidationInfo) -> Config:
+        """Ensure resolved connection references use compatible providers and auth kinds."""
+        context = info.context if isinstance(info.context, dict) else {}
+        strict_missing_connection = bool(context.get("strict_connection_validation"))
+        for model_name, model_config in self.models.items():
+            self._validate_connection_reference(
+                provider=model_config.provider,
+                purpose="chat_model",
+                connection_id=model_config.connection,
+                field_path=f"models.{model_name}.connection",
+                strict_missing_connection=strict_missing_connection,
+            )
+        self._validate_connection_reference(
+            provider=self.memory.embedder.provider,
+            purpose="embedder",
+            connection_id=self.memory.embedder.config.connection,
+            field_path="memory.embedder.config.connection",
+            strict_missing_connection=strict_missing_connection,
+        )
+        if self.memory.llm is not None:
+            self._validate_connection_reference(
+                provider=self.memory.llm.provider,
+                purpose="memory_llm",
+                connection_id=self.memory.llm.connection,
+                field_path="memory.llm.connection",
+                strict_missing_connection=strict_missing_connection,
+            )
+        if self.voice.enabled or "stt" in self.voice.model_fields_set:
+            self._validate_connection_reference(
+                provider=self.voice.stt.provider,
+                purpose="voice_stt",
+                connection_id=self.voice.stt.connection,
+                field_path="voice.stt.connection",
+                strict_missing_connection=strict_missing_connection,
+            )
+        google_oauth_connection_id = default_connection_id(provider="google", purpose="google_oauth_client")
+        if google_oauth_connection_id is not None and google_oauth_connection_id in self.connections:
+            self._validate_connection_reference(
+                provider="google",
+                purpose="google_oauth_client",
+                connection_id=None,
+                field_path="connections.google/oauth",
+                strict_missing_connection=strict_missing_connection,
+            )
         return self
 
     @model_validator(mode="after")
@@ -875,9 +1020,16 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool = False,
+        strict_connection_validation: bool = False,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        config = cls.model_validate(
+            _normalized_config_data(data),
+            context={
+                "runtime_paths": runtime_paths,
+                "strict_connection_validation": strict_connection_validation,
+            },
+        )
         try:
             if tolerate_plugin_load_errors:
                 config._validate_authored_tool_entries(
@@ -892,7 +1044,14 @@ class Config(BaseModel):
 
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""
-        return _strip_empty_root_sections(cast("dict[str, Any]", self.model_dump(exclude_unset=True)))
+        dump = _strip_empty_root_sections(cast("dict[str, Any]", self.model_dump(exclude_unset=True)))
+        authored_connections = dump.get("connections")
+        if isinstance(authored_connections, dict):
+            for connection_id in self._implicit_connection_ids:
+                authored_connections.pop(connection_id, None)
+            if not authored_connections:
+                dump.pop("connections", None)
+        return dump
 
     @classmethod
     def from_yaml(
@@ -909,7 +1068,7 @@ class Config(BaseModel):
             data = yaml.safe_load(f) or {}
 
         runtime_paths = resolve_runtime_paths(config_path=path)
-        config = cls.validate_with_runtime(data, runtime_paths)
+        config = cls.validate_with_runtime(data, runtime_paths, strict_connection_validation=True)
         logger.info("loaded_agent_configuration", path=str(path))
         logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
         return config
@@ -1743,6 +1902,7 @@ def load_config(
         data,
         runtime_paths,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        strict_connection_validation=True,
     )
     logger.info("loaded_agent_configuration", path=str(path))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))

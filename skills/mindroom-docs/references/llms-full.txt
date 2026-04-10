@@ -512,14 +512,14 @@ View and manage rooms that agents have joined but are not in the configuration:
 - **Bulk selection** and **Leave rooms** functionality
 - **Open in Matrix** - Link to view in your Matrix client
 
-### Models & API Keys
+### Models & Connections
 
 Configure AI model providers:
 
-- **Add/edit models** with provider, model ID, host URL, and advanced settings
+- **Add/edit models** with provider, model ID, host URL, named connection, and advanced settings
 - **Provider filter** to show models by provider
 - **Test connection** to verify model accessibility
-- **Provider API keys** section for configuring credentials
+- **Connection summary** showing whether a model uses an explicit connection or the provider default
 
 **Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
@@ -556,13 +556,14 @@ Git-backed knowledge bases are supported, but Git settings are currently configu
 
 ### Credentials
 
-Manage service credentials directly from the dashboard:
+Manage the credential services that named connections point to:
 
 - **List configured credential services** from `CredentialsManager`
-- **Create/select service names** (for example `github_private` or `model:sonnet`)
+- **Create/select service names** (for example `github_private`, `openai_team_a`, or `google_oauth_client`)
 - **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
+- **Route models, memory, voice, and integrations through named connections** such as `openai/default`, `openai/embeddings`, `openai/stt`, `vertexai_claude/default`, and `google/oauth`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
 - `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
 
@@ -918,11 +919,12 @@ models:
   default:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
+    connection: anthropic/default  # Optional: named connection override
   sonnet:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
+    connection: anthropic/default  # Optional: named connection override
     host: null                     # Optional: Host URL (e.g., for Ollama)
-    api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 
@@ -1014,6 +1016,17 @@ Sandbox-proxied execution is stricter than direct local execution: ordinary runt
 # These thresholds only affect automatic thread summaries; manual `set_thread_summary`
 # tool calls write immediately and reset the automatic baseline from the new message count.
 
+# Named connection routing (optional)
+connections:
+  openai/default:
+    provider: openai
+    service: openai
+    auth_kind: api_key
+  google/oauth:
+    provider: google
+    service: google_oauth_client
+    auth_kind: oauth_client
+
 # Memory system configuration (optional)
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
@@ -1022,11 +1035,12 @@ memory:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
-      api_key: null                # Optional: From env var
+      connection: openai/embeddings  # Optional: named connection override
       host: null                   # Optional: For self-hosted
       dimensions: null             # Optional: Embedding dimension override (e.g., 256)
   llm:                             # Optional: LLM for memory operations
     provider: ollama
+    connection: null               # Optional: defaults to provider/default when needed
     config: {}
   file:                            # File-backed memory settings (when backend: file)
     path: null                     # Optional: fallback root for file memory paths
@@ -1080,7 +1094,7 @@ voice:
   stt:
     provider: openai               # Default: openai
     model: whisper-1               # Default: whisper-1
-    api_key: null
+    connection: openai/stt         # Optional: named connection override
     host: null
   intelligence:
     model: default                 # Model for command recognition
@@ -1724,14 +1738,14 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field            | Required | Default | Description                                                                                                                                                                                               |
-| ---------------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`       | Yes      | -       | The AI provider (see supported providers above)                                                                                                                                                           |
-| `id`             | Yes      | -       | Model ID specific to the provider                                                                                                                                                                         |
-| `host`           | No       | `null`  | Host URL for self-hosted models (e.g., Ollama)                                                                                                                                                            |
-| `api_key`        | No       | `null`  | API key (usually read from environment variables)                                                                                                                                                         |
-| `extra_kwargs`   | No       | `null`  | Additional provider-specific parameters                                                                                                                                                                   |
-| `context_window` | No       | `null`  | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
+| Field            | Required | Default            | Description                                                                                                                                                                                               |
+| ---------------- | -------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider`       | Yes      | -                  | The AI provider (see supported providers above)                                                                                                                                                           |
+| `id`             | Yes      | -                  | Model ID specific to the provider                                                                                                                                                                         |
+| `connection`     | No       | `provider/default` | Named connection used for credentials (`gemini` canonicalizes to `google/default`)                                                                                                                        |
+| `host`           | No       | `null`             | Host URL for self-hosted models (e.g., Ollama)                                                                                                                                                            |
+| `extra_kwargs`   | No       | `null`             | Additional provider-specific parameters                                                                                                                                                                   |
+| `context_window` | No       | `null`             | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
 ## Configuration Examples
 
@@ -1741,6 +1755,7 @@ models:
   sonnet:
     provider: anthropic
     id: claude-sonnet-4-6
+    connection: anthropic/default
     context_window: 200000
 
   haiku:
@@ -1752,17 +1767,21 @@ models:
   gpt:
     provider: openai
     id: gpt-5.4
+    connection: openai/default
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
     id: gemini-3.1-pro-preview
+    connection: google/default
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
     provider: vertexai_claude
     id: claude-sonnet-4-6
+    connection: vertexai_claude/default
     extra_kwargs:
+      # Keep Vertex project_id and region on the model config itself.
       project_id: your-gcp-project
       region: us-central1
 
@@ -1776,6 +1795,7 @@ models:
   openrouter:
     provider: openrouter
     id: anthropic/claude-sonnet-4.6
+    connection: openrouter/default
 
   # Groq (fast inference)
   groq:
@@ -8720,6 +8740,7 @@ memory:
     provider: openai
     config:
       model: text-embedding-3-small
+      connection: openai/embeddings
       dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
 
@@ -8760,6 +8781,19 @@ memory:
     provider: ollama    # ollama, openai, or anthropic
     config:
       model: llama3.2
+```
+
+When you use a credentialed memory LLM or embedder, set `connection` on that consuming config. OpenAI embedders default to `openai/embeddings`. Memory LLMs default to `provider/default`.
+
+Example with an explicit OpenAI memory LLM connection:
+
+```
+memory:
+  llm:
+    provider: openai
+    connection: openai/default
+    config:
+      model: gpt-4.1-mini
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
@@ -8943,6 +8977,7 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    connection: openai/stt
     # Optional: custom endpoint (without /v1 suffix)
     # host: http://localhost:8080
   intelligence:
@@ -8965,9 +9000,10 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    connection: openai/stt
 ```
 
-Requires `OPENAI_API_KEY` environment variable.
+Uses the named `openai/stt` connection by default.
 
 ### Self-Hosted Whisper
 
@@ -8977,6 +9013,7 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    connection: openai/stt
     host: http://localhost:8080
 ```
 
@@ -8984,21 +9021,27 @@ Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcr
 
 Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
 
-### Custom API Key
+### Custom Connection
 
-For self-hosted solutions that require authentication:
+For self-hosted solutions that should use a non-default credential:
 
 ```
+connections:
+  openai/stt_lab:
+    provider: openai
+    service: openai_lab
+    auth_kind: api_key
+
 voice:
   enabled: true
   stt:
     provider: openai
     model: whisper-1
     host: http://localhost:8080
-    api_key: your-custom-api-key
+    connection: openai/stt_lab
 ```
 
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+If `connection` is omitted, MindRoom uses `openai/stt`.
 
 ## Command Recognition
 
@@ -9089,9 +9132,9 @@ Audio callbacks are registered on all bots because audio now follows the shared 
 
 ## Environment Variables
 
-| Variable         | Description                                                          |
-| ---------------- | -------------------------------------------------------------------- |
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+| Variable         | Description                               |
+| ---------------- | ----------------------------------------- |
+| `OPENAI_API_KEY` | Seeds the default `openai/stt` connection |
 
 ## Text-to-Speech Tools
 

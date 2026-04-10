@@ -577,8 +577,8 @@ async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
-    """Set previews should surface plugin manifest validation failures as user errors."""
+async def test_handle_config_command_set_tolerates_invalid_plugin_manifest(tmp_path: Path) -> None:
+    """Set previews should keep working when plugin loading degrades."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -603,14 +603,15 @@ async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(t
         _runtime_paths_for_config(config_path),
     )
 
-    assert change_info is None
-    assert "Invalid configuration" in response
-    assert "Invalid plugin name" in response
+    assert change_info is not None
+    assert change_info["config_path"] == "plugins"
+    assert change_info["new_value"] == ["./plugins/bad-name"]
+    assert "Configuration Change Preview" in response
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_returns_malformed_plugin_manifest_error(tmp_path: Path) -> None:
-    """Set previews should surface malformed plugin manifests as user errors."""
+async def test_handle_config_command_set_tolerates_malformed_plugin_manifest(tmp_path: Path) -> None:
+    """Set previews should keep working when a plugin manifest is malformed."""
     plugin_root = tmp_path / "plugins" / "bad-manifest"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -635,14 +636,15 @@ async def test_handle_config_command_set_returns_malformed_plugin_manifest_error
         _runtime_paths_for_config(config_path),
     )
 
-    assert change_info is None
-    assert "Invalid configuration" in response
-    assert "Plugin tools_module must be a string" in response
+    assert change_info is not None
+    assert change_info["config_path"] == "plugins"
+    assert change_info["new_value"] == ["./plugins/bad-manifest"]
+    assert "Configuration Change Preview" in response
 
 
 @pytest.mark.asyncio
-async def test_apply_config_change_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
-    """Confirmed config apply should keep runtime validation in the invalid-config channel."""
+async def test_apply_config_change_tolerates_invalid_plugin_manifest(tmp_path: Path) -> None:
+    """Confirmed config apply should keep working when an unrelated plugin is broken."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -668,8 +670,40 @@ async def test_apply_config_change_returns_invalid_plugin_manifest_error(tmp_pat
         _runtime_paths_for_config(config_path),
     )
 
-    assert "Invalid configuration" in response
-    assert "Invalid plugin name" in response
+    assert "Configuration updated successfully" in response
+    saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved_config["defaults"]["markdown"] is False
+    assert saved_config["plugins"] == [{"path": "./plugins/bad-name"}]
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_does_not_persist_synthesized_connections(tmp_path: Path) -> None:
+    """Confirmed config apply should edit the authored config view, not runtime-synthesized defaults."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "default": {
+                        "provider": "gemini",
+                        "id": "gemini-2.5-flash",
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response = await apply_config_change(
+        "defaults.markdown",
+        False,
+        _runtime_paths_for_config(config_path),
+    )
+
+    assert "Configuration updated successfully" in response
+    saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved_config["defaults"]["markdown"] is False
+    assert "connections" not in saved_config
 
 
 @pytest.mark.asyncio

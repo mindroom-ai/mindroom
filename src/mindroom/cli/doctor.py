@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -16,10 +17,13 @@ from anthropic import APIStatusError
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
 from mindroom import constants
-from mindroom.constants import (
-    RuntimePaths,
-    env_key_for_provider,
+from mindroom.connections import (
+    ResolvedConnection,
+    connection_api_key,
+    connection_google_application_credentials_path,
+    resolve_connection,
 )
+from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
@@ -29,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.config.models import ModelConfig
+    from mindroom.constants import RuntimePaths
 
 from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, iter_config_validation_messages
 
@@ -46,6 +51,8 @@ def doctor() -> None:
     warnings = 0
 
     runtime_paths = _activate_cli_runtime()
+    with suppress(OSError):
+        sync_env_to_credentials(runtime_paths)
     config_path = runtime_paths.config_path
 
     # 1. Config file exists
@@ -54,7 +61,7 @@ def doctor() -> None:
     failed += f
     warnings += w
 
-    # 2+. Config validity + provider API key validation (skip if file missing)
+    # 2. Config validity (skip if file missing)
     if config_path.exists():
         config, p, f, w = _run_doctor_step(
             "Validating configuration...",
@@ -63,35 +70,47 @@ def doctor() -> None:
         passed += p
         failed += f
         warnings += w
-        if config is not None:
-            p, f, w = _run_doctor_step(
-                "Checking providers...",
-                lambda: _check_providers(config, runtime_paths=runtime_paths),
-            )
-            passed += p
-            failed += f
-            warnings += w
 
-            # 4. Memory LLM & embedder
-            p, f, w = _run_doctor_step(
-                "Checking memory config...",
-                lambda: _check_memory_config(config, runtime_paths=runtime_paths),
-            )
-            passed += p
-            failed += f
-            warnings += w
+    # 3. Storage directory writable
+    storage_ok = False
+    p, f, w = _run_doctor_step("Checking storage...", lambda: _check_storage_writable(runtime_paths))
+    passed += p
+    failed += f
+    warnings += w
+    storage_ok = f == 0
+
+    # 4+. Credential-backed config checks only work once storage is available.
+    if config_path.exists() and storage_ok and config is not None:
+        p, f, w = _run_doctor_step(
+            "Checking providers...",
+            lambda: _check_providers(config, runtime_paths=runtime_paths),
+        )
+        passed += p
+        failed += f
+        warnings += w
+
+        # 4. Memory LLM & embedder
+        p, f, w = _run_doctor_step(
+            "Checking memory config...",
+            lambda: _check_memory_config(config, runtime_paths=runtime_paths),
+        )
+        passed += p
+        failed += f
+        warnings += w
+
+        p, f, w = _run_doctor_step(
+            "Checking voice config...",
+            lambda: _check_voice_config(config, runtime_paths=runtime_paths),
+        )
+        passed += p
+        failed += f
+        warnings += w
 
     # 5. Matrix homeserver reachable
     p, f, w = _run_doctor_step(
         "Checking Matrix homeserver...",
         lambda: _check_matrix_homeserver(runtime_paths=runtime_paths),
     )
-    passed += p
-    failed += f
-    warnings += w
-
-    # 6. Storage directory writable
-    p, f, w = _run_doctor_step("Checking storage...", lambda: _check_storage_writable(runtime_paths))
     passed += p
     failed += f
     warnings += w
@@ -149,16 +168,37 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     "cerebras": "https://api.cerebras.ai/v1/models",
     "groq": "https://api.groq.com/openai/v1/models",
 }
+_OPENAI_TRANSCRIPTION_ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
 
 
-def _get_custom_base_url(config: Config, provider: str) -> str | None:
-    """Get custom base_url for a provider from model extra_kwargs, if any."""
-    for model in config.models.values():
-        if model.provider == provider and model.extra_kwargs:
-            base_url = model.extra_kwargs.get("base_url")
-            if base_url:
-                return base_url
-    return None
+def _model_base_url(model_config: ModelConfig) -> str | None:
+    """Get one model's custom base_url override, if any."""
+    extra_kwargs = model_config.extra_kwargs or {}
+    base_url = extra_kwargs.get("base_url")
+    if not isinstance(base_url, str):
+        return None
+    normalized = base_url.strip()
+    return normalized or None
+
+
+def _doctor_connection_api_key(
+    connection: ResolvedConnection,
+    *,
+    label: str,
+) -> tuple[str | None, tuple[int, int, int] | None]:
+    """Return one connection API key, or the terminal result for auth-free/missing-key cases."""
+    if connection.auth_kind == "none":
+        console.print(
+            f"[green]✓[/green] {label} connection '{connection.connection_id}' auth-free (no key required)",
+        )
+        return None, (1, 0, 0)
+
+    api_key = connection_api_key(connection)
+    if api_key is None:
+        console.print(f"[red]✗[/red] {label} connection '{connection.connection_id}' has no API key")
+        return None, (0, 1, 0)
+
+    return api_key, None
 
 
 def _http_check(
@@ -257,6 +297,29 @@ def _validate_openai_embeddings_endpoint(
     return True, ""
 
 
+def _validate_openai_transcriptions_endpoint(
+    api_key: str,
+    base_url: str | None,
+    model: str,
+) -> tuple[bool | None, str]:
+    """Validate an OpenAI-compatible STT endpoint with the runtime request path."""
+    url = f"{base_url.rstrip('/')}/v1/audio/transcriptions" if base_url else _OPENAI_TRANSCRIPTION_ENDPOINT
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    files = {"file": ("doctor.wav", b"RIFF\x00\x00\x00\x00WAVE", "audio/wav")}
+    form_data = {"model": model}
+
+    try:
+        resp = httpx.post(url, headers=headers, files=files, data=form_data, timeout=10)
+    except httpx.HTTPError as exc:
+        return None, str(exc)
+
+    if resp.status_code in {200, 400, 415, 422}:
+        return True, ""
+    if resp.status_code in {401, 403, 404, 405}:
+        return False, f"HTTP {resp.status_code}"
+    return None, f"HTTP {resp.status_code}"
+
+
 def _validate_provider_key(
     provider: str,
     api_key: str,
@@ -288,11 +351,24 @@ def _validate_provider_key(
     return _http_check(url, headers)
 
 
-def _validate_vertexai_claude_connection(
+def _validate_vertexai_claude_connection(  # noqa: C901, PLR0911, PLR0912
+    config: Config,
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
+    try:
+        connection = resolve_connection(
+            config,
+            provider=model_config.provider,
+            purpose="chat_model",
+            connection_name=model_config.connection,
+            runtime_paths=runtime_paths,
+        )
+    except ValueError as exc:
+        return False, str(exc)
+
+    google_application_credentials = connection_google_application_credentials_path(connection)
     extra_kwargs = dict(model_config.extra_kwargs or {})
     project_id = extra_kwargs.get("project_id") or runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
     region = extra_kwargs.get("region") or runtime_paths.env_value("CLOUD_ML_REGION")
@@ -308,6 +384,9 @@ def _validate_vertexai_claude_connection(
     extra_kwargs.setdefault("region", region)
     extra_kwargs.setdefault("timeout", 10)
 
+    previous_google_application_credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if google_application_credentials is not None:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
     try:
         model = VertexAIClaude(id=model_config.id, **extra_kwargs)
         request_kwargs = model.get_request_params().copy()
@@ -327,6 +406,12 @@ def _validate_vertexai_claude_connection(
         return False, str(exc)
     except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
         return None, str(exc)
+    finally:
+        if google_application_credentials is not None:
+            if previous_google_application_credentials is None:
+                os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+            else:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = previous_google_application_credentials
 
     return True, ""
 
@@ -358,10 +443,9 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     passed = 0
     failed = 0
     warnings = 0
-    validated_keys: set[str] = set()
 
     for provider in sorted(provider_models):
-        p, f, w = _check_single_provider(provider, config, validated_keys, runtime_paths)
+        p, f, w = _check_single_provider(provider, config, runtime_paths)
         passed += p
         failed += f
         warnings += w
@@ -390,24 +474,26 @@ def _print_validation(
 def _check_single_provider(
     provider: str,
     config: Config,
-    validated_keys: set[str],
     runtime_paths: RuntimePaths,
 ) -> tuple[int, int, int]:
     """Validate a single provider. Returns (passed, failed, warnings)."""
+    provider_model_configs = [
+        (model_name, model_config)
+        for model_name, model_config in config.models.items()
+        if model_config.provider == provider
+    ]
     if provider == "vertexai_claude":
         passed = 0
         failed = 0
         warnings = 0
-        for model_config in config.models.values():
-            if model_config.provider != provider:
-                continue
-            valid, detail = _validate_vertexai_claude_connection(model_config, runtime_paths)
+        for model_name, model_config in provider_model_configs:
+            valid, detail = _validate_vertexai_claude_connection(config, model_config, runtime_paths)
             p, f, w = _print_validation(
                 valid,
                 detail,
-                f"{provider} connection valid for {model_config.id}",
-                f"{provider} connection failed for {model_config.id}",
-                f"{provider}: could not validate connection for {model_config.id}",
+                f"{provider} connection valid for model '{model_name}' ({model_config.id})",
+                f"{provider} connection failed for model '{model_name}' ({model_config.id})",
+                f"{provider}: could not validate connection for model '{model_name}' ({model_config.id})",
             )
             passed += p
             failed += f
@@ -426,29 +512,53 @@ def _check_single_provider(
             f"{provider}: could not reach {host}",
         )
 
-    env_key = env_key_for_provider(provider)
-    if not env_key:
-        return 0, 0, 0
+    passed = 0
+    failed = 0
+    warnings = 0
+    validated_targets: set[tuple[str, str | None]] = set()
 
-    # google and gemini share GOOGLE_API_KEY — validate once
-    if env_key in validated_keys:
-        return 0, 0, 0
-    validated_keys.add(env_key)
+    for model_name, model_config in provider_model_configs:
+        try:
+            connection = resolve_connection(
+                config,
+                provider=provider,
+                purpose="chat_model",
+                connection_name=model_config.connection,
+                runtime_paths=runtime_paths,
+            )
+        except ValueError as exc:
+            console.print(f"[red]✗[/red] {provider} model '{model_name}' connection error ({exc})")
+            failed += 1
+            continue
 
-    api_key = runtime_paths.env_value(env_key)
-    if not api_key:
-        console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, 1
+        base_url = _model_base_url(model_config)
+        validation_target = (connection.connection_id, base_url)
+        if validation_target in validated_targets:
+            continue
+        validated_targets.add(validation_target)
 
-    base_url = _get_custom_base_url(config, provider)
-    valid, detail = _validate_provider_key(provider, api_key, base_url)
-    return _print_validation(
-        valid,
-        detail,
-        f"{provider} API key valid",
-        f"{provider} API key invalid",
-        f"{provider}: could not validate key",
-    )
+        api_key, key_result = _doctor_connection_api_key(connection, label=provider)
+        if key_result is not None:
+            p, f, w = key_result
+            passed += p
+            failed += f
+            warnings += w
+            continue
+        assert api_key is not None
+
+        valid, detail = _validate_provider_key(provider, api_key, base_url)
+        p, f, w = _print_validation(
+            valid,
+            detail,
+            f"{provider} connection '{connection.connection_id}' valid",
+            f"{provider} connection '{connection.connection_id}' invalid",
+            f"{provider}: could not validate connection '{connection.connection_id}'",
+        )
+        passed += p
+        failed += f
+        warnings += w
+
+    return passed, failed, warnings
 
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -501,13 +611,20 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         )
 
     llm_model = config.memory.llm.config.get("model", "default")
-    env_key = env_key_for_provider(llm_provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
-    if env_key and not api_key:
-        console.print(
-            f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
+    try:
+        connection = resolve_connection(
+            config,
+            provider=llm_provider,
+            purpose="memory_llm",
+            connection_name=config.memory.llm.connection,
+            runtime_paths=runtime_paths,
         )
-        return 0, 0, 1
+    except ValueError as exc:
+        console.print(f"[red]✗[/red] Memory LLM connection error ({exc})")
+        return 0, 1, 0
+    api_key, key_result = _doctor_connection_api_key(connection, label=f"Memory LLM ({llm_provider})")
+    if key_result is not None:
+        return key_result
     base_url = llm_host
     valid, detail = _validate_provider_key(llm_provider, api_key or "", base_url)
     return _print_validation(
@@ -543,13 +660,20 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"Memory embedder: sentence_transformers/{emb.config.model} could not validate",
         )
 
-    env_key = env_key_for_provider(emb.provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
-    if env_key and not api_key:
-        console.print(
-            f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
+    try:
+        connection = resolve_connection(
+            config,
+            provider=emb.provider,
+            purpose="embedder",
+            connection_name=emb.config.connection,
+            runtime_paths=runtime_paths,
         )
-        return 0, 0, 1
+    except ValueError as exc:
+        console.print(f"[red]✗[/red] Memory embedder connection error ({exc})")
+        return 0, 1, 0
+    api_key, key_result = _doctor_connection_api_key(connection, label=f"Memory embedder ({emb.provider})")
+    if key_result is not None:
+        return key_result
 
     if emb.provider == "openai" and emb.config.host:
         valid, detail = _validate_openai_embeddings_endpoint(api_key or "", emb.config.host, emb.config.model)
@@ -569,6 +693,52 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         f"Memory embedder: {emb.provider}/{emb.config.model} API key valid",
         f"Memory embedder: {emb.provider}/{emb.config.model} API key invalid",
         f"Memory embedder: {emb.provider}/{emb.config.model} could not validate",
+    )
+
+
+def _check_voice_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check voice STT configuration. Returns (passed, failed, warnings)."""
+    if not config.voice.enabled:
+        console.print("[green]✓[/green] Voice: disabled")
+        return 1, 0, 0
+
+    stt_provider = config.voice.stt.provider
+    if stt_provider == "ollama":
+        host = config.voice.stt.host or _get_ollama_host(config, runtime_paths=runtime_paths)
+        valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
+        return _print_validation(
+            valid,
+            detail,
+            f"Voice STT: ollama reachable ({host})",
+            f"Voice STT: ollama unreachable ({host})",
+            f"Voice STT: could not reach ollama ({host})",
+        )
+
+    try:
+        connection = resolve_connection(
+            config,
+            provider=stt_provider,
+            purpose="voice_stt",
+            connection_name=config.voice.stt.connection,
+            runtime_paths=runtime_paths,
+        )
+    except ValueError as exc:
+        console.print(f"[red]✗[/red] Voice STT connection error ({exc})")
+        return 0, 1, 0
+
+    api_key, key_result = _doctor_connection_api_key(connection, label=f"Voice STT ({stt_provider})")
+    if key_result is not None:
+        return key_result
+    assert api_key is not None
+
+    base_url = config.voice.stt.host
+    valid, detail = _validate_openai_transcriptions_endpoint(api_key, base_url, config.voice.stt.model)
+    return _print_validation(
+        valid,
+        _with_local_network_hint(detail, base_url),
+        f"Voice STT: {stt_provider}/{config.voice.stt.model} endpoint reachable",
+        f"Voice STT: {stt_provider}/{config.voice.stt.model} endpoint failed",
+        f"Voice STT: {stt_provider}/{config.voice.stt.model} could not reach transcription endpoint",
     )
 
 

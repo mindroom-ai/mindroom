@@ -119,9 +119,21 @@ def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     """Return the runtime config visible inside one sandbox runner."""
     if runtime_paths.config_path.exists():
         if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
-            return load_config(runtime_paths)
+            try:
+                return load_config(runtime_paths)
+            except ConfigRuntimeValidationError as exc:
+                if not isinstance(exc.__cause__, PluginValidationError):
+                    raise
+                if "Configured plugin path does not exist" in str(exc.__cause__):
+                    raise
+                return load_config(runtime_paths, tolerate_plugin_load_errors=True)
         return _dedicated_worker_runtime_config_or_empty(runtime_paths)
-    return Config.validate_with_runtime({}, runtime_paths)
+    return Config.validate_with_runtime(
+        {},
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+        strict_connection_validation=True,
+    )
 
 
 def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
@@ -131,14 +143,17 @@ def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Co
 
     tool_validation_snapshot = _upstream_tool_validation_snapshot_from_env()
     if not tool_validation_snapshot:
-        return load_config(runtime_paths)
+        return load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
     # Dedicated workers only need the authored config shape plus the subset of
     # plugin entries that actually exist in that runtime filesystem. Upstream
     # validation remains authoritative for the full configured tool surface.
     config = Config.model_validate(
         _normalized_config_data(data),
-        context={"runtime_paths": runtime_paths},
+        context={
+            "runtime_paths": runtime_paths,
+            "strict_connection_validation": True,
+        },
     )
     config = _config_with_available_plugins(config, runtime_paths)
 

@@ -24,9 +24,10 @@ from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
+from mindroom.connections import connection_api_key, resolve_connection
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_ollama_host
 from mindroom.embeddings import (
     MindRoomOpenAIEmbedder,
     create_sentence_transformers_embedder,
@@ -139,9 +140,16 @@ def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
     embedder_config = config.memory.embedder.config
 
     if provider == "openai":
+        resolved_connection = resolve_connection(
+            config,
+            provider=provider,
+            purpose="embedder",
+            connection_name=embedder_config.connection,
+            runtime_paths=runtime_paths,
+        )
         return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
+            api_key=connection_api_key(resolved_connection),
             base_url=embedder_config.host,
             dimensions=embedder_config.dimensions,
         )

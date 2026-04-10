@@ -35,6 +35,21 @@ from mindroom.workers.models import WorkerHandle
 TEST_WORKER_AUTH = "token"
 
 
+def _openai_test_connections() -> dict[str, dict[str, str]]:
+    return {
+        "openai/default": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+        "openai/embeddings": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+        "openai/stt": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+    }
+
+
+def _with_openai_connections(payload: dict[str, Any]) -> dict[str, Any]:
+    authored_connections = payload.get("connections")
+    if isinstance(authored_connections, dict):
+        return {**payload, "connections": {**_openai_test_connections(), **authored_connections}}
+    return {**payload, "connections": _openai_test_connections()}
+
+
 def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
     return constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -50,6 +65,14 @@ def _config_with_worker_scope(
 ) -> Config:
     config = Config.model_validate(
         {
+            "connections": {
+                **_openai_test_connections(),
+                "google/oauth": {
+                    "provider": "google",
+                    "service": "google_oauth_client",
+                    "auth_kind": "oauth_client",
+                },
+            },
             "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
             "agents": {
                 "general": {
@@ -72,6 +95,7 @@ def _config_with_worker_scope(
 
 def _authored_config_payload(agent_name: str) -> dict[str, Any]:
     return {
+        "connections": _openai_test_connections(),
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
         "agents": {
@@ -371,21 +395,25 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     )
     first_runtime.config_path.write_text(
         yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
-                "defaults": {"markdown": True},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
+                    "defaults": {"markdown": True},
+                },
+            ),
         ),
         encoding="utf-8",
     )
     second_runtime.config_path.write_text(
         yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "agents": {"second": {"display_name": "Second", "role": "r", "rooms": ["lobby"]}},
-                "defaults": {"markdown": True},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "agents": {"second": {"display_name": "Second", "role": "r", "rooms": ["lobby"]}},
+                    "defaults": {"markdown": True},
+                },
+            ),
         ),
         encoding="utf-8",
     )
@@ -406,11 +434,13 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     runtime_two = _runtime_paths(tmp_path, process_env={"MINDROOM_NAMESPACE": "ns12"})
     runtime_one.config_path.write_text(
         yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
-                "defaults": {"markdown": True},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
+                    "defaults": {"markdown": True},
+                },
+            ),
         ),
         encoding="utf-8",
     )
@@ -504,21 +534,25 @@ def test_load_config_from_file_ignores_runtime_mismatches_after_api_runtime_swap
     )
     first_runtime.config_path.write_text(
         yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"first": {"display_name": "First", "role": "old", "rooms": []}},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {"first": {"display_name": "First", "role": "old", "rooms": []}},
+                },
+            ),
         ),
         encoding="utf-8",
     )
     second_runtime.config_path.write_text(
         yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"second": {"display_name": "Second", "role": "new", "rooms": []}},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {"second": {"display_name": "Second", "role": "new", "rooms": []}},
+                },
+            ),
         ),
         encoding="utf-8",
     )
@@ -655,11 +689,13 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     config_path = tmp_path / "custom-config.yaml"
     config_path.write_text(
         yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"only_alt": {"display_name": "OnlyAlt", "role": "alt", "rooms": []}},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {"only_alt": {"display_name": "OnlyAlt", "role": "alt", "rooms": []}},
+                },
+            ),
         ),
         encoding="utf-8",
     )
@@ -1704,9 +1740,15 @@ def test_google_connect_uses_pending_oauth_state(
             assert redirect_uri
             return _FakeFlow()
 
+    def fake_get_oauth_credentials(_runtime_paths: object, *, config: object | None = None) -> dict[str, object]:
+        assert config is not None
+        return {
+            "web": {"client_id": "client-id", "client_secret": "client-secret"},
+        }
+
     monkeypatch.setattr(
         "mindroom.api.google_integration._get_oauth_credentials",
-        lambda _runtime_paths: {"web": {"client_id": "client-id", "client_secret": "client-secret"}},
+        fake_get_oauth_credentials,
     )
     monkeypatch.setattr(
         "mindroom.api.google_integration._ensure_google_packages",
@@ -1750,10 +1792,9 @@ def test_google_connect_rejects_draft_execution_scope_override(api_key_client: T
 
 def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
     api_key_client: TestClient,
-    temp_config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Google configure should write to the request runtime `.env` and refresh app runtime paths."""
+    """Google configure should save the shared OAuth client and refresh app runtime paths."""
     config = _config_with_worker_scope("shared")
     captured_client_config: dict[str, Any] = {}
 
@@ -1797,11 +1838,19 @@ def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
     )
     assert configure_response.status_code == 200
 
-    env_path = temp_config_file.parent / ".env"
-    env_contents = env_path.read_text(encoding="utf-8")
-    assert "GOOGLE_CLIENT_ID=configured-client-id" in env_contents
-    assert f"GOOGLE_CLIENT_SECRET={configured_client_secret}" in env_contents
-    assert "GOOGLE_PROJECT_ID=configured-project" in env_contents
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    oauth_client = (
+        get_runtime_credentials_manager(runtime_paths)
+        .shared_manager()
+        .load_credentials(
+            "google_oauth_client",
+        )
+    )
+    assert oauth_client == {
+        "client_id": "configured-client-id",
+        "client_secret": configured_client_secret,
+        "_source": "ui",
+    }
 
     monkeypatch.setattr(
         "mindroom.api.google_integration._ensure_google_packages",
@@ -1828,7 +1877,7 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
     api_key_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """Google reset should clear the runtime `.env` and drop the refreshed runtime credentials."""
+    """Google reset should clear shared OAuth credentials and persisted Google tokens."""
     config = _config_with_worker_scope("shared")
     env_path = temp_config_file.parent / ".env"
 
@@ -1841,22 +1890,23 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
         },
     )
     assert configure_response.status_code == 200
-    env_path.write_text(env_path.read_text(encoding="utf-8") + "UNRELATED=value\n", encoding="utf-8")
+    env_path.write_text("UNRELATED=value\n", encoding="utf-8")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    runtime_credentials = get_runtime_credentials_manager(runtime_paths)
+    runtime_credentials.save_credentials(
+        "google",
+        {"token": "google-token", "_source": "ui"},
+    )
 
-    with patch("mindroom.api.google_integration.get_runtime_credentials_manager") as mock_get_credentials_manager:
-        reset_response = api_key_client.post(
-            "/api/google/reset",
-            headers={"Authorization": "Bearer test-key"},
-        )
+    reset_response = api_key_client.post(
+        "/api/google/reset",
+        headers={"Authorization": "Bearer test-key"},
+    )
 
     assert reset_response.status_code == 200
-    mock_get_credentials_manager.return_value.delete_credentials.assert_called_once_with("google")
-    env_contents = env_path.read_text(encoding="utf-8")
-    assert "GOOGLE_CLIENT_ID=" not in env_contents
-    assert "GOOGLE_CLIENT_SECRET=" not in env_contents
-    assert "GOOGLE_PROJECT_ID=" not in env_contents
-    assert "GOOGLE_REDIRECT_URI=" not in env_contents
-    assert "UNRELATED=value" in env_contents
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_client") is None
+    assert runtime_credentials.load_credentials("google") is None
+    assert env_path.read_text(encoding="utf-8") == "UNRELATED=value\n"
 
     _publish_committed_runtime_config(
         api_key_client.app,
@@ -1869,7 +1919,76 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
     )
 
     assert connect_response.status_code == 503
-    assert "GOOGLE_CLIENT_ID" in connect_response.json()["detail"]
+    assert "google/oauth client connection" in connect_response.json()["detail"]
+
+
+def test_google_configure_returns_503_when_oauth_connection_missing(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Google configure should surface missing google/oauth setup as a 503."""
+    config = _authored_config_payload("general")
+    temp_config_file.write_text(yaml.dump(config), encoding="utf-8")
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config,
+    )
+
+    response = api_key_client.post(
+        "/api/google/configure",
+        headers={"Authorization": "Bearer test-key"},
+        json={
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Google OAuth is not configured. Please configure a google/oauth client connection first."
+    )
+    runtime_credentials = get_runtime_credentials_manager(main._app_runtime_paths(api_key_client.app))
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_client") is None
+
+
+def test_google_reset_clears_tokens_and_returns_success_when_oauth_connection_missing(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Google reset should still report success when google/oauth config is gone."""
+    config = _authored_config_payload("general")
+    temp_config_file.write_text(yaml.dump(config), encoding="utf-8")
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config,
+    )
+
+    runtime_credentials = get_runtime_credentials_manager(main._app_runtime_paths(api_key_client.app))
+    runtime_credentials.shared_manager().save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+            "_source": "ui",
+        },
+    )
+    runtime_credentials.save_credentials("google", {"token": "google-token", "_source": "ui"})
+
+    response = api_key_client.post(
+        "/api/google/reset",
+        headers={"Authorization": "Bearer test-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Google integration reset successfully"}
+    assert runtime_credentials.load_credentials("google") is None
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_client") == {
+        "client_id": "configured-client-id",
+        "client_secret": "configured-client-secret",
+        "_source": "ui",
+    }
 
 
 def test_google_runtime_refresh_keeps_config_cache_live(
@@ -1914,6 +2033,56 @@ def test_google_runtime_refresh_keeps_config_cache_live(
     assert "test_agent" in after_reset.json()["agents"]
 
 
+def test_google_configure_and_reset_use_configured_oauth_connection_service(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Google configure/reset should target the configured google/oauth backing service."""
+    config = _config_with_worker_scope("shared").model_dump()
+    config["connections"] = {
+        **_openai_test_connections(),
+        "google/oauth": {
+            "provider": "google",
+            "service": "google_oauth_custom",
+            "auth_kind": "oauth_client",
+        },
+    }
+    temp_config_file.write_text(yaml.dump(config), encoding="utf-8")
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config,
+    )
+
+    configure_response = api_key_client.post(
+        "/api/google/configure",
+        headers={"Authorization": "Bearer test-key"},
+        json={
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+        },
+    )
+
+    assert configure_response.status_code == 200
+    runtime_credentials = get_runtime_credentials_manager(main._app_runtime_paths(api_key_client.app))
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_custom") == {
+        "client_id": "configured-client-id",
+        "client_secret": "configured-client-secret",
+        "_source": "ui",
+    }
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_client") is None
+
+    runtime_credentials.save_credentials("google", {"token": "google-token", "_source": "ui"})
+    reset_response = api_key_client.post(
+        "/api/google/reset",
+        headers={"Authorization": "Bearer test-key"},
+    )
+
+    assert reset_response.status_code == 200
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_custom") is None
+    assert runtime_credentials.load_credentials("google") is None
+
+
 def test_google_configure_surfaces_runtime_validation_failures(
     api_key_client: TestClient,
     temp_config_file: Path,
@@ -1928,12 +2097,14 @@ def test_google_configure_surfaces_runtime_validation_failures(
 
     temp_config_file.write_text(
         yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "defaults": {"markdown": True},
-                "mindroom_user": {"username": "mindroom_router"},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "defaults": {"markdown": True},
+                    "mindroom_user": {"username": "mindroom_router"},
+                },
+            ),
         ),
         encoding="utf-8",
     )
@@ -2002,13 +2173,11 @@ def test_google_configure_rejects_stale_runtime_refresh_after_runtime_swap(tmp_p
     assert response.status_code == 409
     assert main._app_runtime_paths(main.app) == runtime_b
     assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
-    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
-    assert env_contents == "UNRELATED=value\n"
-    assert "GOOGLE_CLIENT_ID=" not in env_contents
+    assert get_runtime_credentials_manager(runtime_a).shared_manager().load_credentials("google_oauth_client") is None
 
 
 def test_google_reset_rejects_stale_runtime_refresh_without_mutating_old_runtime(tmp_path: Path) -> None:
-    """Google reset should fail stale before deleting credentials or editing the older runtime `.env`."""
+    """Google reset should fail stale before deleting credentials from the older runtime."""
     runtime_a = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "first.yaml",
         storage_path=tmp_path / "first-store",
@@ -2021,11 +2190,15 @@ def test_google_reset_rejects_stale_runtime_refresh_without_mutating_old_runtime
     )
     payload_a = _authored_config_payload("old")
     payload_b = _authored_config_payload("new")
-    runtime_a.env_path.parent.mkdir(parents=True, exist_ok=True)
-    runtime_a.env_path.write_text(
-        "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n",
-        encoding="utf-8",
+    get_runtime_credentials_manager(runtime_a).shared_manager().save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "client-a",
+            "client_secret": "secret-a",
+            "_source": "ui",
+        },
     )
+    get_runtime_credentials_manager(runtime_a).save_credentials("google", {"token": "google-token", "_source": "ui"})
     original_require_request_snapshot = google_integration._require_request_snapshot
 
     def _swap_after_request_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
@@ -2050,9 +2223,16 @@ def test_google_reset_rejects_stale_runtime_refresh_without_mutating_old_runtime
     assert response.status_code == 409
     assert main._app_runtime_paths(main.app) == runtime_b
     assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
-    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
-    assert env_contents == "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n"
     mock_get_credentials_manager.assert_not_called()
+    assert get_runtime_credentials_manager(runtime_a).shared_manager().load_credentials("google_oauth_client") == {
+        "client_id": "client-a",
+        "client_secret": "secret-a",
+        "_source": "ui",
+    }
+    assert get_runtime_credentials_manager(runtime_a).load_credentials("google") == {
+        "token": "google-token",
+        "_source": "ui",
+    }
 
 
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
@@ -2433,30 +2613,32 @@ def test_save_config_preserves_explicit_compaction_model_null_clear(
     temp_config_file: Path,
 ) -> None:
     """Config save/load should preserve explicit null clears for inherited compaction models."""
-    new_config = {
-        "models": {
-            "default": {"provider": "openai", "id": "test-model", "context_window": 48_000},
-            "summary": {"provider": "openai", "id": "summary-model", "context_window": 32_000},
-        },
-        "defaults": {
-            "compaction": {
-                "enabled": True,
-                "model": "summary",
+    new_config = _with_openai_connections(
+        {
+            "models": {
+                "default": {"provider": "openai", "id": "test-model", "context_window": 48_000},
+                "summary": {"provider": "openai", "id": "summary-model", "context_window": 32_000},
             },
-        },
-        "agents": {
-            "new_agent": {
-                "display_name": "New Agent",
-                "role": "New role",
-                "tools": [],
-                "instructions": [],
-                "rooms": ["new_room"],
+            "defaults": {
                 "compaction": {
-                    "model": None,
+                    "enabled": True,
+                    "model": "summary",
+                },
+            },
+            "agents": {
+                "new_agent": {
+                    "display_name": "New Agent",
+                    "role": "New role",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["new_room"],
+                    "compaction": {
+                        "model": None,
+                    },
                 },
             },
         },
-    }
+    )
 
     save_response = test_client.put("/api/config/save", json=new_config)
     assert save_response.status_code == 200
@@ -2480,11 +2662,13 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+                },
+            ),
         ),
         encoding="utf-8",
     )
@@ -2510,12 +2694,14 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     with TestClient(main.app) as client:
         response = client.put(
             "/api/config/save",
-            json={
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
-                "mindroom_user": {"username": "mindroom_assistant_prod1", "display_name": "Owner"},
-            },
+            json=_with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+                    "mindroom_user": {"username": "mindroom_assistant_prod1", "display_name": "Owner"},
+                },
+            ),
         )
 
     assert response.status_code == 422
@@ -2523,11 +2709,11 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     assert "mindroom_user" not in saved_config
 
 
-def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
+def test_save_config_tolerates_plugin_with_invalid_dedicated_hooks_module(
     test_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """API save should reject plugin configs whose dedicated hooks module cannot load."""
+    """API save should preserve degraded plugin behavior for broken hooks modules."""
     plugin_root = temp_config_file.parent / "plugins" / "broken-hooks"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -2546,19 +2732,23 @@ def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
 
     response = test_client.put(
         "/api/config/save",
-        json={
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
-            "plugins": ["./plugins/broken-hooks"],
-        },
+        json=_with_openai_connections(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+                "plugins": ["./plugins/broken-hooks"],
+            },
+        ),
     )
 
-    assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail[0]["loc"] == ["config"]
-    assert "hooks.py" in detail[0]["msg"]
-    assert detail[0]["type"] == "value_error"
+    assert response.status_code == 200
+    saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    assert saved_config["plugins"] == [{"path": "./plugins/broken-hooks"}]
+
+    load_response = test_client.post("/api/config/load")
+    assert load_response.status_code == 200
+    assert load_response.json()["plugins"] == [{"path": "./plugins/broken-hooks"}]
 
 
 def test_save_config_can_recover_from_invalid_reload(
@@ -2570,19 +2760,21 @@ def test_save_config_can_recover_from_invalid_reload(
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
     assert main._load_config_from_file(runtime_paths, main.app) is False
 
-    valid_config = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {
-            "recovered_agent": {
-                "display_name": "Recovered Agent",
-                "role": "Recovered role",
-                "tools": [],
-                "instructions": [],
-                "rooms": ["recovery_room"],
+    valid_config = _with_openai_connections(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {
+                "recovered_agent": {
+                    "display_name": "Recovered Agent",
+                    "role": "Recovered role",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["recovery_room"],
+                },
             },
         },
-    }
+    )
 
     response = test_client.put("/api/config/save", json=valid_config)
 
@@ -2637,19 +2829,21 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
     assert main._load_config_from_file(runtime_paths, main.app) is False
 
     valid_source = yaml.safe_dump(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {
-                "recovered_agent": {
-                    "display_name": "Recovered Agent",
-                    "role": "Recovered role",
-                    "tools": [],
-                    "instructions": [],
-                    "rooms": ["recovery_room"],
+        _with_openai_connections(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {
+                    "recovered_agent": {
+                        "display_name": "Recovered Agent",
+                        "role": "Recovered role",
+                        "tools": [],
+                        "instructions": [],
+                        "rooms": ["recovery_room"],
+                    },
                 },
             },
-        },
+        ),
         sort_keys=True,
     )
 
@@ -2743,19 +2937,23 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
     """Concurrent raw validation should not let one request read another request's temp file."""
     runtime_paths = _runtime_paths(tmp_path)
     first_source = yaml.safe_dump(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}},
-        },
+        _with_openai_connections(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}},
+            },
+        ),
         sort_keys=True,
     )
     second_source = yaml.safe_dump(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}},
-        },
+        _with_openai_connections(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}},
+            },
+        ),
         sort_keys=True,
     )
     first_entered = threading.Event()
@@ -2813,11 +3011,13 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
             process_env={"MINDROOM_NAMESPACE": "prod1"},
         ),
     )
-    original_config = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
-    }
+    original_config = _with_openai_connections(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+        },
+    )
     context = main._app_context(main.app)
     context.config_data = yaml.safe_load(yaml.safe_dump(original_config))
 
@@ -2854,8 +3054,8 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
     assert context.config_data == original_config
 
 
-def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path: Path) -> None:
-    """API config writes should surface invalid plugin manifests as user config errors."""
+def test_run_config_write_tolerates_invalid_plugin_manifest_name(tmp_path: Path) -> None:
+    """Internal API config writes should keep working when a plugin manifest is broken."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -2867,24 +3067,23 @@ def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path:
         constants.resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
     )
     context = main._app_context(main.app)
-    context.config_data = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-        "plugins": [],
-    }
+    context.config_data = _with_openai_connections(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            "plugins": [],
+        },
+    )
+    context.config_load_result = main.ConfigLoadResult(success=True)
 
-    with pytest.raises(HTTPException) as exc_info:
-        main._run_config_write(
-            main.app,
-            lambda candidate_config: candidate_config.update({"plugins": ["./plugins/bad-name"]}),
-            error_prefix="Failed to save configuration",
-        )
+    main._run_config_write(
+        main.app,
+        lambda candidate_config: candidate_config.update({"plugins": ["./plugins/bad-name"]}),
+        error_prefix="Failed to save configuration",
+    )
 
-    assert exc_info.value.status_code == 422
-    assert exc_info.value.detail[0]["loc"] == ("config",)
-    assert "Invalid plugin name" in str(exc_info.value.detail[0]["msg"])
-    assert exc_info.value.detail[0]["type"] == "value_error"
+    assert main._app_context(main.app).config_data["plugins"] == [{"path": "./plugins/bad-name"}]
 
 
 def test_run_config_write_checks_current_config_load_result_after_acquiring_lock(tmp_path: Path) -> None:
@@ -2895,11 +3094,13 @@ def test_run_config_write_checks_current_config_load_result_after_acquiring_lock
     )
     main.initialize_api_app(main.app, runtime_paths)
     context = main._app_context(main.app)
-    original_config = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
-    }
+    original_config = _with_openai_connections(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+        },
+    )
     context.config_data = yaml.safe_load(yaml.safe_dump(original_config))
     context.config_load_result = main.ConfigLoadResult(success=True)
 
@@ -2973,12 +3174,14 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     """API config loads should mirror runtime degraded mode for missing plugins."""
     temp_config_file.write_text(
         yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "plugins": ["./plugins/missing"],
-            },
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "router": {"model": "default"},
+                    "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                    "plugins": ["./plugins/missing"],
+                },
+            ),
         ),
         encoding="utf-8",
     )
@@ -2992,6 +3195,57 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     assert response.status_code == 200
     assert response.json()["agents"]["assistant"]["display_name"] == "Assistant"
     assert response.json()["plugins"] == [{"path": "./plugins/missing"}]
+
+
+def test_api_config_save_accepts_missing_plugin_path_in_degraded_mode(temp_config_file: Path) -> None:
+    """API config writes should use the same degraded plugin tolerance as reads."""
+    authored_config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+        "plugins": ["./plugins/missing"],
+    }
+    temp_config_file.write_text(yaml.safe_dump(authored_config), encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
+    assert main._load_config_from_file(runtime_paths, main.app) is True
+    client = TestClient(main.app)
+
+    response = client.put(
+        "/api/config/save",
+        json={
+            **authored_config,
+            "agents": {"assistant": {"display_name": "Assistant", "role": "updated"}},
+        },
+    )
+
+    assert response.status_code == 200
+    saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    assert saved_config["agents"]["assistant"]["role"] == "updated"
+    assert saved_config["plugins"] == [{"path": "./plugins/missing"}]
+
+
+def test_api_raw_config_save_accepts_missing_plugin_path_in_degraded_mode(temp_config_file: Path) -> None:
+    """Raw config writes should use the same degraded plugin tolerance as reads."""
+    source = yaml.safe_dump(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            "plugins": ["./plugins/missing"],
+        },
+        sort_keys=True,
+    )
+    temp_config_file.write_text(source, encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
+    assert main._load_config_from_file(runtime_paths, main.app) is True
+    client = TestClient(main.app)
+
+    response = client.put("/api/config/raw", json={"source": source})
+
+    assert response.status_code == 200
+    assert temp_config_file.read_text(encoding="utf-8") == source
 
 
 def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) -> None:
@@ -3121,15 +3375,18 @@ def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Pat
     """API config loads should drop legacy null optional sections from authored config data."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-5.4\n"
-        "agents: {}\n"
-        "teams: null\n"
-        "plugins: null\n"
-        "router:\n"
-        "  model: default\n",
+        yaml.safe_dump(
+            _with_openai_connections(
+                {
+                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                    "agents": {},
+                    "teams": None,
+                    "plugins": None,
+                    "router": {"model": "default"},
+                },
+            ),
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
@@ -3148,13 +3405,15 @@ def test_run_config_write_omits_legacy_null_optional_sections(tmp_path: Path) ->
         main.app,
         constants.resolve_primary_runtime_paths(config_path=config_path, process_env={}),
     )
-    main._app_context(main.app).config_data = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {},
-        "teams": None,
-        "plugins": None,
-    }
+    main._app_context(main.app).config_data = _with_openai_connections(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {},
+            "teams": None,
+            "plugins": None,
+        },
+    )
 
     main._run_config_write(
         main.app,
@@ -3677,28 +3936,32 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
         storage_path=tmp_path / "second-store",
         process_env={"MINDROOM_API_KEY": "key-b"},
     )
-    payload_a = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "old",
-                "rooms": ["old-room"],
+    payload_a = _with_openai_connections(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "old",
+                    "rooms": ["old-room"],
+                },
             },
         },
-    }
-    payload_b = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-        "router": {"model": "default"},
-        "agents": {
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "new",
-                "rooms": ["new-room"],
+    )
+    payload_b = _with_openai_connections(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "new",
+                    "rooms": ["new-room"],
+                },
             },
         },
-    }
+    )
     original_read = main.read_api_committed_config
 
     def _swap_then_read(request: Request, reader: Callable[[dict[str, Any]], object]) -> object:

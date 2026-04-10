@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Brain } from 'lucide-react';
 
-import type { Config as MindRoomConfig } from '@/types/config';
+import { defaultConnectionIdForPurpose, type Config as MindRoomConfig } from '@/types/config';
 import { EditorPanel } from '@/components/shared/EditorPanel';
 import { FieldGroup } from '@/components/shared/FieldGroup';
 import { Input } from '@/components/ui/input';
@@ -52,6 +52,7 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     provider: 'openai',
     config: {
       model: 'text-embedding-3-small',
+      connection: '',
       host: '',
     },
   },
@@ -134,6 +135,11 @@ function parseBoolean(value: string): boolean {
   return value === 'true';
 }
 
+function normalizeOptionalConnection(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function providerHelperText(provider: string): string {
   if (provider === 'ollama') {
     return 'Local embeddings using Ollama';
@@ -154,6 +160,7 @@ function shouldShowHostField(provider: string): boolean {
 function defaultEmbedderConfig(provider: string): MemorySettings['embedder']['config'] {
   return {
     model: DEFAULT_MODELS[provider] || '',
+    connection: '',
     host: DEFAULT_HOSTS[provider] || '',
   };
 }
@@ -162,6 +169,11 @@ export function MemoryConfig() {
   const { config, updateMemoryConfig, saveConfig, isDirty, isLoading } = useConfigStore();
   const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
     normalizeMemorySettings(config?.memory)
+  );
+  const defaultEmbedderConnection = defaultConnectionIdForPurpose(
+    localConfig.embedder.provider,
+    'embedder',
+    config?.connections
   );
 
   useEffect(() => {
@@ -196,6 +208,19 @@ export function MemoryConfig() {
         config: {
           ...localConfig.embedder.config,
           model,
+        },
+      },
+    });
+  };
+
+  const handleConnectionChange = (connection: string) => {
+    applyMemoryConfig({
+      ...localConfig,
+      embedder: {
+        ...localConfig.embedder,
+        config: {
+          ...localConfig.embedder.config,
+          connection: normalizeOptionalConnection(connection),
         },
       },
     });
@@ -284,6 +309,16 @@ export function MemoryConfig() {
   };
 
   const handleSave = async () => {
+    updateMemoryConfig({
+      ...localConfig,
+      embedder: {
+        ...localConfig.embedder,
+        config: {
+          ...localConfig.embedder.config,
+          connection: normalizeOptionalConnection(localConfig.embedder.config.connection || ''),
+        },
+      },
+    });
     return saveConfig();
   };
 
@@ -390,6 +425,25 @@ export function MemoryConfig() {
               value={localConfig.embedder.config.model}
               onChange={e => handleModelChange(e.target.value)}
               placeholder={MODEL_PLACEHOLDERS[localConfig.embedder.provider] || 'Model name'}
+              className="transition-colors hover:border-ring focus:border-ring"
+            />
+          </FieldGroup>
+
+          <FieldGroup
+            label="Connection"
+            helperText={
+              defaultEmbedderConnection
+                ? `Leave empty to use ${defaultEmbedderConnection}.`
+                : 'No default connection is configured. Set an explicit connection id if this provider needs credentials.'
+            }
+            htmlFor="memory-embedder-connection"
+          >
+            <Input
+              id="memory-embedder-connection"
+              type="text"
+              value={localConfig.embedder.config.connection || ''}
+              onChange={e => handleConnectionChange(e.target.value)}
+              placeholder={defaultEmbedderConnection ?? 'explicit connection id'}
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
@@ -776,11 +830,15 @@ export function MemoryConfig() {
 
         {localConfig.backend !== 'file' &&
           localConfig.embedder.provider === 'openai' &&
-          !localConfig.embedder.config.host && (
+          !localConfig.embedder.config.connection &&
+          defaultEmbedderConnection && (
             <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg shadow-sm">
               <p className="text-sm text-yellow-800 dark:text-yellow-300">
-                <strong>Note:</strong> You&apos;ll need to set the OPENAI_API_KEY environment
-                variable for this provider to work.
+                <strong>Note:</strong> This embedder will use the default{' '}
+                <code className="rounded bg-yellow-100 px-1 py-0.5 text-[10px] dark:bg-yellow-900/40">
+                  {defaultEmbedderConnection}
+                </code>{' '}
+                connection unless you set an explicit connection name here.
               </p>
             </div>
           )}
@@ -805,6 +863,14 @@ export function MemoryConfig() {
             <div className="flex justify-between">
               <span className="text-muted-foreground">Model:</span>
               <span className="font-mono text-foreground">{localConfig.embedder.config.model}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Connection:</span>
+              <span className="font-mono text-foreground">
+                {localConfig.embedder.config.connection ||
+                  defaultEmbedderConnection ||
+                  'not configured'}
+              </span>
             </div>
             {localConfig.backend === 'file' && (
               <>

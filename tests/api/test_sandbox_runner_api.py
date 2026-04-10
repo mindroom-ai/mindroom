@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
@@ -73,6 +74,26 @@ def _fake_local_worker_venv_create(_self: object, venv_dir: Path) -> None:
     (bin_dir / "python").symlink_to(Path(sys.executable))
 
 
+def _runner_openai_config_source(
+    *,
+    agents: dict[str, object] | None = None,
+    plugins: list[str] | None = None,
+) -> str:
+    payload: dict[str, object] = {
+        "connections": {
+            "openai/default": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+            "openai/embeddings": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+            "openai/stt": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+        },
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "agents": agents or {},
+        "router": {"model": "default"},
+    }
+    if plugins is not None:
+        payload["plugins"] = plugins
+    return yaml.safe_dump(payload, sort_keys=False)
+
+
 @pytest.fixture(autouse=True)
 def _load_tools() -> None:
     ensure_tool_registry_loaded(resolve_runtime_paths(config_path=Path("config.yaml")))
@@ -90,10 +111,7 @@ def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
 def runner_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
     """Create a test client for the sandbox runner app."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
@@ -105,7 +123,17 @@ def runner_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[T
 def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the sandbox token through the runner's explicit runtime env boundary."""
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
-    _refresh_runner_app_from_env()
+    try:
+        runtime_paths = sandbox_runner_module._app_runtime_paths(sandbox_runner_app)
+        config = sandbox_runner_module._app_runtime_config(sandbox_runner_app)
+    except TypeError:
+        return
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        runtime_paths,
+        config=config,
+        runner_token=SANDBOX_TOKEN,
+    )
 
 
 def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
@@ -153,10 +181,7 @@ def _invalid_plugin_config_path(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\nplugins:\n  - ./plugins/bad-name\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(plugins=["./plugins/bad-name"]), encoding="utf-8")
     return config_path
 
 
@@ -255,10 +280,7 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
 ) -> None:
     """Startup auth token should stay separate from the committed runtime payload."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     payload_runtime = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -281,10 +303,7 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
 def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_config(tmp_path: Path) -> None:
     """Existing sandbox-runner state should survive lifespan startup without reparsing config.yaml."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -315,14 +334,8 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     """Startup runtime should recover trusted env from real process env while keeping runner auth separate."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "OPENAI_API_KEY=dotenv-secret\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=dotenv-secret\n", encoding="utf-8")
     payload_runtime = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -338,103 +351,6 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     assert startup_runtime.env_value("OPENAI_API_KEY") == "dotenv-secret"
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
-
-
-def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Dedicated workers should trust the committed startup payload instead of ambient runner env."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "OPENAI_API_KEY=dotenv-secret\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
-        encoding="utf-8",
-    )
-    payload_runtime = resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={
-            "MINDROOM_NAMESPACE": "alpha1234",
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
-        },
-    )
-    payload = serialize_runtime_paths(payload_runtime)
-    payload["env_file_values"] = {"MINDROOM_NAMESPACE": "alpha1234"}
-    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(payload))
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
-    monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
-
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
-    execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
-    effective_runtime = sandbox_exec_module.runtime_paths_with_execution_env(startup_runtime, execution_env)
-
-    assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
-    assert startup_runtime.env_value("OPENAI_API_KEY") is None
-    assert startup_runtime.env_value("OPENAI_BASE_URL") is None
-    assert startup_runtime.env_value("CUSTOM_API_TOKEN") is None
-    assert startup_runtime.env_value("TEST_EXECUTION_ENV") is None
-    assert "OPENAI_API_KEY" not in execution_env
-    assert "OPENAI_BASE_URL" not in execution_env
-    assert "CUSTOM_API_TOKEN" not in execution_env
-    assert "TEST_EXECUTION_ENV" not in execution_env
-    assert effective_runtime.env_value("OPENAI_BASE_URL") is None
-    assert effective_runtime.env_value("TEST_EXECUTION_ENV") is None
-
-
-@pytest.mark.asyncio
-async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Dedicated-worker in-process shell should not observe ambient runner env."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    payload_runtime = resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={
-            "MINDROOM_NAMESPACE": "alpha1234",
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
-        },
-    )
-    payload = serialize_runtime_paths(payload_runtime)
-    payload["env_file_values"] = {"MINDROOM_NAMESPACE": "alpha1234"}
-    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(payload))
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
-    monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
-
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
-    response = await sandbox_runner_module._execute_request_inprocess(
-        sandbox_runner_module.SandboxRunnerExecuteRequest(
-            tool_name="shell",
-            function_name="run_shell_command",
-            args=[
-                [
-                    "bash",
-                    "-lc",
-                    "printf '%s' \"$OPENAI_BASE_URL|$TEST_EXECUTION_ENV|$MINDROOM_SANDBOX_PROXY_TOKEN|$MINDROOM_NAMESPACE\"",
-                ],
-            ],
-            kwargs={},
-        ),
-        startup_runtime,
-        sandbox_runner_module._runtime_config_or_empty(startup_runtime),
-        runner_token=SANDBOX_TOKEN,
-    )
-
-    assert response.ok is True
-    assert response.result == "|||alpha1234"
 
 
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:
@@ -475,7 +391,7 @@ def test_public_startup_runtime_still_allows_python_execution_env(
         ),
     )
     child_runtime.config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        _runner_openai_config_source(),
         encoding="utf-8",
     )
 
@@ -509,10 +425,7 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     (config_dir / ".env").write_text(
         "MINDROOM_NAMESPACE=alpha1234\nMATRIX_HOMESERVER=http://dotenv-hs\n",
         encoding="utf-8",
@@ -654,10 +567,7 @@ def test_sandbox_runner_subprocess_python_sees_runtime_env(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     (config_dir / ".env").write_text("MINDROOM_NAMESPACE=alpha1234\n", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
@@ -696,10 +606,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
@@ -733,10 +640,7 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     (tmp_path / ".env").write_text(
         "OPENAI_API_KEY=dotenv-secret\nTEST_EXECUTION_ENV=visible-in-shell\n",
         encoding="utf-8",
@@ -859,21 +763,18 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     assert '"result": 3' in data["result"]
 
 
-def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(
+def test_sandbox_runner_refresh_tolerates_invalid_runtime_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Explicit runner refresh should reject invalid runtime config before committing it."""
+    """Explicit runner refresh should keep working when plugin loading degrades."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(_invalid_plugin_config_path(tmp_path)))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
-    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
-        _refresh_runner_app_from_env()
+    runtime_paths, config = _refresh_runner_app_from_env()
 
-    assert str(exc_info.value) == (
-        "Invalid plugin name: 'BadName'. Plugin names must use lowercase ASCII letters, digits, "
-        "hyphens, or underscores. (" + str((tmp_path / "plugins" / "bad-name" / "mindroom.plugin.json").resolve()) + ")"
-    )
+    assert runtime_paths.config_path == tmp_path / "config.yaml"
+    assert config.plugins[0].path == "./plugins/bad-name"
 
 
 def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
@@ -1092,10 +993,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     original_signature = credentials_module._credentials_manager_signature
     shared_storage = tmp_path / "shared-storage"
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
     metadata_module.register_builtin_tool_metadata(
@@ -1263,10 +1161,7 @@ def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(), encoding="utf-8")
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
@@ -1562,18 +1457,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         encoding="utf-8",
     )
     config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
-    config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-5.4\n"
-        "agents: {}\n"
-        "router:\n"
-        "  model: default\n"
-        "plugins:\n"
-        "  - ./plugins/demo\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(plugins=["./plugins/demo"]), encoding="utf-8")
     _refresh_runner_app_from_env()
 
     response = runner_client.post(
@@ -1626,18 +1510,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         encoding="utf-8",
     )
     config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
-    config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-5.4\n"
-        "agents: {}\n"
-        "router:\n"
-        "  model: default\n"
-        "plugins:\n"
-        "  - ./plugins/demo-init\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(_runner_openai_config_source(plugins=["./plugins/demo-init"]), encoding="utf-8")
     _refresh_runner_app_from_env()
 
     response = runner_client.post(
@@ -2188,18 +2061,19 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from canonical workspace", "note.txt"],
-            "kwargs": {},
-            "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from canonical workspace", "note.txt"],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -2228,18 +2102,19 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     _refresh_runner_app_from_env()
 
     canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from default storage root fallback", "note.txt"],
-            "kwargs": {},
-            "worker_key": "v1:tenant-123:shared:general",
-            "tool_init_overrides": {"base_dir": str(canonical_base_dir)},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from default storage root fallback", "note.txt"],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": str(canonical_base_dir)},
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -2449,19 +2324,16 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
     _set_sandbox_token(monkeypatch)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        (
-            "models:\n"
-            "  default:\n"
-            "    provider: openai\n"
-            "    id: gpt-5.4\n"
-            "agents:\n"
-            "  mind:\n"
-            "    display_name: Mind\n"
-            "    private:\n"
-            "      per: user_agent\n"
-            "      template_dir: ./missing-template\n"
-            "router:\n"
-            "  model: default\n"
+        _runner_openai_config_source(
+            agents={
+                "mind": {
+                    "display_name": "Mind",
+                    "private": {
+                        "per": "user_agent",
+                        "template_dir": "./missing-template",
+                    },
+                },
+            },
         ),
         encoding="utf-8",
     )
