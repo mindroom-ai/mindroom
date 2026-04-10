@@ -70,17 +70,6 @@ def _fake_local_worker_venv_create(_self: object, venv_dir: Path) -> None:
     bin_dir = venv_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     (bin_dir / "python").symlink_to(Path(sys.executable))
-    (venv_dir / "pyvenv.cfg").write_text(
-        "\n".join(
-            (
-                f"home = {Path(sys.executable).parent}",
-                "include-system-site-packages = true",
-                f"version = {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-            ),
-        )
-        + "\n",
-        encoding="utf-8",
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +81,6 @@ def _load_tools() -> None:
 def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
-    monkeypatch.setattr(local_workers_module.venv.EnvBuilder, "create", _fake_local_worker_venv_create)
     monkeypatch.delenv("MINDROOM_SANDBOX_WORKER_ROOT", raising=False)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
