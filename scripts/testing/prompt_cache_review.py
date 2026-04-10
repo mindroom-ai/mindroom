@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 from agno.agent import Agent
 from agno.agent._messages import get_run_messages
@@ -30,6 +30,10 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
 _PROBE_MEMORY_PACKAGE = "mindroom.memory"
+_MEM0_UNEXPECTED_MSG = "Mem0 path should not be used in this file-memory harness"
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @dataclass(frozen=True)
@@ -54,10 +58,12 @@ class RequestArtifacts:
 
     @property
     def user_blocks(self) -> list[dict[str, Any]]:
+        """Return the first user message content blocks from the prepared payload."""
         return list(self.payload["messages"][0]["content"])
 
     @property
     def first_user_text(self) -> str:
+        """Return the text from the first user content block."""
         return str(self.user_blocks[0]["text"])
 
 
@@ -120,13 +126,14 @@ class PromptCacheHarness:
         self.agent_name = "general"
 
     def write_memory_markdown(self, markdown: str) -> None:
+        """Write a MEMORY.md file into the harness storage scope."""
         resolution = self.modules.policy.resolve_file_memory_resolution(
             self.storage_path,
             self.config,
             self.runtime_paths,
             agent_name=self.agent_name,
         )
-        scope_path = self.modules.file_backend._scope_dir(  # noqa: SLF001
+        scope_path = self.modules.file_backend._scope_dir(
             self.modules.policy.agent_scope_user_id(self.agent_name),
             resolution,
             self.config,
@@ -135,6 +142,7 @@ class PromptCacheHarness:
         (scope_path / "MEMORY.md").write_text(markdown, encoding="utf-8")
 
     def current_request(self, prompt: str) -> RequestArtifacts:
+        """Build the current production request shape for one prompt."""
         full_prompt = asyncio.run(
             self.modules.functions.build_memory_enhanced_prompt(
                 prompt,
@@ -142,7 +150,7 @@ class PromptCacheHarness:
                 self.storage_path,
                 self.config,
                 self.runtime_paths,
-            )
+            ),
         )
         return RequestArtifacts(
             prompt=prompt,
@@ -155,6 +163,7 @@ class PromptCacheHarness:
         )
 
     def split_entrypoint_request(self, prompt: str) -> RequestArtifacts:
+        """Build the alternate request shape with entrypoint text in the system prompt."""
         memories = asyncio.run(
             self.modules.functions.search_agent_memories(
                 prompt,
@@ -162,7 +171,7 @@ class PromptCacheHarness:
                 self.storage_path,
                 self.config,
                 self.runtime_paths,
-            )
+            ),
         )
         resolution = self.modules.policy.resolve_file_memory_resolution(
             self.storage_path,
@@ -177,7 +186,7 @@ class PromptCacheHarness:
         )
         user_chunks: list[str] = []
         if memories:
-            user_chunks.append(self.modules.prompting._format_memories_as_context(memories, "agent file"))  # noqa: SLF001
+            user_chunks.append(self.modules.prompting._format_memories_as_context(memories, "agent file"))
         user_chunks.append(prompt)
         user_prompt = "\n\n".join(chunk for chunk in user_chunks if chunk)
         system_prompt = self.system_prompt
@@ -196,10 +205,13 @@ class PromptCacheHarness:
 
 def summarize_block_prefix(first: RequestArtifacts, second: RequestArtifacts) -> BlockPrefixSummary:
     """Return the stable prompt prefix using Anthropic content-block boundaries."""
-
     stable_system_blocks = 0
     stable_system_text_chars = 0
-    for first_block, second_block in zip(first.payload.get("system", ()), second.payload.get("system", ()), strict=False):
+    for first_block, second_block in zip(
+        first.payload.get("system", ()),
+        second.payload.get("system", ()),
+        strict=False,
+    ):
         if first_block != second_block:
             break
         stable_system_blocks += 1
@@ -259,7 +271,6 @@ def prompt_cache_harness(
     system_prompt: str = "SYSTEM",
 ) -> Iterator[PromptCacheHarness]:
     """Yield a harness rooted in one isolated runtime directory."""
-
     modules = _load_probe_modules()
     config = _FakeConfig(agent_config_type=modules.agent_config_type)
     with TemporaryDirectory() as tmp_dir:
@@ -282,7 +293,6 @@ def prompt_cache_harness(
 
 def main() -> None:
     """Print one concise review of the prompt-cache hypothesis."""
-
     memory_markdown = (
         "# Memory\n\n"
         "Stable workspace context.\n"
@@ -306,7 +316,7 @@ def main() -> None:
             "- first user block contains entrypoint / searched memories / prompt: "
             f"{'[File memory entrypoint (agent)]' in current_python.first_user_text} / "
             f"{'[Automatically extracted agent file memories' in current_python.first_user_text} / "
-            f"{current_python.prompt in current_python.first_user_text}"
+            f"{current_python.prompt in current_python.first_user_text}",
         )
         print()
         print("Stable block prefix across two different prompts")
@@ -314,19 +324,18 @@ def main() -> None:
             "- current production path: "
             f"system blocks={current_summary.stable_system_blocks}, "
             f"user blocks={current_summary.stable_message_blocks}, "
-            f"stable system chars={current_summary.stable_system_text_chars}"
+            f"stable system chars={current_summary.stable_system_text_chars}",
         )
         print(
             "- split-entrypoint variant: "
             f"system blocks={split_summary.stable_system_blocks}, "
             f"user blocks={split_summary.stable_message_blocks}, "
-            f"stable system chars={split_summary.stable_system_text_chars}"
+            f"stable system chars={split_summary.stable_system_text_chars}",
         )
 
 
 def _build_vertex_payload(*, system_prompt: str, user_prompt: str) -> dict[str, Any]:
     """Build the actual Anthropic/Vertex request body right before network I/O."""
-
     model = VertexAIClaude(
         id="claude-sonnet-4-6",
         cache_system_prompt=True,
@@ -365,7 +374,6 @@ def _build_vertex_payload(*, system_prompt: str, user_prompt: str) -> dict[str, 
 
 def _load_probe_modules() -> ProbeModules:
     """Load the production memory source files under an isolated probe package."""
-
     if str(_SRC_ROOT) not in sys.path:
         sys.path.insert(0, str(_SRC_ROOT))
 
@@ -380,10 +388,10 @@ def _load_probe_modules() -> ProbeModules:
             self.delegate_to: list[str] = []
             self.worker_scope = None
 
-    class CultureConfig:  # noqa: D401
+    class CultureConfig:
         """Placeholder type used only to satisfy imports."""
 
-    class TeamConfig:  # noqa: D401
+    class TeamConfig:
         """Placeholder type used only to satisfy imports."""
 
     config_agent_module.AgentConfig = AgentConfig
@@ -397,16 +405,16 @@ def _load_probe_modules() -> ProbeModules:
 
     config_stub = types.ModuleType(f"{_PROBE_MEMORY_PACKAGE}.config")
 
-    async def create_memory_instance(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Mem0 path should not be used in this file-memory harness")
+    async def create_memory_instance(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(_MEM0_UNEXPECTED_MSG)
 
     config_stub.create_memory_instance = create_memory_instance
     sys.modules[f"{_PROBE_MEMORY_PACKAGE}.config"] = config_stub
 
     mem0_stub = types.ModuleType(f"{_PROBE_MEMORY_PACKAGE}._mem0_backend")
 
-    async def _unused_mem0(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Mem0 path should not be used in this file-memory harness")
+    async def _unused_mem0(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(_MEM0_UNEXPECTED_MSG)
 
     for name in (
         "add_mem0_agent_memory",
@@ -448,7 +456,6 @@ def _load_probe_modules() -> ProbeModules:
 
 def _existing_probe_modules() -> ProbeModules | None:
     """Return cached probe modules if they were already loaded."""
-
     functions = sys.modules.get(f"{_PROBE_MEMORY_PACKAGE}.functions")
     file_backend = sys.modules.get(f"{_PROBE_MEMORY_PACKAGE}._file_backend")
     policy = sys.modules.get(f"{_PROBE_MEMORY_PACKAGE}._policy")

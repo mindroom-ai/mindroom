@@ -15,6 +15,7 @@ def _memory_markdown() -> str:
 
 
 def test_current_request_places_entrypoint_memories_and_prompt_in_one_user_block() -> None:
+    """Verify the current request shape fuses entrypoint, memories, and prompt text."""
     with prompt_cache_harness() as harness:
         harness.write_memory_markdown(_memory_markdown())
 
@@ -29,6 +30,7 @@ def test_current_request_places_entrypoint_memories_and_prompt_in_one_user_block
 
 
 def test_identical_prompt_keeps_first_user_block_stable() -> None:
+    """Verify identical prompts keep the first user block fully stable."""
     with prompt_cache_harness() as harness:
         harness.write_memory_markdown(_memory_markdown())
 
@@ -43,6 +45,7 @@ def test_identical_prompt_keeps_first_user_block_stable() -> None:
 
 
 def test_changed_prompt_invalidates_the_whole_fused_first_user_block() -> None:
+    """Verify changing the prompt invalidates the fused first user block."""
     with prompt_cache_harness() as harness:
         harness.write_memory_markdown(_memory_markdown())
 
@@ -59,6 +62,7 @@ def test_changed_prompt_invalidates_the_whole_fused_first_user_block() -> None:
 
 
 def test_different_queries_select_different_file_memories() -> None:
+    """Verify memory search chooses different snippets for different queries."""
     with prompt_cache_harness() as harness:
         harness.write_memory_markdown(_memory_markdown())
 
@@ -81,6 +85,7 @@ def test_different_queries_select_different_file_memories() -> None:
 
 
 def test_split_entrypoint_variant_moves_more_stable_text_into_system_blocks() -> None:
+    """Verify the split-entrypoint variant shifts stable text into system blocks."""
     with prompt_cache_harness() as harness:
         harness.write_memory_markdown(_memory_markdown())
 
