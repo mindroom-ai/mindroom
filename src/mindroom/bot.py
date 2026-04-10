@@ -169,7 +169,7 @@ from .matrix.client import (
     get_joined_rooms,
     join_room,
 )
-from .matrix.event_cache import EventCache
+from .matrix.event_cache import ConversationEventCache, EventCache
 from .media_inputs import MediaInputs
 from .response_coordinator import (
     ResponseCoordinator,
@@ -591,12 +591,12 @@ class AgentBot:
         self._runtime_view.orchestrator = value
 
     @property
-    def event_cache(self) -> EventCache | None:
+    def event_cache(self) -> ConversationEventCache | None:
         """Return the advisory event cache."""
         return self._conversation_access.event_cache
 
     @event_cache.setter
-    def event_cache(self, value: EventCache | None) -> None:
+    def event_cache(self, value: ConversationEventCache | None) -> None:
         """Update the advisory event cache."""
         self._conversation_access.event_cache = value
 
