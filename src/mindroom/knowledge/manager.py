@@ -53,6 +53,7 @@ _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
+_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 8
 
 
 def _resolve_knowledge_path(
@@ -353,6 +354,7 @@ class KnowledgeManager:
     _indexed_files: set[str] = field(default_factory=set, init=False)
     _indexed_signatures: dict[str, tuple[int, int] | None] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _watch_task: asyncio.Task[None] | None = field(default=None, init=False)
     _watch_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _git_sync_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -799,7 +801,7 @@ class KnowledgeManager:
     async def initialize(self) -> None:
         """Initialize and index all existing knowledge files."""
         if self._git_config() is not None:
-            await self.sync_git_repository()
+            await self.sync_git_repository(index_changes=False)
 
         indexed_count = await self.reindex_all()
         logger.info(
@@ -873,7 +875,7 @@ class KnowledgeManager:
             "removed_count": removed_count,
         }
 
-    async def sync_git_repository(self) -> dict[str, Any]:
+    async def sync_git_repository(self, *, index_changes: bool = True) -> dict[str, Any]:
         """Fetch and force-align one configured Git repository, then update the index."""
         git_config = self._git_config()
         if git_config is None:
@@ -882,11 +884,12 @@ class KnowledgeManager:
         async with self._git_sync_lock:
             changed_files, removed_files, updated = await self._sync_git_repository_once(git_config)
 
-        for relative_path in sorted(removed_files):
-            await self.remove_file(relative_path)
+        if index_changes:
+            for relative_path in sorted(removed_files):
+                await self.remove_file(relative_path)
 
-        for relative_path in sorted(changed_files):
-            await self.index_file(relative_path, upsert=True)
+            for relative_path in sorted(changed_files):
+                await self.index_file(relative_path, upsert=True)
 
         if updated:
             logger.info(
@@ -985,7 +988,7 @@ class KnowledgeManager:
             logger.info("Knowledge folder watcher stopped", base_id=self.base_id)
 
     async def _index_file_locked(self, resolved_path: Path, *, upsert: bool) -> bool:
-        """Index one file while holding the manager lock."""
+        """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
         source_mtime_ns, source_size = self._file_signature(resolved_path)
         metadata = {
@@ -1013,14 +1016,37 @@ class KnowledgeManager:
         has_vectors = await asyncio.to_thread(self._has_vectors_for_source_path, relative_path)
         if not has_vectors:
             logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
-            self._indexed_files.discard(relative_path)
-            self._indexed_signatures.pop(relative_path, None)
+            async with self._state_lock:
+                self._indexed_files.discard(relative_path)
+                self._indexed_signatures.pop(relative_path, None)
             return False
 
-        self._indexed_files.add(relative_path)
-        self._indexed_signatures[relative_path] = (source_mtime_ns, source_size)
+        async with self._state_lock:
+            self._indexed_files.add(relative_path)
+            self._indexed_signatures[relative_path] = (source_mtime_ns, source_size)
         logger.info("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
+
+    async def _reindex_files_locked(self, files: list[Path]) -> int:
+        """Reindex resolved files with bounded concurrency while holding the operation lock."""
+        if not files:
+            return 0
+
+        concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))
+        if concurrency <= 1:
+            indexed_count = 0
+            for file_path in files:
+                indexed_count += int(await self._index_file_locked(file_path, upsert=True))
+            return indexed_count
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _index_one(file_path: Path) -> bool:
+            async with semaphore:
+                return await self._index_file_locked(file_path, upsert=True)
+
+        results = await asyncio.gather(*(_index_one(file_path) for file_path in files))
+        return sum(int(indexed) for indexed in results)
 
     async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
@@ -1028,12 +1054,12 @@ class KnowledgeManager:
 
         async with self._lock:
             await asyncio.to_thread(self._reset_collection)
-            self._indexed_files.clear()
-            self._indexed_signatures.clear()
-            for file_path in files:
-                await self._index_file_locked(file_path, upsert=True)
+            async with self._state_lock:
+                self._indexed_files.clear()
+                self._indexed_signatures.clear()
+            indexed_count = await self._reindex_files_locked(files)
             await asyncio.to_thread(self._save_persisted_indexing_settings)
-            return len(self._indexed_files)
+            return indexed_count
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:
         """Index or reindex a single file."""
@@ -1058,8 +1084,9 @@ class KnowledgeManager:
                 self._knowledge.remove_vectors_by_metadata,
                 {_SOURCE_PATH_KEY: relative_path},
             )
-            self._indexed_files.discard(relative_path)
-            self._indexed_signatures.pop(relative_path, None)
+            async with self._state_lock:
+                self._indexed_files.discard(relative_path)
+                self._indexed_signatures.pop(relative_path, None)
 
         logger.info("Removed knowledge file from index", base_id=self.base_id, path=relative_path, removed=removed)
         return removed
