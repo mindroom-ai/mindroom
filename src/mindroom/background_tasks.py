@@ -11,15 +11,19 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
 logger = get_logger(__name__)
+_MAX_BACKGROUND_TASK_CANCEL_ROUNDS = 3
 
-# Global set to track background tasks and prevent them from being garbage collected
+# Global registries keep strong references to background tasks and optional owners.
 _background_tasks: set[asyncio.Task[Any]] = set()
+_background_task_owners: dict[asyncio.Task[Any], object] = {}
 
 
 def create_background_task(
     coro: Coroutine[Any, Any, Any],
     name: str | None = None,
     error_handler: Callable[[Exception], None] | None = None,
+    *,
+    owner: object | None = None,
 ) -> asyncio.Task[Any]:
     """Create a background task that won't block the main execution.
 
@@ -27,6 +31,7 @@ def create_background_task(
         coro: The coroutine to run in the background
         name: Optional name for the task (for logging)
         error_handler: Optional error handler function
+        owner: Optional logical owner used for scoped shutdown waits
 
     Returns:
         The created task
@@ -38,10 +43,13 @@ def create_background_task(
 
     # Add to global set to prevent garbage collection
     _background_tasks.add(task)
+    if owner is not None:
+        _background_task_owners[task] = owner
 
     # Add completion callback to remove from set and handle errors
     def _task_done_callback(task: asyncio.Task[Any]) -> None:
         _background_tasks.discard(task)
+        _background_task_owners.pop(task, None)
         try:
             # This will raise if the task had an exception
             task.result()
@@ -61,25 +69,68 @@ def create_background_task(
     return task
 
 
-async def wait_for_background_tasks(timeout: float | None = None) -> None:  # noqa: ASYNC109
+def _tasks_for_owner(owner: object | None) -> tuple[asyncio.Task[Any], ...]:
+    if owner is None:
+        return tuple(_background_tasks)
+    return tuple(task for task in _background_tasks if _background_task_owners.get(task) is owner)
+
+
+async def _cancel_and_drain_background_tasks(
+    tasks: tuple[asyncio.Task[Any], ...],
+    *,
+    owner: object | None,
+) -> None:
+    pending_tasks = tasks
+    for _ in range(_MAX_BACKGROUND_TASK_CANCEL_ROUNDS):
+        if not pending_tasks:
+            return
+        for task in pending_tasks:
+            task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
+        pending_tasks = _tasks_for_owner(owner)
+    if pending_tasks:
+        logger.warning(
+            "Background tasks still running after bounded cancellation drain",
+            task_count=len(pending_tasks),
+            cancel_rounds=_MAX_BACKGROUND_TASK_CANCEL_ROUNDS,
+        )
+
+
+async def wait_for_background_tasks(
+    timeout: float | None = None,  # noqa: ASYNC109
+    *,
+    owner: object | None = None,
+) -> None:
     """Wait for all background tasks to complete.
 
     Args:
         timeout: Optional timeout in seconds
+        owner: Optional logical owner to scope the wait to one bot
 
     """
-    if not _background_tasks:
-        return
+    deadline: float | None = None
+    if timeout is not None:
+        deadline = asyncio.get_running_loop().time() + timeout
 
-    try:
-        await asyncio.wait_for(asyncio.gather(*_background_tasks, return_exceptions=True), timeout=timeout)
-    except TimeoutError:
-        logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
-        # Cancel remaining tasks
-        for task in _background_tasks:
-            task.cancel()
-        # Wait for cancellation to complete
-        await asyncio.gather(*_background_tasks, return_exceptions=True)
+    while True:
+        tasks = _tasks_for_owner(owner)
+        if not tasks:
+            return
+
+        remaining: float | None = None
+        if deadline is not None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
+                await _cancel_and_drain_background_tasks(tasks, owner=owner)
+                return
+
+        done, pending = await asyncio.wait(tasks, timeout=remaining)
+        await asyncio.gather(*done, return_exceptions=True)
+        if pending:
+            logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
+            await _cancel_and_drain_background_tasks(tuple(pending), owner=owner)
+            return
 
 
 def _get_background_task_count() -> int:

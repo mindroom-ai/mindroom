@@ -8,6 +8,7 @@ This test verifies that:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,12 +17,16 @@ import nio
 import pytest
 import pytest_asyncio
 
+from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult
+from mindroom.matrix.client import PermanentMatrixStartupError, ResolvedVisibleMessage, ThreadHistoryResult
+from mindroom.matrix.conversation_access import MatrixConversationAccess
 from mindroom.matrix.event_cache import EventCache
+from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.reply_chain import ReplyChainCaches, _merge_thread_and_chain_history
@@ -58,6 +63,33 @@ def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> Re
 def _state_writer(bot: AgentBot) -> object:
     """Return the writer instance actually captured by the resolver."""
     return unwrap_extracted_collaborator(bot._conversation_state_writer)
+
+
+def _conversation_runtime(
+    *,
+    client: nio.AsyncClient | None = None,
+    event_cache: EventCache | None = None,
+    coordinator: EventCacheWriteCoordinator | None = None,
+) -> BotRuntimeState:
+    """Build one minimal live runtime state for conversation-access tests."""
+    return BotRuntimeState(
+        client=client,
+        config=MagicMock(spec=Config),
+        enable_streaming=True,
+        orchestrator=None,
+        event_cache=event_cache,
+        event_cache_write_coordinator=coordinator,
+    )
+
+
+def _install_runtime_write_coordinator(bot: AgentBot) -> EventCacheWriteCoordinator:
+    """Attach one explicit runtime write coordinator to a bot test double."""
+    coordinator = EventCacheWriteCoordinator(
+        logger=MagicMock(),
+        background_task_owner=bot._runtime_view,
+    )
+    bot.event_cache_write_coordinator = coordinator
+    return coordinator
 
 
 class TestThreadingBehavior:
@@ -128,7 +160,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_start_and_stop_manage_persistent_event_cache(self, bot: AgentBot) -> None:
-        """Startup should wire the persistent cache into the explicit access layer."""
+        """Startup should wire standalone runtime support services onto the live runtime."""
         start_client = AsyncMock(spec=nio.AsyncClient)
         start_client.rooms = {}
         start_client.user_id = "@mindroom_general:localhost"
@@ -148,19 +180,112 @@ class TestThreadingBehavior:
         ):
             await bot.start()
             assert bot.event_cache is not None
-            assert bot._conversation_access.client is start_client
-            assert bot._conversation_access.event_cache is bot.event_cache
+            assert bot.client is start_client
+            assert bot.event_cache_write_coordinator is not None
 
             await bot.stop(reason="test")
 
         assert bot.event_cache is None
-        assert bot._conversation_access.event_cache is None
+        assert bot.event_cache_write_coordinator is None
         start_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_injected_shared_event_cache_stays_open_for_other_bots(self, bot: AgentBot, tmp_path: Path) -> None:
+        """A non-owned injected cache should stay open until its explicit owner closes it."""
+        other_user = AgentMatrixUser(
+            user_id="@mindroom_router:localhost",
+            password=TEST_PASSWORD,
+            display_name="RouterAgent",
+            agent_name="router",
+        )
+        other_bot = AgentBot(
+            agent_user=other_user,
+            storage_path=tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+        )
+
+        shared_cache = EventCache(bot.config.cache.resolve_db_path(bot.runtime_paths))
+        await shared_cache.initialize()
+        bot.event_cache = shared_cache
+        other_bot.event_cache = shared_cache
+
+        try:
+            await shared_cache.store_event(
+                "$shared-event",
+                "!test:localhost",
+                {
+                    "event_id": "$shared-event",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "type": "m.room.message",
+                    "content": {"body": "shared cache", "msgtype": "m.text"},
+                },
+            )
+            await bot._close_runtime_support_services()
+            assert bot.event_cache is None
+            assert other_bot.event_cache is shared_cache
+
+            cached_event = await other_bot.event_cache.get_event("!test:localhost", "$shared-event")
+        finally:
+            await other_bot._close_runtime_support_services()
+            await shared_cache.close()
+
+        assert cached_event is not None
+        assert cached_event["event_id"] == "$shared-event"
+
+    @pytest.mark.asyncio
+    async def test_partial_runtime_support_injection_fails_fast(self, bot: AgentBot) -> None:
+        """Standalone runtime ownership requires all support services to be injected together."""
+        bot.event_cache = MagicMock(spec=EventCache)
+
+        with pytest.raises(
+            RuntimeError,
+            match="Runtime support services must be injected all together or not at all",
+        ):
+            await bot._initialize_runtime_support_services()
+
+    @pytest.mark.asyncio
+    async def test_try_start_partial_runtime_support_injection_fails_before_login(self, bot: AgentBot) -> None:
+        """Mixed runtime support injection should stop startup before any login side effects."""
+        bot.client = None
+        bot.event_cache = MagicMock(spec=EventCache)
+
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()) as ensure_user_account,
+            patch("mindroom.bot.login_agent_user", AsyncMock()) as login_agent_user,
+            pytest.raises(
+                PermanentMatrixStartupError,
+                match="Runtime support services must be injected all together or not at all",
+            ),
+        ):
+            await bot.try_start()
+
+        ensure_user_account.assert_not_awaited()
+        login_agent_user.assert_not_awaited()
+        assert bot.client is None
+
+    @pytest.mark.asyncio
+    async def test_standalone_runtime_support_survives_event_cache_init_failure(self, bot: AgentBot) -> None:
+        """Standalone startup should degrade cleanly to no runtime support when SQLite cache init fails."""
+        with patch("mindroom.runtime_support.EventCache.initialize", AsyncMock(side_effect=RuntimeError("boom"))):
+            await bot._initialize_runtime_support_services()
+            await bot._initialize_runtime_support_services()
+
+        assert bot.event_cache is None
+        assert bot.event_cache_write_coordinator is None
+
+        await bot._close_runtime_support_services()
+
+        assert bot.event_cache is None
+        assert bot.event_cache_write_coordinator is None
 
     @pytest.mark.asyncio
     async def test_sync_response_caches_timeline_events_for_point_lookups(self, bot: AgentBot) -> None:
         """Sync-response handling should persist timeline events into SQLite-backed lookups."""
-        await bot._initialize_event_cache()
+        await bot._initialize_runtime_support_services()
         assert bot.event_cache is not None
 
         try:
@@ -187,18 +312,200 @@ class TestThreadingBehavior:
             bot._first_sync_done = True
 
             await bot._on_sync_response(sync_response)
+            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
             cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
-            await bot._close_event_cache()
+            await bot._close_runtime_support_services()
 
         assert cached_event is not None
         assert cached_event["event_id"] == "$thread_msg:localhost"
         assert cached_event["content"]["body"] == "Thread reply"
 
     @pytest.mark.asyncio
+    async def test_cache_sync_timeline_schedules_background_write(self, bot: AgentBot) -> None:
+        """Sync timeline caching should return before a slow cache write finishes."""
+        store_started = asyncio.Event()
+        allow_store_finish = asyncio.Event()
+
+        async def slow_store_events_batch(_events: object) -> None:
+            store_started.set()
+            await allow_store_finish.wait()
+
+        event_cache = MagicMock(spec=EventCache)
+        event_cache.store_events_batch = AsyncMock(side_effect=slow_store_events_batch)
+        event_cache.redact_event = AsyncMock()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                },
+                "event_id": "$thread_msg:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+        }
+
+        bot._conversation_access.cache_sync_timeline(sync_response)
+        await asyncio.wait_for(store_started.wait(), timeout=1.0)
+
+        allow_store_finish.set()
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        event_cache.store_events_batch.assert_awaited_once()
+        event_cache.redact_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cache_sync_timeline_serializes_same_room_updates_in_order(self, bot: AgentBot) -> None:
+        """Later sync updates for one room should wait for earlier queued cache writes."""
+        store_started = asyncio.Event()
+        allow_store_finish = asyncio.Event()
+        call_order: list[str] = []
+
+        async def slow_store_events_batch(_events: object) -> None:
+            call_order.append("store-start")
+            store_started.set()
+            await allow_store_finish.wait()
+            call_order.append("store-finish")
+
+        async def record_redaction(*_args: object, **_kwargs: object) -> bool:
+            call_order.append("redact")
+            return True
+
+        event_cache = MagicMock(spec=EventCache)
+        event_cache.store_events_batch = AsyncMock(side_effect=slow_store_events_batch)
+        event_cache.redact_event = AsyncMock(side_effect=record_redaction)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                },
+                "event_id": "$thread_msg:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$thread_msg:localhost"
+        redaction_event.sender = "@user:localhost"
+        redaction_event.server_timestamp = 1234567891
+        redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$thread_msg:localhost",
+            "room_id": "!test:localhost",
+            "type": "m.room.redaction",
+        }
+
+        first_sync_response = MagicMock()
+        first_sync_response.__class__ = nio.SyncResponse
+        first_sync_response.rooms = MagicMock()
+        first_sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+        }
+
+        second_sync_response = MagicMock()
+        second_sync_response.__class__ = nio.SyncResponse
+        second_sync_response.rooms = MagicMock()
+        second_sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
+        }
+
+        bot._conversation_access.cache_sync_timeline(first_sync_response)
+        await asyncio.wait_for(store_started.wait(), timeout=1.0)
+
+        bot._conversation_access.cache_sync_timeline(second_sync_response)
+        await asyncio.sleep(0)
+        event_cache.redact_event.assert_not_awaited()
+
+        allow_store_finish.set()
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        assert call_order == ["store-start", "store-finish", "redact"]
+
+    @pytest.mark.asyncio
+    async def test_cache_sync_timeline_keeps_room_updates_isolated(self, bot: AgentBot) -> None:
+        """One room's queued cache write should not block another room's write."""
+        room_a_started = asyncio.Event()
+        release_room_a = asyncio.Event()
+        room_b_finished = asyncio.Event()
+
+        async def store_events_batch(events: list[tuple[str, str, dict[str, object]]]) -> None:
+            room_id = events[0][1]
+            if room_id == "!room-a:localhost":
+                room_a_started.set()
+                await release_room_a.wait()
+                return
+            if room_id == "!room-b:localhost":
+                room_b_finished.set()
+                return
+            msg = f"Unexpected room_id {room_id}"
+            raise AssertionError(msg)
+
+        def sync_response_for(room_id: str, event_id: str) -> nio.SyncResponse:
+            message_event = nio.RoomMessageText.from_dict(
+                {
+                    "content": {
+                        "body": f"Thread reply for {room_id}",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "event_id": event_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+            sync_response = MagicMock()
+            sync_response.__class__ = nio.SyncResponse
+            sync_response.rooms = MagicMock()
+            sync_response.rooms.join = {room_id: MagicMock(timeline=MagicMock(events=[message_event]))}
+            return sync_response
+
+        event_cache = MagicMock(spec=EventCache)
+        event_cache.store_events_batch = AsyncMock(side_effect=store_events_batch)
+        event_cache.redact_event = AsyncMock()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        bot._conversation_access.cache_sync_timeline(sync_response_for("!room-a:localhost", "$room_a_msg:localhost"))
+        await asyncio.wait_for(room_a_started.wait(), timeout=1.0)
+
+        bot._conversation_access.cache_sync_timeline(sync_response_for("!room-b:localhost", "$room_b_msg:localhost"))
+        await asyncio.wait_for(room_b_finished.wait(), timeout=1.0)
+
+        release_room_a.set()
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        assert event_cache.store_events_batch.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_live_redaction_callback_removes_persisted_lookup_event(self, bot: AgentBot) -> None:
         """Live redaction callbacks should remove point-lookup cache entries."""
-        await bot._initialize_event_cache()
+        await bot._initialize_runtime_support_services()
         assert bot.event_cache is not None
 
         try:
@@ -236,14 +543,14 @@ class TestThreadingBehavior:
             await bot._on_redaction(room, redaction_event)
             cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
-            await bot._close_event_cache()
+            await bot._close_runtime_support_services()
 
         assert cached_event is None
 
     @pytest.mark.asyncio
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:
         """A sync batch that contains both a message and its redaction must leave no cached lookup entry."""
-        await bot._initialize_event_cache()
+        await bot._initialize_runtime_support_services()
         assert bot.event_cache is not None
 
         try:
@@ -282,12 +589,106 @@ class TestThreadingBehavior:
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
             }
 
-            await bot._conversation_access.cache_sync_timeline(sync_response)
+            bot._conversation_access.cache_sync_timeline(sync_response)
+            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
             cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
-            await bot._close_event_cache()
+            await bot._close_runtime_support_services()
 
         assert cached_event is None
+
+    @pytest.mark.asyncio
+    async def test_wait_for_background_tasks_owner_scope_isolated(self, bot: AgentBot) -> None:
+        """Scoped waits should not block on background tasks owned by another bot."""
+        other_owner = object()
+        other_task_started = asyncio.Event()
+        release_other_task = asyncio.Event()
+
+        async def other_owner_task() -> None:
+            other_task_started.set()
+            await release_other_task.wait()
+
+        other_task = create_background_task(
+            other_owner_task(),
+            name="other_owner_task",
+            owner=other_owner,
+        )
+
+        await asyncio.wait_for(other_task_started.wait(), timeout=1.0)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        assert not other_task.done()
+
+        release_other_task.set()
+        await wait_for_background_tasks(timeout=1.0, owner=other_owner)
+        assert other_task.done()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_background_tasks_drains_child_tasks_created_during_wait(self) -> None:
+        """Owner-scoped draining should keep waiting for child tasks spawned by awaited tasks."""
+        owner = object()
+        parent_started = asyncio.Event()
+        release_parent = asyncio.Event()
+        child_started = asyncio.Event()
+        release_child = asyncio.Event()
+        child_finished = asyncio.Event()
+
+        async def child_task() -> None:
+            child_started.set()
+            await release_child.wait()
+            child_finished.set()
+
+        async def parent_task() -> None:
+            parent_started.set()
+            await release_parent.wait()
+            create_background_task(child_task(), name="child_task", owner=owner)
+
+        parent = create_background_task(parent_task(), name="parent_task", owner=owner)
+        await asyncio.wait_for(parent_started.wait(), timeout=1.0)
+
+        drain_task = asyncio.create_task(wait_for_background_tasks(timeout=1.0, owner=owner))
+        await asyncio.sleep(0)
+
+        release_parent.set()
+        await asyncio.wait_for(child_started.wait(), timeout=1.0)
+        assert drain_task.done() is False
+
+        release_child.set()
+        await drain_task
+
+        assert parent.done()
+        assert child_finished.is_set()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_background_tasks_timeout_stops_after_bounded_cancel_rounds(self) -> None:
+        """Timed-out draining should return even if cancelled tasks keep spawning replacements."""
+        owner = object()
+        respawned_count = 0
+        respawned_replacement = asyncio.Event()
+        allow_respawn = True
+
+        async def respawning_task() -> None:
+            nonlocal respawned_count
+            try:
+                await asyncio.Future()
+            finally:
+                if allow_respawn:
+                    respawned_count += 1
+                    respawned_replacement.set()
+                    create_background_task(
+                        respawning_task(),
+                        name=f"respawning_task_{respawned_count}",
+                        owner=owner,
+                    )
+
+        create_background_task(respawning_task(), name="respawning_task_root", owner=owner)
+
+        try:
+            await asyncio.wait_for(wait_for_background_tasks(timeout=0.01, owner=owner), timeout=0.5)
+            await asyncio.wait_for(respawned_replacement.wait(), timeout=0.5)
+            assert respawned_count >= 1
+        finally:
+            allow_respawn = False
+            await wait_for_background_tasks(timeout=0.05, owner=owner)
 
     @pytest.mark.asyncio
     async def test_live_edit_cache_lookup_failure_does_not_raise(self, bot: AgentBot) -> None:
@@ -329,6 +730,7 @@ class TestThreadingBehavior:
         event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
         event_cache.redact_event = AsyncMock(return_value=False)
         bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
 
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -352,9 +754,199 @@ class TestThreadingBehavior:
         assert event_cache.redact_event.await_args.kwargs["thread_id"] is None
 
     @pytest.mark.asyncio
+    async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:
+        """A failed same-room cache update should not block the next queued write."""
+        first_update_started = asyncio.Event()
+        allow_first_failure = asyncio.Event()
+        second_update_finished = asyncio.Event()
+        owner = object()
+        coordinator = EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+        access = MatrixConversationAccess(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(coordinator=coordinator),
+        )
+
+        async def failing_update() -> None:
+            first_update_started.set()
+            await allow_first_failure.wait()
+            msg = "update failed"
+            raise RuntimeError(msg)
+
+        async def second_update() -> None:
+            second_update_finished.set()
+
+        access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: failing_update(),
+            name="matrix_cache_first_update",
+        )
+        await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
+
+        access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: second_update(),
+            name="matrix_cache_second_update",
+        )
+        await asyncio.sleep(0)
+        assert second_update_finished.is_set() is False
+
+        allow_first_failure.set()
+        await wait_for_background_tasks(timeout=1.0, owner=owner)
+
+        assert second_update_finished.is_set()
+
+    @pytest.mark.asyncio
+    async def test_shared_event_cache_write_coordinator_serializes_same_room_updates_across_accesses(self) -> None:
+        """Same-room cache writes should serialize even when different bots enqueue them."""
+        first_update_started = asyncio.Event()
+        release_first_update = asyncio.Event()
+        second_update_started = asyncio.Event()
+        owner = object()
+        coordinator = EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+        first_access = MatrixConversationAccess(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(coordinator=coordinator),
+        )
+        second_access = MatrixConversationAccess(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(coordinator=coordinator),
+        )
+
+        async def first_update() -> None:
+            first_update_started.set()
+            await release_first_update.wait()
+
+        async def second_update() -> None:
+            second_update_started.set()
+
+        first_access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: first_update(),
+            name="matrix_cache_first_update",
+        )
+        await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
+
+        second_access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: second_update(),
+            name="matrix_cache_second_update",
+        )
+        await asyncio.sleep(0)
+        assert second_update_started.is_set() is False
+
+        release_first_update.set()
+        await wait_for_background_tasks(timeout=1.0, owner=owner)
+
+        assert second_update_started.is_set()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_room_cache_update_does_not_start_queued_coro(self) -> None:
+        """Cancelling a queued room update before it runs should not invoke its coroutine factory."""
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+        queued_update_started = asyncio.Event()
+        owner = object()
+        coordinator = EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+        access = MatrixConversationAccess(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(coordinator=coordinator),
+        )
+
+        async def blocking_update() -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        async def queued_update() -> None:
+            queued_update_started.set()
+
+        access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: blocking_update(),
+            name="matrix_cache_blocking_update",
+        )
+        await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
+
+        queued_task = access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: queued_update(),
+            name="matrix_cache_queued_update",
+        )
+        queued_task.cancel()
+        await asyncio.gather(queued_task, return_exceptions=True)
+
+        release_blocker.set()
+        await wait_for_background_tasks(timeout=1.0, owner=owner)
+
+        assert queued_update_started.is_set() is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_room_cache_update_keeps_follow_up_update_behind_running_predecessor(self) -> None:
+        """Cancelling a queued room update must not break the same-room serialization chain."""
+        first_update_started = asyncio.Event()
+        release_first_update = asyncio.Event()
+        third_update_started = asyncio.Event()
+        owner = object()
+        coordinator = EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+        access = MatrixConversationAccess(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(coordinator=coordinator),
+        )
+
+        async def first_update() -> None:
+            first_update_started.set()
+            await release_first_update.wait()
+
+        async def cancelled_update() -> None:
+            msg = "Cancelled room cache update should not start"
+            raise AssertionError(msg)
+
+        async def third_update() -> None:
+            third_update_started.set()
+
+        access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: first_update(),
+            name="matrix_cache_first_update",
+        )
+        await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
+
+        cancelled_task = access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: cancelled_update(),
+            name="matrix_cache_cancelled_update",
+        )
+        cancelled_task.cancel()
+        await asyncio.gather(cancelled_task, return_exceptions=True)
+
+        access._queue_room_cache_update(
+            "!test:localhost",
+            lambda: third_update(),
+            name="matrix_cache_third_update",
+        )
+        await asyncio.sleep(0)
+        assert third_update_started.is_set() is False
+
+        release_first_update.set()
+        await wait_for_background_tasks(timeout=1.0, owner=owner)
+
+        assert third_update_started.is_set()
+
+    @pytest.mark.asyncio
     async def test_reply_chain_event_cache_write_through_supports_later_sqlite_lookup(self, bot: AgentBot) -> None:
         """Reply-chain resolution should populate the event cache and later reuse it without network I/O."""
-        await bot._initialize_event_cache()
+        await bot._initialize_runtime_support_services()
         assert bot.event_cache is not None
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -407,6 +999,7 @@ class TestThreadingBehavior:
         try:
             with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
                 first_context = await bot._conversation_resolver.extract_message_context(room, event)
+            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
             assert first_context.is_thread is True
             assert first_context.thread_id == "$msg1:localhost"
@@ -433,7 +1026,7 @@ class TestThreadingBehavior:
             mock_fetch_again.assert_not_called()
             bot.client.room_get_event.assert_not_awaited()
         finally:
-            await bot._close_event_cache()
+            await bot._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:

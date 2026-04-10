@@ -248,6 +248,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         coro: object,
         name: str | None = None,
         error_handler: object | None = None,  # noqa: ARG001
+        owner: object | None = None,  # noqa: ARG001
     ) -> asyncio.Task[Any]:
         assert asyncio.iscoroutine(coro)
         task = asyncio.create_task(coro, name=name)

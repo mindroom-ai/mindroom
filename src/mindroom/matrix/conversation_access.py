@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import typing
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import nio
 from nio.responses import RoomGetEventError
@@ -16,10 +17,12 @@ from mindroom.matrix.room_cache import cached_room_get_event
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import AsyncIterator, Sequence
 
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.event_info import EventInfo
 
 
@@ -92,8 +95,7 @@ class MatrixConversationAccess(ConversationReadAccess):
     """Own Matrix conversation reads and advisory cache writes for one bot."""
 
     logger: structlog.stdlib.BoundLogger
-    client: nio.AsyncClient | None = None
-    event_cache: ConversationEventCache | None = None
+    runtime: BotRuntimeView
     _turn_event_cache: ContextVar[dict[tuple[str, str], EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
@@ -105,11 +107,24 @@ class MatrixConversationAccess(ConversationReadAccess):
     )
 
     def _require_client(self) -> nio.AsyncClient:
-        client = self.client
+        client = self.runtime.client
         if client is None:
             msg = "Matrix client is not ready for conversation access"
             raise RuntimeError(msg)
         return client
+
+    def _queue_room_cache_update(
+        self,
+        room_id: str,
+        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
+        *,
+        name: str,
+    ) -> asyncio.Task[object]:
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is None:
+            msg = "Event cache write coordinator is not configured"
+            raise RuntimeError(msg)
+        return coordinator.queue_room_update(room_id, update_coro_factory, name=name)
 
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
@@ -138,7 +153,7 @@ class MatrixConversationAccess(ConversationReadAccess):
 
         response = await cached_room_get_event(
             self._require_client(),
-            self.event_cache,
+            self.runtime.event_cache,
             room_id,
             event_id,
         )
@@ -182,7 +197,7 @@ class MatrixConversationAccess(ConversationReadAccess):
                     self._require_client(),
                     room_id,
                     thread_id,
-                    event_cache=self.event_cache,
+                    event_cache=self.runtime.event_cache,
                 ),
             )
             if history_cache is not None:
@@ -196,7 +211,7 @@ class MatrixConversationAccess(ConversationReadAccess):
                 self._require_client(),
                 room_id,
                 thread_id,
-                event_cache=self.event_cache,
+                event_cache=self.runtime.event_cache,
             ),
         )
         if snapshot_cache is not None:
@@ -230,7 +245,7 @@ class MatrixConversationAccess(ConversationReadAccess):
         event_info: EventInfo,
     ) -> None:
         """Append one live thread event into the advisory cache when the thread is known."""
-        event_cache = self.event_cache
+        event_cache = self.runtime.event_cache
         if event_cache is None:
             return
 
@@ -266,7 +281,11 @@ class MatrixConversationAccess(ConversationReadAccess):
         )
 
         try:
-            await event_cache.append_event(room_id, thread_id, event_source)
+            await self._queue_room_cache_update(
+                room_id,
+                lambda: event_cache.append_event(room_id, thread_id, event_source),
+                name="matrix_cache_append_live_event",
+            )
         except Exception as exc:
             self.logger.warning(
                 "Failed to append live thread event to cache",
@@ -278,7 +297,7 @@ class MatrixConversationAccess(ConversationReadAccess):
 
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
-        event_cache = self.event_cache
+        event_cache = self.runtime.event_cache
         if event_cache is None:
             return
 
@@ -304,11 +323,15 @@ class MatrixConversationAccess(ConversationReadAccess):
             else None,
         )
         try:
-            await event_cache.redact_event(
+            await self._queue_room_cache_update(
                 room_id,
-                event.redacts,
-                thread_id=thread_id,
-                redaction_event=redaction_source,
+                lambda: event_cache.redact_event(
+                    room_id,
+                    event.redacts,
+                    thread_id=thread_id,
+                    redaction_event=redaction_source,
+                ),
+                name="matrix_cache_apply_redaction",
             )
         except Exception as exc:
             self.logger.warning(
@@ -319,9 +342,31 @@ class MatrixConversationAccess(ConversationReadAccess):
                 error=str(exc),
             )
 
-    async def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
-        """Persist sync timeline events so later reads can reuse the advisory cache."""
-        event_cache = self.event_cache
+    async def _persist_room_sync_timeline_updates(
+        self,
+        event_cache: ConversationEventCache,
+        room_id: str,
+        cached_events: list[tuple[str, str, dict[str, object]]],
+        redacted_event_ids: list[str],
+    ) -> None:
+        """Persist one room's prepared sync timeline updates."""
+        try:
+            if cached_events:
+                await event_cache.store_events_batch(cached_events)
+            for redacted_event_id in redacted_event_ids:
+                await event_cache.redact_event(room_id, redacted_event_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to cache sync timeline events",
+                room_id=room_id,
+                error=str(exc),
+                events=len(cached_events),
+                redactions=len(redacted_event_ids),
+            )
+
+    def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
+        """Schedule sync timeline persistence so sync callbacks do not wait on SQLite."""
+        event_cache = self.runtime.event_cache
         if event_cache is None:
             return
 
@@ -329,15 +374,24 @@ class MatrixConversationAccess(ConversationReadAccess):
         if not filtered_cached_events and not redacted_events:
             return
 
-        try:
-            if filtered_cached_events:
-                await event_cache.store_events_batch(filtered_cached_events)
-            for room_id, redacted_event_id in redacted_events:
-                await event_cache.redact_event(room_id, redacted_event_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to cache sync timeline events",
-                error=str(exc),
-                events=len(filtered_cached_events),
-                redactions=len(redacted_events),
+        updates_by_room: dict[str, tuple[list[tuple[str, str, dict[str, object]]], list[str]]] = {}
+        for event_id, room_id, event_source in filtered_cached_events:
+            room_events, _room_redactions = updates_by_room.setdefault(room_id, ([], []))
+            room_events.append((event_id, room_id, event_source))
+        for room_id, redacted_event_id in redacted_events:
+            _room_events, room_redactions = updates_by_room.setdefault(room_id, ([], []))
+            room_redactions.append(redacted_event_id)
+
+        for room_id, (room_events, room_redactions) in updates_by_room.items():
+            self._queue_room_cache_update(
+                room_id,
+                lambda room_events=room_events,
+                room_id=room_id,
+                room_redactions=room_redactions: self._persist_room_sync_timeline_updates(
+                    event_cache,
+                    room_id,
+                    room_events,
+                    room_redactions,
+                ),
+                name="matrix_cache_sync_timeline",
             )

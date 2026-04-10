@@ -42,6 +42,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         *,
         name: str,
         error_handler: object | None = None,  # noqa: ARG001
+        owner: object | None = None,  # noqa: ARG001
     ) -> asyncio.Task[None]:
         task = asyncio.create_task(coro, name=name)
         scheduled_tasks.append(task)
@@ -141,6 +142,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         *,
         name: str,
         error_handler: object | None = None,  # noqa: ARG001
+        owner: object | None = None,  # noqa: ARG001
     ) -> asyncio.Task[None]:
         task = asyncio.create_task(coro, name=name)
         scheduled_tasks.append(task)

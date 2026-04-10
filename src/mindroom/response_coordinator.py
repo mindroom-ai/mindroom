@@ -1783,6 +1783,7 @@ class ResponseCoordinator:
                             execution_identity=execution_identity,
                         ),
                         name=f"memory_save_{agent_name}_{session_id}",
+                        owner=self.deps.runtime,
                     )
             except Exception:  # pragma: no cover
                 self.deps.logger.debug("Skipping memory storage due to configuration error")
@@ -1924,6 +1925,7 @@ class ResponseCoordinator:
                         execution_identity=execution_identity,
                     ),
                     name=f"memory_save_{self.deps.agent_name}_{session_id}",
+                    owner=self.deps.runtime,
                 )
 
         strip_transient_enrichment, persist_response_event_id = self._build_session_storage_effects(
