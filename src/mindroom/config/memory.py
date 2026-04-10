@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mindroom.config.models import EmbedderConfig
 
@@ -13,6 +13,8 @@ MemoryBackend = Literal["mem0", "file"]
 
 class _MemoryEmbedderConfig(BaseModel):
     """Memory embedder configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(
         default="openai",
@@ -24,8 +26,19 @@ class _MemoryEmbedderConfig(BaseModel):
 class _MemoryLLMConfig(BaseModel):
     """Memory LLM configuration."""
 
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = Field(default="ollama", description="LLM provider (ollama, openai, anthropic)")
+    connection: str | None = Field(default=None, description="Optional named credential connection")
     config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
+
+    @model_validator(mode="after")
+    def validate_inline_api_key_bypass(self) -> _MemoryLLMConfig:
+        """Reject inline memory LLM API keys."""
+        if "api_key" in self.config:
+            msg = "memory.llm.config.api_key is not allowed. Use memory.llm.connection instead."
+            raise ValueError(msg)
+        return self
 
 
 class _MemoryFileConfig(BaseModel):

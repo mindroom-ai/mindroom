@@ -25,6 +25,7 @@ SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
+_WORKER_GRANTABLE_ENV_ONLY_SHARED_CREDENTIAL_SOURCES = frozenset({"env"})
 logger = get_logger(__name__)
 
 
@@ -361,6 +362,7 @@ def load_worker_grantable_shared_credentials(
     *,
     shared_manager: CredentialsManager,
     allowed_services: frozenset[str],
+    include_ui_credentials: bool = True,
 ) -> dict[str, Any] | None:
     """Return one shared credential only when the worker allowlist permits mirroring it."""
     if service not in allowed_services:
@@ -368,7 +370,12 @@ def load_worker_grantable_shared_credentials(
     shared_credentials = shared_manager.load_credentials(service)
     if not isinstance(shared_credentials, Mapping):
         return None
-    if shared_credentials.get("_source") not in _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES:
+    allowed_sources = (
+        _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES
+        if include_ui_credentials
+        else _WORKER_GRANTABLE_ENV_ONLY_SHARED_CREDENTIAL_SOURCES
+    )
+    if shared_credentials.get("_source") not in allowed_sources:
         return None
     return dict(shared_credentials)
 
@@ -377,6 +384,7 @@ def list_worker_grantable_shared_services(
     *,
     shared_manager: CredentialsManager,
     allowed_services: frozenset[str],
+    include_ui_credentials: bool = True,
 ) -> list[str]:
     """List shared credential services that isolated workers may inherit."""
     return sorted(
@@ -386,6 +394,7 @@ def list_worker_grantable_shared_services(
             service,
             shared_manager=shared_manager,
             allowed_services=allowed_services,
+            include_ui_credentials=include_ui_credentials,
         )
         is not None
     )
@@ -396,9 +405,15 @@ def merge_scoped_credentials(
     *,
     base_manager: CredentialsManager,
     worker_manager: CredentialsManager | None,
+    include_ui_shared_credentials: bool = True,
 ) -> dict[str, Any] | None:
     """Merge shared credentials with worker-scoped overrides."""
-    shared_credentials = base_manager.load_credentials(service)
+    shared_credentials = load_worker_grantable_shared_credentials(
+        service,
+        shared_manager=base_manager,
+        allowed_services=frozenset({service}),
+        include_ui_credentials=include_ui_shared_credentials,
+    )
     worker_credentials = worker_manager.load_credentials(service) if worker_manager is not None else None
     return _merge_credential_layers(shared_credentials, worker_credentials)
 
@@ -406,6 +421,7 @@ def merge_scoped_credentials(
 def sync_shared_credentials_to_worker(
     worker_key: str,
     *,
+    include_ui_credentials: bool = True,
     allowed_services: frozenset[str],
     credentials_manager: CredentialsManager,
 ) -> None:
@@ -431,6 +447,7 @@ def sync_shared_credentials_to_worker(
             service,
             shared_manager=source_manager,
             allowed_services=allowed_services,
+            include_ui_credentials=include_ui_credentials,
         )
         if shared_credentials is None:
             if service not in allowed_services:

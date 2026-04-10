@@ -317,6 +317,23 @@ export ANTHROPIC_API_KEY=your-key-here
 ### Optional Advanced Configuration
 
 ```yaml
+connections:
+  openai/default:
+    provider: openai
+    service: openai
+    auth_kind: api_key
+
+  google/oauth:
+    provider: google
+    service: google_oauth_client
+    auth_kind: oauth_client
+
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+    connection: openai/default
+
 knowledge_bases:
   engineering_docs:
     path: ./knowledge_docs
@@ -343,13 +360,21 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    connection: openai/stt
 
 memory:
   backend: mem0
   embedder:
-    provider: sentence_transformers
+    provider: openai
     config:
-      model: sentence-transformers/all-MiniLM-L6-v2
+      model: text-embedding-3-small
+      connection: openai/embeddings
+
+  llm:
+    provider: openai
+    connection: openai/default
+    config:
+      model: gpt-4.1-mini
 
 mindroom_user:
   username: mindroom_user  # Set this before first run; username is immutable after bootstrap
@@ -361,6 +386,9 @@ authorization:
     "!exampleRoomId:example.com": ["@bob:example.com"]
   default_room_access: false
 ```
+
+For `vertexai_claude` models, keep `project_id` and `region` on the model config, for example under `models.<name>.extra_kwargs`.
+Do not move those endpoint settings into `connections`.
 
 `mindroom_user.username` can only be set before the internal user account is created. After first startup, change `mindroom_user.display_name` if you only want a different visible name.
 

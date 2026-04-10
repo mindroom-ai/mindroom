@@ -196,7 +196,6 @@ def _load_plugin_module(
         mtime = module_path.stat().st_mtime
     except OSError as exc:
         msg = f"Failed to stat plugin {kind} module {module_path}: {exc}"
-        logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
         raise PluginValidationError(msg) from exc
 
     module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
@@ -217,7 +216,6 @@ def _load_plugin_module(
     if spec is None or spec.loader is None:
         plugin_imports._restore_plugin_package_chain(previous_packages)
         msg = f"Failed to load plugin {kind} module: {module_path}"
-        logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
         raise PluginValidationError(msg)
 
     module = util.module_from_spec(spec)
@@ -245,7 +243,6 @@ def _load_plugin_module(
                 plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
         plugin_imports._restore_plugin_package_chain(previous_packages)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
-        logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise PluginValidationError(msg) from exc
 
     plugin_imports._MODULE_IMPORT_CACHE[module_path] = plugin_imports._ModuleCacheEntry(

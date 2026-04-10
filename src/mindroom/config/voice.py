@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _VoiceSTTConfig(BaseModel):
     """Configuration for voice speech-to-text."""
 
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = Field(default="openai", description="STT provider (openai or compatible)")
     model: str = Field(default="whisper-1", description="STT model name")
-    api_key: str | None = Field(default=None, description="API key for STT service")
+    connection: str | None = Field(default=None, description="Optional named credential connection")
     host: str | None = Field(default=None, description="Host URL for self-hosted STT")
 
 

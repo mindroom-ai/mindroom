@@ -119,7 +119,8 @@ def _log_skipped_plugin_entry(
     log_kwargs: dict[str, object] = {"plugin_path": plugin_path}
     if root is not None:
         log_kwargs["path"] = str(root)
-    logger.exception("Failed to load plugin, skipping", **log_kwargs)
+    log_kwargs["error"] = str(exc)
+    logger.warning("Failed to load plugin, skipping", **log_kwargs)
 
 
 def _reject_duplicate_plugin_manifest_names(

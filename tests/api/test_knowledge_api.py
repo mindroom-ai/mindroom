@@ -16,6 +16,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
 
 
@@ -37,6 +38,13 @@ def _knowledge_config(
     return Config(
         agents={},
         models={},
+        connections={
+            "openai/embeddings": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
+            },
+        },
         knowledge_bases={
             base_id: KnowledgeBaseConfig(
                 path=str(path),
@@ -95,6 +103,7 @@ def test_client(tmp_path: Path) -> TestClient:
         storage_path=tmp_path / "mindroom_data",
         process_env={},
     )
+    get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-openai-key")
     main.initialize_api_app(main.app, runtime_paths)
     return TestClient(main.app)
 
@@ -290,12 +299,13 @@ def test_knowledge_status_falls_back_without_initializing_when_manager_missing(
     ):
         response = test_client.get("/api/knowledge/bases/research/status")
 
+    expected_file_count = len(knowledge_api._list_file_info(tmp_path)[0])
     assert response.status_code == 200
     assert response.json() == {
         "base_id": "research",
         "folder_path": str(tmp_path.resolve()),
         "watch": False,
-        "file_count": 1,
+        "file_count": expected_file_count,
         "indexed_count": 0,
         "manager_available": False,
     }
@@ -631,6 +641,7 @@ def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path)
     config_old = _knowledge_config(old_path)
     config_new = _knowledge_config(new_path)
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage_path)
+    get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-openai-key")
 
     async def _run() -> None:
         try:

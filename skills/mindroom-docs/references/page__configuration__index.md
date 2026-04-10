@@ -182,11 +182,12 @@ models:
   default:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
+    connection: anthropic/default  # Optional: named connection override
   sonnet:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
+    connection: anthropic/default  # Optional: named connection override
     host: null                     # Optional: Host URL (e.g., for Ollama)
-    api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 
@@ -278,6 +279,17 @@ Sandbox-proxied execution is stricter than direct local execution: ordinary runt
 # These thresholds only affect automatic thread summaries; manual `set_thread_summary`
 # tool calls write immediately and reset the automatic baseline from the new message count.
 
+# Named connection routing (optional)
+connections:
+  openai/default:
+    provider: openai
+    service: openai
+    auth_kind: api_key
+  google/oauth:
+    provider: google
+    service: google_oauth_client
+    auth_kind: oauth_client
+
 # Memory system configuration (optional)
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
@@ -286,11 +298,12 @@ memory:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
-      api_key: null                # Optional: From env var
+      connection: openai/embeddings  # Optional: named connection override
       host: null                   # Optional: For self-hosted
       dimensions: null             # Optional: Embedding dimension override (e.g., 256)
   llm:                             # Optional: LLM for memory operations
     provider: ollama
+    connection: null               # Optional: defaults to provider/default when needed
     config: {}
   file:                            # File-backed memory settings (when backend: file)
     path: null                     # Optional: fallback root for file memory paths
@@ -347,7 +360,7 @@ voice:
   stt:
     provider: openai               # Default: openai
     model: whisper-1               # Default: whisper-1
-    api_key: null
+    connection: openai/stt         # Optional: named connection override
     host: null
   intelligence:
     model: default                 # Model for command recognition

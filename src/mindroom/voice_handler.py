@@ -16,13 +16,13 @@ from agno.media import Audio
 from mindroom.ai import get_model_instance
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import get_available_agents_for_sender
+from mindroom.connections import connection_api_key, resolve_connection
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
 from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
@@ -350,11 +350,20 @@ async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: Ru
         stt_host = config.voice.stt.host
         url = f"{stt_host}/v1/audio/transcriptions" if stt_host else "https://api.openai.com/v1/audio/transcriptions"
 
-        api_key = config.voice.stt.api_key or get_secret_from_env("OPENAI_API_KEY", runtime_paths)
-        if not api_key:
+        resolved_connection = resolve_connection(
+            config,
+            provider=config.voice.stt.provider,
+            purpose="voice_stt",
+            connection_name=config.voice.stt.connection,
+            runtime_paths=runtime_paths,
+        )
+        api_key = connection_api_key(resolved_connection)
+        headers: dict[str, str] = {}
+        if resolved_connection.auth_kind != "none" and not api_key:
             logger.error("No OpenAI-compatible STT API key configured for voice transcription")
             return None
-        headers = {"Authorization": f"Bearer {api_key}"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
         files = {"file": ("audio.ogg", audio_data, "audio/ogg")}
         form_data = {"model": config.voice.stt.model}

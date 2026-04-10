@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -61,7 +61,6 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=self.storage_root,
             tool_validation_snapshot=tool_validation_snapshot,
-            worker_grantable_credentials=worker_grantable_credentials,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -117,6 +116,7 @@ class KubernetesWorkerBackend:
 
             sync_shared_credentials_to_worker(
                 worker_key,
+                include_ui_credentials=resolved_worker_key_scope(worker_key) == "unscoped",
                 allowed_services=self.worker_grantable_credentials,
                 credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
             )
