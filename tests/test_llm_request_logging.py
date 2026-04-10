@@ -1,4 +1,4 @@
-"""Tests for lean LLM request logging."""
+"""Tests for full LLM request logging."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def test_debug_config_parses() -> None:
 
 @pytest.mark.asyncio
 async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
-    """Enabled request logging should emit one JSONL entry per invoke path."""
+    """Enabled request logging should emit one full JSONL entry per invoke path."""
     model = _FakeModel()
     install_llm_request_logging(
         model,
@@ -82,11 +82,21 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
     assert len(entries) == 2
     assert entries[0]["agent_name"] == "assistant"
     assert entries[0]["model_id"] == "test-model"
-    assert entries[0]["system_prompt"] == "s" * 500
+    assert entries[0]["system_prompt"] == "s" * 600
+    assert entries[0]["messages"] == [
+        {"role": "system", "content": "s" * 600},
+        {"role": "user", "content": "hello"},
+    ]
     assert entries[0]["message_count"] == 2
+    assert entries[0]["tools"] == [{"name": "search"}]
     assert entries[0]["tool_count"] == 1
     assert entries[0]["model_params"] == {"temperature": 0.7}
     assert "timestamp" in entries[0]
+    assert entries[1]["messages"] == [
+        {"role": "system", "content": "s" * 600},
+        {"role": "user", "content": "hello"},
+    ]
+    assert entries[1]["tools"] == []
     assert entries[1]["tool_count"] == 0
 
 
