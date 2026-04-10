@@ -1,0 +1,4 @@
+{
+  "name": "restart-notify",
+  "hooks_module": "hooks.py"
+}
