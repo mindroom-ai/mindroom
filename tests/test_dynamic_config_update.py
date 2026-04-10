@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -16,6 +18,9 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import orchestrator_runtime_paths
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
 
 
 def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMock:
@@ -35,11 +40,33 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
     return bot
 
 
+@pytest_asyncio.fixture
+async def orchestrator_factory(
+    tmp_path: Path,
+) -> AsyncIterator[Callable[[], MultiAgentOrchestrator]]:
+    """Create orchestrators that are always stopped during test teardown."""
+    orchestrators: list[MultiAgentOrchestrator] = []
+
+    def create() -> MultiAgentOrchestrator:
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrators.append(orchestrator)
+        return orchestrator
+
+    try:
+        yield create
+    finally:
+        for orchestrator in reversed(orchestrators):
+            await orchestrator.stop()
+
+
 class TestDynamicConfigUpdate:
     """Test that dynamic config updates propagate to all existing bots."""
 
     @pytest.mark.asyncio
-    async def test_config_update_propagates_to_existing_bots(self, tmp_path: Path) -> None:
+    async def test_config_update_propagates_to_existing_bots(
+        self,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+    ) -> None:
         """Test that when config is updated, all existing bots get the new config."""
         # Create initial config with just one agent
         initial_config = Config(
@@ -55,7 +82,7 @@ class TestDynamicConfigUpdate:
         )
 
         # Create orchestrator and set initial config
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
 
         # Create a mock bot for the general agent
@@ -113,7 +140,10 @@ class TestDynamicConfigUpdate:
                 assert orchestrator.agent_bots["callagent"].config == updated_config
 
     @pytest.mark.asyncio
-    async def test_plugin_change_restarts_existing_bots(self, tmp_path: Path) -> None:
+    async def test_plugin_change_restarts_existing_bots(
+        self,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+    ) -> None:
         """Plugin entry changes should restart existing bots instead of only swapping hook registries."""
         initial_config = Config(
             agents={
@@ -140,7 +170,7 @@ class TestDynamicConfigUpdate:
             plugins=["./plugins/tool-policy-v2"],
         )
 
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
 
         general_bot = _mock_agent_bot(initial_config)
@@ -243,7 +273,10 @@ class TestDynamicConfigUpdate:
                 assert result.description == "Monitor for urgent emails and send text notification"
 
     @pytest.mark.asyncio
-    async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(self, tmp_path: Path) -> None:
+    async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(
+        self,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+    ) -> None:
         """Changing defaults.enable_streaming should update existing bots on config reload."""
         initial_config = Config(
             agents={
@@ -270,7 +303,7 @@ class TestDynamicConfigUpdate:
             defaults={"enable_streaming": False},
         )
 
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
 
         mock_bot = _mock_agent_bot(initial_config)
@@ -294,7 +327,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_thread_summary_threshold_defaults_update_existing_bots_without_restart(
         self,
-        tmp_path: Path,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
     ) -> None:
         """Changing thread summary defaults should update existing bots on config reload."""
         initial_config = Config(
@@ -328,7 +361,7 @@ class TestDynamicConfigUpdate:
             },
         )
 
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
 
         mock_bot = _mock_agent_bot(initial_config)
@@ -351,7 +384,10 @@ class TestDynamicConfigUpdate:
         assert router_bot.config.defaults.thread_summary_subsequent_interval == 3
 
     @pytest.mark.asyncio
-    async def test_matrix_room_access_change_reconciles_rooms_without_restarts(self, tmp_path: Path) -> None:
+    async def test_matrix_room_access_change_reconciles_rooms_without_restarts(
+        self,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+    ) -> None:
         """Changing matrix_room_access should trigger room/invitation reconciliation on config reload."""
         initial_config = Config(
             agents={
@@ -381,7 +417,7 @@ class TestDynamicConfigUpdate:
             },
         )
 
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
 
         general_bot = _mock_agent_bot(initial_config)
@@ -402,7 +438,10 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_authorization_change_reconciles_invitations_without_restarts(self, tmp_path: Path) -> None:
+    async def test_authorization_change_reconciles_invitations_without_restarts(
+        self,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+    ) -> None:
         """Changing authorization should trigger room/invitation reconciliation on config reload."""
         initial_config = Config(
             agents={
@@ -429,7 +468,7 @@ class TestDynamicConfigUpdate:
             authorization={"global_users": ["@alice:example.com"]},
         )
 
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
 
         general_bot = _mock_agent_bot(initial_config)
@@ -450,7 +489,10 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_display_name_change_updates_user_account(self, tmp_path: Path) -> None:
+    async def test_mindroom_user_display_name_change_updates_user_account(
+        self,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+    ) -> None:
         """Changing mindroom_user.display_name should refresh the internal user account."""
         initial_config = Config(
             agents={
@@ -476,7 +518,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "mindroom_user", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
         mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()
@@ -500,7 +542,10 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_username_change_is_rejected_without_partial_update(self, tmp_path: Path) -> None:
+    async def test_mindroom_user_username_change_is_rejected_without_partial_update(
+        self,
+        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+    ) -> None:
         """Reject changing mindroom_user.username and keep the current runtime config."""
         initial_config = Config(
             agents={
@@ -526,7 +571,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "alice_internal", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
         mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()
