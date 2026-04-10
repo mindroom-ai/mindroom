@@ -822,6 +822,7 @@ class DispatchPlanner:
             logger=self.deps.logger,
             handled_turn_ledger=self.deps.handled_turn_ledger,
             derive_conversation_context=self.deps.resolver.derive_conversation_context,
+            conversation_access=self.deps.resolver.deps.conversation_access,
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
             send_response=send_response,

@@ -38,6 +38,12 @@ def _runtime_paths() -> object:
     return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
+def _conversation_access(thread_history: list[object] | None = None) -> MagicMock:
+    access = MagicMock()
+    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
+    return access
+
+
 def _record(
     task_id: str,
     workflow: ScheduledWorkflow,
@@ -1070,6 +1076,7 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
             config=config,
             runtime_paths=_runtime_paths(),
             room=room,
+            conversation_access=_conversation_access(),
             thread_id="$fallback_thread",
         )
 
@@ -1126,6 +1133,7 @@ async def test_edit_scheduled_task_preserves_new_thread_mode() -> None:
             config=config,
             runtime_paths=_runtime_paths(),
             room=room,
+            conversation_access=_conversation_access(),
             thread_id="$fallback_thread",
         )
 
@@ -1157,6 +1165,7 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
         config=MagicMock(),
         runtime_paths=_runtime_paths(),
         room=room,
+        conversation_access=_conversation_access(),
         thread_id="$thread123",
     )
 
@@ -1277,6 +1286,7 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
             config=config,
             runtime_paths=_runtime_paths(),
             room=room,
+            conversation_access=_conversation_access(),
         )
 
     assert task_id is None
@@ -1309,6 +1319,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
             config=config,
             runtime_paths=_runtime_paths(),
             room=room,
+            conversation_access=_conversation_access(),
             new_thread=True,
         )
 

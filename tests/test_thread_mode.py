@@ -21,6 +21,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
@@ -81,6 +82,7 @@ def _agent_bot(
 
 def _install_static_logger_deps(bot: AgentBot, logger: MagicMock) -> None:
     """Rebuild extracted collaborators with one fixed logger dependency."""
+    bot._conversation_access.logger = logger
     resolver = replace(
         unwrap_extracted_collaborator(bot._conversation_resolver),
         deps=replace(unwrap_extracted_collaborator(bot._conversation_resolver).deps, logger=logger),
@@ -1149,7 +1151,7 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        await bot._conversation_state_writer.cache_thread_event(
+        await bot._conversation_access.append_live_event(
             "!room:localhost",
             event,
             event_info=EventInfo.from_event(event.source),
@@ -1164,12 +1166,12 @@ class TestExtractedModuleLoggerRebinding:
         )
         rebound_logger.warning.assert_not_called()
 
-    def test_conversation_resolver_fetch_path_uses_state_writer_api(
+    def test_conversation_resolver_fetch_path_uses_conversation_access_api(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Resolver full-history fetches should go through the state-writer cache API."""
+        """Resolver full-history fetches should go through the explicit access layer."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1183,8 +1185,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        state_writer = unwrap_extracted_collaborator(bot._conversation_state_writer)
-        state_writer.fetch_thread_history = AsyncMock(return_value=[])
+        bot._conversation_access.get_thread_history = AsyncMock(return_value=[])
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
@@ -1194,19 +1195,18 @@ class TestExtractedModuleLoggerRebinding:
             ),
         )
 
-        state_writer.fetch_thread_history.assert_awaited_once_with(
-            bot.client,
+        bot._conversation_access.get_thread_history.assert_awaited_once_with(
             "!room:localhost",
             "$threadroot",
         )
 
     @pytest.mark.asyncio
-    async def test_conversation_state_writer_fetch_path_passes_explicit_event_cache(
+    async def test_conversation_access_fetch_path_passes_explicit_event_cache(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Writer-owned fetches should opt into cache maintenance explicitly."""
+        """Access-layer fetches should opt into cache maintenance explicitly."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1219,14 +1219,15 @@ class TestExtractedModuleLoggerRebinding:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = MagicMock()
+        sync_bot_runtime_state(bot)
 
         client = MagicMock()
         with patch(
-            "mindroom.conversation_state_writer.fetch_thread_history",
+            "mindroom.matrix.conversation_access.fetch_thread_history",
             new=AsyncMock(return_value=[]),
         ) as fetch_thread_history_mock:
-            await bot._conversation_state_writer.fetch_thread_history(
-                client,
+            bot._conversation_access.client = client
+            await bot._conversation_access.get_thread_history(
                 "!room:localhost",
                 "$threadroot",
             )
@@ -1235,5 +1236,203 @@ class TestExtractedModuleLoggerRebinding:
             client,
             "!room:localhost",
             "$threadroot",
-            bot.event_cache,
+            event_cache=bot.event_cache,
         )
+
+    @pytest.mark.asyncio
+    async def test_conversation_access_promotes_full_snapshot_to_history_cache(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Full snapshots should satisfy later full-history reads inside the same turn."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.event_cache = MagicMock()
+        sync_bot_runtime_state(bot)
+
+        snapshot = ThreadHistoryResult([], is_full_history=True)
+        with (
+            patch(
+                "mindroom.matrix.conversation_access.fetch_thread_snapshot",
+                new=AsyncMock(return_value=snapshot),
+            ) as fetch_thread_snapshot_mock,
+            patch(
+                "mindroom.matrix.conversation_access.fetch_thread_history",
+                new=AsyncMock(),
+            ) as fetch_thread_history_mock,
+        ):
+            bot._conversation_access.client = MagicMock()
+            async with bot._conversation_access.turn_scope():
+                snapshot_history = await bot._conversation_access.get_thread_snapshot(
+                    "!room:localhost",
+                    "$threadroot",
+                )
+                full_history = await bot._conversation_access.get_thread_history(
+                    "!room:localhost",
+                    "$threadroot",
+                )
+
+        assert snapshot_history is snapshot
+        assert full_history is snapshot
+        fetch_thread_snapshot_mock.assert_awaited_once()
+        fetch_thread_history_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_conversation_access_reloads_non_full_snapshot_for_history(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Preview snapshots should not suppress a later hydrated history read."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.event_cache = MagicMock()
+        sync_bot_runtime_state(bot)
+
+        preview_snapshot = ThreadHistoryResult([], is_full_history=False)
+        hydrated_history = ThreadHistoryResult([], is_full_history=True)
+        with (
+            patch(
+                "mindroom.matrix.conversation_access.fetch_thread_snapshot",
+                new=AsyncMock(return_value=preview_snapshot),
+            ) as fetch_thread_snapshot_mock,
+            patch(
+                "mindroom.matrix.conversation_access.fetch_thread_history",
+                new=AsyncMock(return_value=hydrated_history),
+            ) as fetch_thread_history_mock,
+        ):
+            bot._conversation_access.client = MagicMock()
+            async with bot._conversation_access.turn_scope():
+                snapshot_history = await bot._conversation_access.get_thread_snapshot(
+                    "!room:localhost",
+                    "$threadroot",
+                )
+                full_history = await bot._conversation_access.get_thread_history(
+                    "!room:localhost",
+                    "$threadroot",
+                )
+
+        assert snapshot_history is preview_snapshot
+        assert full_history is hydrated_history
+        fetch_thread_snapshot_mock.assert_awaited_once()
+        fetch_thread_history_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_coalescing_thread_id_uses_canonical_relation_walk(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Pre-gate coalescing should avoid full dispatch-target derivation for reply chains."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = MagicMock()
+        sync_bot_runtime_state(bot)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "follow-up",
+                    "m.relates_to": {
+                        "m.in_reply_to": {"event_id": "$reply-seed:localhost"},
+                    },
+                },
+            },
+        )
+
+        with (
+            patch(
+                "mindroom.conversation_resolver.canonicalize_related_event_id",
+                new=AsyncMock(return_value="$thread-root:localhost"),
+            ) as canonicalize_mock,
+            patch.object(
+                bot._conversation_resolver,
+                "derive_conversation_target",
+                new=AsyncMock(side_effect=AssertionError("coalescing should not derive full dispatch target")),
+            ),
+        ):
+            thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+
+        assert thread_id == "$thread-root:localhost"
+        canonicalize_mock.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$reply-seed:localhost",
+            access=bot._conversation_access,
+            caches=bot._conversation_resolver.reply_chain,
+        )
+
+
+class TestConversationAccessArchitecture:
+    """Architecture guards for the explicit conversation-access seam."""
+
+    def test_hot_path_modules_do_not_call_raw_matrix_history_apis(self) -> None:
+        """Hot-path conversation modules should use the explicit access layer."""
+        repo_root = Path(__file__).resolve().parents[1]
+        banned_calls = (
+            "room_get_event(",
+            "room_get_event_relations(",
+            "room_messages(",
+            "cached_room_get_event(",
+        )
+        for relative_path in (
+            "src/mindroom/conversation_resolver.py",
+            "src/mindroom/dispatch_planner.py",
+            "src/mindroom/matrix/reply_chain.py",
+            "src/mindroom/response_coordinator.py",
+        ):
+            file_text = (repo_root / relative_path).read_text()
+            for banned_call in banned_calls:
+                assert banned_call not in file_text, f"{relative_path} should not call {banned_call}"
+
+    def test_hot_path_modules_do_not_reference_event_cache_directly(self) -> None:
+        """Hot-path conversation modules should not bypass the access layer for cache state."""
+        repo_root = Path(__file__).resolve().parents[1]
+        banned_tokens = (
+            "EventCache(",
+            "event_cache.",
+        )
+        for relative_path in (
+            "src/mindroom/conversation_resolver.py",
+            "src/mindroom/dispatch_planner.py",
+            "src/mindroom/matrix/reply_chain.py",
+            "src/mindroom/response_coordinator.py",
+        ):
+            file_text = (repo_root / relative_path).read_text()
+            for banned_token in banned_tokens:
+                assert banned_token not in file_text, f"{relative_path} should not reference {banned_token}"

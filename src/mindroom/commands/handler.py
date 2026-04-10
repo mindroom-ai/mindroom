@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.handled_turns import HandledTurnLedger
     from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.conversation_access import ConversationReadAccess
     from mindroom.matrix.identity import MatrixID
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -73,6 +74,7 @@ class CommandHandlerContext:
         [str, EventInfo],
         Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
     ]
+    conversation_access: ConversationReadAccess
     requester_user_id_for_event: Callable[[CommandEvent], str]
     build_message_target: Callable[..., MessageTarget]
     send_response: Callable[..., Awaitable[str | None]]
@@ -521,6 +523,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             config=context.config,
             runtime_paths=context.runtime_paths,
             room=room,
+            conversation_access=context.conversation_access,
             mentioned_agents=mentioned_agents,
         )
 
@@ -562,6 +565,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             config=context.config,
             runtime_paths=context.runtime_paths,
             room=room,
+            conversation_access=context.conversation_access,
             thread_id=effective_thread_id,
         )
 

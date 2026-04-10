@@ -170,6 +170,7 @@ def _build_response_coordinator(
         logger=bot.logger,
         runtime_paths=runtime_paths,
         delivery_gateway=delivery_gateway,
+        conversation_access=bot._conversation_resolver.deps.conversation_access,
     )
     bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
 

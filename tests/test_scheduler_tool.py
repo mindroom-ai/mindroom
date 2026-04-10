@@ -33,6 +33,7 @@ def _make_context(config: Config) -> ToolRuntimeContext:
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
+        conversation_access=MagicMock(),
         room=MagicMock(),
         reply_to_event_id=None,
         storage_path=None,
@@ -94,6 +95,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "config": context.config,
         "runtime_paths": context.runtime_paths,
         "room": context.room,
+        "conversation_access": context.conversation_access,
         "new_thread": False,
     }
     assert mock_schedule.await_args_list[1].kwargs == {
@@ -105,6 +107,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "config": context.config,
         "runtime_paths": context.runtime_paths,
         "room": context.room,
+        "conversation_access": context.conversation_access,
         "new_thread": True,
     }
 
@@ -143,6 +146,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=context.room,
+        conversation_access=context.conversation_access,
         thread_id=context.resolved_thread_id,
     )
 

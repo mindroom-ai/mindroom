@@ -46,6 +46,7 @@ def _make_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
+        conversation_access=AsyncMock(),
         room=None,
         reply_to_event_id=reply_to_event_id,
         storage_path=None,
@@ -119,16 +120,13 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
     """The tool should default to the current room and resolved thread context."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
+    context.conversation_access.get_thread_history.return_value = _thread_history(3)
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
-        patch(
-            "mindroom.custom_tools.thread_summary.fetch_thread_history",
-            new=AsyncMock(return_value=_thread_history(3)),
-        ) as mock_history,
         patch(
             "mindroom.custom_tools.thread_summary.send_thread_summary_event",
             new=AsyncMock(return_value="$summary-event:localhost"),
@@ -151,9 +149,9 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
+        access=context.conversation_access,
     )
-    mock_history.assert_awaited_once_with(
-        context.client,
+    context.conversation_access.get_thread_history.assert_awaited_once_with(
         context.room_id,
         "$ctx-thread:localhost",
     )
@@ -187,16 +185,13 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
     """Explicit event IDs should be normalized to the canonical thread root."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id=None)
+    context.conversation_access.get_thread_history.return_value = _thread_history(4)
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
             new=AsyncMock(return_value="$thread-root:localhost"),
         ) as mock_normalize,
-        patch(
-            "mindroom.custom_tools.thread_summary.fetch_thread_history",
-            new=AsyncMock(return_value=_thread_history(4)),
-        ),
         patch(
             "mindroom.custom_tools.thread_summary.send_thread_summary_event",
             new=AsyncMock(return_value="$summary-event:localhost"),
@@ -211,6 +206,7 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
+        access=context.conversation_access,
     )
 
 
@@ -222,16 +218,13 @@ async def test_set_thread_summary_falls_back_to_reply_to_event_id_for_room_timel
         thread_id=None,
         reply_to_event_id="$root-event:localhost",
     )
+    context.conversation_access.get_thread_history.return_value = _thread_history(3)
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
             new=AsyncMock(return_value="$root-event:localhost"),
         ) as mock_normalize,
-        patch(
-            "mindroom.custom_tools.thread_summary.fetch_thread_history",
-            new=AsyncMock(return_value=_thread_history(3)),
-        ),
         patch(
             "mindroom.custom_tools.thread_summary.send_thread_summary_event",
             new=AsyncMock(return_value="$summary-event:localhost"),
@@ -246,6 +239,7 @@ async def test_set_thread_summary_falls_back_to_reply_to_event_id_for_room_timel
         context.client,
         context.room_id,
         "$root-event:localhost",
+        access=context.conversation_access,
     )
     mock_send.assert_awaited_once_with(
         context.client,
@@ -341,15 +335,12 @@ async def test_set_thread_summary_send_failure_leaves_cache_unchanged() -> None:
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
     update_last_summary_count(context.room_id, "$ctx-thread:localhost", 2)
+    context.conversation_access.get_thread_history.return_value = _thread_history(5)
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.fetch_thread_history",
-            new=AsyncMock(return_value=_thread_history(5)),
         ),
         patch(
             "mindroom.custom_tools.thread_summary.send_thread_summary_event",
@@ -369,15 +360,12 @@ async def test_set_thread_summary_excludes_existing_summary_notices_from_message
     """Manual summaries should not count prior summary notices toward the baseline."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
+    context.conversation_access.get_thread_history.return_value = _thread_history(3, summary_count=2)
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.fetch_thread_history",
-            new=AsyncMock(return_value=_thread_history(3, summary_count=2)),
         ),
         patch(
             "mindroom.custom_tools.thread_summary.send_thread_summary_event",
@@ -424,15 +412,12 @@ async def test_set_thread_summary_returns_error_when_fetch_raises() -> None:
     """History fetch exceptions should return the standard error payload."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
+    context.conversation_access.get_thread_history.side_effect = TimeoutError("timed out")
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.fetch_thread_history",
-            new=AsyncMock(side_effect=TimeoutError("timed out")),
         ),
         tool_runtime_context(context),
     ):
@@ -449,15 +434,12 @@ async def test_set_thread_summary_returns_error_when_send_raises() -> None:
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
     update_last_summary_count(context.room_id, "$ctx-thread:localhost", 2)
+    context.conversation_access.get_thread_history.return_value = _thread_history(5)
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.fetch_thread_history",
-            new=AsyncMock(return_value=_thread_history(5)),
         ),
         patch(
             "mindroom.custom_tools.thread_summary.send_thread_summary_event",

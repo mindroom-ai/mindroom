@@ -39,6 +39,12 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
 
 
+def _conversation_access(thread_history: list[object] | None = None) -> MagicMock:
+    access = MagicMock()
+    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
+    return access
+
+
 @pytest.fixture
 def mock_config() -> Config:
     """Create a runtime-bound config with test agents."""
@@ -656,6 +662,7 @@ class TestIntegrationWithScheduling:
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 room=room,
+                conversation_access=_conversation_access(),
             )
 
             assert task_id is not None

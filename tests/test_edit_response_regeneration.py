@@ -2617,7 +2617,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
-        patch("mindroom.conversation_state_writer.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
+        patch("mindroom.matrix.conversation_access.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
     ):
         # Setup mocks
         mock_handle_reaction.return_value = ("Option 1", "thread_id")  # selected_value, thread_id

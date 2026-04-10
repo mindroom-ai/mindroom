@@ -19,9 +19,7 @@ from mindroom.matrix.client import (
     _fetch_thread_history_via_room_messages,
     _latest_thread_event_id,
     _ThreadHistoryFastPathUnavailableError,
-    attach_event_cache,
     build_threaded_edit_content,
-    detach_event_cache,
     fetch_thread_history,
     fetch_thread_snapshot,
     get_room_threads_page,
@@ -520,7 +518,7 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_relations_fast_path_accepts_audio_root(self) -> None:
         """Snapshot fast path should keep non-text room-message roots without room-scan fallback."""
-        root_event = self._make_audio_event(
+        root_event = TestThreadHistory._make_audio_event(
             event_id="$thread_root",
             sender="@user:localhost",
             body="voice-note.ogg",
@@ -1593,7 +1591,7 @@ class TestThreadHistory:
         """Stop pagination once a non-text thread root has been seen."""
         client = AsyncMock()
 
-        root_event = self._make_audio_event(
+        root_event = TestThreadHistory._make_audio_event(
             event_id="$thread_root",
             sender="@user:localhost",
             body="voice-note.ogg",
@@ -1882,18 +1880,68 @@ class TestThreadHistoryCache:
         first_page.chunk = [root_event]
         first_page.end = None
         client.room_messages = AsyncMock(return_value=first_page)
-        attach_event_cache(client, cache)
-
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
         finally:
-            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         assert history[1].body == "Cached reply"
         client.room_get_event.assert_not_called()
         client.room_get_event_relations.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_cache_hit_keeps_non_text_root(self, tmp_path: Path) -> None:
+        """Cached snapshots should preserve non-text room-message roots without network fetches."""
+        cache = EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = TestThreadHistory._make_audio_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="voice-note.ogg",
+            server_timestamp=1000,
+            source_content={"url": "mxc://localhost/voice-note"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Cached reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Cached reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        await cache.store_thread_events(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+        )
+
+        client = MagicMock()
+        client.room_get_event = AsyncMock()
+        client.room_get_event_relations = MagicMock()
+        client.room_messages = AsyncMock()
+
+        try:
+            snapshot = await fetch_thread_snapshot(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        assert isinstance(snapshot, ThreadHistoryResult)
+        assert snapshot.is_full_history is False
+        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply"]
+        assert snapshot[0].body == "voice-note.ogg"
+        assert snapshot[0].to_dict()["msgtype"] == "m.audio"
+        client.room_get_event.assert_not_called()
+        client.room_get_event_relations.assert_not_called()
+        client.room_messages.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_miss_populates_cache(self, tmp_path: Path) -> None:
@@ -1926,13 +1974,10 @@ class TestThreadHistoryCache:
                 self._relation_key("$reply", RelationshipType.replacement): [],
             },
         )
-        attach_event_cache(client, cache)
-
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
-            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
@@ -1985,13 +2030,10 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(return_value=first_page)
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
-        attach_event_cache(client, cache)
-
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
-            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply", "$reply_2"]
@@ -2046,13 +2088,10 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(return_value=first_page)
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
-        attach_event_cache(client, cache)
-
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
-            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == [
@@ -2116,13 +2155,10 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(return_value=first_page)
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
-        attach_event_cache(client, cache)
-
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
-            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
@@ -2172,13 +2208,10 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(return_value=first_page)
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
-        attach_event_cache(client, cache)
-
         try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
             cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
         finally:
-            detach_event_cache(client)
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root"]
@@ -2261,13 +2294,7 @@ class TestThreadHistoryCache:
         broken_cache.get_latest_timestamp = AsyncMock()
         broken_cache.invalidate_thread = AsyncMock()
         broken_cache.store_thread_events = AsyncMock()
-        attach_event_cache(client, broken_cache)
-
-        try:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
-        finally:
-            detach_event_cache(client)
-
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         broken_cache.get_thread_events.assert_awaited_once_with("!room:localhost", "$thread_root")
         assert broken_cache.invalidate_thread.await_count >= 1

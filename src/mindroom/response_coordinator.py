@@ -593,9 +593,10 @@ class ResponseCoordinator:
         if request.thread_id is None:
             return request
 
-        cache = self.deps.resolver.turn_thread_cache.get()
-        if cache is not None:
-            cache.pop(f"{request.room_id}:{request.thread_id}", None)
+        self.deps.resolver.deps.conversation_access.invalidate_turn_thread_history(
+            request.room_id,
+            request.thread_id,
+        )
 
         refreshed_history = await self.deps.resolver.fetch_thread_history(
             self._client(),
@@ -1048,6 +1049,13 @@ class ResponseCoordinator:
             run_id=response_run_id,
             pipeline_timing=request.pipeline_timing,
         )
+        if delivery_result is None:
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=resolved_correlation_id,
+                envelope=resolved_response_envelope,
+                visible_response_event_id=tracked_event_id,
+                response_kind="team",
+            )
         if resolved_event_id is None:
             resolved_event_id = self.resolve_response_event_id(
                 delivery_result=delivery_result,
@@ -2030,6 +2038,13 @@ class ResponseCoordinator:
             run_id=response_run_id,
             pipeline_timing=request.pipeline_timing,
         )
+        if delivery_result is None:
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=self._correlation_id_for_request(request),
+                envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
+                visible_response_event_id=tracked_event_id,
+                response_kind="ai",
+            )
         if resolved_event_id is None:
             resolved_event_id = self.resolve_response_event_id(
                 delivery_result=delivery_result,

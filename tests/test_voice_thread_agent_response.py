@@ -150,7 +150,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     # Mock context extraction
     with (
         patch.object(
-            bot._conversation_state_writer,
+            bot._conversation_resolver,
             "fetch_thread_history",
             new=AsyncMock(return_value=thread_history),
         ),
@@ -214,7 +214,7 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
 
     with (
         patch.object(
-            bot._conversation_state_writer,
+            bot._conversation_resolver,
             "fetch_thread_history",
             new=AsyncMock(return_value=thread_history),
         ),
@@ -259,7 +259,7 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
 
     # Mock context extraction
     with (
-        patch.object(bot._conversation_state_writer, "fetch_thread_history", new=AsyncMock(return_value=[])),
+        patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
         patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
     ):
@@ -334,7 +334,7 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
 
     with (
         patch.object(
-            bot._conversation_state_writer,
+            bot._conversation_resolver,
             "fetch_thread_history",
             new=AsyncMock(return_value=thread_history),
         ),
@@ -404,7 +404,7 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
 
     with (
         patch.object(
-            bot._conversation_state_writer,
+            bot._conversation_resolver,
             "fetch_thread_history",
             new=AsyncMock(return_value=thread_history),
         ),
@@ -474,7 +474,7 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
 
     with (
         patch.object(
-            bot._conversation_state_writer,
+            bot._conversation_resolver,
             "fetch_thread_history",
             new=AsyncMock(return_value=thread_history),
         ),
