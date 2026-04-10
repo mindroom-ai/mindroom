@@ -66,6 +66,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling import set_scheduling_hook_registry
+from mindroom.tool_approval import initialize_approval_store, shutdown_approval_store
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
@@ -785,6 +786,7 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
+        initialize_approval_store(self.runtime_paths)
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         await self._prepare_user_account(config, update_runtime_state=True)
@@ -1496,6 +1498,7 @@ class MultiAgentOrchestrator:
         stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
+        await shutdown_approval_store()
         logger.info("All agent bots stopped")
 
 

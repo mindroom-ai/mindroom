@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
 from urllib.parse import quote, unquote
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
+
+# Import routers
+from mindroom.api.approvals import router as approvals_router
+from mindroom.api.approvals import websocket_router as approvals_websocket_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult
 from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runtime_paths
 from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
@@ -33,8 +37,6 @@ from mindroom.api.config_lifecycle import request_snapshot as request_api_snapsh
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
 from mindroom.api.config_lifecycle import write_app_committed_config as write_api_app_committed_config
 from mindroom.api.config_lifecycle import write_committed_config as write_api_committed_config
-
-# Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
@@ -52,12 +54,15 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
+from mindroom.tool_approval import initialize_approval_store
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+
+    from starlette.requests import HTTPConnection
 
     from mindroom.config.main import Config
 
@@ -281,6 +286,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             ),
         )
         config_lifecycle.register_api_app(api_app)
+        initialize_approval_store(runtime_paths)
         return
 
     config_lock = previous_state.config_lock
@@ -308,6 +314,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         )
         api_app.state.api_state = current_state
     config_lifecycle.register_api_app(api_app)
+    initialize_approval_store(runtime_paths)
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
@@ -644,19 +651,19 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     return token or None
 
 
-def _get_request_token(
-    request: Request,
+def _get_connection_token(
+    connection: HTTPConnection,
     authorization: str | None,
     *,
     cookie_names: tuple[str, ...],
 ) -> str | None:
-    """Return the request auth token from bearer auth or one of the allowed cookies."""
+    """Return the auth token from bearer auth or one of the allowed cookies."""
     bearer_token = _extract_bearer_token(authorization)
     if bearer_token:
         return bearer_token
 
     for cookie_name in cookie_names:
-        cookie_value = request.cookies.get(cookie_name)
+        cookie_value = connection.cookies.get(cookie_name)
         if cookie_value:
             return cookie_value
 
@@ -734,14 +741,14 @@ def _request_has_frontend_access(request: Request) -> bool:
     if auth_state.supabase_auth is None:
         if not mindroom_api_key:
             return True
-        token = _get_request_token(
+        token = _get_connection_token(
             request,
             authorization,
             cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
         )
         return token is not None and secrets.compare_digest(token, mindroom_api_key)
 
-    token = _get_request_token(
+    token = _get_connection_token(
         request,
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
@@ -889,7 +896,7 @@ async def verify_user(
             return auth_user
 
         if mindroom_api_key:
-            token = _get_request_token(
+            token = _get_connection_token(
                 request,
                 authorization,
                 cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
@@ -902,7 +909,7 @@ async def verify_user(
         request.scope["auth_user"] = auth_user
         return auth_user
 
-    token = _get_request_token(
+    token = _get_connection_token(
         request,
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
@@ -922,12 +929,55 @@ async def verify_user(
     return auth_user
 
 
+async def authenticate_websocket_user(websocket: WebSocket) -> dict[str, Any]:
+    """Authenticate one approvals WebSocket using the same bearer/cookie rules as REST."""
+    auth_state = _app_auth_state(cast("FastAPI", websocket.app))
+    authorization = websocket.headers.get("authorization")
+    mindroom_api_key = auth_state.settings.mindroom_api_key
+
+    if auth_state.supabase_auth is None:
+        if mindroom_api_key:
+            token = _get_connection_token(
+                websocket,
+                authorization,
+                cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
+            )
+            if token is None:
+                raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+            if not secrets.compare_digest(token, mindroom_api_key):
+                raise HTTPException(status_code=401, detail="Invalid API key")
+        auth_user = {"user_id": "standalone", "email": None}
+        websocket.scope["auth_user"] = auth_user
+        return auth_user
+
+    token = _get_connection_token(
+        websocket,
+        authorization,
+        cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
+    )
+    if token is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+
+    user = _validate_supabase_token(token, auth_state)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    if auth_state.settings.account_id and user.id != auth_state.settings.account_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    auth_user = {"user_id": user.id, "email": user.email}
+    websocket.scope["auth_user"] = auth_user
+    return auth_user
+
+
 def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from YAML file."""
     return load_api_config_into_app(runtime_paths, api_app)
 
 
 # Include routers
+app.include_router(approvals_router, dependencies=[Depends(verify_user)])
+app.include_router(approvals_websocket_router)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(google_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])

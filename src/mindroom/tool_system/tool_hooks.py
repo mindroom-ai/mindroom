@@ -24,6 +24,13 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
 from mindroom.logging_config import get_logger
+from mindroom.tool_approval import (
+    ApprovalRequest,
+    ApprovalStore,
+    ToolApprovalScriptError,
+    evaluate_tool_approval,
+    get_approval_store,
+)
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 from mindroom.tool_system.tool_failures import record_tool_failure
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
@@ -38,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.hooks.registry import HookRegistry
     from mindroom.hooks.types import HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.tool_approval import ApprovalRequest, ApprovalStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -83,6 +91,8 @@ class _ResolvedToolContext:
     requester_id: str | None
     session_id: str | None
     channel: str | None
+    tenant_id: str | None
+    account_id: str | None
     config: Config | None
     runtime_paths: RuntimePaths | None
     correlation_id: str
@@ -130,6 +140,7 @@ def _resolve_tool_context(
     runtime_context = get_tool_runtime_context()
     resolved_execution_identity = active_tool_execution_identity(execution_identity)
     request_runtime_context = runtime_context if execution_identity is None else None
+    resolved_runtime_paths = runtime_context.runtime_paths if runtime_context is not None else runtime_paths
     bindings = resolve_tool_runtime_hook_bindings(runtime_context) if runtime_context is not None else None
     return _ResolvedToolContext(
         agent_name=(
@@ -157,8 +168,16 @@ def _resolve_tool_context(
             resolved_execution_identity.session_id if resolved_execution_identity is not None else None,
         ),
         channel=resolved_execution_identity.channel if resolved_execution_identity is not None else None,
+        tenant_id=_coalesce(
+            resolved_execution_identity.tenant_id if resolved_execution_identity is not None else None,
+            resolved_runtime_paths.env_value("CUSTOMER_ID") if resolved_runtime_paths is not None else None,
+        ),
+        account_id=_coalesce(
+            resolved_execution_identity.account_id if resolved_execution_identity is not None else None,
+            resolved_runtime_paths.env_value("ACCOUNT_ID") if resolved_runtime_paths is not None else None,
+        ),
         config=runtime_context.config if runtime_context is not None else config,
-        runtime_paths=runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
+        runtime_paths=resolved_runtime_paths,
         correlation_id=(
             runtime_context.correlation_id
             if runtime_context is not None and runtime_context.correlation_id
@@ -173,6 +192,18 @@ def _resolve_tool_context(
 
 def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
+
+
+def _approval_status_reason(status: str, reason: str | None) -> str:
+    if reason:
+        return reason
+    if status == "approved":
+        return "Tool approval was granted."
+    if status == "denied":
+        return "Tool approval was denied."
+    if status == "expired":
+        return "Tool approval request expired."
+    return "Tool approval request is pending."
 
 
 async def _await_result(awaitable: Awaitable[ToolHookResult]) -> ToolHookResult:
@@ -244,6 +275,195 @@ async def _call_tool(func: Callable[..., Any], args: dict[str, Any]) -> ToolHook
     return result
 
 
+async def _emit_after_call(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    result: ToolHookResult,
+    error: BaseException | None,
+    blocked: bool,
+    duration_ms: float,
+) -> None:
+    after_context = ToolAfterCallContext(
+        **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
+        tool_name=tool_name,
+        result=result,
+        error=error,
+        blocked=blocked,
+        duration_ms=duration_ms,
+    )
+    await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
+
+
+async def _blocked_tool_result(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    reason: str,
+    has_after_hooks: bool,
+    started_at: float,
+) -> str:
+    result = _format_declined_result(tool_name, reason)
+    if has_after_hooks:
+        await _emit_after_call(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            result=result,
+            error=None,
+            blocked=True,
+            duration_ms=(time.perf_counter() - started_at) * 1000,
+        )
+    return result
+
+
+async def _wait_for_tool_approval(
+    store: ApprovalStore,
+    approval_request: ApprovalRequest,
+) -> ApprovalRequest:
+    remaining_seconds = max(0.0, approval_request.expires_at.timestamp() - time.time())
+    future = approval_request._future
+    if future is None:
+        msg = f"Approval request '{approval_request.id}' is missing its live wait future."
+        raise RuntimeError(msg)
+    try:
+        await asyncio.wait_for(future, timeout=remaining_seconds)
+    except TimeoutError:
+        try:
+            approval_request = await store.expire(
+                approval_request.id,
+                reason="Tool approval request timed out.",
+            )
+        except (LookupError, ValueError):
+            current_request = store.get_request(approval_request.id)
+            if current_request is not None:
+                return current_request
+    return store.get_request(approval_request.id) or approval_request
+
+
+async def _maybe_block_for_tool_approval(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    has_after_hooks: bool,
+    started_at: float,
+) -> str | None:
+    if resolved_context.config is None or resolved_context.runtime_paths is None:
+        return None
+
+    approval_arguments = deepcopy(args)
+    try:
+        requires_approval, matched_rule, script_path, timeout_seconds = await evaluate_tool_approval(
+            resolved_context.config,
+            resolved_context.runtime_paths,
+            tool_name,
+            approval_arguments,
+            resolved_context.agent_name,
+        )
+    except ToolApprovalScriptError as exc:
+        return await _blocked_tool_result(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            reason=str(exc),
+            has_after_hooks=has_after_hooks,
+            started_at=started_at,
+        )
+
+    if not requires_approval:
+        return None
+
+    store = get_approval_store()
+    if store is None:
+        return await _blocked_tool_result(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            reason="Tool approval is required but the approval store is not initialized.",
+            has_after_hooks=has_after_hooks,
+            started_at=started_at,
+        )
+
+    approval_request = await store.create_request(
+        tool_name=tool_name,
+        arguments=approval_arguments,
+        agent_name=resolved_context.agent_name,
+        room_id=resolved_context.room_id,
+        thread_id=resolved_context.thread_id,
+        requester_id=resolved_context.requester_id,
+        session_id=resolved_context.session_id,
+        channel=resolved_context.channel,
+        tenant_id=resolved_context.tenant_id,
+        account_id=resolved_context.account_id,
+        matched_rule=matched_rule,
+        script_path=script_path,
+        timeout_seconds=timeout_seconds,
+    )
+    approval_request = await _wait_for_tool_approval(store, approval_request)
+    if approval_request.status == "approved":
+        return None
+
+    return await _blocked_tool_result(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        reason=_approval_status_reason(approval_request.status, approval_request.resolution_reason),
+        has_after_hooks=has_after_hooks,
+        started_at=started_at,
+    )
+
+
+async def _maybe_block_for_before_hooks(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    has_before_hooks: bool,
+    has_after_hooks: bool,
+    started_at: float,
+) -> str | None:
+    if not has_before_hooks:
+        return None
+
+    before_context = ToolBeforeCallContext(
+        **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
+        tool_name=tool_name,
+    )
+    await emit_gate(hook_registry, EVENT_TOOL_BEFORE_CALL, before_context)
+    if not before_context.declined:
+        return None
+
+    return await _blocked_tool_result(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        reason=before_context.decline_reason,
+        has_after_hooks=has_after_hooks,
+        started_at=started_at,
+    )
+
+
 async def _execute_bridge(
     *,
     hook_registry: HookRegistry,
@@ -273,28 +493,30 @@ async def _execute_bridge(
         runtime_paths=runtime_paths,
     )
     hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
+    blocked_result = await _maybe_block_for_tool_approval(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        has_after_hooks=has_after_hooks,
+        started_at=started_at,
+    )
+    if blocked_result is not None:
+        return blocked_result
 
-    if has_before_hooks:
-        before_context = ToolBeforeCallContext(
-            **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
-            tool_name=tool_name,
-        )
-        await emit_gate(hook_registry, EVENT_TOOL_BEFORE_CALL, before_context)
-        if before_context.declined:
-            result = _format_declined_result(tool_name, before_context.decline_reason)
-            if has_after_hooks:
-                after_context = ToolAfterCallContext(
-                    **resolved_context.hook_context_kwargs(
-                        hook_arguments if hook_arguments is not None else deepcopy(args),
-                    ),
-                    tool_name=tool_name,
-                    result=result,
-                    error=None,
-                    blocked=True,
-                    duration_ms=(time.perf_counter() - started_at) * 1000,
-                )
-                await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
-            return result
+    blocked_result = await _maybe_block_for_before_hooks(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        has_before_hooks=has_before_hooks,
+        has_after_hooks=has_after_hooks,
+        started_at=started_at,
+    )
+    if blocked_result is not None:
+        return blocked_result
 
     result: ToolHookResult = None
     error: BaseException | None = None
@@ -335,29 +557,31 @@ async def _execute_bridge(
                 correlation_id=resolved_context.correlation_id,
             )
         if has_after_hooks:
-            after_context = ToolAfterCallContext(
-                **resolved_context.hook_context_kwargs(
-                    hook_arguments if hook_arguments is not None else deepcopy(args),
-                ),
+            await _emit_after_call(
+                hook_registry=hook_registry,
+                resolved_context=resolved_context,
+                hook_arguments=hook_arguments,
+                args=args,
                 tool_name=tool_name,
                 result=None,
                 error=error,
                 blocked=False,
                 duration_ms=duration_ms,
             )
-            await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
         raise
 
     if has_after_hooks:
-        after_context = ToolAfterCallContext(
-            **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
+        await _emit_after_call(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
             tool_name=tool_name,
             result=result,
             error=error,
             blocked=False,
             duration_ms=(time.perf_counter() - started_at) * 1000,
         )
-        await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
     return result
 
 
