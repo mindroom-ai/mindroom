@@ -128,7 +128,6 @@ class _SupportsQueuedMessageState(Protocol):
 @dataclass
 class _QueuedMessageNoticeContext:
     state: _SupportsQueuedMessageState | None
-    notice_delivered: bool = False
 
 
 _queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] = ContextVar(
@@ -170,6 +169,26 @@ def _strip_queued_notice_messages(messages: list[Message] | None) -> bool:
         return False
     messages[:] = filtered_messages
     return True
+
+
+def _append_queued_notice_if_needed(
+    *,
+    messages: list[Message],
+    function_call_results: Sequence[Message],
+) -> None:
+    _strip_queued_notice_messages(messages)
+    if any(message.stop_after_tool_call for message in function_call_results):
+        return
+    notice_context = _queued_message_notice_context.get()
+    if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
+        return
+    messages.append(
+        Message(
+            role="user",
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
+            provider_data={_QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+        ),
+    )
 
 
 def _cleanup_queued_notice_from_run_output(run_output: RunOutput | TeamRunOutput | None) -> bool:
@@ -302,26 +321,35 @@ def install_queued_message_notice_hook(model: Model) -> None:
             compress_tool_results=compress_tool_results,
             **kwargs,
         )
-        if any(message.stop_after_tool_call for message in function_call_results):
-            return
-        notice_context = _queued_message_notice_context.get()
-        if (
-            notice_context is None
-            or notice_context.notice_delivered
-            or notice_context.state is None
-            or not notice_context.state.has_pending_human_messages()
-        ):
-            return
-        messages.append(
-            Message(
-                role="user",
-                content=QUEUED_MESSAGE_NOTICE_TEXT,
-                provider_data={_QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
-            ),
+        _append_queued_notice_if_needed(
+            messages=messages,
+            function_call_results=function_call_results,
         )
-        notice_context.notice_delivered = True
+
+    def _handle_function_call_media_with_notice(
+        messages: list[Message],
+        function_call_results: list[Message],
+        send_media_to_model: bool = True,
+    ) -> None:
+        original_handle_function_call_media(
+            messages=messages,
+            function_call_results=function_call_results,
+            send_media_to_model=send_media_to_model,
+        )
+        # Agno appends follow-up media user messages after format_function_call_results(),
+        # so reapply the queued notice here to keep it as the final prompt message.
+        _append_queued_notice_if_needed(
+            messages=messages,
+            function_call_results=function_call_results,
+        )
 
     model_dict["format_function_call_results"] = _format_function_call_results_with_notice
+    try:
+        original_handle_function_call_media = model._handle_function_call_media
+    except AttributeError:
+        return
+
+    model_dict["_handle_function_call_media"] = _handle_function_call_media_with_notice
 
 
 def _empty_request_metric_totals() -> dict[str, int]:
