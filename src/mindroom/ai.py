@@ -70,11 +70,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.llm_request_logging import (
-    bind_llm_request_logging_context,
-    install_llm_request_logging_hooks,
-    resolve_llm_request_log_dir,
-)
+from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
@@ -723,13 +719,21 @@ def get_model_instance(
     if model_api_key:
         extra_kwargs["api_key"] = model_api_key
 
-    return _create_model_for_provider(
+    model = _create_model_for_provider(
         provider,
         model_id,
         model_config,
         extra_kwargs,
         runtime_paths,
     )
+    if config.debug.log_llm_requests:
+        install_llm_request_logging(
+            model,
+            agent_name=model_name,
+            debug_config=config.debug,
+            default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
+        )
+    return model
 
 
 def _normalized_string_list(values: object) -> list[str]:
@@ -1060,7 +1064,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     room_id: str | None = None,
-    thread_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     run_id: str | None = None,
@@ -1089,7 +1092,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional Matrix room ID for caller context
-        thread_id: Optional Matrix thread root event ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
@@ -1129,11 +1131,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         run_id=run_id,
         session_id=session_id,
         agent_name=agent_name,
-    )
-    runtime_model = config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=room_id,
-        runtime_paths=runtime_paths,
     )
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
@@ -1185,16 +1182,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 return get_user_friendly_error_message(e, agent_name)
             if agent.model is not None:
                 install_queued_message_notice_hook(agent.model)
-                if config.debug.log_llm_requests:
-                    install_llm_request_logging_hooks(
-                        agent.model,
-                        log_dir=resolve_llm_request_log_dir(
-                            runtime_paths=runtime_paths,
-                            configured_log_dir=config.debug.llm_request_log_dir,
-                        ),
-                        default_agent_name=agent_name,
-                        default_model_config_name=runtime_model.model_name,
-                    )
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1213,23 +1200,17 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     try:
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
-                        with bind_llm_request_logging_context(
-                            session_id=session_id,
-                            room_id=room_id,
-                            thread_id=thread_id,
+                        response = await _run_cached_agent_attempt(
+                            agent,
+                            attempt_prompt,
+                            session_id,
+                            user_id=user_id,
                             run_id=attempt_run_id,
-                        ):
-                            response = await _run_cached_agent_attempt(
-                                agent,
-                                attempt_prompt,
-                                session_id,
-                                user_id=user_id,
-                                run_id=attempt_run_id,
-                                run_id_callback=run_id_callback,
-                                media=attempt_media_inputs,
-                                metadata=metadata,
-                                timing_scope=timing_scope,
-                            )
+                            run_id_callback=run_id_callback,
+                            media=attempt_media_inputs,
+                            metadata=metadata,
+                            timing_scope=timing_scope,
+                        )
                     except Exception as e:
                         if not retried_without_inline_media and should_retry_without_inline_media(
                             e,
@@ -1420,7 +1401,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     room_id: str | None = None,
-    thread_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     run_id: str | None = None,
@@ -1448,7 +1428,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional Matrix room ID for caller context
-        thread_id: Optional Matrix thread root event ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         run_id: Explicit Agno run identifier used for graceful stop/cancel handling.
@@ -1486,11 +1465,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         run_id=run_id,
         session_id=session_id,
         agent_name=agent_name,
-    )
-    runtime_model = config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=room_id,
-        runtime_paths=runtime_paths,
     )
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
@@ -1545,16 +1519,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 return
             if agent.model is not None:
                 install_queued_message_notice_hook(agent.model)
-                if config.debug.log_llm_requests:
-                    install_llm_request_logging_hooks(
-                        agent.model,
-                        log_dir=resolve_llm_request_log_dir(
-                            runtime_paths=runtime_paths,
-                            configured_log_dir=config.debug.llm_request_log_dir,
-                        ),
-                        default_agent_name=agent_name,
-                        default_model_config_name=runtime_model.model_name,
-                    )
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1576,37 +1540,31 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
-                        with bind_llm_request_logging_context(
+                        stream_generator = agent.arun(
+                            attempt_prompt,
                             session_id=session_id,
-                            room_id=room_id,
-                            thread_id=thread_id,
+                            user_id=user_id,
                             run_id=attempt_run_id,
+                            audio=attempt_media_inputs.audio,
+                            images=attempt_media_inputs.images,
+                            files=attempt_media_inputs.files,
+                            videos=attempt_media_inputs.videos,
+                            stream=True,
+                            stream_events=True,
+                            metadata=metadata,
+                        )
+                        async for stream_chunk in _process_stream_events(
+                            stream_generator,
+                            state=state,
+                            show_tool_calls=show_tool_calls,
+                            agent_name=agent_name,
+                            media_inputs=attempt_media_inputs,
+                            retried_without_inline_media=retried_without_inline_media,
+                            timing_scope=timing_scope,
+                            request_started_at=request_started_at,
+                            pipeline_timing=pipeline_timing,
                         ):
-                            stream_generator = agent.arun(
-                                attempt_prompt,
-                                session_id=session_id,
-                                user_id=user_id,
-                                run_id=attempt_run_id,
-                                audio=attempt_media_inputs.audio,
-                                images=attempt_media_inputs.images,
-                                files=attempt_media_inputs.files,
-                                videos=attempt_media_inputs.videos,
-                                stream=True,
-                                stream_events=True,
-                                metadata=metadata,
-                            )
-                            async for stream_chunk in _process_stream_events(
-                                stream_generator,
-                                state=state,
-                                show_tool_calls=show_tool_calls,
-                                agent_name=agent_name,
-                                media_inputs=attempt_media_inputs,
-                                retried_without_inline_media=retried_without_inline_media,
-                                timing_scope=timing_scope,
-                                request_started_at=request_started_at,
-                                pipeline_timing=pipeline_timing,
-                            ):
-                                yield stream_chunk
+                            yield stream_chunk
                     except Exception as e:
                         if _request_stream_retry(
                             state,
