@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -103,6 +104,7 @@ class ResponseHookService:
         response_event_id: str,
         delivery_kind: Literal["sent", "edited"],
         response_kind: str,
+        continue_on_cancelled: bool = False,
     ) -> None:
         """Emit message:after_response after the final send or edit succeeds."""
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
@@ -118,7 +120,12 @@ class ResponseHookService:
                 envelope=envelope,
             ),
         )
-        await emit(self.hook_context.registry, EVENT_MESSAGE_AFTER_RESPONSE, context)
+        await emit(
+            self.hook_context.registry,
+            EVENT_MESSAGE_AFTER_RESPONSE,
+            context,
+            continue_on_cancelled=continue_on_cancelled,
+        )
 
     async def emit_cancelled_response(
         self,
@@ -128,7 +135,7 @@ class ResponseHookService:
         visible_response_event_id: str | None = None,
         response_kind: str = "ai",
     ) -> None:
-        """Emit message:cancelled when a response is cancelled mid-stream."""
+        """Emit message:cancelled when a response never reaches final delivery."""
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_CANCELLED):
             return
 
@@ -280,6 +287,36 @@ class DeliveryGateway:
             raise RuntimeError(msg)
         return client
 
+    async def _emit_after_response_best_effort(
+        self,
+        *,
+        correlation_id: str,
+        envelope: MessageEnvelope,
+        response_text: str,
+        response_event_id: str,
+        delivery_kind: Literal["sent", "edited"],
+        response_kind: str,
+    ) -> None:
+        """Best-effort after_response emission once delivery is already visible."""
+        try:
+            await self.deps.response_hooks.emit_after_response(
+                correlation_id=correlation_id,
+                envelope=envelope,
+                response_text=response_text,
+                response_event_id=response_event_id,
+                delivery_kind=delivery_kind,
+                response_kind=response_kind,
+                continue_on_cancelled=True,
+            )
+        except asyncio.CancelledError:
+            self.deps.logger.warning(
+                "message:after_response cancelled after visible delivery; returning success",
+                correlation_id=correlation_id,
+                response_event_id=response_event_id,
+                response_kind=response_kind,
+                delivery_kind=delivery_kind,
+            )
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
         client = self._client()
@@ -428,6 +465,22 @@ class DeliveryGateway:
             reason="Suppressed streamed response",
         )
 
+    async def emit_suppressed_response(
+        self,
+        *,
+        correlation_id: str,
+        response_envelope: MessageEnvelope,
+        response_kind: str,
+        visible_response_event_id: str | None = None,
+    ) -> None:
+        """Treat hook-suppressed turns as non-delivered responses for cleanup hooks."""
+        await self.deps.response_hooks.emit_cancelled_response(
+            correlation_id=correlation_id,
+            envelope=response_envelope,
+            visible_response_event_id=visible_response_event_id,
+            response_kind=response_kind,
+        )
+
     async def deliver_final(self, request: FinalDeliveryRequest) -> DeliveryResult:
         """Apply before/after hooks around one final send or edit."""
         draft = (
@@ -449,6 +502,14 @@ class DeliveryGateway:
             )
         )
         if draft.suppress:
+            await self.emit_suppressed_response(
+                correlation_id=request.correlation_id,
+                response_envelope=request.response_envelope,
+                response_kind=request.response_kind,
+                visible_response_event_id=(
+                    request.existing_event_id if request.existing_event_is_placeholder else None
+                ),
+            )
             self.deps.logger.info(
                 "Response suppressed by hook",
                 response_kind=request.response_kind,
@@ -500,7 +561,7 @@ class DeliveryGateway:
             delivery_kind = "sent" if event_id else None
 
         if event_id and delivery_kind is not None:
-            await self.deps.response_hooks.emit_after_response(
+            await self._emit_after_response_best_effort(
                 correlation_id=request.correlation_id,
                 envelope=request.response_envelope,
                 response_text=display_text,
@@ -593,6 +654,12 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
         if draft.suppress:
+            await self.emit_suppressed_response(
+                correlation_id=request.correlation_id,
+                response_envelope=request.response_envelope,
+                response_kind=request.response_kind,
+                visible_response_event_id=request.streamed_event_id,
+            )
             if request.cleanup_suppressed_streamed_event:
                 return await self.cleanup_suppressed_streamed_response(
                     room_id=request.room_id,
@@ -641,7 +708,7 @@ class DeliveryGateway:
             request.streamed_text,
             extract_mapping=True,
         )
-        await self.deps.response_hooks.emit_after_response(
+        await self._emit_after_response_best_effort(
             correlation_id=request.correlation_id,
             envelope=request.response_envelope,
             response_text=interactive_response.formatted_text,

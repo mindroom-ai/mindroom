@@ -264,7 +264,13 @@ def _eligible_hooks(
     return tuple(eligible_hooks)
 
 
-async def emit(registry: HookRegistry, event_name: str, context: HookExecutionContext) -> None:
+async def emit(
+    registry: HookRegistry,
+    event_name: str,
+    context: HookExecutionContext,
+    *,
+    continue_on_cancelled: bool = False,
+) -> None:
     """Run observer hooks serially for one event."""
     depth = _EMIT_DEPTH.get()
     if depth >= _MAX_EMIT_DEPTH:
@@ -280,7 +286,16 @@ async def emit(registry: HookRegistry, event_name: str, context: HookExecutionCo
     try:
         for hook in _eligible_hooks(registry, event_name, context):
             hook_context = _bind_hook_context(hook, context)
-            await _invoke_hook(hook, hook_context)
+            try:
+                await _invoke_hook(hook, hook_context)
+            except asyncio.CancelledError:
+                if not continue_on_cancelled:
+                    raise
+                hook_context.logger.warning(
+                    "Hook execution cancelled during best-effort observer emission",
+                    correlation_id=context.correlation_id,
+                )
+                continue
             _merge_observer_context_changes(context, hook_context)
     finally:
         _EMIT_DEPTH.reset(token)
