@@ -57,6 +57,13 @@ class CoalescingConfig(BaseModel):
     )
 
 
+class DebugConfig(BaseModel):
+    """Debug and diagnostic settings."""
+
+    log_llm_requests: bool = False
+    llm_request_log_dir: str | None = None
+
+
 def _normalize_tool_entry_overrides(
     overrides: object,
     *,

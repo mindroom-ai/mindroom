@@ -56,6 +56,14 @@ cache:
   enabled: true
   db_path: mindroom_data/event_cache.db
 
+# Optional debug logging for pre-provider LLM request assembly data.
+# This writes sensitive prompts, messages, tools, and model params to JSONL.
+# It does not capture the final provider-specific wire payload.
+# Leave disabled unless you are actively debugging request assembly.
+# debug:
+#   log_llm_requests: true
+#   llm_request_log_dir: ./mindroom_data/logs/llm_requests
+
 # Default local embedder for knowledge indexing.
 memory:
   embedder:

@@ -206,7 +206,7 @@ class MCPServerManager:
         try:
             result = await session.call_tool(
                 remote_tool_name,
-                arguments=arguments or None,
+                arguments=arguments,
                 read_timeout_seconds=timedelta(seconds=timeout_seconds),
             )
         except Exception as exc:

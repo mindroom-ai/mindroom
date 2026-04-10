@@ -49,6 +49,7 @@ class _FakeClientSession:
     planned_tool_pages: ClassVar[list[ListToolsResult]] = []
     tool_list: ClassVar[list[Tool]] = []
     listed_cursors: ClassVar[list[str | None]] = []
+    call_tool_arguments: ClassVar[list[dict[str, object] | None]] = []
     initialize_delay_seconds: ClassVar[float] = 0.0
     list_tools_delay_seconds: ClassVar[float] = 0.0
     parallel_call_gate: ClassVar[asyncio.Event | None] = None
@@ -109,7 +110,7 @@ class _FakeClientSession:
     ) -> CallToolResult:
         """Pop and return the next planned tool result."""
         assert progress_callback is None
-        assert arguments is not None
+        _FakeClientSession.call_tool_arguments.append(arguments)
         assert read_timeout_seconds is not None
         _FakeClientSession.call_tool_invocation_count += 1
         if _FakeClientSession.call_started_event is not None:
@@ -137,6 +138,7 @@ def _reset_fake_session_state() -> None:
     _FakeClientSession.planned_tool_pages = []
     _FakeClientSession.tool_list = []
     _FakeClientSession.listed_cursors = []
+    _FakeClientSession.call_tool_arguments = []
     _FakeClientSession.initialize_delay_seconds = 0.0
     _FakeClientSession.list_tools_delay_seconds = 0.0
     _FakeClientSession.parallel_call_gate = None
@@ -191,6 +193,27 @@ async def test_mcp_manager_syncs_catalog_and_calls_tool(monkeypatch: pytest.Monk
     assert changed == {"demo"}
     result = await manager.call_tool("demo", "echo", {"value": "ping"})
     assert result.content == "pong"
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_preserves_empty_tool_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward zero-argument MCP calls as {} instead of omitting arguments entirely."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
+    ]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+
+    result = await manager.call_tool("demo", "echo", {})
+
+    assert result.content == "pong"
+    assert _FakeClientSession.call_tool_arguments == [{}]
 
 
 @pytest.mark.asyncio

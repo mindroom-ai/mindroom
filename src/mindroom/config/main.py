@@ -27,6 +27,7 @@ from mindroom.config.matrix import CacheConfig, MatrixRoomAccessConfig, MatrixSp
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import (
     CompactionConfig,
+    DebugConfig,
     DefaultsConfig,
     ModelConfig,
     ResolvedToolConfig,
@@ -84,6 +85,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug",)
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -221,6 +223,9 @@ def _normalize_optional_config_sections(data: dict[str, object]) -> None:
     for name in _OPTIONAL_DICT_SECTION_NAMES:
         if data.get(name) is None:
             data[name] = {}
+    for name in _OPTIONAL_MODEL_SECTION_NAMES:
+        if data.get(name) is None:
+            data[name] = {}
     if data.get("plugins") is None:
         data["plugins"] = []
 
@@ -248,6 +253,9 @@ def _strip_empty_root_sections(payload: dict[str, Any]) -> dict[str, Any]:
     """Drop normalized empty root sections from authored config serialization."""
     authored_payload = dict(payload)
     for name in _OPTIONAL_DICT_SECTION_NAMES:
+        if authored_payload.get(name) == {}:
+            authored_payload.pop(name, None)
+    for name in _OPTIONAL_MODEL_SECTION_NAMES:
         if authored_payload.get(name) == {}:
             authored_payload.pop(name, None)
     if authored_payload.get("plugins") == []:
@@ -349,6 +357,7 @@ class Config(BaseModel):
         description="Dynamically loadable tool bundles keyed by public toolkit name",
     )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
+    debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(

@@ -70,6 +70,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
+from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
@@ -718,13 +719,21 @@ def get_model_instance(
     if model_api_key:
         extra_kwargs["api_key"] = model_api_key
 
-    return _create_model_for_provider(
+    model = _create_model_for_provider(
         provider,
         model_id,
         model_config,
         extra_kwargs,
         runtime_paths,
     )
+    if config.debug.log_llm_requests:
+        install_llm_request_logging(
+            model,
+            agent_name=model_name,
+            debug_config=config.debug,
+            default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
+        )
+    return model
 
 
 def _normalized_string_list(values: object) -> list[str]:
@@ -1544,6 +1553,18 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             stream_events=True,
                             metadata=metadata,
                         )
+                        async for stream_chunk in _process_stream_events(
+                            stream_generator,
+                            state=state,
+                            show_tool_calls=show_tool_calls,
+                            agent_name=agent_name,
+                            media_inputs=attempt_media_inputs,
+                            retried_without_inline_media=retried_without_inline_media,
+                            timing_scope=timing_scope,
+                            request_started_at=request_started_at,
+                            pipeline_timing=pipeline_timing,
+                        ):
+                            yield stream_chunk
                     except Exception as e:
                         if _request_stream_retry(
                             state,
@@ -1560,19 +1581,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         logger.exception("Error starting streaming AI response")
                         yield get_user_friendly_error_message(e, agent_name)
                         return
-
-                    async for stream_chunk in _process_stream_events(
-                        stream_generator,
-                        state=state,
-                        show_tool_calls=show_tool_calls,
-                        agent_name=agent_name,
-                        media_inputs=attempt_media_inputs,
-                        retried_without_inline_media=retried_without_inline_media,
-                        timing_scope=timing_scope,
-                        request_started_at=request_started_at,
-                        pipeline_timing=pipeline_timing,
-                    ):
-                        yield stream_chunk
 
                     if state.retry_requested:
                         attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
