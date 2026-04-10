@@ -1279,7 +1279,7 @@ class TestAgentBot:
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._process_and_respond(
+            delivery = await bot._response_coordinator.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1325,7 +1325,7 @@ class TestAgentBot:
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._process_and_respond(
+            delivery = await bot._response_coordinator.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1381,7 +1381,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._process_and_respond_streaming(
+                delivery = await bot._response_coordinator.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -1434,7 +1434,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._process_and_respond_streaming(
+                delivery = await bot._response_coordinator.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Hello",
@@ -1474,7 +1474,7 @@ class TestAgentBot:
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._process_and_respond(
+            await bot._response_coordinator.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -1533,7 +1533,7 @@ class TestAgentBot:
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._process_and_respond_streaming(
+            await bot._response_coordinator.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -1618,7 +1618,7 @@ class TestAgentBot:
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._process_and_respond_streaming(
+            await bot._response_coordinator.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Hello",
@@ -1682,7 +1682,7 @@ class TestAgentBot:
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._process_and_respond_streaming(
+            await bot._response_coordinator.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Cancel me",
@@ -1731,7 +1731,7 @@ class TestAgentBot:
                 stream_agent_response=mock_stream_agent_response,
             ),
         ):
-            delivery = await bot._process_and_respond_streaming(
+            delivery = await bot._response_coordinator.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please continue",
@@ -1784,7 +1784,7 @@ class TestAgentBot:
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._process_and_respond(
+            delivery = await bot._response_coordinator.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1833,7 +1833,7 @@ class TestAgentBot:
                 typing_indicator=noop_typing_indicator,
                 ai_response=mock_ai_response,
             ):
-                await bot._process_and_respond(
+                await bot._response_coordinator.process_and_respond(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please continue",
@@ -1901,7 +1901,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._process_and_respond_streaming(
+                delivery = await bot._response_coordinator.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -1958,7 +1958,7 @@ class TestAgentBot:
                     typing_indicator=noop_typing_indicator,
                     stream_agent_response=mock_stream,
                 ):
-                    await bot._process_and_respond_streaming(
+                    await bot._response_coordinator.process_and_respond_streaming(
                         _response_request(
                             room_id="!test:localhost",
                             prompt="Please continue",
@@ -2423,7 +2423,7 @@ class TestAgentBot:
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
             mock_send_streaming_response.return_value = ("$streaming", "chunk")
-            delivery = await bot._process_and_respond_streaming(
+            delivery = await bot._response_coordinator.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please reply in thread",
@@ -2691,7 +2691,7 @@ class TestAgentBot:
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._process_and_respond(
+            delivery = await bot._response_coordinator.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Summarize README",
@@ -2751,7 +2751,7 @@ class TestAgentBot:
             ai_response=mock_ai,
             create_background_task=MagicMock(side_effect=discard_background_task),
         ):
-            await bot._send_skill_command_response(
+            await bot._response_coordinator.send_skill_command_response(
                 room_id="!test:localhost",
                 reply_to_event_id="$event",
                 thread_id=None,
@@ -2809,7 +2809,7 @@ class TestAgentBot:
             mark_auto_flush_dirty_session=MagicMock(),
             create_background_task=MagicMock(),
         ):
-            await bot._send_skill_command_response(
+            await bot._response_coordinator.send_skill_command_response(
                 room_id="!test:localhost",
                 reply_to_event_id="$event",
                 thread_id=None,

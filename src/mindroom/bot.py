@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -65,7 +63,7 @@ from mindroom.post_response_effects import (
     record_handled_turn,
 )
 from mindroom.stop import StopManager
-from mindroom.teams import TeamMode, TeamOutcome, TeamResolution, resolve_configured_team
+from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.thread_utils import (
     should_agent_respond,
 )
@@ -136,7 +134,6 @@ from .conversation_state_writer import (
 from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
-    DeliveryResult,
     EditTextRequest,
     ResponseHookService,
     SendTextRequest,
@@ -146,16 +143,9 @@ from .delivery_gateway import (
 )
 from .dispatch_planner import (
     DispatchHookService,
-    DispatchPlan,
     DispatchPlanner,
     DispatchPlannerDeps,
     ResponseAction,
-)
-from .dispatch_planner import (
-    PreparedDispatch as _PreparedDispatch,
-)
-from .dispatch_planner import (
-    ResponseAction as _ResponseAction,
 )
 from .handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
 from .inbound_turn_normalizer import (
@@ -196,7 +186,7 @@ from .scheduling import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -205,7 +195,6 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.config.main import Config
-    from mindroom.history import CompactionOutcome
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -350,8 +339,6 @@ type _MediaDispatchEvent = (
 )
 type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
 
-type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
-
 type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
@@ -369,7 +356,6 @@ class _PrecheckedEvent[T]:
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
 type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
-type _PrecheckedDispatchEvent = _PrecheckedTextDispatchEvent | _PrecheckedMediaDispatchEvent
 
 
 class AgentBot:
@@ -864,40 +850,6 @@ class AgentBot:
             message_received_depth=envelope.message_received_depth,
         )
         return True
-
-    def _default_response_envelope(
-        self,
-        *,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        resolved_thread_id: str | None,
-        requester_id: str,
-        body: str,
-        attachment_ids: list[str] | None = None,
-        agent_name: str | None = None,
-    ) -> MessageEnvelope:
-        """Build the default outbound envelope when hooks did not supply one."""
-        target = self._conversation_resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_mode_override="room" if resolved_thread_id is None else None,
-        )
-        if target.resolved_thread_id != resolved_thread_id:
-            target = target.with_thread_root(resolved_thread_id)
-        return MessageEnvelope(
-            source_event_id=reply_to_event_id,
-            room_id=room_id,
-            target=target,
-            requester_id=requester_id,
-            sender_id=requester_id,
-            body=body,
-            attachment_ids=tuple(attachment_ids or ()),
-            mentioned_agents=(),
-            agent_name=agent_name or self.agent_name,
-            source_kind="message",
-        )
 
     async def _emit_reaction_received_hooks(
         self,
@@ -2234,74 +2186,9 @@ class AgentBot:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
 
-    async def _prepare_dispatch(
-        self,
-        room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedDispatchEvent,
-        *,
-        event_label: str,
-        handled_turn: HandledTurnState,
-    ) -> _PreparedDispatch | None:
-        """Run common precheck/context/sender-gating for dispatch handlers."""
-        return await self._dispatch_planner.prepare_dispatch(
-            room,
-            prechecked_event.event,
-            prechecked_event.requester_user_id,
-            event_label=event_label,
-            handled_turn=handled_turn,
-        )
-
     async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> PreparedTextEvent:
         """Return one canonical text event for hooks, routing, and command handling."""
         return await self._dispatch_planner.resolve_text_dispatch_event(event)
-
-    async def _plan_dispatch(
-        self,
-        room: nio.MatrixRoom,
-        event: _TextDispatchEvent,
-        dispatch: _PreparedDispatch,
-        *,
-        extra_content: dict[str, Any] | None = None,
-        media_events: list[_MediaDispatchEvent] | None = None,
-        handled_turn: HandledTurnState | None = None,
-        router_event: _DispatchEvent | None = None,
-    ) -> DispatchPlan:
-        """Return the explicit plan for one prepared dispatch."""
-        return await self._dispatch_planner.plan_dispatch(
-            room,
-            event,
-            dispatch,
-            extra_content=extra_content,
-            media_events=media_events,
-            handled_turn=handled_turn,
-            router_event=router_event,
-        )
-
-    async def _execute_dispatch_action(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        dispatch: _PreparedDispatch,
-        action: _ResponseAction,
-        payload_builder: _DispatchPayloadBuilder,
-        *,
-        processing_log: str,
-        dispatch_started_at: float,
-        handled_turn: HandledTurnState,
-        matrix_run_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Execute resolved dispatch action and mark the source event responded."""
-        await self._dispatch_planner.execute_response_action(
-            room,
-            event,
-            dispatch,
-            action,
-            payload_builder,
-            processing_log=processing_log,
-            dispatch_started_at=dispatch_started_at,
-            handled_turn=handled_turn,
-            matrix_run_metadata=matrix_run_metadata,
-        )
 
     def _should_queue_follow_up_in_active_response_thread(
         self,
@@ -2320,50 +2207,6 @@ class AgentBot:
         if is_agent_id(source_envelope.sender_id, self.config, self.runtime_paths):
             return False
         return self.has_active_response_for_target(target)
-
-    async def _decide_team_for_sender(
-        self,
-        agents_in_thread: list[MatrixID],
-        context: _MessageContext,
-        room: nio.MatrixRoom,
-        requester_user_id: str,
-        message: str,
-        is_dm: bool,
-        *,
-        available_agents_in_room: list[MatrixID] | None = None,
-        materializable_agent_names: set[str] | None = None,
-    ) -> TeamResolution:
-        """Decide team formation using sender-visible candidates without losing explicit intent."""
-        return await self._dispatch_planner.decide_team_for_sender(
-            agents_in_thread,
-            context,
-            room,
-            requester_user_id,
-            message,
-            is_dm,
-            available_agents_in_room=available_agents_in_room,
-            materializable_agent_names=materializable_agent_names,
-        )
-
-    async def _extract_message_context(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        *,
-        full_history: bool = True,
-    ) -> _MessageContext:
-        """Extract message context, optionally using a lightweight thread snapshot."""
-        return await self._conversation_resolver.extract_message_context(
-            room,
-            event,
-            full_history=full_history,
-        )
-
-    @asynccontextmanager
-    async def _turn_thread_cache_scope(self) -> AsyncIterator[None]:
-        """Cache thread history for the lifetime of one message-handling turn."""
-        async with self._conversation_resolver.turn_thread_cache_scope():
-            yield
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
         """Return whether an agent can issue Matrix message actions."""
@@ -2422,118 +2265,6 @@ class AgentBot:
             team_agents=team_agents,
             team_mode=team_mode,
             reason_prefix=reason_prefix,
-        )
-
-    async def _run_cancellable_response(
-        self,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        response_function: Callable[[str | None], Coroutine[Any, Any, None]],
-        thinking_message: str | None = None,  # None means don't send thinking message
-        existing_event_id: str | None = None,
-        user_id: str | None = None,  # User ID for presence check
-        run_id: str | None = None,
-        target: MessageTarget | None = None,
-    ) -> str | None:
-        """Run a response generation function with cancellation support."""
-        return await self._response_coordinator.run_cancellable_response(
-            room_id=room_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
-            response_function=response_function,
-            thinking_message=thinking_message,
-            existing_event_id=existing_event_id,
-            user_id=user_id,
-            run_id=run_id,
-            target=target,
-        )
-
-    def _request_with_resolved_thread_target(
-        self,
-        request: ResponseRequest,
-        *,
-        resolved_thread_id: str | None = None,
-    ) -> ResponseRequest:
-        """Apply an explicit resolved thread root to one response request."""
-        if resolved_thread_id is None:
-            return request
-        resolved_target = (
-            request.target
-            or self._conversation_resolver.build_message_target(
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-            )
-        ).with_thread_root(resolved_thread_id)
-        return replace(request, target=resolved_target)
-
-    async def _process_and_respond(
-        self,
-        request: ResponseRequest,
-        *,
-        run_id: str | None = None,
-        resolved_thread_id: str | None = None,
-        response_kind: str = "ai",
-        compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    ) -> DeliveryResult:
-        """Delegate non-streaming response execution to the coordinator."""
-        resolved_request = self._request_with_resolved_thread_target(
-            request,
-            resolved_thread_id=resolved_thread_id,
-        )
-        return await self._response_coordinator.process_and_respond(
-            resolved_request,
-            run_id=run_id,
-            response_kind=response_kind,
-            compaction_outcomes_collector=compaction_outcomes_collector,
-        )
-
-    async def _send_skill_command_response(
-        self,
-        *,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        prompt: str,
-        agent_name: str,
-        user_id: str | None,
-        reply_to_event: nio.RoomMessageText | None = None,
-        source_envelope: MessageEnvelope | None = None,
-    ) -> str | None:
-        """Send a skill command response using a specific agent."""
-        return await self._response_coordinator.send_skill_command_response(
-            room_id=room_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
-            thread_history=thread_history,
-            prompt=prompt,
-            agent_name=agent_name,
-            user_id=user_id,
-            reply_to_event=reply_to_event,
-            source_envelope=source_envelope,
-        )
-
-    async def _process_and_respond_streaming(
-        self,
-        request: ResponseRequest,
-        *,
-        run_id: str | None = None,
-        resolved_thread_id: str | None = None,
-        response_kind: str = "ai",
-        compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    ) -> DeliveryResult:
-        """Delegate streaming response execution to the coordinator."""
-        resolved_request = self._request_with_resolved_thread_target(
-            request,
-            resolved_thread_id=resolved_thread_id,
-        )
-        return await self._response_coordinator.process_and_respond_streaming(
-            resolved_request,
-            run_id=run_id,
-            response_kind=response_kind,
-            compaction_outcomes_collector=compaction_outcomes_collector,
         )
 
     async def _generate_response(

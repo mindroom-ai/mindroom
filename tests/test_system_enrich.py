@@ -551,7 +551,7 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),
     ):
-        delivery = await bot._process_and_respond(
+        delivery = await bot._response_coordinator.process_and_respond(
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",
@@ -595,7 +595,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
             stream_agent_response=fake_stream_agent_response,
         ),
     ):
-        delivery = await bot._process_and_respond_streaming(
+        delivery = await bot._response_coordinator.process_and_respond_streaming(
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",

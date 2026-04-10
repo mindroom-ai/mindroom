@@ -125,10 +125,6 @@ def _build_response_coordinator(
     bot._conversation_state_writer.create_team_history_storage = MagicMock(return_value=MagicMock())
     bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
     bot._conversation_state_writer.history_session_type = MagicMock(return_value=SessionType.AGENT)
-    bot._request_with_resolved_thread_target = AgentBot._request_with_resolved_thread_target.__get__(
-        bot,
-        AgentBot,
-    )
     bot._edit_message = AsyncMock(return_value=True)
     delivery_gateway = MagicMock()
     delivery_gateway.deliver_final = AsyncMock(
