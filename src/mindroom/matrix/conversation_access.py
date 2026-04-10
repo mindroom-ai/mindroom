@@ -11,7 +11,7 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.matrix.client import ResolvedVisibleMessage, fetch_thread_history, fetch_thread_snapshot
-from mindroom.matrix.event_cache import EventCache, normalize_event_source_for_cache
+from mindroom.matrix.event_cache import ConversationEventCache, normalize_event_source_for_cache
 from mindroom.matrix.room_cache import cached_room_get_event
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
@@ -93,7 +93,7 @@ class MatrixConversationAccess(ConversationReadAccess):
 
     logger: structlog.stdlib.BoundLogger
     client: nio.AsyncClient | None = None
-    event_cache: EventCache | None = None
+    event_cache: ConversationEventCache | None = None
     _turn_event_cache: ContextVar[dict[tuple[str, str], EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )

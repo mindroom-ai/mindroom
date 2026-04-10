@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_cache import EventCache, normalize_event_source_for_cache
+from mindroom.matrix.event_cache import ConversationEventCache, normalize_event_source_for_cache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -1295,7 +1295,7 @@ async def _load_cached_thread_history(
     *,
     room_id: str,
     thread_id: str,
-    event_cache: EventCache,
+    event_cache: ConversationEventCache,
     hydrate_sidecars: bool = True,
     refresh_cache: bool = True,
 ) -> list[ResolvedVisibleMessage] | None:
@@ -1353,7 +1353,7 @@ async def _load_cached_thread_result(
     *,
     room_id: str,
     thread_id: str,
-    event_cache: EventCache,
+    event_cache: ConversationEventCache,
     hydrate_sidecars: bool,
     refresh_cache: bool,
 ) -> ThreadHistoryResult | None:
@@ -1379,7 +1379,7 @@ async def _refresh_cached_thread_event_sources(
     room_id: str,
     thread_id: str,
     cached_event_ids: Collection[str],
-    event_cache: EventCache,
+    event_cache: ConversationEventCache,
     cached_event_sources: Sequence[dict[str, Any]],
 ) -> Sequence[dict[str, Any]]:
     """Apply incremental refreshes to one cached thread payload when possible."""
@@ -1422,7 +1422,7 @@ async def _resolve_cached_thread_history(
     *,
     room_id: str,
     thread_id: str,
-    event_cache: EventCache,
+    event_cache: ConversationEventCache,
     cached_event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
 ) -> list[ResolvedVisibleMessage] | None:
@@ -1446,7 +1446,7 @@ async def _resolve_cached_thread_history(
 
 
 async def _invalidate_thread_cache_entry(
-    event_cache: EventCache,
+    event_cache: ConversationEventCache,
     *,
     room_id: str,
     thread_id: str,
@@ -1528,7 +1528,7 @@ async def _fetch_thread_event_sources_via_relations(
 
 
 async def _store_thread_history_cache(
-    event_cache: EventCache,
+    event_cache: ConversationEventCache,
     *,
     room_id: str,
     thread_id: str,
@@ -1830,7 +1830,7 @@ async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    event_cache: EventCache | None = None,
+    event_cache: ConversationEventCache | None = None,
 ) -> list[ResolvedVisibleMessage]:
     """Fetch all messages in a thread."""
     if event_cache is None:
@@ -2082,7 +2082,7 @@ async def fetch_thread_snapshot(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    event_cache: EventCache | None = None,
+    event_cache: ConversationEventCache | None = None,
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context for dispatch decisions."""
     if event_cache is not None:

@@ -187,7 +187,7 @@ class TestThreadingBehavior:
             bot._first_sync_done = True
 
             await bot._on_sync_response(sync_response)
-            cached_event = await bot.event_cache.get_event("$thread_msg:localhost")
+            cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
 
@@ -234,7 +234,7 @@ class TestThreadingBehavior:
             }
 
             await bot._on_redaction(room, redaction_event)
-            cached_event = await bot.event_cache.get_event("$thread_msg:localhost")
+            cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
 
@@ -283,7 +283,7 @@ class TestThreadingBehavior:
             }
 
             await bot._conversation_access.cache_sync_timeline(sync_response)
-            cached_event = await bot.event_cache.get_event("$thread_msg:localhost")
+            cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
 
@@ -414,8 +414,8 @@ class TestThreadingBehavior:
                 "$msg1:localhost",
                 "$msg2:localhost",
             ]
-            assert await bot.event_cache.get_event("$msg2:localhost") is not None
-            assert await bot.event_cache.get_event("$msg1:localhost") is not None
+            assert await bot.event_cache.get_event("!test:localhost", "$msg2:localhost") is not None
+            assert await bot.event_cache.get_event("!test:localhost", "$msg1:localhost") is not None
             mock_fetch.assert_not_called()
 
             bot._conversation_resolver.reply_chain = ReplyChainCaches()
