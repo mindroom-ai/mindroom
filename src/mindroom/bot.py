@@ -25,7 +25,6 @@ from mindroom.hooks import (
     emit,
 )
 from mindroom.hooks.ingress import (
-    AUTOMATION_SOURCE_KINDS,
     hook_ingress_policy,
     is_automation_source_kind,
     should_handle_interactive_text_response,
@@ -70,7 +69,6 @@ from mindroom.teams import TeamMode, TeamOutcome, TeamResolution, resolve_config
 from mindroom.thread_utils import (
     should_agent_respond,
 )
-from mindroom.timing import timed
 from mindroom.timing import timing_scope as timing_scope_context
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import (
@@ -816,7 +814,7 @@ class AgentBot:
         """
         # Automation events (scheduled tasks, hooks) are independent — never suppress.
         # User-originated synthetics (coalesced batches, voice) must still be guarded.
-        if isinstance(event, PreparedTextEvent) and event.source_kind_override in AUTOMATION_SOURCE_KINDS:
+        if isinstance(event, PreparedTextEvent) and is_automation_source_kind(event.source_kind_override or ""):
             return False
         event_ts = event.server_timestamp
         if event_ts is None or not thread_history:
@@ -2364,74 +2362,6 @@ class AgentBot:
             matrix_run_metadata=matrix_run_metadata,
         )
 
-    async def _finalize_dispatch_failure(
-        self,
-        *,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        error: Exception,
-    ) -> str | None:
-        """Convert post-placeholder setup failures into a visible terminal message."""
-        return await self._dispatch_planner.finalize_dispatch_failure(
-            room_id=room_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
-            error=error,
-        )
-
-    def _log_dispatch_latency(
-        self,
-        *,
-        event_id: str,
-        action_kind: str,
-        dispatch_started_at: float,
-        context_ready_monotonic: float,
-        payload_ready_monotonic: float,
-    ) -> None:
-        """Emit startup latency metrics for dispatch decisions that will respond."""
-        self._dispatch_planner.log_dispatch_latency(
-            event_id=event_id,
-            action_kind=action_kind,
-            dispatch_started_at=dispatch_started_at,
-            context_ready_monotonic=context_ready_monotonic,
-            payload_ready_monotonic=payload_ready_monotonic,
-        )
-
-    def _can_reply_to_sender(self, sender_id: str) -> bool:
-        """Return whether this entity may reply to *sender_id*."""
-        return self._dispatch_planner.can_reply_to_sender(sender_id)
-
-    def _materializable_agent_names(self) -> set[str] | None:
-        """Return live shared agent names that can currently answer."""
-        return self._dispatch_planner.materializable_agent_names()
-
-    async def _resolve_response_action(
-        self,
-        context: _MessageContext,
-        room: nio.MatrixRoom,
-        requester_user_id: str,
-        message: str,
-        is_dm: bool,
-        *,
-        target: MessageTarget | None = None,
-        source_envelope: MessageEnvelope | None = None,
-    ) -> _ResponseAction:
-        """Decide whether to respond as a team, individually, or skip.
-
-        Shared by text and image handlers to avoid duplicating the team
-        formation + should-respond decision.
-        """
-        return await self._dispatch_planner.resolve_response_action(
-            context,
-            room,
-            requester_user_id,
-            message,
-            is_dm,
-            target=target,
-            source_envelope=source_envelope,
-        )
-
     def _should_queue_follow_up_in_active_response_thread(
         self,
         *,
@@ -2474,14 +2404,6 @@ class AgentBot:
             materializable_agent_names=materializable_agent_names,
         )
 
-    async def _extract_dispatch_context(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _MessageContext:
-        """Extract lightweight routing context without hydrating full thread history."""
-        return await self._conversation_resolver.extract_dispatch_context(room, event)
-
     async def _extract_message_context(
         self,
         room: nio.MatrixRoom,
@@ -2496,56 +2418,11 @@ class AgentBot:
             full_history=full_history,
         )
 
-    async def _extract_message_context_impl(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        *,
-        full_history: bool,
-    ) -> _MessageContext:
-        return await self._conversation_resolver.extract_message_context_impl(
-            room,
-            event,
-            full_history=full_history,
-        )
-
-    @timed("hydrate_dispatch_context")
-    async def _hydrate_dispatch_context(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        context: _MessageContext,
-    ) -> None:
-        """Replace lightweight thread snapshots with full history once a reply is required."""
-        await self._conversation_resolver.hydrate_dispatch_context(room, event, context)
-
-    def _cached_room(self, room_id: str) -> nio.MatrixRoom | None:
-        """Return room from client cache when available."""
-        return self._conversation_resolver.cached_room(room_id)
-
     @asynccontextmanager
     async def _turn_thread_cache_scope(self) -> AsyncIterator[None]:
         """Cache thread history for the lifetime of one message-handling turn."""
         async with self._conversation_resolver.turn_thread_cache_scope():
             yield
-
-    @timed("fetch_thread_history")
-    async def _fetch_thread_history(
-        self,
-        client: nio.AsyncClient,
-        room_id: str,
-        thread_id: str,
-    ) -> list[ResolvedVisibleMessage]:
-        """Fetch thread history once per turn for the same room/thread pair."""
-        return await self._conversation_resolver.fetch_thread_history(client, room_id, thread_id)
-
-    @timed("dispatch_payload_builder")
-    async def _build_dispatch_payload(
-        self,
-        payload_builder: _DispatchPayloadBuilder,
-        context: MessageContext,
-    ) -> DispatchPayload:
-        return await payload_builder(context)
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
         """Return whether an agent can issue Matrix message actions."""

@@ -1080,8 +1080,6 @@ class DispatchPlanner:
                         thread_history=dispatch.context.thread_history,
                         prompt=prepared_payload.payload.prompt,
                         model_prompt=prepared_payload.payload.model_prompt,
-                        existing_event_id=None,
-                        existing_event_is_placeholder=False,
                         user_id=dispatch.requester_user_id,
                         media=prepared_payload.payload.media,
                         attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
@@ -1105,8 +1103,6 @@ class DispatchPlanner:
                         thread_history=dispatch.context.thread_history,
                         prompt=prepared_payload.payload.prompt,
                         model_prompt=prepared_payload.payload.model_prompt,
-                        existing_event_id=None,
-                        existing_event_is_placeholder=False,
                         user_id=dispatch.requester_user_id,
                         media=prepared_payload.payload.media,
                         attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
@@ -1121,7 +1117,7 @@ class DispatchPlanner:
                 )
         except SuppressedPlaceholderCleanupError:
             self.deps.logger.warning(
-                "Suppressed placeholder cleanup failed",
+                "Suppressed response cleanup failed",
                 source_event_id=event.event_id,
                 correlation_id=dispatch.correlation_id,
             )
@@ -1139,7 +1135,7 @@ class DispatchPlanner:
         thread_id: str | None,
         error: Exception,
     ) -> str | None:
-        """Convert post-placeholder setup failures into a visible terminal message."""
+        """Convert dispatch setup failures into a visible terminal message."""
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
         return await self.deps.delivery_gateway.send_text(
