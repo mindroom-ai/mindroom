@@ -455,10 +455,7 @@ async def test_stop_manager_cleanup_uses_captured_run_id_after_task_finishes() -
 
     async def short_lived_response() -> None:
         started.set()
-        try:
-            await asyncio.sleep(999)
-        except asyncio.CancelledError:
-            raise
+        await asyncio.sleep(999)
 
     task = asyncio.create_task(short_lived_response())
     await started.wait()
