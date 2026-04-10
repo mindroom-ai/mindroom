@@ -29,7 +29,6 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
         config=config,
         enable_streaming=enable_streaming,
         orchestrator=None,
-        event_cache=None,
     )
     return bot
 

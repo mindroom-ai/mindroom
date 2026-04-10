@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.conversation_access import ConversationReadAccess
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -86,6 +87,7 @@ class PostResponseEffectsSupport:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway
+    conversation_access: ConversationReadAccess
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -169,6 +171,7 @@ class PostResponseEffectsSupport:
             thread_id=thread_id,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
+            conversation_access=self.conversation_access,
             message_count_hint=message_count_hint,
         )
         create_background_task(

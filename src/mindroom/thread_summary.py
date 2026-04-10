@@ -14,16 +14,14 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
-    fetch_thread_history,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.conversation_access import ConversationReadAccess
 
 logger = get_logger(__name__)
 
@@ -77,6 +75,15 @@ def _is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
 def _count_non_summary_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
     """Count visible thread messages while excluding summary notices."""
     return sum(1 for message in thread_history if not _is_thread_summary_message(message))
+
+
+async def _load_thread_history(
+    conversation_access: ConversationReadAccess,
+    room_id: str,
+    thread_id: str,
+) -> list[ResolvedVisibleMessage]:
+    """Load thread history through the explicit conversation-access seam."""
+    return list(await conversation_access.get_thread_history(room_id, thread_id))
 
 
 async def _recover_last_summary_count(
@@ -237,6 +244,7 @@ async def maybe_generate_thread_summary(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
+    conversation_access: ConversationReadAccess,
     message_count_hint: int | None = None,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
@@ -261,7 +269,7 @@ async def maybe_generate_thread_summary(
         # message_count_hint comes from a pre-send snapshot and is only a
         # lower bound. Other agents or humans can post before this background
         # task runs, so a stale hint must never suppress the live re-fetch.
-        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        thread_history = await _load_thread_history(conversation_access, room_id, thread_id)
         message_count = _count_non_summary_messages(thread_history)
         if message_count_hint is not None:
             message_count = max(message_count, message_count_hint)

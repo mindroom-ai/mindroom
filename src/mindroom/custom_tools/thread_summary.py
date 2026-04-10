@@ -7,7 +7,6 @@ import json
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
-from mindroom.matrix.client import fetch_thread_history
 from mindroom.thread_summary import (
     _count_non_summary_messages,
     send_thread_summary_event,
@@ -52,6 +51,9 @@ class ThreadSummaryTools(Toolkit):
         """Write a manual summary notice into the current or specified Matrix thread."""
         context = get_tool_runtime_context()
         if context is None:
+            return self._context_error()
+        conversation_access = context.conversation_access
+        if conversation_access is None:
             return self._context_error()
 
         if room_id is None:
@@ -106,6 +108,7 @@ class ThreadSummaryTools(Toolkit):
                     context.client,
                     resolved_room_id,
                     effective_thread_id,
+                    access=conversation_access,
                 )
             except Exception:
                 error_thread_id = effective_thread_id
@@ -117,8 +120,7 @@ class ThreadSummaryTools(Toolkit):
                 else:
                     async with thread_summary_lock(resolved_room_id, normalized_thread_id):
                         try:
-                            thread_history = await fetch_thread_history(
-                                context.client,
+                            thread_history = await conversation_access.get_thread_history(
                                 resolved_room_id,
                                 normalized_thread_id,
                             )

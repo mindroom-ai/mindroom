@@ -312,6 +312,30 @@ def _clear_summary_counts() -> None:
 class TestMaybeGenerateThreadSummary:
     """Integration tests for the threshold-gated summary pipeline."""
 
+    @pytest.fixture(autouse=True)
+    def _conversation_access(self) -> None:
+        """Provide one explicit conversation-access mock per test."""
+        self.conversation_access = MagicMock()
+
+    async def _maybe_generate(
+        self,
+        client: AsyncMock,
+        config: MagicMock,
+        rp: MagicMock,
+        *,
+        message_count_hint: int | None = None,
+    ) -> None:
+        """Run the production helper through the explicit access seam."""
+        await maybe_generate_thread_summary(
+            client,
+            "!room:x",
+            "$thread1",
+            config,
+            rp,
+            conversation_access=self.conversation_access,
+            message_count_hint=message_count_hint,
+        )
+
     async def test_below_threshold_skips(self) -> None:
         """No LLM call when message count is below the first threshold."""
         client = AsyncMock(spec=nio.AsyncClient)
@@ -320,7 +344,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(3),
             ) as mock_fetch,
             patch(
@@ -331,7 +355,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_fetch.assert_awaited_once()
         mock_gen.assert_not_awaited()
@@ -345,7 +369,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(5),
             ),
             patch(
@@ -357,7 +381,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
@@ -380,7 +404,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(message_count),
             ),
             patch(
@@ -392,7 +416,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         assert mock_gen.await_count == int(should_generate)
         assert client.room_send.await_count == int(should_generate)
@@ -415,7 +439,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(message_count),
             ),
             patch(
@@ -423,7 +447,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value="Boundary summary",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         assert mock_gen.await_count == int(should_generate)
         assert client.room_send.await_count == int(should_generate)
@@ -443,7 +467,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(5),
             ),
             patch(
@@ -459,11 +483,9 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            task_one = asyncio.create_task(
-                maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp),
-            )
+            task_one = asyncio.create_task(self._maybe_generate(client, config, rp))
             task_two = asyncio.create_task(
-                maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp),
+                self._maybe_generate(client, config, rp),
             )
             await generation_started.wait()
             await asyncio.sleep(0)
@@ -490,20 +512,13 @@ class TestMaybeGenerateThreadSummary:
         thread_history = _make_thread_history(5)
 
         with (
-            patch("mindroom.thread_summary.fetch_thread_history", return_value=thread_history) as mock_fetch,
+            patch("mindroom.thread_summary._load_thread_history", return_value=thread_history) as mock_fetch,
             patch("mindroom.thread_summary._generate_summary", return_value="Summary") as mock_gen,
             patch("mindroom.thread_summary._recover_last_summary_count", return_value=0),
         ):
-            await maybe_generate_thread_summary(
-                client,
-                "!room:x",
-                "$thread1",
-                config,
-                rp,
-                message_count_hint=4,
-            )
+            await self._maybe_generate(client, config, rp, message_count_hint=4)
 
-        mock_fetch.assert_awaited_once_with(client, "!room:x", "$thread1")
+        mock_fetch.assert_awaited_once_with(self.conversation_access, "!room:x", "$thread1")
         mock_gen.assert_awaited_once_with(thread_history, config, rp)
         client.room_send.assert_awaited_once()
 
@@ -516,20 +531,13 @@ class TestMaybeGenerateThreadSummary:
         thread_history = _make_thread_history(5)
 
         with (
-            patch("mindroom.thread_summary.fetch_thread_history", return_value=thread_history) as mock_fetch,
+            patch("mindroom.thread_summary._load_thread_history", return_value=thread_history) as mock_fetch,
             patch("mindroom.thread_summary._generate_summary", return_value="Summary") as mock_gen,
             patch("mindroom.thread_summary._recover_last_summary_count", return_value=0),
         ):
-            await maybe_generate_thread_summary(
-                client,
-                "!room:x",
-                "$thread1",
-                config,
-                rp,
-                message_count_hint=5,
-            )
+            await self._maybe_generate(client, config, rp, message_count_hint=5)
 
-        mock_fetch.assert_awaited_once_with(client, "!room:x", "$thread1")
+        mock_fetch.assert_awaited_once_with(self.conversation_access, "!room:x", "$thread1")
         mock_gen.assert_awaited_once_with(thread_history, config, rp)
         client.room_send.assert_awaited_once()
 
@@ -542,14 +550,14 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(10),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_not_awaited()
 
@@ -563,7 +571,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(15),
             ),
             patch(
@@ -571,7 +579,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value="Team decided on approach B",
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         client.room_send.assert_awaited_once()
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 15
@@ -585,7 +593,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(1),
             ),
             patch(
@@ -597,7 +605,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
@@ -613,20 +621,20 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(6),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_not_awaited()
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(7),
             ),
             patch(
@@ -634,7 +642,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value="🧵 Custom interval threshold reached",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
@@ -650,33 +658,33 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(5),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_not_awaited()
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(12),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_not_awaited()
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(13),
             ),
             patch(
@@ -684,7 +692,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value="🧵 Manual baseline respected",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
@@ -703,14 +711,14 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=thread_history,
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
             ) as mock_gen,
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_not_awaited()
         client.room_send.assert_not_awaited()
@@ -723,7 +731,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(5),
             ),
             patch(
@@ -735,7 +743,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         client.room_send.assert_not_awaited()
         # Count is recorded to prevent retry storms
@@ -749,7 +757,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(5),
             ),
             patch(
@@ -761,7 +769,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         client.room_send.assert_not_awaited()
         # Count is recorded to prevent retry storms
@@ -776,7 +784,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(5),
             ),
             patch(
@@ -788,7 +796,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
@@ -803,7 +811,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(12),
             ),
             patch(
@@ -814,7 +822,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=10,
             ),
         ):
-            await maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp)
+            await self._maybe_generate(client, config, rp)
 
         # Recovered count 10 → next threshold 20 → 12 messages < 20 → skip
         mock_gen.assert_not_awaited()
@@ -834,7 +842,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 return_value=_make_thread_history(5),
             ),
             patch(
@@ -846,8 +854,8 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            first = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
-            second = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
+            first = asyncio.create_task(self._maybe_generate(client, config, rp))
+            second = asyncio.create_task(self._maybe_generate(client, config, rp))
             await asyncio.sleep(0)
             release_generation.set()
             await asyncio.gather(first, second)
@@ -873,7 +881,7 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_history",
+                "mindroom.thread_summary._load_thread_history",
                 new=AsyncMock(side_effect=_blocked_fetch),
             ),
             patch(
@@ -889,8 +897,8 @@ class TestMaybeGenerateThreadSummary:
                 return_value=0,
             ),
         ):
-            first = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
-            second = asyncio.create_task(maybe_generate_thread_summary(client, "!room:x", "$thread1", config, rp))
+            first = asyncio.create_task(self._maybe_generate(client, config, rp))
+            second = asyncio.create_task(self._maybe_generate(client, config, rp))
             await fetch_started.wait()
             await asyncio.sleep(0)
             assert fetch_calls == 1

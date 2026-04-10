@@ -1111,7 +1111,7 @@ class TestAgentBot:
     @patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed")
     @patch("mindroom.response_coordinator.ai_response")
     @patch("mindroom.response_coordinator.stream_agent_response")
-    @patch("mindroom.conversation_state_writer.ConversationStateWriter.fetch_thread_history")
+    @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
     @patch("mindroom.response_coordinator.should_use_streaming")
     async def test_agent_bot_on_message_mentioned(  # noqa: PLR0915
         self,
@@ -2897,7 +2897,7 @@ class TestAgentBot:
             ),
             patch("mindroom.response_coordinator.datetime") as mock_datetime,
             patch.object(
-                bot._conversation_state_writer,
+                bot._conversation_resolver,
                 "fetch_thread_history",
                 new=AsyncMock(return_value=thread_history),
             ),
@@ -3007,7 +3007,7 @@ class TestAgentBot:
                 store_conversation_memory=fake_store_conversation_memory,
             ),
             patch.object(
-                bot._conversation_state_writer,
+                bot._conversation_resolver,
                 "fetch_thread_history",
                 new=AsyncMock(return_value=thread_history),
             ),
@@ -3159,6 +3159,12 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
+        async def cached_history_refresh(room_id: str, thread_id: str) -> list[ResolvedVisibleMessage]:
+            cache = bot._conversation_access._turn_history_cache.get()
+            assert cache is not None
+            cache[(room_id, thread_id)] = fresh_history
+            return fresh_history
+
         with (
             patch.object(
                 ResponseCoordinator,
@@ -3177,10 +3183,10 @@ class TestAgentBot:
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(
-                bot._conversation_state_writer,
-                "fetch_thread_history",
-                new=AsyncMock(return_value=fresh_history),
-            ) as mock_fetch_thread_history,
+                bot._conversation_access,
+                "get_thread_history",
+                new=AsyncMock(side_effect=cached_history_refresh),
+            ) as mock_get_thread_history,
             patch_response_coordinator_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 prepare_memory_and_model_context=passthrough_prepare_context,
@@ -3189,9 +3195,9 @@ class TestAgentBot:
             ),
         ):
             async with bot._conversation_resolver.turn_thread_cache_scope():
-                cache = bot._conversation_resolver.turn_thread_cache.get()
+                cache = bot._conversation_access._turn_history_cache.get()
                 assert cache is not None
-                cache["!test:localhost:$thread"] = stale_history
+                cache[("!test:localhost", "$thread")] = stale_history
 
                 event_id = await bot._generate_response(
                     room_id="!test:localhost",
@@ -3202,10 +3208,10 @@ class TestAgentBot:
                     user_id="@alice:localhost",
                 )
 
-                assert cache["!test:localhost:$thread"] == fresh_history
+                assert cache[("!test:localhost", "$thread")] == fresh_history
 
         assert event_id == "$response"
-        mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!test:localhost", "$thread")
+        mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history
         assert request.thread_history[0].stream_status == STREAM_STATUS_COMPLETED
@@ -3366,6 +3372,7 @@ class TestAgentBot:
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
+            conversation_access=bot._conversation_access,
             message_count_hint=1,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
@@ -6092,8 +6099,8 @@ class TestAgentBot:
         mock_snapshot = AsyncMock(return_value=snapshot)
 
         with (
-            patch("mindroom.conversation_resolver.fetch_thread_snapshot", new=mock_snapshot),
-            patch.object(bot._conversation_state_writer, "fetch_thread_history", new=mock_history),
+            patch.object(bot._conversation_access, "get_thread_snapshot", new=mock_snapshot),
+            patch.object(bot._conversation_access, "get_thread_history", new=mock_history),
         ):
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
@@ -6101,7 +6108,7 @@ class TestAgentBot:
         assert context.thread_id == "$thread_root"
         assert [message.event_id for message in context.thread_history] == ["$thread_root"]
         assert context.requires_full_thread_history is True
-        mock_snapshot.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
+        mock_snapshot.assert_awaited_once_with(room.room_id, "$thread_root")
         mock_history.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -6159,7 +6166,7 @@ class TestAgentBot:
                 "mindroom.matrix.client._fetch_thread_history_via_room_messages",
                 new=AsyncMock(return_value=full_history),
             ) as mock_snapshot_fallback,
-            patch.object(bot._conversation_state_writer, "fetch_thread_history", new=AsyncMock()) as mock_hydrate_fetch,
+            patch.object(bot._conversation_access, "get_thread_history", new=AsyncMock()) as mock_hydrate_fetch,
         ):
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
             await bot._conversation_resolver.hydrate_dispatch_context(room, event, context)
@@ -6654,11 +6661,16 @@ class TestAgentBot:
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch(
-                "mindroom.conversation_resolver.ConversationResolver.build_dispatch_envelope",
-                new=AsyncMock(return_value=envelope),
+                "mindroom.conversation_resolver.ConversationResolver.build_ingress_envelope",
+                return_value=envelope,
             ),
             patch.object(bot, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch("mindroom.bot.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
             patch.object(
                 bot._response_coordinator,
                 "has_active_response_for_target",
@@ -6669,7 +6681,9 @@ class TestAgentBot:
         ):
             await bot._on_message(room, event)
 
-        mock_has_active_response.assert_called_once_with(target)
+        mock_has_active_response.assert_called_once()
+        active_target = mock_has_active_response.call_args.args[0]
+        assert active_target.resolved_thread_id == target.resolved_thread_id
         mock_dispatch.assert_awaited_once_with(room, prepared_event, "@user:localhost")
         mock_enqueue.assert_not_awaited()
 
@@ -7296,8 +7310,8 @@ class TestAgentBot:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_coordinator.ai_response")
     @patch("mindroom.response_coordinator.stream_agent_response")
-    @patch("mindroom.conversation_resolver.fetch_thread_snapshot")
-    @patch("mindroom.conversation_state_writer.ConversationStateWriter.fetch_thread_history")
+    @patch("mindroom.matrix.conversation_access.MatrixConversationAccess.get_thread_snapshot")
+    @patch("mindroom.matrix.conversation_access.MatrixConversationAccess.get_thread_history")
     @patch("mindroom.response_coordinator.should_use_streaming")
     @patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed")
     async def test_agent_bot_thread_response(  # noqa: PLR0915

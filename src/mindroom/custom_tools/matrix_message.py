@@ -30,7 +30,6 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
     edit_message,
-    fetch_thread_history,
     get_latest_thread_event_id_if_needed,
     get_room_threads_page,
     send_message,
@@ -599,7 +598,10 @@ class MatrixMessageTools(Toolkit):
         thread_id: str,
         read_limit: int,
     ) -> str:
-        thread_messages = await fetch_thread_history(context.client, room_id, thread_id)
+        conversation_access = context.conversation_access
+        if conversation_access is None:
+            return self._context_error()
+        thread_messages = await conversation_access.get_thread_history(room_id, thread_id)
         recent_messages = thread_messages[-read_limit:]
         return self._payload(
             "ok",
@@ -651,7 +653,10 @@ class MatrixMessageTools(Toolkit):
 
         latest_thread_event_id: str | None = None
         if thread_id is not None:
-            thread_messages = await fetch_thread_history(context.client, room_id, thread_id)
+            conversation_access = context.conversation_access
+            if conversation_access is None:
+                return self._context_error()
+            thread_messages = await conversation_access.get_thread_history(room_id, thread_id)
             if thread_messages:
                 latest_thread_event_id = thread_messages[-1].visible_event_id
             if latest_thread_event_id is None:

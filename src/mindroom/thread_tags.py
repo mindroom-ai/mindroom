@@ -7,12 +7,15 @@ import math
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mindroom.matrix.reply_chain import canonicalize_related_event_id
+
+if TYPE_CHECKING:
+    from mindroom.matrix.conversation_access import ConversationReadAccess
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
@@ -751,15 +754,19 @@ async def normalize_thread_root_event_id(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
+    *,
+    access: ConversationReadAccess,
 ) -> str | None:
     """Resolve a room event or related reply into the canonical thread root ID."""
     normalized_event_id = _normalize_non_empty_string(event_id)
     if not normalized_event_id:
         return None
+
     return await canonicalize_related_event_id(
         client,
         room_id,
         normalized_event_id,
+        access=access,
         traversal_limit=MAX_THREAD_ROOT_NORMALIZATION_DEPTH,
     )
 

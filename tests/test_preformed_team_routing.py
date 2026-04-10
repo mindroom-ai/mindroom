@@ -409,7 +409,7 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing_indicator,
         ),
-        patch.object(bot._conversation_state_writer, "fetch_thread_history", new=AsyncMock(return_value=[])),
+        patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
     ):
         await bot._on_message(room, event)
 

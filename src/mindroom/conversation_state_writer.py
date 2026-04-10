@@ -1,4 +1,4 @@
-"""Conversation-state persistence and cache-write helpers for bot flows."""
+"""Conversation-state persistence helpers for bot flows."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import nio
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
@@ -20,18 +19,15 @@ from mindroom.agents import (
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
-from mindroom.matrix.client import fetch_thread_history
-from mindroom.matrix.event_cache import normalize_event_source_for_cache
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
+    import nio
     import structlog
     from agno.db.sqlite import SqliteDb
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -82,74 +78,9 @@ class ConversationStateWriterDeps:
     agent_name: str
 
 
-def _collect_sync_timeline_cache_updates(
-    response: nio.SyncResponse,
-) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, str]]]:
-    """Extract cacheable timeline events and redactions from one sync response."""
-    cached_events: list[tuple[str, str, dict[str, Any]]] = []
-    redacted_events: list[tuple[str, str]] = []
-    redacted_event_ids_by_room: dict[str, set[str]] = {}
-
-    for room_id, room_info in response.rooms.join.items():
-        _collect_room_sync_timeline_cache_updates(
-            room_id=room_id,
-            room_info=room_info,
-            cached_events=cached_events,
-            redacted_events=redacted_events,
-            redacted_event_ids_by_room=redacted_event_ids_by_room,
-        )
-
-    filtered_cached_events = [
-        (event_id, room_id, event_source)
-        for event_id, room_id, event_source in cached_events
-        if event_id not in redacted_event_ids_by_room.get(room_id, set())
-    ]
-    return filtered_cached_events, redacted_events
-
-
-def _collect_room_sync_timeline_cache_updates(
-    *,
-    room_id: str,
-    room_info: nio.RoomInfo,
-    cached_events: list[tuple[str, str, dict[str, Any]]],
-    redacted_events: list[tuple[str, str]],
-    redacted_event_ids_by_room: dict[str, set[str]],
-) -> None:
-    """Collect cache writes for one joined room timeline."""
-    for event in room_info.timeline.events:
-        if not isinstance(event, nio.Event):
-            continue
-        if not isinstance(event.source, dict):
-            continue
-        if not isinstance(event.event_id, str):
-            continue
-        if isinstance(event, nio.RedactionEvent):
-            if not isinstance(event.redacts, str):
-                continue
-            redacted_events.append((room_id, event.redacts))
-            redacted_event_ids_by_room.setdefault(room_id, set()).add(event.redacts)
-            continue
-
-        server_timestamp = event.server_timestamp
-        cached_events.append(
-            (
-                event.event_id,
-                room_id,
-                normalize_event_source_for_cache(
-                    event.source,
-                    event_id=event.event_id,
-                    sender=event.sender if isinstance(event.sender, str) else None,
-                    origin_server_ts=server_timestamp
-                    if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-                    else None,
-                ),
-            ),
-        )
-
-
 @dataclass
 class ConversationStateWriter:
-    """Own the persisted conversation state and advisory cache writes for one bot."""
+    """Own the persisted conversation state for one bot."""
 
     deps: ConversationStateWriterDeps
 
@@ -420,141 +351,6 @@ class ConversationStateWriter:
                     event_id=request.original_event_id,
                     session_id=session_id,
                 )
-
-    async def fetch_thread_history(
-        self,
-        client: nio.AsyncClient,
-        room_id: str,
-        thread_id: str,
-    ) -> list[ResolvedVisibleMessage]:
-        """Fetch thread history through the writer-owned cache maintenance API."""
-        return list(
-            await fetch_thread_history(
-                client,
-                room_id,
-                thread_id,
-                self.deps.runtime.event_cache,
-            ),
-        )
-
-    async def cache_thread_event(
-        self,
-        room_id: str,
-        event: nio.RoomMessageText,
-        *,
-        event_info: EventInfo,
-    ) -> None:
-        """Append a live thread event into the advisory cache when the thread is known."""
-        event_cache = self.deps.runtime.event_cache
-        if event_cache is None:
-            return
-
-        thread_id = event_info.thread_id
-        if thread_id is None and event_info.is_edit and event_info.original_event_id is not None:
-            thread_id = event_info.thread_id_from_edit
-            if thread_id is None:
-                try:
-                    thread_id = await event_cache.get_thread_id_for_event(
-                        room_id,
-                        event_info.original_event_id,
-                    )
-                except Exception as exc:
-                    self.deps.logger.warning(
-                        "Failed to resolve cached thread for live edit event",
-                        room_id=room_id,
-                        event_id=event.event_id,
-                        original_event_id=event_info.original_event_id,
-                        error=str(exc),
-                    )
-                    return
-        if thread_id is None:
-            return
-
-        server_timestamp = event.server_timestamp
-        event_source = normalize_event_source_for_cache(
-            event.source,
-            event_id=event.event_id,
-            sender=event.sender,
-            origin_server_ts=server_timestamp
-            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-            else None,
-        )
-
-        try:
-            await event_cache.append_event(room_id, thread_id, event_source)
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Failed to append live thread event to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event.event_id,
-                error=str(exc),
-            )
-
-    async def cache_redaction_event(self, room_id: str, event: nio.RedactionEvent) -> None:
-        """Apply one redaction to the advisory cache when the affected thread is known."""
-        event_cache = self.deps.runtime.event_cache
-        if event_cache is None:
-            return
-
-        try:
-            thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Failed to resolve cached thread for redaction",
-                room_id=room_id,
-                event_id=event.event_id,
-                redacted_event_id=event.redacts,
-                error=str(exc),
-            )
-            thread_id = None
-        server_timestamp = event.server_timestamp
-        redaction_source = normalize_event_source_for_cache(
-            event.source,
-            event_id=event.event_id,
-            sender=event.sender,
-            origin_server_ts=server_timestamp
-            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-            else None,
-        )
-        try:
-            await event_cache.redact_event(
-                room_id,
-                event.redacts,
-                thread_id=thread_id,
-                redaction_event=redaction_source,
-            )
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Failed to apply live redaction to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                redacted_event_id=event.redacts,
-                error=str(exc),
-            )
-
-    async def cache_sync_timeline_events(self, response: nio.SyncResponse) -> None:
-        """Persist sync timeline events so later thread lookups can use the advisory cache."""
-        event_cache = self.deps.runtime.event_cache
-        if event_cache is None:
-            return
-
-        filtered_cached_events, redacted_events = _collect_sync_timeline_cache_updates(response)
-        if not filtered_cached_events and not redacted_events:
-            return
-
-        try:
-            if filtered_cached_events:
-                await event_cache.store_events_batch(filtered_cached_events)
-            for room_id, redacted_event_id in redacted_events:
-                await event_cache.redact_event(room_id, redacted_event_id)
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Failed to cache sync timeline events",
-                error=str(exc),
-                events=len(filtered_cached_events),
-                redactions=len(redacted_events),
-            )
 
     def remove_stale_runs_for_turn_record(
         self,

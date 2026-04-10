@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -33,6 +33,12 @@ def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.Mat
                 avatar_url=None,
             )
     return room
+
+
+def _conversation_access(thread_history: list[object] | None = None) -> MagicMock:
+    access = MagicMock()
+    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
+    return access
 
 
 @pytest.mark.asyncio
@@ -87,6 +93,7 @@ async def test_schedule_validates_agents_in_room() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
+            conversation_access=_conversation_access(),
         )
 
         # Should fail because calculator is not in test_room
@@ -150,6 +157,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
+            conversation_access=_conversation_access(),
         )
 
         # Should fail because calculator is not in the room
@@ -204,12 +212,9 @@ async def test_schedule_allows_agents_in_room() -> None:
         description="Calculate something",
     )
 
-    with (
-        patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse,
-        patch("mindroom.scheduling.fetch_thread_history") as mock_fetch_history,
-    ):
+    with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
-        mock_fetch_history.return_value = []  # Empty thread history
+        conversation_access = _conversation_access()
 
         # Try to schedule in a thread where calculator is in the room
         task_id, response = await schedule_task(
@@ -221,6 +226,7 @@ async def test_schedule_allows_agents_in_room() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
+            conversation_access=conversation_access,
         )
 
         # Should succeed because calculator is in the room
@@ -288,6 +294,7 @@ async def test_schedule_with_multiple_agents_validation() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
+            conversation_access=_conversation_access(),
         )
 
         # Should fail because calculator is not in room
@@ -342,11 +349,9 @@ async def test_schedule_with_no_agent_mentions() -> None:
         description="Deployment reminder",
     )
 
-    with (
-        patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse,
-        patch("mindroom.scheduling.fetch_thread_history") as mock_fetch_history,
-    ):
+    with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
+        conversation_access = _conversation_access()
 
         task_id, response = await schedule_task(
             client=client,
@@ -357,13 +362,14 @@ async def test_schedule_with_no_agent_mentions() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
+            conversation_access=conversation_access,
             new_thread=True,
         )
 
     assert task_id is not None
     assert "✅ Scheduled" in response
     assert "New room-level thread root" in response
-    mock_fetch_history.assert_not_called()
+    conversation_access.get_thread_history.assert_not_called()
     available_agents = mock_parse.await_args.args[3]
     expected_agents = [
         config.get_ids(runtime_paths_for(config))["assistant"],
@@ -421,6 +427,7 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
+            conversation_access=_conversation_access(),
         )
 
     assert task_id is None
@@ -473,6 +480,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             room=room,
+            conversation_access=_conversation_access(),
         )
 
         # Should succeed if imaginary_agent is not recognized as a valid agent

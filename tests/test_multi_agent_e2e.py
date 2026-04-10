@@ -90,7 +90,7 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
-@patch("mindroom.conversation_resolver.fetch_thread_snapshot")
+@patch("mindroom.matrix.conversation_access.fetch_thread_snapshot")
 @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
 async def test_agent_processes_direct_mention(
     mock_fetch_snapshot: AsyncMock,
@@ -325,8 +325,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         }
 
         with (
-            patch("mindroom.conversation_resolver.fetch_thread_snapshot") as mock_fetch_snapshot,
-            patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_fetch,
+            patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
             patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
         ):
@@ -382,8 +382,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_2.sender = test_user_id
 
         with (
-            patch("mindroom.conversation_resolver.fetch_thread_snapshot") as mock_fetch_snapshot,
-            patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_fetch,
+            patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
             patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
         ):
@@ -460,8 +460,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_with_mention.sender = test_user_id
 
         with (
-            patch("mindroom.conversation_resolver.fetch_thread_snapshot") as mock_fetch_snapshot,
-            patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_fetch,
+            patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
             patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
         ):

@@ -8,7 +8,6 @@ correct thread.
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -20,26 +19,15 @@ from mindroom.matrix.message_content import resolve_event_source_content, visibl
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import structlog
 
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.event_cache import EventCache
-
-from mindroom.matrix.room_cache import cached_room_get_event
+    from mindroom.matrix.conversation_access import ConversationReadAccess
 
 type _HistoryMessage = ResolvedVisibleMessage
 
-
-# Callback type for fetching thread history, injected by the caller to keep
-# this module decoupled from the concrete import (and easy to mock in tests).
-type _FetchThreadHistory = Callable[
-    [nio.AsyncClient, str, str],
-    Coroutine[Any, Any, Sequence[_HistoryMessage]],
-]
-type _FetchThreadSnapshot = Callable[
-    [nio.AsyncClient, str, str],
-    Coroutine[Any, Any, Sequence[_HistoryMessage]],
-]
 
 logger = get_logger(__name__)
 
@@ -327,12 +315,12 @@ def _first_cached_root(caches: ReplyChainCaches, room_id: str, event_ids: list[s
 
 async def _fetch_node(
     client: nio.AsyncClient,
+    access: ConversationReadAccess,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
     room_id: str,
     event_id: str,
     *,
-    event_cache: EventCache | None = None,
     hydrate_sidecars: bool = True,
 ) -> _ReplyChainNode | None:
     """Fetch reply-chain node metadata from cache or Matrix."""
@@ -342,7 +330,7 @@ async def _fetch_node(
             await _hydrate_cached_node_message(cached_node, client)
         return cached_node
 
-    response = await cached_room_get_event(client, event_cache, room_id, event_id)
+    response = await access.get_event(room_id, event_id)
     if not isinstance(response, nio.RoomGetEventResponse):
         logger.debug(
             "Failed to resolve reply event for context",
@@ -370,9 +358,8 @@ async def _fetch_node(
 
 
 async def _resolve_direct_thread_root(
-    client: nio.AsyncClient,
+    access: ConversationReadAccess,
     caches: ReplyChainCaches,
-    fetch_snapshot: _FetchThreadSnapshot,
     room_id: str,
     event_id: str,
     node: _ReplyChainNode,
@@ -385,7 +372,7 @@ async def _resolve_direct_thread_root(
     if chain_history_length != 1 or node.parent_event_id or node.thread_root_id or node.has_relations:
         return None
 
-    thread_history = await fetch_snapshot(client, room_id, event_id)
+    thread_history = await access.get_thread_snapshot(room_id, event_id)
     if not _thread_history_has_replies(thread_history, event_id):
         return None
 
@@ -408,8 +395,8 @@ async def canonicalize_related_event_id(
     room_id: str,
     event_id: str,
     *,
+    access: ConversationReadAccess,
     caches: ReplyChainCaches | None = None,
-    event_cache: EventCache | None = None,
     traversal_limit: int | None = None,
 ) -> str | None:
     """Resolve one event or relation chain into its canonical conversation root."""
@@ -429,11 +416,11 @@ async def canonicalize_related_event_id(
 
         node = await _fetch_node(
             client,
+            access,
             effective_caches,
             logger,
             room_id,
             current_event_id,
-            event_cache=event_cache,
         )
         if node is None:
             break
@@ -478,13 +465,12 @@ def _build_context_result(
 
 async def _resolve_reply_chain(
     client: nio.AsyncClient,
+    access: ConversationReadAccess,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    fetch_snapshot: _FetchThreadSnapshot,
     room_id: str,
     reply_to_event_id: str,
     *,
-    event_cache: EventCache | None,
     default_history_is_full: bool,
     hydrate_sidecars: bool,
 ) -> tuple[str, list[_HistoryMessage], bool, bool]:
@@ -524,11 +510,11 @@ async def _resolve_reply_chain(
 
         node = await _fetch_node(
             client,
+            access,
             caches,
             logger,
             room_id,
             current_event_id,
-            event_cache=event_cache,
             hydrate_sidecars=hydrate_sidecars,
         )
         if node is None:
@@ -539,9 +525,8 @@ async def _resolve_reply_chain(
             thread_root_id = thread_root_id or node.thread_root_id
 
         direct_thread_root_context = await _resolve_direct_thread_root(
-            client,
+            access,
             caches,
-            fetch_snapshot,
             room_id=room_id,
             event_id=current_event_id,
             node=node,
@@ -593,14 +578,12 @@ async def derive_conversation_context(
     event_info: EventInfo,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    fetch_history: _FetchThreadHistory,
-    *,
-    event_cache: EventCache | None = None,
+    access: ConversationReadAccess,
 ) -> tuple[bool, str | None, list[_HistoryMessage]]:
     """Derive conversation context from threads or reply chains."""
     thread_root_id = _thread_root_id_from_event_info(event_info)
     if thread_root_id is not None:
-        thread_history = await fetch_history(client, room_id, thread_root_id)
+        thread_history = await access.get_thread_history(room_id, thread_root_id)
         return True, thread_root_id, list(thread_history)
 
     reply_chain_seed = _reply_chain_seed(event_info)
@@ -614,12 +597,11 @@ async def derive_conversation_context(
         is_full_thread_history,
     ) = await _resolve_reply_chain(
         client,
+        access,
         caches,
         logger,
-        fetch_history,
         room_id,
         reply_chain_seed,
-        event_cache=event_cache,
         default_history_is_full=True,
         hydrate_sidecars=True,
     )
@@ -627,7 +609,7 @@ async def derive_conversation_context(
         if is_full_thread_history:
             return True, context_root_id, list(chain_history)
 
-        thread_history = await fetch_history(client, room_id, context_root_id)
+        thread_history = await access.get_thread_history(room_id, context_root_id)
         return True, context_root_id, _merged_thread_history(thread_history, chain_history)
 
     # Policy choice: reply-only chains are still treated as one conversation
@@ -641,9 +623,7 @@ async def derive_conversation_target(
     event_info: EventInfo,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    fetch_snapshot: _FetchThreadSnapshot,
-    *,
-    event_cache: EventCache | None = None,
+    access: ConversationReadAccess,
 ) -> tuple[bool, str | None, list[_HistoryMessage], bool]:
     """Derive the conversation target with lightweight history for dispatch.
 
@@ -653,7 +633,7 @@ async def derive_conversation_target(
     """
     thread_root_id = _thread_root_id_from_event_info(event_info)
     if thread_root_id is not None:
-        thread_history = await fetch_snapshot(client, room_id, thread_root_id)
+        thread_history = await access.get_thread_snapshot(room_id, thread_root_id)
         return (
             True,
             thread_root_id,
@@ -672,12 +652,11 @@ async def derive_conversation_target(
         is_full_thread_history,
     ) = await _resolve_reply_chain(
         client,
+        access,
         caches,
         logger,
-        fetch_snapshot,
         room_id,
         reply_chain_seed,
-        event_cache=event_cache,
         default_history_is_full=False,
         hydrate_sidecars=False,
     )
@@ -685,7 +664,7 @@ async def derive_conversation_target(
         if is_full_thread_history:
             return True, context_root_id, list(chain_history), False
 
-        thread_history = await fetch_snapshot(client, room_id, context_root_id)
+        thread_history = await access.get_thread_snapshot(room_id, context_root_id)
         requires_full_thread_history = not _thread_history_is_full(thread_history, default=False)
         return (
             True,

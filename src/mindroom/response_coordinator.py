@@ -593,9 +593,10 @@ class ResponseCoordinator:
         if request.thread_id is None:
             return request
 
-        cache = self.deps.resolver.turn_thread_cache.get()
-        if cache is not None:
-            cache.pop(f"{request.room_id}:{request.thread_id}", None)
+        self.deps.resolver.deps.conversation_access.invalidate_turn_thread_history(
+            request.room_id,
+            request.thread_id,
+        )
 
         refreshed_history = await self.deps.resolver.fetch_thread_history(
             self._client(),

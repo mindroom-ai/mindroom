@@ -105,6 +105,8 @@ def _make_text_event(
     server_timestamp: int,
     source_content: dict[str, object],
 ) -> MagicMock:
+    normalized_content = dict(source_content)
+    normalized_content.setdefault("msgtype", "m.text")
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = event_id
     event.sender = sender
@@ -112,7 +114,7 @@ def _make_text_event(
     event.server_timestamp = server_timestamp
     event.source = {
         "type": "m.room.message",
-        "content": source_content,
+        "content": normalized_content,
     }
     return event
 

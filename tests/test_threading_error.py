@@ -20,7 +20,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult, get_event_cache
+from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult
 from mindroom.matrix.event_cache import EventCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
@@ -128,7 +128,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_start_and_stop_manage_persistent_event_cache(self, bot: AgentBot) -> None:
-        """Startup should attach the persistent cache and shutdown should detach it."""
+        """Startup should wire the persistent cache into the explicit access layer."""
         start_client = AsyncMock(spec=nio.AsyncClient)
         start_client.rooms = {}
         start_client.user_id = "@mindroom_general:localhost"
@@ -148,12 +148,13 @@ class TestThreadingBehavior:
         ):
             await bot.start()
             assert bot.event_cache is not None
-            assert get_event_cache(start_client) is None
+            assert bot._conversation_access.client is start_client
+            assert bot._conversation_access.event_cache is bot.event_cache
 
             await bot.stop(reason="test")
 
         assert bot.event_cache is None
-        assert get_event_cache(start_client) is None
+        assert bot._conversation_access.event_cache is None
         start_client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -281,7 +282,7 @@ class TestThreadingBehavior:
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
             }
 
-            await bot._conversation_state_writer.cache_sync_timeline_events(sync_response)
+            await bot._conversation_access.cache_sync_timeline(sync_response)
             cached_event = await bot.event_cache.get_event("$thread_msg:localhost")
         finally:
             await bot._close_event_cache()
@@ -312,7 +313,7 @@ class TestThreadingBehavior:
             },
         )
 
-        await bot._conversation_state_writer.cache_thread_event(
+        await bot._conversation_access.append_live_event(
             "!test:localhost",
             edit_event,
             event_info=EventInfo.from_event(edit_event.source),
@@ -344,7 +345,7 @@ class TestThreadingBehavior:
             "type": "m.room.redaction",
         }
 
-        await bot._conversation_state_writer.cache_redaction_event("!test:localhost", redaction_event)
+        await bot._conversation_access.apply_redaction("!test:localhost", redaction_event)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
         event_cache.redact_event.assert_awaited_once()
@@ -404,7 +405,7 @@ class TestThreadingBehavior:
         )
 
         try:
-            with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+            with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
                 first_context = await bot._extract_message_context(room, event)
 
             assert first_context.is_thread is True
@@ -420,7 +421,7 @@ class TestThreadingBehavior:
             bot._conversation_resolver.reply_chain = ReplyChainCaches()
             bot.client.room_get_event = AsyncMock(side_effect=AssertionError("should use persisted cache"))
 
-            with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch_again:
+            with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch_again:
                 second_context = await bot._extract_message_context(room, event)
 
             assert second_context.is_thread is True
@@ -607,8 +608,8 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Agent answer in thread"),
         ]
         with patch.object(
-            _state_writer(bot),
-            "fetch_thread_history",
+            bot._conversation_access,
+            "get_thread_history",
             AsyncMock(return_value=expected_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -617,7 +618,6 @@ class TestThreadingBehavior:
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         mock_fetch.assert_awaited_once_with(
-            bot.client,
             room.room_id,
             "$thread_root:localhost",
         )
@@ -665,8 +665,8 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Agent answer in thread"),
         ]
         with patch.object(
-            _state_writer(bot),
-            "fetch_thread_history",
+            bot._conversation_access,
+            "get_thread_snapshot",
             AsyncMock(return_value=expected_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -675,7 +675,6 @@ class TestThreadingBehavior:
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         mock_fetch.assert_awaited_once_with(
-            bot.client,
             room.room_id,
             "$thread_root:localhost",
         )
@@ -712,8 +711,8 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Original"),
         ]
         with patch.object(
-            _state_writer(bot),
-            "fetch_thread_history",
+            bot._conversation_access,
+            "get_thread_history",
             AsyncMock(return_value=expected_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -722,7 +721,6 @@ class TestThreadingBehavior:
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         mock_fetch.assert_awaited_once_with(
-            bot.client,
             room.room_id,
             "$thread_root:localhost",
         )
@@ -775,8 +773,8 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Thread message"),
         ]
         with patch.object(
-            _state_writer(bot),
-            "fetch_thread_history",
+            bot._conversation_access,
+            "get_thread_history",
             AsyncMock(return_value=expected_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -786,7 +784,6 @@ class TestThreadingBehavior:
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_msg:localhost")
         mock_fetch.assert_awaited_once_with(
-            bot.client,
             room.room_id,
             "$thread_root:localhost",
         )
@@ -863,7 +860,7 @@ class TestThreadingBehavior:
             ],
         )
 
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
@@ -930,7 +927,7 @@ class TestThreadingBehavior:
             ],
         )
 
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
@@ -983,7 +980,7 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=responses)
 
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
             # Re-resolving should use cached reply-chain nodes and roots.
             context_cached = await bot._conversation_resolver.extract_message_context(room, event)
@@ -1053,7 +1050,7 @@ class TestThreadingBehavior:
             ],
         )
 
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
@@ -1107,7 +1104,7 @@ class TestThreadingBehavior:
         bot._conversation_resolver.reply_chain.traversal_limit = 3
         with (
             patch.object(bot.logger, "warning") as mock_warning,
-            patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch,
+            patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -1170,7 +1167,7 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=_make_chain_responses(6))
         bot._conversation_resolver.reply_chain.traversal_limit = 3
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
             ctx1 = await bot._conversation_resolver.extract_message_context(room, event1)
 
         assert ctx1.thread_id == "$msg4:localhost"  # stale root from limit hit
@@ -1195,7 +1192,7 @@ class TestThreadingBehavior:
 
         # Node cache already has $msg6..$msg4; supply $msg3..$msg1 for the deeper walk
         bot.client.room_get_event = AsyncMock(side_effect=_make_chain_responses(3))
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
             ctx2 = await bot._conversation_resolver.extract_message_context(room, event2)
 
         assert ctx2.is_thread is True
@@ -1248,7 +1245,7 @@ class TestThreadingBehavior:
 
         bot._conversation_resolver.reply_chain.nodes.maxsize = 5
         bot._conversation_resolver.reply_chain.roots.maxsize = 5
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock()) as mock_fetch:
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
@@ -1331,8 +1328,8 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
         ]
         with patch.object(
-            _state_writer(bot),
-            "fetch_thread_history",
+            bot._conversation_access,
+            "get_thread_history",
             AsyncMock(return_value=thread_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -1346,7 +1343,6 @@ class TestThreadingBehavior:
             "$plain2:localhost",
         ]
         mock_fetch.assert_awaited_once_with(
-            bot.client,
             room.room_id,
             "$thread_root:localhost",
         )
@@ -1429,8 +1425,8 @@ class TestThreadingBehavior:
             _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
         ]
         with patch.object(
-            _state_writer(bot),
-            "fetch_thread_history",
+            bot._conversation_access,
+            "get_thread_history",
             AsyncMock(return_value=thread_history),
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -1537,10 +1533,10 @@ class TestThreadingBehavior:
         mock_snapshot = AsyncMock(return_value=preview_snapshot)
 
         with (
-            patch("mindroom.conversation_resolver.fetch_thread_snapshot", new=mock_snapshot),
+            patch.object(bot._conversation_access, "get_thread_snapshot", new=mock_snapshot),
             patch.object(
-                _state_writer(bot),
-                "fetch_thread_history",
+                bot._conversation_access,
+                "get_thread_history",
                 AsyncMock(return_value=full_thread_history),
             ) as mock_fetch,
         ):
@@ -1569,9 +1565,8 @@ class TestThreadingBehavior:
         assert context.thread_history[-1].content["body"] == "Hydrated plain reply from sidecar"
         bot.client.download.assert_awaited_once()
         assert bot.client.room_get_event.await_count == 2
-        mock_snapshot.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+        mock_snapshot.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         mock_fetch.assert_awaited_once_with(
-            bot.client,
             room.room_id,
             "$thread_root:localhost",
         )
@@ -1683,8 +1678,8 @@ class TestThreadingBehavior:
             _message(event_id="$t2:localhost", body="Thread reply after plain interleave"),
         ]
         with patch.object(
-            _state_writer(bot),
-            "fetch_thread_history",
+            bot._conversation_access,
+            "get_thread_history",
             AsyncMock(return_value=thread_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -1699,7 +1694,6 @@ class TestThreadingBehavior:
             "$p2:localhost",
         ]
         mock_fetch.assert_awaited_once_with(
-            bot.client,
             room.room_id,
             "$root:localhost",
         )
@@ -2027,7 +2021,7 @@ class TestThreadingBehavior:
             ),
         )
 
-        with patch.object(_state_writer(bot), "fetch_thread_history", AsyncMock(return_value=[])):
+        with patch.object(bot._conversation_access, "get_thread_history", AsyncMock(return_value=[])):
             await bot._on_message(room, event)
 
         bot.client.room_send.assert_called_once()

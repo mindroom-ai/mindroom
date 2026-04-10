@@ -33,7 +33,6 @@ from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
-    fetch_thread_history,
     get_latest_thread_event_id_if_needed,
     send_message,
 )
@@ -46,6 +45,7 @@ from mindroom.thread_utils import get_agents_in_thread
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.conversation_access import ConversationReadAccess
 
 logger = get_logger(__name__)
 
@@ -1098,6 +1098,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     room: nio.MatrixRoom,
+    conversation_access: ConversationReadAccess,
     new_thread: bool = False,
     mentioned_agents: list[MatrixID] | None = None,
     task_id: str | None = None,
@@ -1120,7 +1121,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         available_agents = list(sender_visible_room_agents)
     else:
         if thread_id:
-            thread_history = await fetch_thread_history(client, room_id, thread_id)
+            thread_history = list(await conversation_access.get_thread_history(room_id, thread_id))
             thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
             available_agents = [agent for agent in thread_agents if agent in sender_visible_room_agents]
 
@@ -1257,6 +1258,7 @@ async def edit_scheduled_task(
     config: Config,
     runtime_paths: RuntimePaths,
     room: nio.MatrixRoom,
+    conversation_access: ConversationReadAccess,
     thread_id: str | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
@@ -1278,6 +1280,7 @@ async def edit_scheduled_task(
         config=config,
         runtime_paths=runtime_paths,
         room=room,
+        conversation_access=conversation_access,
         new_thread=target_new_thread,
         task_id=task_id,
         existing_task=existing_task,
