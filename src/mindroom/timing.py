@@ -34,6 +34,34 @@ def _is_enabled() -> bool:
 
 type TimingMetadataValue = str | int | float | bool
 
+PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
+    ("seg_ingress_ms", "message_received", "gate_enter"),
+    ("seg_coalescing_ms", "gate_enter", "gate_exit"),
+    ("seg_dispatch_ms", "gate_exit", "response_payload_ready"),
+    ("seg_response_queue_ms", "response_payload_ready", "lock_acquired"),
+    ("seg_thread_refresh_ms", "lock_acquired", "thread_refresh_ready"),
+    ("seg_first_visible_reply_ms", "thread_refresh_ready", "first_visible_reply"),
+    ("seg_after_first_visible_ms", "first_visible_reply", "response_complete"),
+)
+
+PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
+    ("time_to_first_visible_reply_ms", "message_received", "first_visible_reply"),
+    ("total_pipeline_ms", "message_received", "response_complete"),
+)
+
+DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
+    ("diag_dispatch_prepare_ms", "dispatch_prepare_start", "dispatch_prepare_ready"),
+    ("diag_dispatch_plan_ms", "dispatch_plan_start", "dispatch_plan_ready"),
+    ("diag_response_payload_setup_ms", "response_payload_start", "response_payload_ready"),
+    ("diag_lock_wait_ms", "lock_wait_start", "lock_acquired"),
+    ("diag_runtime_prepare_ms", "response_runtime_start", "response_runtime_ready"),
+    ("diag_llm_prepare_ms", "ai_prepare_start", "history_ready"),
+    ("diag_history_ready_to_model_request_ms", "history_ready", "model_request_sent"),
+    ("diag_provider_ttft_ms", "model_request_sent", "model_first_token"),
+    ("diag_first_visible_to_stream_complete_ms", "first_visible_reply", "streaming_complete"),
+    ("diag_model_request_to_completion_ms", "model_request_sent", "response_complete"),
+)
+
 
 @dataclass(slots=True)
 class DispatchPipelineTiming:
@@ -56,6 +84,13 @@ class DispatchPipelineTiming:
             if value is not None:
                 self.metadata[key] = value
 
+    def mark_first_visible_reply(self, kind: str) -> None:
+        """Record the first user-visible response milestone once."""
+        if "first_visible_reply" in self.marks:
+            return
+        self.marks["first_visible_reply"] = time.perf_counter()
+        self.metadata["first_visible_kind"] = kind
+
     def elapsed_ms(self, start_label: str, end_label: str) -> float | None:
         """Return elapsed time between two recorded phase boundaries."""
         start = self.marks.get(start_label)
@@ -75,34 +110,8 @@ class DispatchPipelineTiming:
             "outcome": outcome,
             **self.metadata,
         }
-        duration_pairs = {
-            "arrival_to_gate_entry_ms": ("message_received", "gate_enter"),
-            "coalescing_gate_ms": ("gate_enter", "gate_exit"),
-            "gate_exit_to_dispatch_start_ms": ("gate_exit", "dispatch_start"),
-            "prepare_dispatch_ms": ("dispatch_prepare_start", "dispatch_prepare_ready"),
-            "plan_dispatch_ms": ("dispatch_plan_start", "dispatch_plan_ready"),
-            "response_payload_setup_ms": ("response_payload_start", "response_payload_ready"),
-            "lock_wait_ms": ("lock_wait_start", "lock_acquired"),
-            "post_lock_thread_refresh_ms": ("lock_acquired", "thread_refresh_ready"),
-            "lock_acquired_to_placeholder_ms": ("lock_acquired", "placeholder_sent"),
-            "placeholder_to_runtime_start_ms": ("placeholder_sent", "response_runtime_start"),
-            "runtime_prepare_ms": ("response_runtime_start", "response_runtime_ready"),
-            "system_prompt_history_ms": ("ai_prepare_start", "history_ready"),
-            "history_ready_to_model_request_ms": ("history_ready", "model_request_sent"),
-            "model_request_to_first_token_ms": ("model_request_sent", "model_first_token"),
-            "model_first_token_to_first_visible_stream_update_ms": (
-                "model_first_token",
-                "first_visible_stream_update",
-            ),
-            "first_visible_stream_update_to_stream_complete_ms": (
-                "first_visible_stream_update",
-                "streaming_complete",
-            ),
-            "placeholder_visible_ms": ("placeholder_sent", "response_complete"),
-            "total_pipeline_ms": ("message_received", "response_complete"),
-            "model_request_to_completion_ms": ("model_request_sent", "response_complete"),
-        }
-        for key, (start_label, end_label) in duration_pairs.items():
+        duration_pairs = (*PRIMARY_SEGMENTS, *PRIMARY_TOTALS, *DIAGNOSTIC_SPANS)
+        for key, start_label, end_label in duration_pairs:
             elapsed = self.elapsed_ms(start_label, end_label)
             if elapsed is not None:
                 summary[key] = elapsed

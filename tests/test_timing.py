@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 import mindroom.timing as timing_module
-from mindroom.timing import timed, timing_scope
+from mindroom.timing import DispatchPipelineTiming, timed, timing_scope
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -224,3 +224,79 @@ def test_timed_logs_omit_scope_when_unset(monkeypatch: pytest.MonkeyPatch) -> No
     run()
 
     _assert_timing_logged(logger, "plain_label")
+
+
+def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> None:
+    """Pipeline summary should separate additive segments from drill-down diagnostics."""
+    logger = Mock()
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
+    timing.metadata["first_visible_kind"] = "stream_update"
+    timing.marks.update(
+        {
+            "message_received": 0.0,
+            "gate_enter": 1.0,
+            "gate_exit": 3.0,
+            "dispatch_prepare_start": 4.0,
+            "dispatch_prepare_ready": 6.0,
+            "dispatch_plan_start": 6.5,
+            "dispatch_plan_ready": 7.5,
+            "response_payload_start": 8.0,
+            "response_payload_ready": 9.0,
+            "lock_wait_start": 10.0,
+            "lock_acquired": 12.0,
+            "thread_refresh_ready": 13.0,
+            "response_runtime_start": 14.0,
+            "response_runtime_ready": 15.0,
+            "ai_prepare_start": 15.5,
+            "history_ready": 17.0,
+            "model_request_sent": 18.0,
+            "model_first_token": 19.5,
+            "first_visible_reply": 20.0,
+            "streaming_complete": 24.0,
+            "response_complete": 25.0,
+        },
+    )
+
+    timing.emit_summary(logger, outcome="edited")
+
+    logger.info.assert_called_once()
+    assert logger.info.call_args.args == ("Dispatch pipeline timing",)
+    summary = logger.info.call_args.kwargs
+    assert summary["first_visible_kind"] == "stream_update"
+    assert summary["seg_ingress_ms"] == 1000.0
+    assert summary["seg_coalescing_ms"] == 2000.0
+    assert summary["seg_dispatch_ms"] == 6000.0
+    assert summary["seg_response_queue_ms"] == 3000.0
+    assert summary["seg_thread_refresh_ms"] == 1000.0
+    assert summary["seg_first_visible_reply_ms"] == 7000.0
+    assert summary["seg_after_first_visible_ms"] == 5000.0
+    assert summary["time_to_first_visible_reply_ms"] == 20000.0
+    assert summary["total_pipeline_ms"] == 25000.0
+    assert summary["diag_dispatch_prepare_ms"] == 2000.0
+    assert summary["diag_dispatch_plan_ms"] == 1000.0
+    assert summary["diag_response_payload_setup_ms"] == 1000.0
+    assert summary["diag_lock_wait_ms"] == 2000.0
+    assert summary["diag_runtime_prepare_ms"] == 1000.0
+    assert summary["diag_llm_prepare_ms"] == 1500.0
+    assert summary["diag_history_ready_to_model_request_ms"] == 1000.0
+    assert summary["diag_provider_ttft_ms"] == 1500.0
+    assert summary["diag_first_visible_to_stream_complete_ms"] == 4000.0
+    assert summary["diag_model_request_to_completion_ms"] == 7000.0
+    assert "model_first_token_to_first_visible_stream_update_ms" not in summary
+    assert "placeholder_visible_ms" not in summary
+    assert "model_request_to_completion_ms" not in summary
+
+
+def test_dispatch_pipeline_first_visible_reply_is_first_write_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first visible reply mark should preserve the earliest visible milestone."""
+    perf_counter = Mock(side_effect=[1.5, 9.0])
+    monkeypatch.setattr(timing_module.time, "perf_counter", perf_counter)
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
+
+    timing.mark_first_visible_reply("placeholder")
+    timing.mark_first_visible_reply("final")
+
+    assert timing.marks["first_visible_reply"] == 1.5
+    assert timing.metadata["first_visible_kind"] == "placeholder"

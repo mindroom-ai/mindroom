@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
-from agno.run.agent import RunContentEvent
 
 from mindroom import interactive
 from mindroom.agents import show_tool_calls_for_agent
@@ -52,7 +49,6 @@ from mindroom.streaming import (
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.timing import timing_scope as timing_scope_context
 from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
     stream_with_tool_execution_identity,
@@ -290,7 +286,6 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     strip_transient_enrichment_after_run: bool = False
-    received_monotonic: float | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
 
@@ -952,6 +947,7 @@ class ResponseCoordinator:
                     ),
                 )
                 if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
             else:
                 try:
@@ -1031,6 +1027,7 @@ class ResponseCoordinator:
                     ),
                 )
                 if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
 
         thinking_msg = None
@@ -1115,6 +1112,7 @@ class ResponseCoordinator:
                 )
                 if initial_message_id is not None and pipeline_timing is not None:
                     pipeline_timing.mark("placeholder_sent")
+                    pipeline_timing.mark_first_visible_reply("placeholder")
 
             message_id = existing_event_id or initial_message_id
             task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))
@@ -1179,36 +1177,6 @@ class ResponseCoordinator:
             return message_id
         finally:
             self.in_flight_response_count -= 1
-
-    async def _stream_response_with_first_token_log(
-        self,
-        response_stream: object,
-        *,
-        room_id: str,
-        received_monotonic: float | None = None,
-    ) -> AsyncIterator[object]:
-        """Proxy one streaming response and log time-to-first visible token."""
-        first_visible_token_logged = False
-        async for chunk in cast("AsyncIterator[object]", response_stream):
-            if (
-                received_monotonic is not None
-                and os.environ.get("MINDROOM_TIMING") == "1"
-                and not first_visible_token_logged
-                and isinstance(chunk, RunContentEvent)
-                and chunk.content
-            ):
-                first_visible_token_logged = True
-                elapsed_seconds = time.monotonic() - received_monotonic
-                scope = timing_scope_context.get()
-                prefix = f"[{scope}] " if scope else ""
-                self.deps.logger.info(
-                    f"TIMING {prefix}message_receipt_to_first_stream_token: {elapsed_seconds:.3f}s",
-                    timing_scope=scope,
-                    timing_step="message_receipt_to_first_stream_token",
-                    elapsed_s=round(elapsed_seconds, 3),
-                    room_id=room_id,
-                )
-            yield chunk
 
     async def _prepare_response_runtime_common(
         self,
@@ -1374,7 +1342,6 @@ class ResponseCoordinator:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
-        received_monotonic: float | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> tuple[str | None, str]:
         """Run one streaming AI request and send the streamed Matrix response."""
@@ -1417,11 +1384,6 @@ class ResponseCoordinator:
                 tool_context=runtime.tool_context,
                 stream_factory=lambda: response_stream,
             )
-            timed_response_stream = self._stream_response_with_first_token_log(
-                wrapped_response_stream,
-                room_id=request.room_id,
-                received_monotonic=received_monotonic,
-            )
             response_extra_content = _merge_response_extra_content(
                 run_metadata_content,
                 request.attachment_ids,
@@ -1431,7 +1393,7 @@ class ResponseCoordinator:
                     room_id=request.room_id,
                     reply_to_event_id=request.reply_to_event_id,
                     response_thread_id=runtime.response_thread_id,
-                    response_stream=timed_response_stream,
+                    response_stream=wrapped_response_stream,
                     existing_event_id=request.existing_event_id,
                     adopt_existing_placeholder=request.existing_event_id is not None
                     and request.existing_event_is_placeholder,
@@ -1534,6 +1496,7 @@ class ResponseCoordinator:
             ),
         )
         if request.pipeline_timing is not None:
+            request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
@@ -1545,7 +1508,6 @@ class ResponseCoordinator:
         *,
         run_id: str | None = None,
         response_kind: str = "ai",
-        received_monotonic: float | None = None,
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     ) -> DeliveryResult:
         """Process a message and send a streamed response."""
@@ -1571,7 +1533,6 @@ class ResponseCoordinator:
                 tool_trace=tool_trace,
                 run_metadata_content=run_metadata_content,
                 compaction_outcomes=compaction_outcomes,
-                received_monotonic=received_monotonic,
                 pipeline_timing=request.pipeline_timing,
             )
         except StreamingDeliveryError as error:
@@ -1622,6 +1583,7 @@ class ResponseCoordinator:
             if compaction_outcomes_collector is not None:
                 compaction_outcomes_collector.extend(compaction_outcomes)
             if request.pipeline_timing is not None:
+                request.pipeline_timing.mark_first_visible_reply("final")
                 request.pipeline_timing.mark("response_complete")
             return DeliveryResult(
                 event_id=event_id,
@@ -1651,6 +1613,7 @@ class ResponseCoordinator:
             ),
         )
         if request.pipeline_timing is not None:
+            request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
 
         if compaction_outcomes_collector is not None:
@@ -2012,7 +1975,6 @@ class ResponseCoordinator:
                 delivery_result = await self.process_and_respond_streaming(
                     delivery_request,
                     run_id=response_run_id,
-                    received_monotonic=request.received_monotonic,
                     compaction_outcomes_collector=compaction_outcomes,
                 )
             else:

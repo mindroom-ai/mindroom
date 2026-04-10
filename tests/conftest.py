@@ -407,7 +407,6 @@ def install_generate_response_mock(bot: object, generate_response: AsyncMock) ->
             correlation_id=request.correlation_id,
             target=request.target,
             matrix_run_metadata=request.matrix_run_metadata,
-            received_monotonic=request.received_monotonic,
         )
 
     bot._response_coordinator.generate_response = AsyncMock(side_effect=_generate)
