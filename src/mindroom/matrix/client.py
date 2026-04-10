@@ -29,6 +29,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import (
     extract_and_resolve_message,
     extract_edit_body,
+    resolve_event_source_content,
     visible_body_from_event_source,
 )
 from mindroom.matrix.room_cache import cached_room
@@ -1136,7 +1137,26 @@ def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str
     return (message.timestamp, message.event_id)
 
 
-def _snapshot_message_dict(event: nio.RoomMessageText | nio.RoomMessageNotice) -> ResolvedVisibleMessage:
+def _is_room_message_event(event: nio.Event) -> bool:
+    """Return whether one nio event is a readable Matrix room message."""
+    event_source = event.source if isinstance(event.source, dict) else {}
+    return event_source.get("type") == "m.room.message"
+
+
+def _room_message_fallback_body(event: nio.Event) -> str:
+    """Return one best-effort fallback body for a room message event."""
+    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+        return event.body
+    event_source = event.source if isinstance(event.source, dict) else {}
+    content = event_source.get("content")
+    if isinstance(content, dict):
+        body = content.get("body")
+        if isinstance(body, str):
+            return body
+    return ""
+
+
+def _snapshot_message_dict(event: nio.Event) -> ResolvedVisibleMessage:
     """Build one lightweight visible message without hydrating sidecars."""
     event_source = event.source if isinstance(event.source, dict) else {}
     content = event_source.get("content", {})
@@ -1144,8 +1164,8 @@ def _snapshot_message_dict(event: nio.RoomMessageText | nio.RoomMessageNotice) -
     event_info = EventInfo.from_event(event_source)
     message = ResolvedVisibleMessage.synthetic(
         sender=event.sender,
-        body=visible_body_from_event_source(event_source, event.body),
-        timestamp=event.server_timestamp,
+        body=visible_body_from_event_source(event_source, _room_message_fallback_body(event)),
+        timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
         event_id=event.event_id,
         content=normalized_content,
         thread_id=event_info.thread_id,
@@ -1171,11 +1191,11 @@ async def _fetch_thread_context_via_relations(
         raise _ThreadHistoryFastPathUnavailableError(msg)
 
     root_event = root_response.event
-    if not isinstance(root_event, (nio.RoomMessageText, nio.RoomMessageNotice)):
+    if not _is_room_message_event(root_event):
         msg = f"thread root {thread_id} is not a readable room message"
         raise _ThreadHistoryFastPathUnavailableError(msg)
 
-    thread_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
+    thread_events: list[nio.Event] = []
     try:
         async for event in client.room_get_event_relations(
             room_id,
@@ -1183,7 +1203,7 @@ async def _fetch_thread_context_via_relations(
             rel_type=RelationshipType.thread,
             event_type="m.room.message",
         ):
-            if not isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
+            if not _is_room_message_event(event):
                 continue
             event_info = EventInfo.from_event(event.source)
             if event_info.is_edit:
@@ -1601,23 +1621,50 @@ async def _collect_thread_relation_events(
     return thread_events, latest_edits_by_original_event_id
 
 
+async def _resolve_thread_history_message(
+    event: nio.Event,
+    client: nio.AsyncClient,
+) -> ResolvedVisibleMessage:
+    """Resolve one room-message event into the normalized thread-history shape."""
+    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+        message_data = await extract_and_resolve_message(event, client)
+        return ResolvedVisibleMessage.from_message_data(
+            message_data,
+            thread_id=EventInfo.from_event(event.source).thread_id,
+            latest_event_id=event.event_id,
+        )
+
+    resolved_event_source = await resolve_event_source_content(
+        event.source if isinstance(event.source, dict) else {},
+        client,
+    )
+    content = resolved_event_source.get("content", {})
+    normalized_content = content if isinstance(content, dict) else {}
+    event_info = EventInfo.from_event(resolved_event_source)
+    message = ResolvedVisibleMessage.synthetic(
+        sender=event.sender,
+        body=visible_body_from_event_source(resolved_event_source, _room_message_fallback_body(event)),
+        timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
+        event_id=event.event_id,
+        content=normalized_content,
+        thread_id=event_info.thread_id,
+    )
+    message.refresh_stream_status()
+    return message
+
+
 async def _record_relations_history_messages(
     client: nio.AsyncClient,
     *,
-    root_message_event: nio.RoomMessageText | nio.RoomMessageNotice | None,
-    thread_events: list[nio.RoomMessageText | nio.RoomMessageNotice],
+    root_message_event: nio.Event | None,
+    thread_events: list[nio.Event],
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the root and direct thread children into canonical visible messages."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     for event in [root_message_event, *thread_events]:
         if event is None:
             continue
-        message_data = await extract_and_resolve_message(event, client)
-        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
-            message_data,
-            thread_id=EventInfo.from_event(event.source).thread_id,
-            latest_event_id=event.event_id,
-        )
+        messages_by_event_id[event.event_id] = await _resolve_thread_history_message(event, client)
     return messages_by_event_id
 
 
@@ -1651,7 +1698,7 @@ def _record_latest_thread_edit(
 
 
 async def _record_thread_message(
-    event: nio.RoomMessageText | nio.RoomMessageNotice,
+    event: nio.Event,
     *,
     event_info: EventInfo,
     client: nio.AsyncClient,
@@ -1667,21 +1714,11 @@ async def _record_thread_message(
     is_thread_message = event_info.is_thread and event_info.thread_id == thread_id
 
     if is_root_message and not root_message_found:
-        message_data = await extract_and_resolve_message(event, client)
-        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
-            message_data,
-            thread_id=event_info.thread_id,
-            latest_event_id=event.event_id,
-        )
+        messages_by_event_id[event.event_id] = await _resolve_thread_history_message(event, client)
         return True
 
     if is_thread_message:
-        message_data = await extract_and_resolve_message(event, client)
-        messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
-            message_data,
-            thread_id=event_info.thread_id,
-            latest_event_id=event.event_id,
-        )
+        messages_by_event_id[event.event_id] = await _resolve_thread_history_message(event, client)
 
     return root_message_found
 
@@ -1825,9 +1862,7 @@ async def _fetch_thread_history_via_relations_with_events(
         raise _ThreadHistoryFastPathUnavailableError(msg)
 
     root_message = root_response.event
-    root_message_event = (
-        root_message if isinstance(root_message, (nio.RoomMessageText, nio.RoomMessageNotice)) else None
-    )
+    root_message_event = root_message if _is_room_message_event(root_message) else None
     messages_by_event_id = await _record_relations_history_messages(
         client,
         root_message_event=root_message_event,
@@ -1835,7 +1870,7 @@ async def _fetch_thread_history_via_relations_with_events(
     )
 
     for event in [root_message_event, *thread_events]:
-        if event is None:
+        if event is None or not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
             continue
         replacement = await _fetch_latest_message_replacement(client, room_id, event)
         if replacement is not None:
@@ -1898,15 +1933,17 @@ async def _fetch_thread_history_via_room_messages_with_events(
             break
 
         for event in response.chunk:
-            if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+            if not isinstance(event, nio.Event) or not _is_room_message_event(event):
                 continue
 
             event_info = EventInfo.from_event(event.source)
-            if _record_latest_thread_edit(
+            if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and _record_latest_thread_edit(
                 event,
                 event_info=event_info,
                 latest_edits_by_original_event_id=latest_edits_by_original_event_id,
             ):
+                continue
+            if event_info.is_edit:
                 continue
 
             if event.event_id == thread_id or (event_info.is_thread and event_info.thread_id == thread_id):
