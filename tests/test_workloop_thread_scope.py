@@ -86,6 +86,39 @@ def _copy_plugin_root(tmp_path: Path) -> Path:
         module_text = module_text.replace("from .state import ", f"from {package_prefix}.state import ")
         module_text = module_text.replace("from .todos import ", f"from {package_prefix}.todos import ")
         module_text = module_text.replace("from .types import ", f"from {package_prefix}.types import ")
+        if module_path.name == "poke.py":
+            # The copied fixture plugin still targets the older cancellation hook API, so
+            # strip CancelledResponseContext and its hook until the external plugin catches up.
+            module_text = module_text.replace("    CancelledResponseContext,\n", "")
+            module_text = module_text.replace(
+                "\n\n@hook(\n"
+                '    event="message:cancelled",\n'
+                '    name="workloop-track-cancelled",\n'
+                "    priority=100,\n"
+                "    timeout_ms=3000,\n"
+                ")\n"
+                "async def track_cancelled(ctx: CancelledResponseContext) -> None:\n"
+                '    """Remove the active run for this scope without recording a response timestamp."""\n'
+                "    agent_name = ctx.info.envelope.agent_name\n"
+                "    room_id = ctx.info.envelope.room_id\n"
+                "    thread_id = response_scope_thread_id(ctx.info.envelope)\n"
+                '    run_key = f"{room_id}:{thread_id}"\n'
+                "    try:\n"
+                "        _clear_active_run(\n"
+                "            ctx.state_root,\n"
+                "            agent_name,\n"
+                "            run_key,\n"
+                "            record_last_response=False,\n"
+                "        )\n"
+                "    except Exception:\n"
+                "        logger.exception(\n"
+                '            "workloop-track-cancelled: failed to update agent state for %s",\n'
+                "            agent_name,\n"
+                "        )\n",
+                "",
+            )
+        if module_path.name == "hooks.py":
+            module_text = module_text.replace("\ntrack_cancelled = poke.track_cancelled\n", "\n")
         module_path.write_text(module_text, encoding="utf-8")
     types_path = copied_root / "types.py"
     types_text = types_path.read_text(encoding="utf-8")

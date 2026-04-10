@@ -17,6 +17,12 @@ from mindroom.stop import StopManager
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
+async def _drain_stop_cleanup(stop_manager: StopManager) -> None:
+    """Wait for any background stop-manager cleanup tasks."""
+    if stop_manager.cleanup_tasks:
+        await asyncio.gather(*list(stop_manager.cleanup_tasks), return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     """Test that 🛑 reaction only acts as stop button during message generation."""
@@ -109,8 +115,8 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_emoji_prefers_graceful_agno_cancel_when_run_id_present(tmp_path: Path) -> None:
-    """Tracked Agno runs should use graceful cancellation before hard task cancellation."""
+async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_present(tmp_path: Path) -> None:
+    """Tracked Agno runs should hard-cancel immediately and clean up Agno state in the background."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@test_agent:example.com",
@@ -171,8 +177,8 @@ async def test_stop_emoji_prefers_graceful_agno_cancel_when_run_id_present(tmp_p
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await bot._on_reaction(room, reaction_event)
 
-    mock_schedule_cancel.assert_called_once_with("$message:example.com")
-    task.cancel.assert_not_called()
+    mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
+    task.cancel.assert_called_once()
     bot._send_response.assert_awaited_once_with(
         "!test:example.com",
         "$message:example.com",
@@ -185,11 +191,13 @@ async def test_stop_emoji_prefers_graceful_agno_cancel_when_run_id_present(tmp_p
 async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellable() -> None:
     """A stop request must hard-cancel quickly when the Agno run is not live yet."""
     stop_manager = StopManager(graceful_cancel_fallback_seconds=0.01)
+    started = asyncio.Event()
     completed = asyncio.Event()
     task_cancelled = asyncio.Event()
 
     async def response_that_would_complete() -> None:
         try:
+            started.set()
             await asyncio.sleep(0.1)
             completed.set()
         except asyncio.CancelledError:
@@ -197,6 +205,7 @@ async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellabl
             raise
 
     task = asyncio.create_task(response_that_would_complete())
+    await started.wait()
 
     stop_manager.set_current(
         message_id="$message:example.com",
@@ -208,6 +217,7 @@ async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellabl
     with patch("mindroom.stop.acancel_run", new=AsyncMock(return_value=False)):
         assert await stop_manager.handle_stop_reaction("$message:example.com") is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
+        await _drain_stop_cleanup(stop_manager)
 
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -242,16 +252,19 @@ async def test_stop_manager_force_cancels_task_when_graceful_cancel_errors() -> 
     with patch("mindroom.stop.acancel_run", new=AsyncMock(side_effect=RuntimeError("redis down"))):
         assert await stop_manager.handle_stop_reaction("$message:example.com") is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
+        await _drain_stop_cleanup(stop_manager)
 
     with pytest.raises(asyncio.CancelledError):
         await task
 
 
 @pytest.mark.asyncio
-async def test_stop_manager_force_cancels_task_when_graceful_cancel_hangs() -> None:
-    """Graceful cancellation should still force-cancel the task when Agno never stops it."""
-    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.01)
+async def test_stop_manager_immediately_cancels_task_even_when_acancel_run_succeeds() -> None:
+    """A successful Agno cleanup request must not delay hard task cancellation."""
+    stop_manager = StopManager(graceful_cancel_fallback_seconds=1.0)
     started = asyncio.Event()
+    allow_task_to_finish = asyncio.Event()
+    cleanup_requested = asyncio.Event()
     task_cancelled = asyncio.Event()
 
     async def hung_response() -> None:
@@ -260,6 +273,7 @@ async def test_stop_manager_force_cancels_task_when_graceful_cancel_hangs() -> N
             await asyncio.sleep(999)
         except asyncio.CancelledError:
             task_cancelled.set()
+            await allow_task_to_finish.wait()
             raise
 
     task = asyncio.create_task(hung_response())
@@ -272,20 +286,29 @@ async def test_stop_manager_force_cancels_task_when_graceful_cancel_hangs() -> N
         run_id="run-123",
     )
 
-    with patch("mindroom.stop.acancel_run", new=AsyncMock(return_value=True)):
+    async def graceful_cancel_run(_run_id: str) -> bool:
+        cleanup_requested.set()
+        allow_task_to_finish.set()
+        return True
+
+    with patch("mindroom.stop.acancel_run", new=graceful_cancel_run):
         assert await stop_manager.handle_stop_reaction("$message:example.com") is True
-        await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
+        await asyncio.wait_for(task_cancelled.wait(), timeout=0.1)
+        await asyncio.wait_for(cleanup_requested.wait(), timeout=0.2)
+        await _drain_stop_cleanup(stop_manager)
 
     with pytest.raises(asyncio.CancelledError):
         await task
 
 
 @pytest.mark.asyncio
-async def test_stop_manager_force_cancels_task_when_cancellation_manager_hangs() -> None:
-    """A hung cancellation-manager call must not block the hard-cancel fallback."""
-    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.01)
+async def test_stop_manager_immediately_cancels_task_when_acancel_run_is_slow() -> None:
+    """A slow Agno cleanup call must not trigger a second task.cancel()."""
+    stop_manager = StopManager(graceful_cancel_fallback_seconds=1.0)
     started = asyncio.Event()
+    allow_task_to_finish = asyncio.Event()
     task_cancelled = asyncio.Event()
+    cancellation_manager_started = asyncio.Event()
 
     async def hung_response() -> None:
         started.set()
@@ -293,9 +316,11 @@ async def test_stop_manager_force_cancels_task_when_cancellation_manager_hangs()
             await asyncio.sleep(999)
         except asyncio.CancelledError:
             task_cancelled.set()
+            await allow_task_to_finish.wait()
             raise
 
     async def hanging_cancel_run(_run_id: str) -> bool:
+        cancellation_manager_started.set()
         await asyncio.sleep(999)
         return True
 
@@ -311,7 +336,11 @@ async def test_stop_manager_force_cancels_task_when_cancellation_manager_hangs()
 
     with patch("mindroom.stop.acancel_run", new=hanging_cancel_run):
         assert await stop_manager.handle_stop_reaction("$message:example.com") is True
-        await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
+        await asyncio.wait_for(task_cancelled.wait(), timeout=0.1)
+        await asyncio.wait_for(cancellation_manager_started.wait(), timeout=0.2)
+        await _drain_stop_cleanup(stop_manager)
+        assert not task.done()
+        allow_task_to_finish.set()
 
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -319,15 +348,23 @@ async def test_stop_manager_force_cancels_task_when_cancellation_manager_hangs()
 
 @pytest.mark.asyncio
 async def test_stop_manager_retries_until_run_becomes_cancellable() -> None:
-    """The stop probe should retry briefly when the Agno run is not live on the first probe."""
-    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.2)
+    """Hard cancellation should happen immediately even if Agno needs a retry before cleanup succeeds."""
+    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.3)
+    started = asyncio.Event()
     allow_task_to_finish = asyncio.Event()
-    task_completed = asyncio.Event()
+    hard_cancelled = asyncio.Event()
+    task_cancelled = asyncio.Event()
     cancel_attempts: list[str] = []
 
     async def graceful_response() -> None:
-        await allow_task_to_finish.wait()
-        task_completed.set()
+        try:
+            started.set()
+            await asyncio.sleep(999)
+        except asyncio.CancelledError:
+            hard_cancelled.set()
+            await allow_task_to_finish.wait()
+            task_cancelled.set()
+            raise
 
     async def fake_acancel_run(run_id: str) -> bool:
         cancel_attempts.append(run_id)
@@ -337,6 +374,7 @@ async def test_stop_manager_retries_until_run_becomes_cancellable() -> None:
         return True
 
     task = asyncio.create_task(graceful_response())
+    await started.wait()
 
     stop_manager.set_current(
         message_id="$message:example.com",
@@ -347,24 +385,34 @@ async def test_stop_manager_retries_until_run_becomes_cancellable() -> None:
 
     with patch("mindroom.stop.acancel_run", new=fake_acancel_run):
         assert await stop_manager.handle_stop_reaction("$message:example.com") is True
-        await asyncio.wait_for(task_completed.wait(), timeout=0.2)
+        await asyncio.wait_for(hard_cancelled.wait(), timeout=0.1)
+        await _drain_stop_cleanup(stop_manager)
 
-    await asyncio.wait_for(task, timeout=0.2)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
     assert cancel_attempts == ["run-123", "run-123"]
-    assert not task.cancelled()
+    assert task_cancelled.is_set()
 
 
 @pytest.mark.asyncio
 async def test_stop_manager_reprobes_when_retry_updates_run_id() -> None:
-    """A stop request should follow a fresh retry run_id instead of waiting for hard cancellation."""
-    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.2)
-    keep_running = asyncio.Event()
+    """A stop request should keep probing updated run IDs after the hard cancel is sent."""
+    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.3)
+    started = asyncio.Event()
+    allow_task_to_finish = asyncio.Event()
+    hard_cancelled = asyncio.Event()
     first_cancel_attempt = asyncio.Event()
     second_cancel_attempt = asyncio.Event()
     cancel_attempts: list[str] = []
 
     async def graceful_response() -> None:
-        await keep_running.wait()
+        try:
+            started.set()
+            await asyncio.sleep(999)
+        except asyncio.CancelledError:
+            hard_cancelled.set()
+            await allow_task_to_finish.wait()
+            raise
 
     async def fake_acancel_run(run_id: str) -> bool:
         cancel_attempts.append(run_id)
@@ -372,10 +420,11 @@ async def test_stop_manager_reprobes_when_retry_updates_run_id() -> None:
             first_cancel_attempt.set()
         if run_id == "run-456":
             second_cancel_attempt.set()
-            keep_running.set()
+            allow_task_to_finish.set()
         return True
 
     task = asyncio.create_task(graceful_response())
+    await started.wait()
 
     stop_manager.set_current(
         message_id="$message:example.com",
@@ -386,15 +435,49 @@ async def test_stop_manager_reprobes_when_retry_updates_run_id() -> None:
 
     with patch("mindroom.stop.acancel_run", new=fake_acancel_run):
         assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        await asyncio.wait_for(hard_cancelled.wait(), timeout=0.1)
         await asyncio.wait_for(first_cancel_attempt.wait(), timeout=0.2)
         stop_manager.update_run_id("$message:example.com", "run-456")
         await asyncio.wait_for(second_cancel_attempt.wait(), timeout=0.2)
+        await _drain_stop_cleanup(stop_manager)
 
-    await asyncio.wait_for(task, timeout=0.2)
-    if stop_manager.cleanup_tasks:
-        await asyncio.gather(*stop_manager.cleanup_tasks, return_exceptions=True)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
 
     assert cancel_attempts == ["run-123", "run-456"]
+
+
+@pytest.mark.asyncio
+async def test_stop_manager_cleanup_uses_captured_run_id_after_task_finishes() -> None:
+    """Cleanup should still cancel the Agno run even if the response task is already done."""
+    stop_manager = StopManager(graceful_cancel_fallback_seconds=0.1)
+    started = asyncio.Event()
+
+    async def short_lived_response() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(999)
+        except asyncio.CancelledError:
+            raise
+
+    task = asyncio.create_task(short_lived_response())
+    await started.wait()
+
+    stop_manager.set_current(
+        message_id="$message:example.com",
+        room_id="!test:example.com",
+        task=task,
+        run_id="run-123",
+    )
+
+    cancel_run = AsyncMock(return_value=True)
+    with patch("mindroom.stop.acancel_run", new=cancel_run):
+        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _drain_stop_cleanup(stop_manager)
+
+    cancel_run.assert_awaited_once_with("run-123")
 
 
 @pytest.mark.asyncio
