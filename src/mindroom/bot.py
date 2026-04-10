@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import nio
@@ -53,6 +53,7 @@ from mindroom.post_response_effects import (
 )
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.tool_approval import get_approval_store
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -148,6 +149,23 @@ __all__ = ["AgentBot"]
 # Constants
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
+
+
+def _reply_to_event_id_from_event_source(event_source: dict[str, Any] | None) -> str | None:
+    """Return the reply target event ID from one raw Matrix event source."""
+    if not isinstance(event_source, dict):
+        return None
+    content = event_source.get("content")
+    if not isinstance(content, dict):
+        return None
+    relates_to = content.get("m.relates_to")
+    if not isinstance(relates_to, dict):
+        return None
+    in_reply_to = relates_to.get("m.in_reply_to")
+    if not isinstance(in_reply_to, dict):
+        return None
+    reply_to_event_id = in_reply_to.get("event_id")
+    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
 
 
 def _create_task_wrapper(
@@ -1072,6 +1090,10 @@ class AgentBot:
                 nio.RoomEncryptedAudio,
             ):
                 client.add_event_callback(media_callback, event_type)
+            client.add_event_callback(
+                _create_task_wrapper(self._on_unknown_event, owner=self._runtime_view),
+                nio.UnknownEvent,
+            )
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1264,6 +1286,8 @@ class AgentBot:
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
+        if await self._maybe_handle_tool_approval_reply(room, event):
+            return
         await self._turn_controller.handle_text_event(room, event)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
@@ -1275,22 +1299,107 @@ class AgentBot:
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 
-    async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
-        """Handle one reaction inside the per-turn thread-history cache scope."""
-        assert self.client is not None
+    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Handle custom Matrix events that are not part of nio's typed event set."""
+        if event.type != "io.mindroom.tool_approval_response":
+            return
+        if not self._approval_sender_is_allowed(room, event.sender):
+            return
 
+        approval_id, status, reason = self._approval_response_payload(event)
+        if approval_id is None or status is None:
+            return
+
+        approval_manager = get_approval_store()
+        if approval_manager is None:
+            return
+
+        await approval_manager.handle_approval_resolution(
+            approval_id=approval_id,
+            status=status,
+            reason=reason,
+            resolved_by=event.sender,
+        )
+
+    def _approval_sender_is_allowed(self, room: nio.MatrixRoom, sender: str) -> bool:
+        """Return whether one sender may resolve a pending tool approval."""
         if not is_authorized_sender(
-            event.sender,
+            sender,
             self.config,
             room.room_id,
             self.runtime_paths,
             room_alias=room.canonical_alias,
         ):
-            self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
+            self.logger.debug("Ignoring tool approval action from unauthorized sender", user_id=sender)
+            return False
+        if not self._turn_policy.can_reply_to_sender(sender):
+            self.logger.debug("Ignoring tool approval action due to reply permissions", sender=sender)
+            return False
+        return True
+
+    @staticmethod
+    def _approval_response_payload(
+        event: nio.UnknownEvent,
+    ) -> tuple[str | None, Literal["approved", "denied"] | None, str | None]:
+        """Parse one custom approval response event."""
+        content = event.source.get("content", {})
+        if not isinstance(content, dict):
+            return None, None, None
+
+        approval_id = content.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            return None, None, None
+
+        raw_status = content.get("status")
+        if raw_status not in {"approved", "denied"}:
+            approved = content.get("approved")
+            if isinstance(approved, bool):
+                raw_status = "approved" if approved else "denied"
+        if raw_status not in {"approved", "denied"}:
+            return approval_id, None, None
+
+        raw_reason = content.get("denial_reason")
+        if not isinstance(raw_reason, str) or not raw_reason.strip():
+            raw_reason = content.get("reason")
+        reason = raw_reason.strip() if isinstance(raw_reason, str) and raw_reason.strip() else None
+        return approval_id, cast("Literal['approved', 'denied']", raw_status), reason
+
+    async def _maybe_handle_tool_approval_reply(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+    ) -> bool:
+        """Consume reply-to-approval messages as denial actions."""
+        approval_manager = get_approval_store()
+        if approval_manager is None:
+            return False
+
+        reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
+        if reply_to_event_id is None or approval_manager.approval_id_for_event(reply_to_event_id) is None:
+            return False
+        if not self._approval_sender_is_allowed(room, event.sender):
+            return True
+
+        await approval_manager.handle_reply(
+            approval_event_id=reply_to_event_id,
+            reason=event.body,
+            resolved_by=event.sender,
+        )
+        return True
+
+    async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+        """Handle one reaction inside the per-turn thread-history cache scope."""
+        assert self.client is not None
+
+        if not self._approval_sender_is_allowed(room, event.sender):
             return
 
-        if not self._turn_policy.can_reply_to_sender(event.sender):
-            self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
+        approval_manager = get_approval_store()
+        if approval_manager is not None and await approval_manager.handle_reaction(
+            approval_event_id=event.reacts_to,
+            reaction_key=event.key,
+            resolved_by=event.sender,
+        ):
             return
 
         if event.key == "🛑":

@@ -7,9 +7,10 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import uuid4
 
+import nio
 import uvicorn
 
 from mindroom import constants
@@ -64,6 +65,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling import set_scheduling_hook_registry
+from mindroom.tool_approval import initialize_approval_store, shutdown_approval_store
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import (
     clear_skill_cache,
@@ -107,7 +109,7 @@ from .runtime_support import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable
     from pathlib import Path
     from types import FrameType
 
@@ -120,6 +122,8 @@ logger = get_logger(__name__)
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
+
+_TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 _CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
 _CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
@@ -219,6 +223,7 @@ class MultiAgentOrchestrator:
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
+    _main_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -264,6 +269,148 @@ class MultiAgentOrchestrator:
         )
         self._memory_auto_flush_worker = worker
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
+
+    def _get_bot_by_agent_name(self, agent_name: str) -> AgentBot | TeamBot | None:
+        """Return the managed bot that owns a given approval request."""
+        return self.agent_bots.get(agent_name)
+
+    def _capture_main_loop(self) -> None:
+        """Remember the runtime loop that owns Matrix client I/O."""
+        self._main_loop = asyncio.get_running_loop()
+
+    async def _run_approval_transport_on_main_loop(
+        self,
+        coroutine_factory: Callable[[], Coroutine[Any, Any, _TApprovalTransportResult]],
+    ) -> _TApprovalTransportResult:
+        """Run Matrix approval transport on the orchestrator's main loop.
+
+        Sync tool hooks can request approval through a private loop created by
+        ``_run_coroutine_from_sync()``. The Matrix aiohttp client belongs to the
+        runtime loop, so approval event sends and edits must hop back there.
+        """
+        main_loop = self._main_loop
+        if main_loop is None or main_loop.is_closed():
+            return await coroutine_factory()
+
+        current_loop = asyncio.get_running_loop()
+        if current_loop is main_loop:
+            return await coroutine_factory()
+
+        future = asyncio.run_coroutine_threadsafe(coroutine_factory(), main_loop)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+
+    @staticmethod
+    def _approval_thread_relation(thread_id: str) -> dict[str, object]:
+        """Return a threaded relation payload for approval events."""
+        return {
+            "rel_type": "m.thread",
+            "event_id": thread_id,
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": thread_id},
+        }
+
+    async def _send_approval_event(
+        self,
+        room_id: str,
+        thread_id: str,
+        agent_name: str,
+        content: dict[str, Any],
+    ) -> str | None:
+        """Send one custom approval event into the active Matrix thread."""
+        return await self._run_approval_transport_on_main_loop(
+            lambda: self._send_approval_event_now(room_id, thread_id, agent_name, content),
+        )
+
+    async def _send_approval_event_now(
+        self,
+        room_id: str,
+        thread_id: str,
+        agent_name: str,
+        content: dict[str, Any],
+    ) -> str | None:
+        """Send one custom approval event on the current loop."""
+        bot = self._get_bot_by_agent_name(agent_name)
+        if bot is None or bot.client is None:
+            return None
+        response = await bot.client.room_send(
+            room_id=room_id,
+            message_type="io.mindroom.tool_approval",
+            content={
+                **content,
+                "m.relates_to": self._approval_thread_relation(thread_id),
+            },
+        )
+        if isinstance(response, nio.RoomSendResponse):
+            return str(response.event_id)
+        logger.warning(
+            "Failed to send approval Matrix event",
+            room_id=room_id,
+            thread_id=thread_id,
+            agent_name=agent_name,
+            response=str(response),
+        )
+        return None
+
+    async def _edit_approval_event(
+        self,
+        room_id: str,
+        event_id: str,
+        agent_name: str,
+        new_content: dict[str, Any],
+    ) -> None:
+        """Edit one previously sent approval event."""
+        await self._run_approval_transport_on_main_loop(
+            lambda: self._edit_approval_event_now(room_id, event_id, agent_name, new_content),
+        )
+
+    async def _edit_approval_event_now(
+        self,
+        room_id: str,
+        event_id: str,
+        agent_name: str,
+        new_content: dict[str, Any],
+    ) -> None:
+        """Edit one previously sent approval event on the current loop."""
+        bot = self._get_bot_by_agent_name(agent_name)
+        if bot is None:
+            return
+        if bot.client is None:
+            msg = f"Approval Matrix client is unavailable for agent '{agent_name}'"
+            raise RuntimeError(msg)
+
+        thread_id = new_content.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            logger.warning(
+                "Skipping approval Matrix edit without thread_id",
+                room_id=room_id,
+                event_id=event_id,
+                agent_name=agent_name,
+            )
+            return
+
+        replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
+        replacement_content["m.relates_to"] = self._approval_thread_relation(thread_id)
+        response = await bot.client.room_send(
+            room_id=room_id,
+            message_type="io.mindroom.tool_approval",
+            content={
+                **replacement_content,
+                "m.new_content": replacement_content,
+                "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+            },
+        )
+        if not isinstance(response, nio.RoomSendResponse):
+            logger.warning(
+                "Failed to edit approval Matrix event",
+                room_id=room_id,
+                event_id=event_id,
+                agent_name=agent_name,
+                response=str(response),
+            )
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -783,9 +930,15 @@ class MultiAgentOrchestrator:
 
     async def initialize(self) -> None:
         """Initialize all managed bots from configuration."""
+        self._capture_main_loop()
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
+        initialize_approval_store(
+            self.runtime_paths,
+            sender=self._send_approval_event,
+            editor=self._edit_approval_event,
+        )
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         await self._prepare_user_account(config, update_runtime_state=True)
@@ -800,6 +953,7 @@ class MultiAgentOrchestrator:
 
     async def start(self) -> None:
         """Start all agent bots and publish readiness state."""
+        self._capture_main_loop()
         try:
             await self._start_runtime()
         except asyncio.CancelledError:
@@ -1502,6 +1656,7 @@ class MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.running = False
 
+        await shutdown_approval_store()
         stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
