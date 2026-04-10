@@ -74,7 +74,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
-from mindroom.timing import timed
+from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
@@ -1071,6 +1071,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -1109,6 +1110,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
+        pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
     Returns:
         Agent response string
@@ -1143,6 +1145,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 entity_name=agent_name,
             )
             try:
+                if pipeline_timing is not None:
+                    pipeline_timing.mark("ai_prepare_start")
                 agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
                     agent_name,
                     prompt,
@@ -1162,6 +1166,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     system_enrichment_items=system_enrichment_items,
                     timing_scope=timing_scope,
                 )
+                if pipeline_timing is not None:
+                    pipeline_timing.mark("history_ready")
             except Exception as e:
                 logger.exception("Error preparing agent", agent=agent_name)
                 return get_user_friendly_error_message(e, agent_name)
@@ -1183,6 +1189,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 for retried_without_inline_media in (False, True):
                     response = None
                     try:
+                        if pipeline_timing is not None:
+                            pipeline_timing.mark("model_request_sent", overwrite=True)
                         response = await _run_cached_agent_attempt(
                             agent,
                             attempt_prompt,
@@ -1289,6 +1297,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     retried_without_inline_media: bool,
     timing_scope: str,
     request_started_at: float,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
     try:
@@ -1296,6 +1305,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
             if isinstance(event, RunContentEvent) and event.content:
                 if not state.first_token_logged:
                     state.first_token_logged = True
+                    if pipeline_timing is not None:
+                        pipeline_timing.mark("model_first_token")
                     if os.environ.get("MINDROOM_TIMING") == "1":
                         elapsed_seconds = time.monotonic() - request_started_at
                         prefix = f"[{timing_scope}] " if timing_scope else ""
@@ -1396,6 +1407,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1432,6 +1444,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
+        pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1468,6 +1481,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 entity_name=agent_name,
             )
             try:
+                if pipeline_timing is not None:
+                    pipeline_timing.mark("ai_prepare_start")
                 agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
                     agent_name,
                     prompt,
@@ -1487,6 +1502,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     system_enrichment_items=system_enrichment_items,
                     timing_scope=timing_scope,
                 )
+                if pipeline_timing is not None:
+                    pipeline_timing.mark("history_ready")
             except Exception as e:
                 logger.exception("Error preparing agent for streaming", agent=agent_name)
                 yield get_user_friendly_error_message(e, agent_name)
@@ -1511,6 +1528,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
                     try:
                         request_started_at = time.monotonic()
+                        if pipeline_timing is not None:
+                            pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
                         stream_generator = agent.arun(
                             attempt_prompt,
@@ -1551,6 +1570,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         retried_without_inline_media=retried_without_inline_media,
                         timing_scope=timing_scope,
                         request_started_at=request_started_at,
+                        pipeline_timing=pipeline_timing,
                     ):
                         yield stream_chunk
 

@@ -51,7 +51,7 @@ from mindroom.streaming import (
     build_restart_interrupted_body,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
-from mindroom.timing import timed
+from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.timing import timing_scope as timing_scope_context
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -289,6 +289,7 @@ class ResponseRequest:
     strip_transient_enrichment_after_run: bool = False
     received_monotonic: float | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
+    pipeline_timing: DispatchPipelineTiming | None = None
 
 
 @dataclass(frozen=True)
@@ -488,8 +489,12 @@ class ResponseCoordinator:
             queued_signal.add_waiting_human_message()
         lock_acquired = False
         try:
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("lock_wait_start")
             await lifecycle_lock.acquire()
             lock_acquired = True
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("lock_acquired")
             try:
                 if queued_human_message:
                     queued_signal.consume_waiting_human_message()
@@ -597,6 +602,32 @@ class ResponseCoordinator:
         )
         return replace(request, thread_history=refreshed_history)
 
+    def _note_pipeline_metadata(
+        self,
+        request: ResponseRequest,
+        *,
+        response_kind: str,
+        used_streaming: bool,
+    ) -> None:
+        """Attach shared response metadata to one timing tracker."""
+        if request.pipeline_timing is None:
+            return
+        request.pipeline_timing.note(
+            response_kind=response_kind,
+            used_streaming=used_streaming,
+        )
+
+    def _emit_pipeline_timing_summary(
+        self,
+        request: ResponseRequest,
+        *,
+        outcome: str,
+    ) -> None:
+        """Emit one structured end-to-end timing summary when available."""
+        if request.pipeline_timing is None:
+            return
+        request.pipeline_timing.emit_summary(self.deps.logger, outcome=outcome)
+
     def _response_envelope_for_request(
         self,
         request: ResponseRequest,
@@ -683,6 +714,8 @@ class ResponseCoordinator:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._refresh_thread_history_after_lock(request)
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
         prepared_prompt = _prefix_user_turn_time(
@@ -714,6 +747,7 @@ class ResponseCoordinator:
             requester_user_id=requester_user_id,
             enable_streaming=self.deps.runtime.enable_streaming,
         )
+        self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
         mode = TeamMode.COORDINATE if team_request.team_mode == "coordinate" else TeamMode.COLLABORATE
         agent_names = [
@@ -818,7 +852,7 @@ class ResponseCoordinator:
                 ),
             )
 
-        async def generate_team_response(message_id: str | None) -> None:
+        async def generate_team_response(message_id: str | None) -> None:  # noqa: C901
             nonlocal delivery_result
             delivery_request = self._request_for_delivery(delivery_request_base, message_id=message_id)
             delivery_target = delivery_request.target
@@ -881,8 +915,11 @@ class ResponseCoordinator:
                             header=None,
                             show_tool_calls=show_tool_calls,
                             streaming_cls=ReplacementStreamingResponse,
+                            pipeline_timing=request.pipeline_timing,
                         ),
                     )
+                if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark("streaming_complete")
                 if event_id is None:
                     delivery_result = DeliveryResult(
                         event_id=None,
@@ -911,6 +948,8 @@ class ResponseCoordinator:
                         ),
                     ),
                 )
+                if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark("response_complete")
             else:
                 try:
                     async with typing_indicator(self._client(), request.room_id):
@@ -988,6 +1027,8 @@ class ResponseCoordinator:
                         extra_content=None,
                     ),
                 )
+                if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark("response_complete")
 
         thinking_msg = None
         if not request.existing_event_id:
@@ -1003,6 +1044,7 @@ class ResponseCoordinator:
             existing_event_id=request.existing_event_id,
             user_id=requester_user_id,
             run_id=response_run_id,
+            pipeline_timing=request.pipeline_timing,
         )
         if resolved_event_id is None:
             resolved_event_id = self.resolve_response_event_id(
@@ -1012,6 +1054,12 @@ class ResponseCoordinator:
                 existing_event_is_placeholder=request.existing_event_is_placeholder,
             )
         await finalize_post_response_effects(tracked_event_id)
+        outcome = "no_visible_response"
+        if delivery_result is not None and delivery_result.suppressed:
+            outcome = "suppressed"
+        elif delivery_result is not None and delivery_result.delivery_kind is not None:
+            outcome = delivery_result.delivery_kind
+        self._emit_pipeline_timing_summary(request, outcome=outcome)
         return resolved_event_id
 
     async def run_cancellable_response(
@@ -1026,6 +1074,7 @@ class ResponseCoordinator:
         user_id: str | None = None,
         run_id: str | None = None,
         target: MessageTarget | None = None,
+        pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> str | None:
         """Run one response generation function with cancellation support."""
         resolved_target = target or self.deps.resolver.build_message_target(
@@ -1054,6 +1103,8 @@ class ResponseCoordinator:
                         extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                     ),
                 )
+                if initial_message_id is not None and pipeline_timing is not None:
+                    pipeline_timing.mark("placeholder_sent")
 
             message_id = existing_event_id or initial_message_id
             task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))
@@ -1257,6 +1308,7 @@ class ResponseCoordinator:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
+        pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> str:
         """Run one non-streaming AI request."""
 
@@ -1291,6 +1343,7 @@ class ResponseCoordinator:
                 compaction_outcomes_collector=compaction_outcomes,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=request.system_enrichment_items,
+                pipeline_timing=pipeline_timing,
             )
 
         async with typing_indicator(self._client(), request.room_id):
@@ -1312,6 +1365,7 @@ class ResponseCoordinator:
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
         received_monotonic: float | None = None,
+        pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> tuple[str | None, str]:
         """Run one streaming AI request and send the streamed Matrix response."""
 
@@ -1344,6 +1398,7 @@ class ResponseCoordinator:
             compaction_outcomes_collector=compaction_outcomes,
             matrix_run_metadata=matrix_run_metadata,
             system_enrichment_items=request.system_enrichment_items,
+            pipeline_timing=pipeline_timing,
         )
 
         async with typing_indicator(self._client(), request.room_id):
@@ -1361,7 +1416,7 @@ class ResponseCoordinator:
                 run_metadata_content,
                 request.attachment_ids,
             )
-            return await self.deps.delivery_gateway.deliver_stream(
+            event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
                 StreamingDeliveryRequest(
                     room_id=request.room_id,
                     reply_to_event_id=request.reply_to_event_id,
@@ -1376,8 +1431,12 @@ class ResponseCoordinator:
                     extra_content=response_extra_content,
                     tool_trace_collector=tool_trace,
                     streaming_cls=StreamingResponse,
+                    pipeline_timing=request.pipeline_timing,
                 ),
             )
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("streaming_complete")
+            return event_id, accumulated
 
     async def process_and_respond(
         self,
@@ -1391,7 +1450,11 @@ class ResponseCoordinator:
         if not request.prompt.strip():
             return DeliveryResult(event_id=request.existing_event_id, response_text="", delivery_kind=None)
 
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_non_streaming_runtime(request)
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_runtime_ready")
         tool_trace: list[Any] = []
         compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
@@ -1406,6 +1469,7 @@ class ResponseCoordinator:
                 tool_trace=tool_trace,
                 run_metadata_content=run_metadata_content,
                 compaction_outcomes=compaction_outcomes,
+                pipeline_timing=request.pipeline_timing,
             )
         except asyncio.CancelledError as exc:
             restart = is_sync_restart_cancel(exc)
@@ -1459,6 +1523,8 @@ class ResponseCoordinator:
                 extra_content=response_extra_content or None,
             ),
         )
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_complete")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
         return delivery
@@ -1476,7 +1542,11 @@ class ResponseCoordinator:
         if not request.prompt.strip():
             return DeliveryResult(event_id=request.existing_event_id, response_text="", delivery_kind=None)
 
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_streaming_runtime(request)
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_runtime_ready")
         compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(request.room_id)
@@ -1492,6 +1562,7 @@ class ResponseCoordinator:
                 run_metadata_content=run_metadata_content,
                 compaction_outcomes=compaction_outcomes,
                 received_monotonic=received_monotonic,
+                pipeline_timing=request.pipeline_timing,
             )
         except StreamingDeliveryError as error:
             self.deps.logger.exception("Error in streaming response", error=str(error.error))
@@ -1540,6 +1611,8 @@ class ResponseCoordinator:
             )
             if compaction_outcomes_collector is not None:
                 compaction_outcomes_collector.extend(compaction_outcomes)
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("response_complete")
             return DeliveryResult(
                 event_id=event_id,
                 response_text=interactive_response.formatted_text,
@@ -1567,6 +1640,8 @@ class ResponseCoordinator:
                 ),
             ),
         )
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_complete")
 
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
@@ -1794,7 +1869,7 @@ class ResponseCoordinator:
             ),
         )
 
-    async def generate_response_locked(
+    async def generate_response_locked(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
@@ -1806,6 +1881,8 @@ class ResponseCoordinator:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._refresh_thread_history_after_lock(request)
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("thread_refresh_ready")
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
@@ -1845,6 +1922,7 @@ class ResponseCoordinator:
             requester_user_id=request.user_id,
             enable_streaming=self.deps.runtime.enable_streaming,
         )
+        self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         delivery_result: DeliveryResult | None = None
         compaction_outcomes: list[CompactionOutcome] = []
         response_run_id = str(uuid4())
@@ -1948,6 +2026,7 @@ class ResponseCoordinator:
             existing_event_id=request.existing_event_id,
             user_id=request.user_id,
             run_id=response_run_id,
+            pipeline_timing=request.pipeline_timing,
         )
         if resolved_event_id is None:
             resolved_event_id = self.resolve_response_event_id(
@@ -1961,4 +2040,10 @@ class ResponseCoordinator:
             tracked_event_id=tracked_event_id,
             swallow_late_cancellation=True,
         )
+        outcome = "no_visible_response"
+        if delivery_result is not None and delivery_result.suppressed:
+            outcome = "suppressed"
+        elif delivery_result is not None and delivery_result.delivery_kind is not None:
+            outcome = delivery_result.delivery_kind
+        self._emit_pipeline_timing_summary(request, outcome=outcome)
         return resolved_event_id

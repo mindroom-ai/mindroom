@@ -12,6 +12,7 @@ from nio.api import RelationshipType
 from mindroom.matrix.client import fetch_thread_history
 from mindroom.matrix.event_cache import EventCache
 from mindroom.matrix.room_cache import cached_room_get_event
+from mindroom.timing import DispatchPipelineTiming
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -182,6 +183,36 @@ async def test_individual_event_cache_store_and_retrieve(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_individual_event_cache_strips_runtime_timing_marker(tmp_path: Path) -> None:
+    """Batch event caching should drop in-memory timing objects before serialization."""
+    cache = EventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+
+    reply_event = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Cached reply",
+        server_timestamp=2000,
+        source_content={"body": "Cached reply"},
+    )
+    event_source = _cache_source(reply_event)
+    event_source["com.mindroom.dispatch_pipeline_timing"] = DispatchPipelineTiming(
+        source_event_id="$reply",
+        room_id="!room:localhost",
+    )
+
+    try:
+        await cache.store_events_batch([("$reply", "!room:localhost", event_source)])
+        cached_event = await cache.get_event("$reply")
+    finally:
+        await cache.close()
+
+    assert cached_event is not None
+    assert cached_event["event_id"] == "$reply"
+    assert "com.mindroom.dispatch_pipeline_timing" not in cached_event
+
+
+@pytest.mark.asyncio
 async def test_thread_cache_store_populates_individual_event_lookup(tmp_path: Path) -> None:
     """Thread cache writes should also populate the individual event table."""
     cache = EventCache(tmp_path / "event_cache.db")
@@ -218,6 +249,41 @@ async def test_thread_cache_store_populates_individual_event_lookup(tmp_path: Pa
     assert cached_event is not None
     assert cached_event["event_id"] == "$reply"
     assert cached_event["content"]["body"] == "Cached reply"
+
+
+@pytest.mark.asyncio
+async def test_thread_event_cache_strips_runtime_timing_marker(tmp_path: Path) -> None:
+    """Thread cache writes should strip runtime-only timing markers before JSON storage."""
+    cache = EventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+
+    reply_event = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Reply in thread",
+        server_timestamp=2000,
+        source_content={
+            "body": "Reply in thread",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+        },
+    )
+    event_source = _cache_source(reply_event)
+    event_source["com.mindroom.dispatch_pipeline_timing"] = DispatchPipelineTiming(
+        source_event_id="$reply",
+        room_id="!room:localhost",
+    )
+
+    try:
+        await cache.store_events("!room:localhost", "$thread_root", [event_source])
+        cached_event = await cache.get_event("$reply")
+        cached_thread_events = await cache.get_thread_events("!room:localhost", "$thread_root")
+    finally:
+        await cache.close()
+
+    assert cached_event is not None
+    assert "com.mindroom.dispatch_pipeline_timing" not in cached_event
+    assert cached_thread_events is not None
+    assert "com.mindroom.dispatch_pipeline_timing" not in cached_thread_events[0]
 
 
 @pytest.mark.asyncio
