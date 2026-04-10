@@ -85,10 +85,20 @@ class _ModuleCacheEntry:
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
+_WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
 
 
 def _hook_display_name(callback: HookCallback) -> str:
     return cast("Any", callback).__name__
+
+
+def _warn_once(message: str, *, path: Path) -> None:
+    """Emit one plugin-path warning once per process for the same message/path pair."""
+    warning_key = (message, path)
+    if warning_key in _WARNED_PLUGIN_MESSAGES:
+        return
+    _WARNED_PLUGIN_MESSAGES.add(warning_key)
+    logger.warning(message, path=str(path))
 
 
 def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
@@ -193,7 +203,7 @@ def _log_skipped_plugin_entry(
 ) -> None:
     """Log one broken plugin entry without aborting the rest of startup."""
     if root is not None and (not root.exists() or not root.is_dir()):
-        logger.warning("Plugin path does not exist, skipping", path=str(root))
+        _warn_once("Plugin path does not exist, skipping", path=root)
         return
 
     if isinstance(exc, PluginValidationError) and str(exc).startswith(
@@ -307,7 +317,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         raise PluginValidationError(msg)
 
     if not root.is_relative_to(_REPO_ROOT):
-        logger.warning("Loading non-bundled plugin", path=str(root))
+        _warn_once("Loading non-bundled plugin", path=root)
 
     try:
         manifest_mtime = manifest_path.stat().st_mtime
