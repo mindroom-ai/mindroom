@@ -16,14 +16,11 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.constants import (
-    DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-    deserialize_runtime_paths,
-    resolve_primary_runtime_paths,
-    sandbox_startup_manifest_path,
-    startup_manifest_sha256,
-)
-from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
+from mindroom.config.main import Config
+from mindroom.connections import connection_google_application_credentials_path, resolve_connection
+from mindroom.constants import deserialize_runtime_paths, resolve_primary_runtime_paths
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -142,6 +139,18 @@ def _load_startup_manifest(
         backend.storage_root / f"workers/{worker_dir_name(worker_key)}",
     )
     return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def _vertexai_claude_connection_config() -> Config:
+    return Config(
+        connections={
+            "vertexai_claude/default": {
+                "provider": "vertexai_claude",
+                "service": "google_vertex_adc",
+                "auth_kind": "google_adc",
+            },
+        },
+    )
 
 
 class _FakeApiError(Exception):
@@ -452,59 +461,24 @@ def _backend(
     return backend, apps_api, core_api
 
 
-def _install_real_elapsed_wait_for_ready(
-    backend: KubernetesWorkerBackend,
+def _worker_connection_runtime_paths(
     *,
-    ready_after_seconds: float,
-    ready_gate: threading.Event | None = None,
-    poll_interval_seconds: float = 0.01,
-    monotonic: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], None] = time.sleep,
-    on_iteration: Callable[[float], None] | None = None,
-) -> None:
-    object.__setattr__(
-        backend.config,
-        "ready_timeout_seconds",
-        max(backend.config.ready_timeout_seconds, ready_after_seconds + 1.0),
+    config_path: Path,
+    storage_root: Path,
+    worker_key: str,
+) -> RuntimePaths:
+    state_subpath = Path("workers") / worker_dir_name(worker_key)
+    local_worker_root = storage_root / state_subpath
+    return resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=local_worker_root,
+        process_env={SHARED_CREDENTIALS_PATH_ENV: str(local_worker_root / ".shared_credentials")},
     )
 
-    def _ready(
-        self: object,
-        deployment_name: str,
-        *,
-        timeout_seconds: float,
-        deployment_ready_fn: object,
-        on_poll_tick: Callable[[float], None] | None = None,
-    ) -> object:
-        del deployment_ready_fn
-        started_at = monotonic()
-        deadline = started_at + timeout_seconds
-        while True:
-            elapsed_seconds = monotonic() - started_at
-            if on_iteration is not None:
-                on_iteration(elapsed_seconds)
-            if elapsed_seconds >= ready_after_seconds and (ready_gate is None or ready_gate.is_set()):
-                deployment = self.read_deployment(deployment_name)
-                assert deployment is not None
-                return deployment
-            assert monotonic() < deadline
-            if on_poll_tick is not None:
-                on_poll_tick(elapsed_seconds)
-            sleep(poll_interval_seconds)
 
-    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
-
-
-def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tmp_path: Path) -> None:  # noqa: PLR0915
-    """Ensuring one worker should create runtime resources on shared storage."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=tmp_path / "mindroom-test-storage",
-    )
-    backend, apps_api, core_api = _backend(
-        runtime_paths=runtime_paths,
-        owner_deployment_name="mindroom-demo",
-    )
+def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
+    """Ensuring one worker should create a service/deployment pair on shared storage."""
+    backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-demo")
     worker_key = _TEST_SCOPED_WORKER_KEY_A
 
     handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
@@ -1090,7 +1064,8 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
         },
     )
-    backend, _apps_api, _core_api = _backend(
+    sync_env_to_credentials(runtime_paths)
+    backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path=str(storage_mount_path),
     )
@@ -1159,7 +1134,7 @@ def test_kubernetes_backend_uses_provided_validation_snapshot(tmp_path: Path) ->
 
 
 def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path: Path) -> None:
-    """Dedicated worker payloads must not serialize unusable host-local ADC paths."""
+    """Dedicated worker payloads must drop unusable host-local ADC paths without blocking ambient ADC."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -1171,18 +1146,34 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
         config_path=config_path,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": "/host/path/adc.json"},
     )
-    backend, _apps_api, _core_api = _backend(
+    sync_env_to_credentials(runtime_paths)
+    backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path=str(tmp_path / "not-mounted-storage"),
     )
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    committed_runtime = deserialize_runtime_paths(
-        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    worker_runtime_paths = _worker_connection_runtime_paths(
+        config_path=config_path,
+        storage_root=runtime_paths.storage_root,
+        worker_key=_TEST_SCOPED_WORKER_KEY_A,
     )
 
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
+    resolved_connection = resolve_connection(
+        _vertexai_claude_connection_config(),
+        provider="vertexai_claude",
+        purpose="chat_model",
+        runtime_paths=worker_runtime_paths,
+    )
+
+    assert resolved_connection.auth_kind == "google_adc"
+    assert connection_google_application_credentials_path(resolved_connection) is None
 
 
 def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Path) -> None:
@@ -1203,12 +1194,36 @@ def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Pat
         storage_path=local_storage_root,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
     )
-    with pytest.raises(WorkerBackendError, match="google_vertex_adc"):
-        _backend(
-            runtime_paths=runtime_paths,
-            storage_mount_path="/app/worker",
-            worker_grantable_credentials=frozenset({"google_vertex_adc"}),
-        )
+    sync_env_to_credentials(runtime_paths)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/app/worker",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    local_adc_copy = local_storage_root / state_subpath / ".runtime" / credentials_path.name
+    worker_runtime_paths = _worker_connection_runtime_paths(
+        config_path=config_path,
+        storage_root=local_storage_root,
+        worker_key=_TEST_SCOPED_WORKER_KEY_A,
+    )
+    resolved_connection = resolve_connection(
+        _vertexai_claude_connection_config(),
+        provider="vertexai_claude",
+        purpose="chat_model",
+        runtime_paths=worker_runtime_paths,
+    )
+    expected_worker_adc_path = f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
+
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == expected_worker_adc_path
+    assert connection_google_application_credentials_path(resolved_connection) == expected_worker_adc_path
+    assert local_adc_copy.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

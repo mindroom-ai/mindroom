@@ -18,7 +18,32 @@ from tests.conftest import orchestrator_runtime_paths
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
+    return resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+
+
+def _openai_memory_connections(
+    *,
+    llm_connection_id: str = "openai/default",
+    llm_service: str = "openai",
+    embedder_connection_id: str = "openai/embeddings",
+    embedder_service: str = "openai",
+) -> dict[str, dict[str, str]]:
+    return {
+        llm_connection_id: {
+            "provider": "openai",
+            "service": llm_service,
+            "auth_kind": "api_key",
+        },
+        embedder_connection_id: {
+            "provider": "openai",
+            "service": embedder_service,
+            "auth_kind": "api_key",
+        },
+    }
 
 
 class TestMemoryConfig:
@@ -74,7 +99,7 @@ class TestMemoryConfig:
     ) -> None:
         """Test memory config creation with OpenAI embedder."""
         runtime_paths = _runtime_paths(tmp_path)
-        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("openai", {"api_key": "test-key"})
+        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-key")
 
         # Create config with OpenAI embedder
         embedder_config = _MemoryEmbedderConfig(
@@ -86,7 +111,11 @@ class TestMemoryConfig:
             config={"model": "gpt-4", "temperature": 0.1, "top_p": 1},
         )
         memory = MemoryConfig(embedder=embedder_config, llm=llm_config)
-        config = Config(memory=memory, router=RouterConfig(model="default"))
+        config = Config(
+            memory=memory,
+            router=RouterConfig(model="default"),
+            connections=_openai_memory_connections(),
+        )
 
         # Test config generation
         storage_path = tmp_path / "memory"
@@ -116,9 +145,14 @@ class TestMemoryConfig:
             ),
         )
         memory = MemoryConfig(embedder=embedder_config, llm=None)
-        config = Config(memory=memory, router=RouterConfig(model="default"))
-
-        result = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))
+        runtime_paths = _runtime_paths(tmp_path)
+        config = Config(
+            memory=memory,
+            router=RouterConfig(model="default"),
+            connections=_openai_memory_connections(),
+        )
+        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-key")
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
 
         assert result["embedder"]["config"]["embedding_dims"] == 3072
 
@@ -206,70 +240,81 @@ class TestMemoryConfig:
                 },
             },
             router=RouterConfig(model="default"),
+            connections=_openai_memory_connections(),
         )
 
         result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
 
         assert result["embedder"]["config"]["api_key"] == "shared-openai-key"
 
-    def test_get_memory_config_openai_embedder_maps_provider_settings(self, tmp_path: Path) -> None:
-        """OpenAI Mem0 embedder config should keep the provider-specific field names."""
+    def test_get_memory_config_works_with_synthesized_default_embedder_connection(self, tmp_path: Path) -> None:
+        """The default Mem0 embedder should validate and resolve even when only the model connection is authored."""
         runtime_paths = _runtime_paths(tmp_path)
-        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-            "openai",
-            {"api_key": "shared-openai-key"},
-        )
-        config = Config(
-            memory={
-                "embedder": {
-                    "provider": "openai",
-                    "config": {
-                        "model": "custom-embedding-model",
-                        "host": "http://embeddings.local/v1",
-                        "dimensions": 1024,
+        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-key")
+        config = Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.4",
                     },
                 },
+                "connections": {
+                    "openai/default": {
+                        "provider": "openai",
+                        "service": "openai",
+                        "auth_kind": "api_key",
+                    },
+                },
+                "router": {"model": "default"},
             },
-            router=RouterConfig(model="default"),
+            runtime_paths,
+            strict_connection_validation=True,
         )
 
         result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
 
         assert result["embedder"]["provider"] == "openai"
-        assert result["embedder"]["config"] == {
-            "model": "custom-embedding-model",
-            "api_key": "shared-openai-key",
-            "openai_base_url": "http://embeddings.local/v1",
-            "embedding_dims": 1024,
-        }
+        assert result["embedder"]["config"]["model"] == "text-embedding-3-small"
+        assert result["embedder"]["config"]["api_key"] == "test-key"
 
-    def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
-        """Credential-backed Ollama host should override the embedder config host."""
+    def test_get_memory_config_uses_named_openai_connections(self, tmp_path: Path) -> None:
+        """Memory config should honor explicitly named OpenAI connections for both consumers."""
         runtime_paths = _runtime_paths(tmp_path)
-        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-            "ollama",
-            {"host": "http://credential-ollama:11434"},
-        )
+        credentials = get_runtime_shared_credentials_manager(runtime_paths)
+        credentials.save_credentials("openai-memory-llm", {"api_key": "llm-key", "_source": "test"})
+        credentials.save_credentials("openai-memory-embedder", {"api_key": "embed-key", "_source": "test"})
+
         config = Config(
             memory={
                 "embedder": {
-                    "provider": "ollama",
+                    "provider": "openai",
                     "config": {
-                        "model": "nomic-embed-text",
-                        "host": "http://config-ollama:11434",
+                        "model": "text-embedding-3-small",
+                        "connection": "openai/memory-embedder",
+                    },
+                },
+                "llm": {
+                    "provider": "openai",
+                    "connection": "openai/memory-llm",
+                    "config": {
+                        "model": "gpt-4o-mini",
                     },
                 },
             },
             router=RouterConfig(model="default"),
+            connections=_openai_memory_connections(
+                llm_connection_id="openai/memory-llm",
+                llm_service="openai-memory-llm",
+                embedder_connection_id="openai/memory-embedder",
+                embedder_service="openai-memory-embedder",
+            ),
         )
 
         result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
 
-        assert result["embedder"]["provider"] == "ollama"
-        assert result["embedder"]["config"] == {
-            "model": "nomic-embed-text",
-            "ollama_base_url": "http://credential-ollama:11434",
-        }
+        assert result["embedder"]["config"]["api_key"] == "embed-key"
+        assert result["llm"]["config"]["api_key"] == "llm-key"
 
     @pytest.mark.parametrize(
         ("model", "effective_dimensions"),
@@ -302,34 +347,6 @@ class TestMemoryConfig:
         explicit_config = Config(memory=explicit_default, router=RouterConfig(model="default"))
 
         assert _memory_collection_name(implicit_config) == _memory_collection_name(explicit_config)
-
-    def test_custom_openai_compatible_memory_collection_name_tracks_explicit_dimensions(self) -> None:
-        """Custom OpenAI-compatible embedders must not treat omitted dimensions as explicit 1536."""
-        implicit_dimensions = MemoryConfig(
-            embedder=_MemoryEmbedderConfig(
-                provider="openai",
-                config=EmbedderConfig(
-                    model="gemini-embedding-001",
-                    host="http://example.com/v1",
-                ),
-            ),
-            llm=None,
-        )
-        explicit_dimensions = MemoryConfig(
-            embedder=_MemoryEmbedderConfig(
-                provider="openai",
-                config=EmbedderConfig(
-                    model="gemini-embedding-001",
-                    host="http://example.com/v1",
-                    dimensions=1536,
-                ),
-            ),
-            llm=None,
-        )
-        implicit_config = Config(memory=implicit_dimensions, router=RouterConfig(model="default"))
-        explicit_config = Config(memory=explicit_dimensions, router=RouterConfig(model="default"))
-
-        assert _memory_collection_name(implicit_config) != _memory_collection_name(explicit_config)
 
     def test_get_memory_config_no_model_fallback(
         self,

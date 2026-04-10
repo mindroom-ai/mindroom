@@ -16,7 +16,27 @@ from typing import TYPE_CHECKING, Literal
 import typer
 from rich.console import Console
 
-from mindroom import constants
+from mindroom.config.main import (
+    CONFIG_LOAD_USER_ERROR_TYPES,
+    Config,
+    ConfigRuntimeValidationError,
+    iter_config_validation_messages,
+    load_config,
+)
+from mindroom.connections import default_connection_config, default_connection_id
+from mindroom.constants import (
+    OWNER_MATRIX_USER_ID_PLACEHOLDER,
+    VERTEXAI_CLAUDE_ENV_KEYS,
+    RuntimePaths,
+    config_search_locations,
+    env_key_for_provider,
+    exported_process_env,
+    resolve_primary_runtime_paths,
+    resolve_runtime_paths,
+)
+from mindroom.credentials_sync import get_secret_from_env
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -720,17 +740,42 @@ def _prompt_provider_preset() -> _ProviderPreset:
 
 def _model_template_block(provider_preset: _ProviderPreset) -> str:
     """Render the provider-specific YAML fragment for models.default."""
-    provider, model_id, context_window = _DEFAULT_MODEL_PRESETS[provider_preset]
-    lines = [f"provider: {provider}", f"id: {model_id}", f"context_window: {context_window}"]
-    if provider_preset == "codex":
+    provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
+    connection_id = default_connection_id(provider=provider, purpose="chat_model")
+    lines = [f"provider: {provider}", f"id: {model_id}"]
+    if connection_id is not None:
+        lines.append(f"connection: {connection_id}")
+    if provider == "vertexai_claude":
         lines.extend(
             [
-                "# Prompt caching is enabled automatically per active agent session.",
                 "extra_kwargs:",
-                "  reasoning_effort: medium",
+                "  # Keep Vertex endpoint settings on the model, not under connections.",
+                "  # project_id: your-gcp-project-id",
+                "  # region: us-central1",
             ],
         )
     return textwrap.indent("\n".join(lines), "    ")
+
+
+def _connections_template_block(provider_preset: _ProviderPreset) -> str:
+    """Render one starter named connection block for the selected provider."""
+    provider, _model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
+    connection_id = default_connection_id(provider=provider, purpose="chat_model")
+    if connection_id is None:
+        return ""
+    connection_config = default_connection_config(provider=provider, purpose="chat_model")
+    if connection_config is None:
+        return ""
+    service_value = "null" if connection_config.service is None else connection_config.service
+    return textwrap.dedent(
+        f"""\
+        connections:
+          {connection_id}:
+            provider: {connection_config.provider}
+            service: {service_value}
+            auth_kind: {connection_config.auth_kind}
+        """,
+    ).rstrip()
 
 
 def _full_template(
@@ -747,6 +792,7 @@ def _full_template(
     Requester-private agents remain an opt-in advanced config surface.
     """
     model_block = _model_template_block(provider_preset)
+    connections_block = _connections_template_block(provider_preset)
     mind_memory_knowledge_path = _default_mind_knowledge_base_path(
         config_dir,
         storage_root=storage_root,
@@ -773,6 +819,7 @@ def _full_template(
 models:
   default:
 {model_block}
+{connections_block}
 
 agents:
   assistant:
@@ -852,6 +899,7 @@ memory:
     provider: sentence_transformers
     config:
       model: sentence-transformers/all-MiniLM-L6-v2
+      # connection: openai/embeddings  # Use this for credentialed embedders such as OpenAI.
   file:
     max_entrypoint_lines: 200
   auto_flush:
@@ -936,12 +984,14 @@ MINDROOM_API_KEY={api_key}
 def _minimal_template(provider_preset: _ProviderPreset = "openai") -> str:
     """Return a bare-minimum inline config."""
     model_block = _model_template_block(provider_preset)
+    connections_block = _connections_template_block(provider_preset)
     return f"""\
 # MindRoom Configuration (minimal)
 
 models:
   default:
 {model_block}
+{connections_block}
 
 agents:
   assistant:

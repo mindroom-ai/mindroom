@@ -7,8 +7,9 @@ from typing import Any
 from mem0 import AsyncMemory
 
 from mindroom.config.main import Config
+from mindroom.connections import ConnectionPurpose, connection_api_key, resolve_connection
 from mindroom.constants import RuntimePaths
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_ollama_host
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -33,6 +34,24 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
+def _resolved_connection_api_key(
+    config: Config,
+    *,
+    provider: str,
+    purpose: ConnectionPurpose,
+    connection_name: str | None,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    connection = resolve_connection(
+        config,
+        provider=provider,
+        purpose=purpose,
+        connection_name=connection_name,
+        runtime_paths=runtime_paths,
+    )
+    return connection_api_key(connection)
+
+
 def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901, PLR0912
     """Get Mem0 configuration with ChromaDB backend.
 
@@ -48,7 +67,6 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     app_config = config
     # Canonicalize once so Chroma path is independent of runtime cwd changes.
     resolved_storage_path = storage_path.expanduser().resolve()
-
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"
     chroma_path.mkdir(parents=True, exist_ok=True)
@@ -65,7 +83,13 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
-        api_key = get_api_key_for_provider("openai", runtime_paths=runtime_paths)
+        api_key = _resolved_connection_api_key(
+            app_config,
+            provider=embedder_provider,
+            purpose="embedder",
+            connection_name=app_config.memory.embedder.config.connection,
+            runtime_paths=runtime_paths,
+        )
         if api_key:
             embedder_provider_config["api_key"] = api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
@@ -74,12 +98,8 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         if app_config.memory.embedder.config.dimensions is not None:
             embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
     elif embedder_provider == "ollama":
-        host = (
-            get_ollama_host(runtime_paths=runtime_paths)
-            or app_config.memory.embedder.config.host
-            or "http://localhost:11434"
-        )
-        embedder_provider_config["ollama_base_url"] = host
+        host = app_config.memory.embedder.config.host or get_ollama_host(runtime_paths) or "http://localhost:11434"
+        embedder_config["config"]["ollama_base_url"] = host
     elif embedder_provider == "sentence_transformers" and app_config.memory.embedder.config.dimensions is not None:
         embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
 
@@ -94,13 +114,19 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         for key, value in app_config.memory.llm.config.items():
             if key == "host" and app_config.memory.llm.provider == "ollama":
                 llm_config["config"]["ollama_base_url"] = (
-                    get_ollama_host(runtime_paths=runtime_paths) or value or "http://localhost:11434"
+                    value or get_ollama_host(runtime_paths) or "http://localhost:11434"
                 )
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
 
         if app_config.memory.llm.provider in {"openai", "anthropic"}:
-            api_key = get_api_key_for_provider(app_config.memory.llm.provider, runtime_paths=runtime_paths)
+            api_key = _resolved_connection_api_key(
+                app_config,
+                provider=app_config.memory.llm.provider,
+                purpose="memory_llm",
+                connection_name=app_config.memory.llm.connection,
+                runtime_paths=runtime_paths,
+            )
             if api_key:
                 llm_config["config"]["api_key"] = api_key
 
@@ -112,6 +138,7 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     else:
         # Fallback if no LLM configured
         logger.warning("No memory LLM configured, using default ollama/llama3.2")
+        ollama_host = get_ollama_host(runtime_paths) or "http://localhost:11434"
 
         llm_config = {
             "provider": "ollama",

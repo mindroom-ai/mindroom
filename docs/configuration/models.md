@@ -27,8 +27,8 @@ Each model configuration supports the following fields:
 |-------|----------|---------|-------------|
 | `provider` | Yes | - | The AI provider (see supported providers above) |
 | `id` | Yes | - | Model ID specific to the provider |
+| `connection` | No | `provider/default` | Named connection used for credentials (`gemini` canonicalizes to `google/default`) |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
-| `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
@@ -40,6 +40,7 @@ models:
   sonnet:
     provider: anthropic
     id: claude-sonnet-4-6
+    connection: anthropic/default
     context_window: 200000
 
   haiku:
@@ -51,6 +52,7 @@ models:
   gpt:
     provider: openai
     id: gpt-5.4
+    connection: openai/default
 
   # OpenAI via Codex CLI subscription
   codex:
@@ -61,12 +63,15 @@ models:
   gemini:
     provider: google
     id: gemini-3.1-pro-preview
+    connection: google/default
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
     provider: vertexai_claude
     id: claude-sonnet-4-6
+    connection: vertexai_claude/default
     extra_kwargs:
+      # Keep Vertex project_id and region on the model config itself.
       project_id: your-gcp-project
       region: us-central1
 
@@ -80,6 +85,7 @@ models:
   openrouter:
     provider: openrouter
     id: anthropic/claude-sonnet-4.6
+    connection: openrouter/default
 
   # Groq (fast inference)
   groq:

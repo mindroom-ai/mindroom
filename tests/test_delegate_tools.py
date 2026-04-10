@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -28,21 +29,43 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
+def _default_test_connections() -> dict[str, dict[str, str]]:
+    return {
+        "openai/default": {
+            "provider": "openai",
+            "service": "openai",
+            "auth_kind": "api_key",
+        },
+        "openai/embeddings": {
+            "provider": "openai",
+            "service": "openai",
+            "auth_kind": "api_key",
+        },
+    }
+
+
+def _delegate_test_config(**kwargs: object) -> Config:
+    connections = kwargs.pop("connections", _default_test_connections())
+    return Config(connections=connections, **kwargs)
+
+
 def _make_config(agents: dict[str, AgentConfig]) -> Config:
     """Create a minimal Config with the given agents."""
-    return Config(
+    return _delegate_test_config(
         agents=agents,
         models={"default": ModelConfig(provider="openai", id="gpt-4")},
     )
 
 
-def _runtime_paths(storage_path: Path) -> RuntimePaths:
+def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
     """Create explicit runtime paths for delegate-tool agent creation tests."""
-    return resolve_runtime_paths(
-        config_path=storage_path / "config.yaml",
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path or storage_path / "config.yaml",
         storage_path=storage_path,
         process_env={},
     )
+    get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-openai-key")
+    return runtime_paths
 
 
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
@@ -83,10 +106,7 @@ class TestDelegateTools:
     @pytest.fixture
     def tools(self, storage_path: Path, config: Config) -> DelegateTools:
         """Create a DelegateTools instance for testing."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=storage_path / "config.yaml",
-            storage_path=storage_path,
-        )
+        runtime_paths = _runtime_paths(storage_path)
         return DelegateTools(
             agent_name="leader",
             delegate_to=["code", "research"],
@@ -183,10 +203,7 @@ class TestDelegateTools:
     @pytest.mark.asyncio
     async def test_delegation_depth_increments(self, storage_path: Path, config: Config) -> None:
         """Verify that delegation_depth is passed through correctly."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=storage_path / "config.yaml",
-            storage_path=storage_path,
-        )
+        runtime_paths = _runtime_paths(storage_path)
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["code"],
@@ -213,7 +230,7 @@ class TestDelegateTools:
         """Delegated agents should inherit the orchestrator-owned config path."""
         config.agents["code"].tools = ["self_config"]
         config_path = tmp_path / "custom-config.yaml"
-        runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+        runtime_paths = _runtime_paths(storage_path, config_path=config_path)
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["code"],
@@ -237,7 +254,7 @@ class TestDelegateKnowledge:
     @pytest.mark.asyncio
     async def test_delegation_resolves_knowledge(self, tmp_path: Path) -> None:
         """Delegated agent with knowledge_bases should receive knowledge."""
-        config = Config(
+        config = _delegate_test_config(
             agents={
                 "leader": AgentConfig(
                     display_name="Leader",
@@ -254,7 +271,7 @@ class TestDelegateKnowledge:
             knowledge_bases={"docs": {"path": "./docs"}},
         )
         config = _bind_runtime_paths(config, tmp_path)
-        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        runtime_paths = _runtime_paths(tmp_path)
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["researcher"],
@@ -382,7 +399,7 @@ class TestDelegateKnowledge:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        runtime_paths = _runtime_paths(tmp_path)
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["worker"],
@@ -418,7 +435,7 @@ class TestDelegateKnowledge:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        runtime_paths = _runtime_paths(tmp_path)
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="leader",
@@ -477,7 +494,7 @@ class TestDelegateKnowledge:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        runtime_paths = _runtime_paths(tmp_path)
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="leader",
@@ -537,7 +554,7 @@ class TestDelegateKnowledge:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Delegated child tools should see the child's room-resolved runtime model."""
-        config = Config(
+        config = _delegate_test_config(
             agents={
                 "leader": AgentConfig(
                     display_name="Leader",
@@ -559,8 +576,8 @@ class TestDelegateKnowledge:
             },
         )
         config = _bind_runtime_paths(config, tmp_path)
-        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-        monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
+        runtime_paths = _runtime_paths(tmp_path)
+        monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="leader",
@@ -810,7 +827,7 @@ class TestDelegateAutoInjection:
     ) -> None:
         """At max depth, 'delegate' from defaults.tools should be skipped."""
         assert mock_storage is not None
-        config = Config(
+        config = _delegate_test_config(
             agents={
                 "leader": AgentConfig(
                     display_name="Leader",

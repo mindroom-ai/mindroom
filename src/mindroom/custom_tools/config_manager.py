@@ -81,6 +81,17 @@ def validate_knowledge_bases(
     return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
 
 
+def _save_runtime_validated_config(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Revalidate the full config against the active runtime before writing it."""
+    validated = Config.validate_with_runtime(
+        config.authored_model_dump(),
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+        strict_connection_validation=True,
+    )
+    config_lifecycle.persist_runtime_validated_config(validated, runtime_paths)
+
+
 class _InfoType(str, Enum):
     """Types of information that can be retrieved."""
 

@@ -14,15 +14,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
 )
 from mindroom.api import config_lifecycle
-from mindroom.config.main import Config
-from mindroom.credential_policy import (
-    OAUTH_CREDENTIAL_FIELDS,
-    credential_service_policy,
-    dashboard_may_edit_oauth_service,
-    filter_oauth_credential_fields,
-    is_oauth_client_config_service,
-    looks_like_oauth_credentials,
-)
+from mindroom.connections import canonical_connection_provider
 from mindroom.credentials import (
     CredentialsManager,
     delete_scoped_credentials,
@@ -54,10 +46,8 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
-_OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed through the OAuth connect flow."  # noqa: S105
-_OAUTH_CLIENT_CONFIG_FIELDS = frozenset({"client_id", "client_secret", "redirect_uri"})
-_OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS = _OAUTH_CLIENT_CONFIG_FIELDS - {"client_secret"}
-_PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
+_BACKEND_MANAGED_GOOGLE_SERVICES = frozenset({"google", "google_vertex_adc", "google_oauth_client"})
+_pending_oauth_state_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -98,6 +88,46 @@ def _validated_service(service: str) -> str:
         return validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _configured_backend_managed_services(request: Request) -> frozenset[str]:
+    """Return credential services reserved for backend-managed Google auth flows."""
+    reserved_services = _BACKEND_MANAGED_GOOGLE_SERVICES
+    snapshot = config_lifecycle.request_snapshot(request)
+    if snapshot is None:
+        snapshot = config_lifecycle.bind_current_request_snapshot(request)
+
+    runtime_config = snapshot.runtime_config
+    if runtime_config is None:
+        if not snapshot.config_data:
+            return reserved_services
+        runtime_config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+
+    if not runtime_config.connections:
+        return reserved_services
+
+    services = {
+        service
+        for connection_data in runtime_config.connections.values()
+        if isinstance(service := connection_data.service, str)
+        and (
+            connection_data.auth_kind == "google_adc"
+            or (
+                connection_data.auth_kind == "oauth_client"
+                and canonical_connection_provider(connection_data.provider) == "google"
+            )
+        )
+    }
+    return reserved_services | frozenset(services)
+
+
+def _reject_backend_managed_raw_access(service: str, request: Request) -> None:
+    """Block raw generic credential API access for backend-managed services."""
+    if service in _configured_backend_managed_services(request):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Service '{service}' is not available through the generic credentials API",
+        )
 
 
 @dataclass(frozen=True)
@@ -959,8 +989,23 @@ async def list_services(
     agent_name: str | None = None,
 ) -> list[str]:
     """List all services with stored credentials."""
-    access = _DashboardCredentialAccess.resolve(request, agent_name=agent_name, allow_private_scopes=True)
-    return access.list_services()
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    backend_managed_services = _configured_backend_managed_services(request)
+    if target.worker_scope is None:
+        return sorted(
+            service for service in target.target_manager.list_services() if service not in backend_managed_services
+        )
+    worker_services = set(target.target_manager.list_services())
+    env_services = {
+        service
+        for service in target.base_manager.list_services()
+        if (credentials := target.base_manager.load_credentials(service)) is not None
+        and credentials.get("_source") == "env"
+    }
+    services = worker_services | env_services
+    services -= backend_managed_services
+    services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
+    return sorted(services)
 
 
 @router.get("/{service}/status")
@@ -971,12 +1016,9 @@ async def get_credential_status(
 ) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    access = _DashboardCredentialAccess.resolve(
-        request,
-        agent_name=agent_name,
-        service_names=(service,),
-    )
-    credentials = access.load(service)
+    _reject_backend_managed_raw_access(service, request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    credentials = load_credentials_for_target(service, target)
 
     if credentials:
         access.reject_stored_oauth_credentials(credentials)
@@ -999,15 +1041,8 @@ async def set_credentials(
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    _reject_oauth_credentials_document(payload.credentials)
-    access = _DashboardCredentialAccess.resolve(
-        http_request,
-        agent_name=agent_name,
-        service_names=(service,),
-    )
-    existing_credentials = access.load(service)
-    if existing_credentials:
-        access.reject_stored_oauth_credentials(existing_credentials)
+    _reject_backend_managed_raw_access(service, http_request)
+    target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
 
     creds = access.credentials_for_save(service, payload.credentials)
     access.save(service, creds)
@@ -1024,6 +1059,7 @@ async def set_api_key(
 ) -> dict[str, str]:
     """Set an API key for a service."""
     service = _validated_service(service)
+    _reject_backend_managed_raw_access(service, http_request)
     request_service = _validated_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
@@ -1053,15 +1089,9 @@ async def get_api_key(
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
     service = _validated_service(service)
-    access = _DashboardCredentialAccess.resolve(
-        request,
-        agent_name=agent_name,
-        service_names=(service,),
-    )
-    oauth_match = access.match(service)
-    _reject_oauth_api_key_read_field(service, oauth_match, key_name=key_name)
-    credentials = access.load(service) or {}
-    access.reject_stored_oauth_credentials(credentials)
+    _reject_backend_managed_raw_access(service, request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    credentials = load_credentials_for_target(service, target) or {}
     api_key = credentials.get(key_name)
     if _is_oauth_client_config_service(service, oauth_match) and api_key is not None and not isinstance(api_key, str):
         raise HTTPException(
@@ -1094,12 +1124,9 @@ async def get_credentials(
 ) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    access = _DashboardCredentialAccess.resolve(
-        request,
-        agent_name=agent_name,
-        service_names=(service,),
-    )
-    credentials = access.load(service)
+    _reject_backend_managed_raw_access(service, request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    credentials = load_credentials_for_target(service, target)
 
     if not credentials:
         return {"service": service, "credentials": {}}
@@ -1119,15 +1146,9 @@ async def delete_credentials(
 ) -> dict[str, str]:
     """Delete all credentials for a service."""
     service = _validated_service(service)
-    access = _DashboardCredentialAccess.resolve(
-        request,
-        agent_name=agent_name,
-        service_names=(service,),
-    )
-    existing_credentials = access.load(service)
-    if existing_credentials:
-        access.reject_stored_oauth_credentials(existing_credentials)
-    access.delete(service)
+    _reject_backend_managed_raw_access(service, request)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    target.target_manager.delete_credentials(service)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 
@@ -1142,12 +1163,9 @@ async def copy_credentials(
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
-    destination_match = _oauth_service_match(request, service)
-    source_match = _oauth_service_match(request, source_service)
-    _reject_oauth_token_service(destination_match)
-    _reject_oauth_token_service(source_match)
-    _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
-    access = _DashboardCredentialAccess.resolve(
+    _reject_backend_managed_raw_access(service, request)
+    _reject_backend_managed_raw_access(source_service, request)
+    target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
         service_names=(service, source_service),
@@ -1177,7 +1195,7 @@ async def validate_credentials(
 ) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
-    _reject_oauth_token_service(_oauth_service_match(request, service))
+    _reject_backend_managed_raw_access(service, request)
     # This is a placeholder - actual testing would depend on the service
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target)

@@ -24,6 +24,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -51,7 +52,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     """Return explicit runtime paths for one isolated dynamic-toolkit test."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
-    return resolve_runtime_paths(
+    runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "mindroom_data",
         process_env={
@@ -59,6 +60,8 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_NAMESPACE": "",
         },
     )
+    get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-openai-key")
+    return runtime_paths
 
 
 def _base_config_data() -> dict[str, object]:
@@ -68,6 +71,18 @@ def _base_config_data() -> dict[str, object]:
             "code": {
                 "display_name": "Code",
                 "role": "Write code",
+            },
+        },
+        "connections": {
+            "openai/default": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
+            },
+            "openai/embeddings": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
             },
         },
         "models": {
@@ -1080,6 +1095,18 @@ def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) 
                 role="Write code",
                 rooms=[],
             ),
+        },
+        connections={
+            "openai/default": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
+            },
+            "openai/embeddings": {
+                "provider": "openai",
+                "service": "openai",
+                "auth_kind": "api_key",
+            },
         },
         models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
         router=RouterConfig(model="default"),

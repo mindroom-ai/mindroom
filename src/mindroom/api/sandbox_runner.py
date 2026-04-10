@@ -194,10 +194,13 @@ def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str,
 def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     """Return the runtime config visible inside one sandbox runner."""
     if runtime_paths.config_path.exists():
-        if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
-            return load_config(runtime_paths)
-        return _dedicated_worker_runtime_config_or_empty(runtime_paths)
-    return Config.validate_with_runtime({}, runtime_paths)
+        return load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    return Config.validate_with_runtime(
+        {},
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+        strict_connection_validation=True,
+    )
 
 
 def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:

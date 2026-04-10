@@ -29,6 +29,7 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    connection: openai/stt
     # Optional: custom endpoint (without /v1 suffix)
     # host: http://localhost:8080
   intelligence:
@@ -53,9 +54,10 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    connection: openai/stt
 ```
 
-Requires `OPENAI_API_KEY` environment variable.
+Uses the named `openai/stt` connection by default.
 
 ### Self-Hosted Whisper
 
@@ -65,6 +67,7 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+    connection: openai/stt
     host: http://localhost:8080
 ```
 
@@ -72,21 +75,27 @@ Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcr
 
 Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
 
-### Custom API Key
+### Custom Connection
 
-For self-hosted solutions that require authentication:
+For self-hosted solutions that should use a non-default credential:
 
-```yaml
+```
+connections:
+  openai/stt_lab:
+    provider: openai
+    service: openai_lab
+    auth_kind: api_key
+
 voice:
   enabled: true
   stt:
     provider: openai
     model: whisper-1
     host: http://localhost:8080
-    api_key: your-custom-api-key
+    connection: openai/stt_lab
 ```
 
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+If `connection` is omitted, MindRoom uses `openai/stt`.
 
 ## Command Recognition
 
@@ -196,9 +205,9 @@ Reply-permission checks still use the original human sender, not a later router 
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+| Variable         | Description                               |
+| ---------------- | ----------------------------------------- |
+| `OPENAI_API_KEY` | Seeds the default `openai/stt` connection |
 
 ## Text-to-Speech Tools
 

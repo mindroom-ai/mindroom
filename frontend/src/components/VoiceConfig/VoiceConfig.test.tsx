@@ -48,10 +48,10 @@ describe("VoiceConfig", () => {
       enabled: true,
       visible_router_echo: true,
       stt: {
-        provider: "custom",
-        model: "whisper-1",
-        host: "http://localhost:8080",
-        api_key: "",
+        provider: 'openai',
+        model: 'whisper-1',
+        host: 'http://localhost:8080',
+        connection: '',
       },
       intelligence: {
         model: "default",
@@ -86,15 +86,11 @@ describe("VoiceConfig", () => {
   it("shows current effective settings summary", () => {
     render(<VoiceConfig />);
 
-    expect(screen.getByText("Current Effective Settings")).toBeInTheDocument();
-    expect(screen.getByText("OpenAI-compatible API")).toBeInTheDocument();
-    expect(screen.getByText("OpenAI")).toBeInTheDocument();
-    expect(
-      screen.getByText("http://localhost:8080/v1/audio/transcriptions"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("OPENAI_API_KEY environment variable"),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Current Effective Settings')).toBeInTheDocument();
+    expect(screen.getByText('OpenAI-compatible API')).toBeInTheDocument();
+    expect(screen.getByText('OpenAI')).toBeInTheDocument();
+    expect(screen.getByText('http://localhost:8080/v1/audio/transcriptions')).toBeInTheDocument();
+    expect(screen.getAllByText('openai/stt').length).toBeGreaterThan(0);
   });
 
   it("always shows optional base url input", () => {
@@ -126,10 +122,10 @@ describe("VoiceConfig", () => {
         enabled: true,
         visible_router_echo: true,
         stt: {
-          provider: "openai",
-          model: "whisper-1",
-          host: "",
-          api_key: "",
+          provider: 'openai',
+          model: 'whisper-1',
+          host: '',
+          connection: '',
         },
         intelligence: {
           model: "default",
@@ -160,10 +156,10 @@ describe("VoiceConfig", () => {
         enabled: true,
         visible_router_echo: true,
         stt: {
-          provider: "openai",
-          model: "whisper-1",
-          host: "http://localhost:8080",
-          api_key: "",
+          provider: 'openai',
+          model: 'whisper-1',
+          host: 'http://localhost:8080',
+          connection: undefined,
         },
         intelligence: {
           model: "default",
@@ -267,10 +263,10 @@ describe("VoiceConfig", () => {
         enabled: true,
         visible_router_echo: true,
         stt: {
-          provider: "openai",
-          model: "whisper-1",
-          host: "http://localhost:8080",
-          api_key: "",
+          provider: 'openai',
+          model: 'whisper-1',
+          host: 'http://localhost:8080',
+          connection: '',
         },
         intelligence: {
           model: "default",
@@ -291,5 +287,28 @@ describe("VoiceConfig", () => {
     expect(
       screen.getByRole("button", { name: "Save Voice Configuration" }),
     ).toBeDisabled();
+  });
+
+  it('updates the STT connection field', async () => {
+    render(<VoiceConfig />);
+
+    const connectionInput = document.getElementById('stt-connection') as HTMLInputElement;
+    fireEvent.change(connectionInput, { target: { value: 'openai/transcription-lab' } });
+
+    await waitFor(() => {
+      expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
+        enabled: true,
+        visible_router_echo: false,
+        stt: {
+          provider: 'openai',
+          model: 'whisper-1',
+          host: 'http://localhost:8080',
+          connection: 'openai/transcription-lab',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
+    });
   });
 });

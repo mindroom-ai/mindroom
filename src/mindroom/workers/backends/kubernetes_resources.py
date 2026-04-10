@@ -14,19 +14,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom import constants
-from mindroom.constants import RuntimePaths
-from mindroom.runtime_env_policy import (
-    CREDENTIALS_ENCRYPTION_KEY_ENV,
-    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
-    SANDBOX_RUNTIME_ENV_BY_KEY,
-    SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
+from mindroom.credentials import (
     SHARED_CREDENTIALS_PATH_ENV,
-    VENDOR_TELEMETRY_ENV_VALUES,
-    credentials_encryption_key_value,
-    worker_extra_env,
+    get_runtime_credentials_manager,
+    get_runtime_shared_credentials_manager,
 )
-from mindroom.tool_system import worker_routing
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
@@ -912,29 +906,41 @@ class KubernetesResourceManager:
 
     def _write_startup_manifest(
         self,
+        worker_key: str,
+        dedicated_root: Path,
         *,
         worker_key: str,
         dedicated_root: Path,
         local_dedicated_root: Path,
-    ) -> tuple[str, str]:
-        startup_runtime_paths = self._worker_runtime_paths(
-            worker_key=worker_key,
-            dedicated_root=dedicated_root,
+    ) -> str | None:
+        """Return a worker-visible ADC file path and rewrite the mirrored credential payload."""
+        worker_shared_manager = (
+            get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key).shared_manager()
         )
-        constants.write_startup_manifest(
-            local_dedicated_root,
-            startup_runtime_paths,
-            tool_validation_snapshot=self.tool_validation_snapshot,
-            public_runtime=True,
-        )
-        return (
-            str(constants.sandbox_startup_manifest_path(dedicated_root)),
-            constants.startup_manifest_sha256(
-                startup_runtime_paths,
-                tool_validation_snapshot=self.tool_validation_snapshot,
-                public_runtime=True,
-            ),
-        )
+        credentials = get_runtime_shared_credentials_manager(self.runtime_paths).load_credentials("google_vertex_adc")
+        raw_path = credentials.get("application_credentials_path") if isinstance(credentials, dict) else None
+        if not isinstance(raw_path, str) or not raw_path.strip() or not self.storage_root.exists():
+            worker_shared_manager.delete_credentials("google_vertex_adc")
+            return None
+        if not isinstance(credentials, dict):
+            worker_shared_manager.delete_credentials("google_vertex_adc")
+            return None
+        source_path = Path(raw_path).expanduser().resolve()
+        if not source_path.is_file():
+            worker_shared_manager.delete_credentials("google_vertex_adc")
+            return None
+
+        runtime_dir = local_dedicated_root / ".runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        target_path = runtime_dir / source_path.name
+        if source_path.resolve() != target_path.resolve():
+            shutil.copyfile(source_path, target_path)
+            target_path.chmod(0o600)
+        worker_visible_path = str(dedicated_root / ".runtime" / source_path.name)
+        worker_credentials = dict(cast("dict[str, object]", credentials))
+        worker_credentials["application_credentials_path"] = worker_visible_path
+        worker_shared_manager.save_credentials("google_vertex_adc", worker_credentials)
+        return worker_visible_path
 
     def _worker_runtime_paths(
         self,
@@ -959,6 +965,12 @@ class KubernetesResourceManager:
             if not is_kubernetes_worker_backend_config_env_name(key)
         }
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        if google_application_credentials := self._worker_google_application_credentials_path(
+            worker_key,
+            dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+        ):
+            process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
         process_env.update(
             {
                 SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
