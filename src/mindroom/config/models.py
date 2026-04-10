@@ -57,6 +57,21 @@ class CoalescingConfig(BaseModel):
     )
 
 
+class DebugConfig(BaseModel):
+    """Debug and diagnostic settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    log_llm_requests: bool = Field(
+        default=False,
+        description="Log pre-provider LLM request assembly data to daily JSONL files for debugging",
+    )
+    llm_request_log_dir: str | None = Field(
+        default=None,
+        description="Optional config-relative override for the LLM request log directory",
+    )
+
+
 def _normalize_tool_entry_overrides(
     overrides: object,
     *,
