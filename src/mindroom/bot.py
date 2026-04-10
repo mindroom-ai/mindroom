@@ -169,13 +169,17 @@ from .matrix.client import (
     get_joined_rooms,
     join_room,
 )
-from .matrix.event_cache import ConversationEventCache, EventCache
 from .media_inputs import MediaInputs
 from .response_coordinator import (
     ResponseCoordinator,
     ResponseCoordinatorDeps,
     ResponseRequest,
     prepare_memory_and_model_context,
+)
+from .runtime_support import (
+    StandaloneRuntimeSupport,
+    close_standalone_runtime_support,
+    create_standalone_runtime_support,
 )
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -197,6 +201,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.event_cache import ConversationEventCache
+    from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -227,6 +233,8 @@ def _thread_summary_message_count_hint(
 
 def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
+    *,
+    owner: object | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
@@ -248,7 +256,7 @@ def _create_task_wrapper(
                 logger.exception("Error in event callback")
 
         # Keep a strong reference via background task registry.
-        create_background_task(error_handler())
+        create_background_task(error_handler(), owner=owner)
 
     return wrapper
 
@@ -392,6 +400,7 @@ class AgentBot:
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
+    _standalone_runtime_support: StandaloneRuntimeSupport | None
 
     def __init__(
         self,
@@ -420,7 +429,10 @@ class AgentBot:
             config=config,
             enable_streaming=enable_streaming,
             orchestrator=None,
+            event_cache=None,
+            event_cache_write_coordinator=None,
         )
+        self._standalone_runtime_support = None
         self._deferred_overdue_task_drain_task = None
         self._init_runtime_components()
 
@@ -451,7 +463,10 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
         )
-        self._conversation_access = MatrixConversationAccess(logger=self.logger)
+        self._conversation_access = MatrixConversationAccess(
+            logger=self.logger,
+            runtime=self._runtime_view,
+        )
         self._conversation_state_writer = ConversationStateWriter(
             ConversationStateWriterDeps(
                 runtime=self._runtime_view,
@@ -558,7 +573,6 @@ class AgentBot:
     def client(self, value: nio.AsyncClient | None) -> None:
         """Update the current Matrix client."""
         self._runtime_view.client = value
-        self._conversation_access.client = value
 
     @property
     def config(self) -> Config:
@@ -593,12 +607,22 @@ class AgentBot:
     @property
     def event_cache(self) -> ConversationEventCache | None:
         """Return the advisory event cache."""
-        return self._conversation_access.event_cache
+        return self._runtime_view.event_cache
 
     @event_cache.setter
     def event_cache(self, value: ConversationEventCache | None) -> None:
         """Update the advisory event cache."""
-        self._conversation_access.event_cache = value
+        self._runtime_view.event_cache = value
+
+    @property
+    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator | None:
+        """Return the advisory event-cache write coordinator."""
+        return self._runtime_view.event_cache_write_coordinator
+
+    @event_cache_write_coordinator.setter
+    def event_cache_write_coordinator(self, value: EventCacheWriteCoordinator | None) -> None:
+        """Update the advisory event-cache write coordinator."""
+        self._runtime_view.event_cache_write_coordinator = value
 
     @property
     def hook_registry(self) -> HookRegistry:
@@ -1117,7 +1141,7 @@ class AgentBot:
             return
 
         if isinstance(_response, nio.SyncResponse):
-            await self._conversation_access.cache_sync_timeline(_response)
+            self._conversation_access.cache_sync_timeline(_response)
 
         self._first_sync_done = True
 
@@ -1142,42 +1166,69 @@ class AgentBot:
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
 
-    async def _initialize_event_cache(self) -> None:
-        """Initialize the persistent Matrix event cache when enabled."""
-        assert self.client is not None
-        if not self.config.cache.enabled:
+    async def _initialize_runtime_support_services(self) -> None:
+        """Initialize standalone runtime support services with an all-or-nothing injection contract."""
+        if self._standalone_runtime_support is not None:
             return
-
-        event_cache = EventCache(self.config.cache.resolve_db_path(self.runtime_paths))
-        try:
-            await event_cache.initialize()
-        except Exception as exc:
-            self.logger.warning("Failed to initialize event cache", error=str(exc))
+        injected_service_count = self._runtime_support_injection_count()
+        if injected_service_count == 2:
             return
+        if injected_service_count != 0:
+            msg = self._partial_runtime_support_injection_error()
+            raise RuntimeError(msg)
 
-        self.event_cache = event_cache
+        support = await create_standalone_runtime_support(
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            logger=self.logger,
+            background_task_owner=self._runtime_view,
+        )
+        self._standalone_runtime_support = support
+        self.event_cache = support.event_cache
+        self.event_cache_write_coordinator = support.event_cache_write_coordinator
 
-    async def _close_event_cache(self) -> None:
-        """Close the persistent Matrix event cache when present."""
-        event_cache = self.event_cache
+    async def _close_runtime_support_services(self) -> None:
+        """Clear runtime support bindings and close standalone-owned services when present."""
+        support = self._standalone_runtime_support
+        self._standalone_runtime_support = None
         self.event_cache = None
-        if event_cache is None:
+        self.event_cache_write_coordinator = None
+        if support is None:
             return
+        await close_standalone_runtime_support(support, logger=self.logger)
 
-        try:
-            await event_cache.close()
-        except Exception as exc:
-            self.logger.warning("Failed to close event cache", error=str(exc))
+    def _runtime_support_injection_count(self) -> int:
+        """Return how many runtime support services are currently injected."""
+        return sum(
+            service is not None
+            for service in (
+                self.event_cache,
+                self.event_cache_write_coordinator,
+            )
+        )
+
+    @staticmethod
+    def _partial_runtime_support_injection_error() -> str:
+        """Return the shared error text for invalid mixed runtime support injection."""
+        return "Runtime support services must be injected all together or not at all; partial injection is unsupported"
+
+    def _validate_runtime_support_injection_contract_for_startup(self) -> None:
+        """Reject mixed runtime support injection before startup side effects begin."""
+        injected_service_count = self._runtime_support_injection_count()
+        if injected_service_count in {0, 2}:
+            return
+        raise PermanentMatrixStartupError(self._partial_runtime_support_injection_error())
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
+        self._validate_runtime_support_injection_contract_for_startup()
         await self.ensure_user_account()
         self.client = await login_agent_user(
             constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
             self.agent_user,
             runtime_paths=self.runtime_paths,
         )
-        await self._initialize_event_cache()
+        await self._initialize_runtime_support_services()
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
         interactive.init_persistence(self.runtime_paths.storage_root)
@@ -1186,20 +1237,50 @@ class AgentBot:
 
         # Register event callbacks - wrap them to run as background tasks
         # This ensures the sync loop is never blocked, allowing stop reactions to work
-        client.add_event_callback(_create_task_wrapper(self._on_invite), nio.InviteEvent)  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
-        client.add_event_callback(_create_task_wrapper(self._on_message), nio.RoomMessageText)
-        client.add_event_callback(_create_task_wrapper(self._on_redaction), nio.RedactionEvent)
-        client.add_event_callback(_create_task_wrapper(self._on_reaction), nio.ReactionEvent)
+        client.add_event_callback(
+            _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+            nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
+        )
+        client.add_event_callback(_create_task_wrapper(self._on_message, owner=self._runtime_view), nio.RoomMessageText)
+        client.add_event_callback(
+            _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
+            nio.RedactionEvent,
+        )
+        client.add_event_callback(_create_task_wrapper(self._on_reaction, owner=self._runtime_view), nio.ReactionEvent)
 
         # Register media callbacks on all agents (each agent handles its own routing)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageImage)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedImage)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageFile)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedFile)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageVideo)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedVideo)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageAudio)
-        client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedAudio)
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomMessageImage,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomEncryptedImage,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomMessageFile,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomEncryptedFile,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomMessageVideo,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomEncryptedVideo,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomMessageAudio,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            nio.RoomEncryptedAudio,
+        )
         client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
         client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1275,7 +1356,7 @@ class AgentBot:
 
         # Wait for any pending background tasks (like memory saves) to complete
         try:
-            await wait_for_background_tasks(timeout=5.0)  # 5 second timeout
+            await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)  # 5 second timeout
             self.logger.info("Background tasks completed")
         except Exception as e:
             self.logger.warning("background_tasks_incomplete", error=str(e))
@@ -1290,7 +1371,7 @@ class AgentBot:
 
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
-            await self._close_event_cache()
+            await self._close_runtime_support_services()
             await self.client.close()
         self.logger.info("Stopped agent bot")
 
@@ -2880,6 +2961,7 @@ class TeamBot(AgentBot):
                     execution_identity=execution_identity,
                 ),
                 name=f"memory_save_team_{session_id}",
+                owner=self._runtime_view,
             )
 
         media_inputs = media or MediaInputs()

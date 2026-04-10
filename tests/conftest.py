@@ -300,10 +300,6 @@ def sync_bot_runtime_state(bot: object) -> None:
     runtime.config = bot.config
     runtime.enable_streaming = bot.enable_streaming
     runtime.orchestrator = bot.orchestrator
-    conversation_access = getattr(bot, "_conversation_access", None)
-    if conversation_access is not None:
-        conversation_access.client = bot.client
-        conversation_access.event_cache = getattr(bot, "event_cache", None)
 
 
 def replace_dispatch_planner_deps(bot: object, **changes: object) -> DispatchPlanner:

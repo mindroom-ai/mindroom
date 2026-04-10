@@ -51,9 +51,10 @@ matrix_space:
   enabled: true
   name: MindRoom
 
-# Persistent Matrix thread history cache (enabled by default)
+# Persistent Matrix thread history cache.
+# This cache is always enabled.
+# `db_path` is read at startup and changing it requires a restart.
 cache:
-  enabled: true
   db_path: mindroom_data/event_cache.db
 
 # Optional debug logging for pre-provider LLM request assembly data.

@@ -35,6 +35,8 @@ from mindroom.matrix.client import (
     get_room_members,
     invite_to_room,
 )
+from mindroom.matrix.event_cache import EventCache
+from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import (
@@ -211,6 +213,9 @@ class MultiAgentOrchestrator:
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _event_cache: EventCache | None = field(default=None, init=False)
+    _event_cache_write_coordinator: EventCacheWriteCoordinator | None = field(default=None, init=False)
+    _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
     def __post_init__(self) -> None:
@@ -252,6 +257,95 @@ class MultiAgentOrchestrator:
         )
         self._memory_auto_flush_worker = worker
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
+
+    def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
+        """Bind the current runtime support services to one managed bot."""
+        bot.event_cache = self._event_cache
+        bot.event_cache_write_coordinator = self._event_cache_write_coordinator
+
+    def _rebind_runtime_support_services(self) -> None:
+        """Rebind the current runtime support services to every managed bot."""
+        for bot in self.agent_bots.values():
+            self._bind_runtime_support_services(bot)
+
+    async def _sync_event_cache_service(self, config: Config) -> None:
+        """Ensure the runtime has one shared event-cache service.
+
+        The cache is intentionally always attempted, but it remains advisory.
+        Startup should therefore degrade to no cache service if SQLite init fails.
+        Hot reload may rebind bots to the existing shared service, but it must not
+        swap the live SQLite file underneath running bots.
+        Future changes to ``cache.db_path`` should therefore apply on restart, not
+        by mutating the active service during ``update_config()``.
+        """
+        desired_db_path = config.cache.resolve_db_path(self.runtime_paths)
+        cache = self._event_cache
+        coordinator = self._event_cache_write_coordinator
+        if cache is None:
+            if coordinator is not None:
+                await self._close_event_cache_write_coordinator()
+            cache = EventCache(desired_db_path)
+            try:
+                await cache.initialize()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to initialize event cache",
+                    db_path=str(desired_db_path),
+                    error=str(exc),
+                )
+                try:
+                    await cache.close()
+                except Exception as close_exc:
+                    logger.warning(
+                        "Failed to close partially initialized event cache",
+                        db_path=str(desired_db_path),
+                        error=str(close_exc),
+                    )
+                self._event_cache = None
+                self._event_cache_write_coordinator = None
+                self._rebind_runtime_support_services()
+                return
+
+            coordinator = EventCacheWriteCoordinator(
+                logger=logger,
+                background_task_owner=self._event_cache_write_task_owner,
+            )
+            self._event_cache = cache
+            self._event_cache_write_coordinator = coordinator
+            self._rebind_runtime_support_services()
+            return
+
+        if cache.db_path != desired_db_path:
+            logger.info(
+                "Event cache db_path change will apply after restart",
+                active_db_path=str(cache.db_path),
+                configured_db_path=str(desired_db_path),
+            )
+
+        if cache is not None:
+            if coordinator is None:
+                coordinator = EventCacheWriteCoordinator(
+                    logger=logger,
+                    background_task_owner=self._event_cache_write_task_owner,
+                )
+                self._event_cache_write_coordinator = coordinator
+            self._rebind_runtime_support_services()
+
+    async def _close_event_cache_write_coordinator(self) -> None:
+        """Drain the shared event-cache write coordinator."""
+        coordinator = self._event_cache_write_coordinator
+        self._event_cache_write_coordinator = None
+        if coordinator is None:
+            return
+        await coordinator.close()
+
+    async def _close_event_cache(self) -> None:
+        """Close the shared event cache."""
+        cache = self._event_cache
+        self._event_cache = None
+        if cache is None:
+            return
+        await cache.close()
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -602,6 +696,7 @@ class MultiAgentOrchestrator:
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
         ensure_default_agent_workspaces(config, self.storage_path)
+        await self._sync_event_cache_service(config)
         await self._refresh_knowledge_for_runtime(config, start_watcher=start_watcher)
         await self._sync_memory_auto_flush_worker()
 
@@ -667,6 +762,7 @@ class MultiAgentOrchestrator:
         )
         bot.orchestrator = self
         bot.hook_registry = self.hook_registry
+        self._bind_runtime_support_services(bot)
         self.agent_bots[entity_name] = bot
         return bot
 
@@ -750,6 +846,7 @@ class MultiAgentOrchestrator:
         self.config = config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
+        await self._sync_event_cache_service(config)
         for entity_name in self._configured_entity_names(config):
             self._create_managed_bot(entity_name, config)
 
@@ -1132,6 +1229,7 @@ class MultiAgentOrchestrator:
         self.config = new_config
         self._activate_hook_registry(new_hook_registry)
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
+        await self._sync_event_cache_service(new_config)
         logger.info(
             "updating_config_authorization",
             authorized_user_ids=new_config.authorization.global_users,
@@ -1450,6 +1548,8 @@ class MultiAgentOrchestrator:
 
         stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
+        await self._close_event_cache_write_coordinator()
+        await self._close_event_cache()
         logger.info("All agent bots stopped")
 
 

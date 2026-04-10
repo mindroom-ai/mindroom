@@ -854,6 +854,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         *,
         name: str,
         error_handler: object | None = None,  # noqa: ARG001
+        owner: object | None = None,  # noqa: ARG001
     ) -> asyncio.Task[None]:
         task = asyncio.create_task(coro, name=name)
         scheduled_tasks.append(task)

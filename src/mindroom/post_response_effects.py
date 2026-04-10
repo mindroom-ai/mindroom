@@ -180,6 +180,7 @@ class PostResponseEffectsSupport:
                 summary_coro=summary_coro,
             ),
             name=f"thread_summary_{room_id}_{thread_id}",
+            owner=self.runtime,
         )
 
     def build_deps(

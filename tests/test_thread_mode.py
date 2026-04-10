@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
+from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -1133,6 +1134,10 @@ class TestExtractedModuleLoggerRebinding:
         event_cache = AsyncMock()
         event_cache.append_event.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=bot._runtime_view,
+        )
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -1226,7 +1231,7 @@ class TestExtractedModuleLoggerRebinding:
             "mindroom.matrix.conversation_access.fetch_thread_history",
             new=AsyncMock(return_value=[]),
         ) as fetch_thread_history_mock:
-            bot._conversation_access.client = client
+            bot.client = client
             await bot._conversation_access.get_thread_history(
                 "!room:localhost",
                 "$threadroot",
@@ -1271,7 +1276,7 @@ class TestExtractedModuleLoggerRebinding:
                 new=AsyncMock(),
             ) as fetch_thread_history_mock,
         ):
-            bot._conversation_access.client = MagicMock()
+            bot.client = MagicMock()
             async with bot._conversation_access.turn_scope():
                 snapshot_history = await bot._conversation_access.get_thread_snapshot(
                     "!room:localhost",
@@ -1320,7 +1325,7 @@ class TestExtractedModuleLoggerRebinding:
                 new=AsyncMock(return_value=hydrated_history),
             ) as fetch_thread_history_mock,
         ):
-            bot._conversation_access.client = MagicMock()
+            bot.client = MagicMock()
             async with bot._conversation_access.turn_scope():
                 snapshot_history = await bot._conversation_access.get_thread_snapshot(
                     "!room:localhost",

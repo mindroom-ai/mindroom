@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.matrix.identity import managed_room_key_from_alias_localpart, room_alias_localpart
@@ -181,21 +181,21 @@ class MatrixRoomAccessConfig(BaseModel):
 
 
 class CacheConfig(BaseModel):
-    """Persistent Matrix event cache configuration."""
+    """Startup configuration for the always-on Matrix event cache."""
 
-    enabled: bool = Field(
-        default=True,
-        description="Whether to persist thread history in SQLite for incremental reuse",
-    )
+    model_config = ConfigDict(extra="forbid")
+
     db_path: str | None = Field(
         default=None,
         description=(
-            "SQLite database path for the Matrix event cache. Defaults to <storage>/event_cache.db when omitted."
+            "SQLite database path for the always-on Matrix event cache. "
+            "Defaults to <storage>/event_cache.db when omitted. "
+            "Changing this path requires a restart because hot reload intentionally keeps the active cache file."
         ),
     )
 
     def resolve_db_path(self, runtime_paths: RuntimePaths) -> Path:
-        """Resolve the configured database path for the active runtime."""
+        """Resolve the configured database path for the active runtime startup."""
         if self.db_path is None:
             return runtime_paths.storage_root / "event_cache.db"
         return resolve_config_relative_path(self.db_path, runtime_paths)

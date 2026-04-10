@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
+    from mindroom.matrix.event_cache import ConversationEventCache
+    from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
 
 
@@ -27,6 +29,12 @@ class BotRuntimeView(Protocol):
     @property
     def orchestrator(self) -> MultiAgentOrchestrator | None: ...  # noqa: D102
 
+    @property
+    def event_cache(self) -> ConversationEventCache | None: ...  # noqa: D102
+
+    @property
+    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator | None: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
@@ -36,3 +44,5 @@ class BotRuntimeState:
     config: Config
     enable_streaming: bool
     orchestrator: MultiAgentOrchestrator | None
+    event_cache: ConversationEventCache | None
+    event_cache_write_coordinator: EventCacheWriteCoordinator | None

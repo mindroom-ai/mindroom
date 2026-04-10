@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -29,7 +30,12 @@ if TYPE_CHECKING:
 
 def _conversation_access(client: AsyncMock) -> MatrixConversationAccess:
     """Build one explicit conversation-access seam for thread-tag tests."""
-    return MatrixConversationAccess(logger=MagicMock(), client=client)
+    runtime = SimpleNamespace(
+        client=client,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    return MatrixConversationAccess(logger=MagicMock(), runtime=runtime)
 
 
 def _message_event_response(
