@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
+    _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
     KnowledgeManager,
     _create_embedder,
     _get_shared_knowledge_manager,
@@ -518,6 +519,33 @@ async def test_load_indexed_files_recovers_source_paths(dummy_manager: Knowledge
     assert indexed_count == 2
     status = dummy_manager.get_status()
     assert status["indexed_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_reindex_all_uses_bounded_file_concurrency(dummy_manager: KnowledgeManager) -> None:
+    """Full reindex should process multiple files concurrently up to the configured bound."""
+    for index in range(3):
+        (dummy_manager.knowledge_path / f"doc-{index}.md").write_text(f"doc {index}", encoding="utf-8")
+
+    active = 0
+    max_active = 0
+
+    async def _fake_index(resolved_path: Path, *, upsert: bool) -> bool:
+        nonlocal active, max_active
+        assert upsert is True
+        assert resolved_path.is_file()
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return True
+
+    dummy_manager._index_file_locked = _fake_index  # type: ignore[method-assign]
+
+    indexed_count = await dummy_manager.reindex_all()
+
+    assert indexed_count == 3
+    assert max_active == min(3, _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES)
 
 
 @pytest.mark.asyncio
@@ -1980,6 +2008,32 @@ async def test_sync_git_repository_indexes_files_after_initial_clone(
             "source_size": (manager.knowledge_path / "doc.md").stat().st_size,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_initialize_git_backed_base_syncs_before_single_full_reindex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git-backed initialization should refresh the checkout once, then do one full reindex."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    sync_git_repository = AsyncMock(return_value={"updated": True, "changed_count": 10, "removed_count": 0})
+    reindex_all = AsyncMock(return_value=10)
+    monkeypatch.setattr(manager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(manager, "reindex_all", reindex_all)
+
+    await manager.initialize()
+
+    sync_git_repository.assert_awaited_once_with(index_changes=False)
+    reindex_all.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
