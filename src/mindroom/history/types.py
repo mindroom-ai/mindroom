@@ -132,8 +132,9 @@ class CompactionOutcome:
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
+        version = 2 if self.history_budget_tokens is not None else 1
         meta: dict[str, object] = {
-            "version": 1,
+            "version": version,
             "mode": self.mode,
             "session_id": self.session_id,
             "scope": self.scope,
@@ -146,6 +147,8 @@ class CompactionOutcome:
             "compacted_run_count": self.compacted_run_count,
             "compacted_at": self.compacted_at,
         }
+        if self.history_budget_tokens is not None:
+            meta["history_budget_tokens"] = self.history_budget_tokens
         if self.role_instructions_tokens is not None:
             meta["role_instructions_tokens"] = self.role_instructions_tokens
         if self.tool_definition_tokens is not None:

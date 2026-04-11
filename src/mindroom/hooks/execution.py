@@ -16,6 +16,7 @@ from .context import (
     AgentLifecycleContext,
     BeforeResponseContext,
     CancelledResponseContext,
+    CompactionHookContext,
     CustomEventContext,
     HookContext,
     MessageEnrichContext,
@@ -23,6 +24,7 @@ from .context import (
     ReactionReceivedContext,
     ResponseDraft,
     ScheduleFiredContext,
+    SessionHookContext,
     SystemEnrichContext,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -30,6 +32,8 @@ from .context import (
 from .types import EVENT_MESSAGE_RECEIVED, EnrichmentItem, RegisteredHook, default_timeout_ms_for_event
 
 if TYPE_CHECKING:
+    from agno.models.message import Message
+
     from .registry import HookRegistry
 
 logger = get_logger(__name__)
@@ -78,10 +82,12 @@ def _scope_agent_name(context: HookExecutionContext) -> str | None:  # noqa: PLR
         return context.info.envelope.agent_name
     if isinstance(context, AgentLifecycleContext):
         return context.entity_name
+    if isinstance(context, CompactionHookContext | SessionHookContext):
+        return context.agent_name
     return None
 
 
-def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
+def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: C901, PLR0911
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return (context.room_id,) if context.room_id else ()
     if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
@@ -96,6 +102,10 @@ def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: 
         return (context.room_id,)
     if isinstance(context, AgentLifecycleContext):
         return context.rooms
+    if isinstance(context, CompactionHookContext):
+        return (context.room_id,)
+    if isinstance(context, SessionHookContext):
+        return (context.room_id,)
     if isinstance(context, CustomEventContext) and context.room_id:
         return (context.room_id,)
     return ()
@@ -144,7 +154,24 @@ def _snapshot_tool_observer_error(error: BaseException | None) -> BaseException 
     return copied if isinstance(copied, BaseException) else Exception(str(error))
 
 
-def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> HookExecutionContext:
+def _snapshot_compaction_messages(messages: list[Message]) -> list[Message] | None:
+    """Return one best-effort isolated snapshot of compaction messages."""
+    try:
+        return deepcopy(messages)
+    except Exception as deepcopy_error:
+        try:
+            return [message.model_copy(deep=True) for message in messages]
+        except Exception as model_copy_error:
+            logger.warning(
+                "Skipping compaction hooks after snapshot copy failures",
+                deepcopy_error=repr(deepcopy_error),
+                model_copy_error=repr(model_copy_error),
+                message_count=len(messages),
+            )
+            return None
+
+
+def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> HookExecutionContext | None:
     replacement_kwargs: dict[str, object] = {
         "plugin_name": hook.plugin_name,
         "settings": dict(hook.settings),
@@ -155,6 +182,11 @@ def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> H
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
         replacement_kwargs["error"] = _snapshot_tool_observer_error(context.error)
+    if isinstance(context, CompactionHookContext):
+        messages_snapshot = _snapshot_compaction_messages(context.messages)
+        if messages_snapshot is None:
+            return None
+        replacement_kwargs["messages"] = messages_snapshot
     if isinstance(context, MessageEnrichContext | SystemEnrichContext):
         replacement_kwargs["_items"] = []
     return replace(context, **replacement_kwargs)
@@ -286,6 +318,8 @@ async def emit(
     try:
         for hook in _eligible_hooks(registry, event_name, context):
             hook_context = _bind_hook_context(hook, context)
+            if hook_context is None:
+                return
             try:
                 await _invoke_hook(hook, hook_context)
             except asyncio.CancelledError:
@@ -321,6 +355,8 @@ async def emit_gate(
     try:
         for hook in _eligible_hooks(registry, event_name, context):
             hook_context = cast("ToolBeforeCallContext", _bind_hook_context(hook, context))
+            if hook_context is None:
+                return
             invocation = await _invoke_hook(hook, hook_context)
             if not invocation.succeeded:
                 continue

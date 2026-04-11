@@ -144,11 +144,18 @@ async def block_secret_reads(ctx):
 | `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
 | `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
+| `session:started` | Observer | `SessionHookContext` | Once per persisted session, after the response path confirms a new backing session was created for that history scope, during response finalization and before later cleanup such as persisted response-event IDs or transient-enrichment stripping | None (frozen) |
+| `compaction:before` | Observer | `CompactionHookContext` | After the compacted message set is prepared and before the compacted session is persisted | None (frozen) |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is persisted, with before/after token counts and the generated summary | None (frozen) |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
+
+For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
+MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
+For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation from a streaming or delivery failure.
 
 ### Default timeouts
 
@@ -165,10 +172,16 @@ async def block_secret_reads(ctx):
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
 | `bot:ready` | 5000 |
+| `session:started` | 5000 |
+| `compaction:before` | 15000 |
+| `compaction:after` | 5000 |
 | `config:reloaded` | 5000 |
 | `tool:before_call` | 200 |
 | `tool:after_call` | 300 |
 | Custom events | 1000 |
+
+For `session:started`, `compaction:before`, and `compaction:after`, `ctx.scope.key` identifies the persisted history scope rather than one unique session row.
+Use `ctx.session_id` as the unique persisted session identifier within that scope.
 
 ## The `@hook` decorator
 

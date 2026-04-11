@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from contextvars import Context
+from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,7 +24,10 @@ from agno.run.agent import (
     RunErrorEvent,
 )
 from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
+from mindroom.agents import create_session_storage
 from mindroom.ai import (
     _prepare_agent_and_prompt,
     ai_response,
@@ -34,21 +40,37 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.delivery_gateway import DeliveryResult
 from mindroom.history import PreparedHistoryState
-from mindroom.hooks import HookContextSupport, HookRegistry
+from mindroom.history.types import HistoryScope
+from mindroom.hooks import (
+    BUILTIN_EVENT_NAMES,
+    EVENT_SESSION_STARTED,
+    HookContextSupport,
+    HookRegistry,
+    SessionHookContext,
+    hook,
+)
+from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.registry import HookRegistryState
+from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
+from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
@@ -59,7 +81,7 @@ from mindroom.tool_system.worker_routing import (
 from tests.conftest import bind_runtime_paths, resolve_response_thread_root_for_test
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
 
 
@@ -100,6 +122,87 @@ def _prepared_prompt_result(
     return agent, prompt, [], PreparedHistoryState()
 
 
+class _SessionStorage:
+    def __init__(self, session: AgentSession | TeamSession | None = None) -> None:
+        self._session = deepcopy(session)
+
+    @property
+    def session(self) -> AgentSession | TeamSession | None:
+        return deepcopy(self._session)
+
+    @session.setter
+    def session(self, session: AgentSession | TeamSession | None) -> None:
+        self._session = deepcopy(session)
+
+    def open(self) -> _SessionStorageView:
+        return _SessionStorageView(self)
+
+
+class _SessionStorageView:
+    def __init__(self, store: _SessionStorage) -> None:
+        self._store = store
+
+    def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+        session = self._store.session
+        if session is None or session.session_id != session_id:
+            return None
+        return session
+
+    def upsert_session(self, session: AgentSession | TeamSession) -> None:
+        self._store.session = session
+
+    def close(self) -> None:
+        return None
+
+
+def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        discovered_hooks=tuple(callbacks),
+        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
+        plugin_order=0,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_execution_state() -> Generator[None, None, None]:
+    reset_hook_execution_state()
+    yield
+    reset_hook_execution_state()
+
+
+def _make_bot(
+    tmp_path: Path,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str = "general",
+) -> MagicMock:
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = agent_name
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._send_response = AsyncMock(return_value="$response_id")
+    bot._handle_interactive_question = AsyncMock()
+    return bot
+
+
+def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=config,
+        runtime_paths=runtime_paths,
+        _hook_room_state_querier=lambda: None,
+        _hook_room_state_putter=lambda: None,
+    )
+
+
 def _build_response_runner(
     bot: MagicMock,
     *,
@@ -107,24 +210,57 @@ def _build_response_runner(
     runtime_paths: RuntimePaths,
     storage_path: Path,
     requester_id: str,  # noqa: ARG001
+    hook_registry: HookRegistry | None = None,
+    history_storage: object | None = None,
+    team_history_storage: object | None = None,
+    message_target: MessageTarget | None = None,
+    orchestrator: object | None = None,
 ) -> ResponseRunner:
-    """Build a real response coordinator for one bot-shaped test double."""
+    """Build a real response runner for one bot-shaped test double."""
+
+    def _open_test_storage(storage: object | None) -> object:
+        if isinstance(storage, _SessionStorage):
+            return storage.open()
+        return storage if storage is not None else MagicMock()
+
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
     bot.enable_streaming = True
     bot.show_tool_calls = False
-    bot.orchestrator = None
+    bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
-        return_value=MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
+        return_value=message_target or MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
     )
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(return_value=())
     bot._conversation_resolver.resolve_response_thread_root = MagicMock(
         side_effect=resolve_response_thread_root_for_test,
     )
     bot._conversation_state_writer = MagicMock()
-    bot._conversation_state_writer.create_history_scope_storage = MagicMock(return_value=MagicMock())
-    bot._conversation_state_writer.create_team_history_storage = MagicMock(return_value=MagicMock())
+    bot._conversation_state_writer.create_history_scope_storage = MagicMock(
+        side_effect=lambda *_args, **_kwargs: _open_test_storage(history_storage),
+    )
+    bot._conversation_state_writer.create_team_history_storage = MagicMock(
+        side_effect=lambda *_args, **_kwargs: _open_test_storage(team_history_storage),
+    )
+    bot._conversation_state_writer.create_storage_for_history_scope = MagicMock(
+        side_effect=lambda *_args, **_kwargs: _open_test_storage(history_storage),
+    )
     bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
     bot._conversation_state_writer.history_session_type = MagicMock(return_value=SessionType.AGENT)
+    bot._conversation_state_writer.history_scope = MagicMock(
+        return_value=HistoryScope(
+            kind="team" if bot.agent_name in config.teams else "agent",
+            scope_id=bot.agent_name,
+        ),
+    )
+    bot._conversation_state_writer.team_history_scope = MagicMock(
+        side_effect=lambda team_agents: HistoryScope(
+            kind="team",
+            scope_id=bot.agent_name
+            if bot.agent_name in config.teams
+            else f"team_{'+'.join(sorted(mid.agent_name(config, runtime_paths) or mid.username for mid in team_agents))}",
+        ),
+    )
     bot._edit_message = AsyncMock(return_value=True)
     delivery_gateway = MagicMock()
     delivery_gateway.deliver_final = AsyncMock(
@@ -135,6 +271,18 @@ def _build_response_runner(
         ),
     )
     delivery_gateway.deliver_stream = AsyncMock(return_value=("$msg_id", "Hello!"))
+    delivery_gateway.edit_text = AsyncMock()
+    delivery_gateway.send_text = AsyncMock(return_value="$thinking")
+    delivery_gateway.finalize_streamed_response = AsyncMock(
+        return_value=MagicMock(
+            event_id="$response_id",
+            response_text="Hello!",
+            delivery_kind="sent",
+        ),
+    )
+    delivery_gateway.deps = SimpleNamespace(
+        response_hooks=SimpleNamespace(emit_cancelled_response=AsyncMock()),
+    )
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
@@ -147,7 +295,7 @@ def _build_response_runner(
         logger=bot.logger,
         runtime_paths=runtime_paths,
         agent_name=bot.agent_name,
-        hook_registry_state=HookRegistryState(HookRegistry.empty()),
+        hook_registry_state=HookRegistryState(hook_registry or HookRegistry.empty()),
         hook_send_message=AsyncMock(),
     )
     tool_runtime = ToolRuntimeSupport(
@@ -206,6 +354,1407 @@ def _response_request(
         prompt=prompt,
         user_id=user_id,
     )
+
+
+def test_session_started_event_is_registered() -> None:
+    """session:started should be a built-in event with the expected default timeout."""
+    assert EVENT_SESSION_STARTED in BUILTIN_EVENT_NAMES
+    assert validate_event_name(EVENT_SESSION_STARTED) == EVENT_SESSION_STARTED
+    assert "session" in RESERVED_EVENT_NAMESPACES
+    assert default_timeout_ms_for_event(EVENT_SESSION_STARTED) == 5000
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_emits_session_started_after_first_persisted_thread_response(
+    tmp_path: Path,
+) -> None:
+    """The first persisted thread response should emit session:started before delivery finalization."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._send_response = AsyncMock(return_value="$response_id")
+
+    storage = _SessionStorage()
+    sequence: list[tuple[str, str | None, str | None, str | None]] = []
+
+    @hook(EVENT_SESSION_STARTED, priority=10)
+    async def first(ctx: SessionHookContext) -> None:
+        sequence.append(("first", ctx.scope.key, ctx.session_id, ctx.thread_id))
+
+    @hook(EVENT_SESSION_STARTED, priority=20)
+    async def second(ctx: SessionHookContext) -> None:
+        sequence.append(("second", ctx.scope.key, None, None))
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [first, second])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append(("ai", context.session_id, None, None))
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+        coordinator.deps.delivery_gateway.deliver_final.side_effect = AsyncMock(
+            side_effect=lambda *_args, **_kwargs: sequence.append(("deliver", None, None, None))
+            or MagicMock(
+                event_id="$response_id",
+                response_text="Hello!",
+                delivery_kind="sent",
+            ),
+        )
+
+        await coordinator.process_and_respond(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+        await coordinator.process_and_respond(
+            _response_request(prompt="Hello again", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    assert sequence == [
+        ("ai", "!test:localhost:$thread-root", None, None),
+        ("first", "agent:general", "!test:localhost:$thread-root", "$thread-root"),
+        ("second", "agent:general", None, None),
+        ("deliver", None, None, None),
+        ("ai", "!test:localhost:$thread-root", None, None),
+        ("deliver", None, None, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_applies_session_started_agent_and_room_scopes(tmp_path: Path) -> None:
+    """session:started hooks should respect agent and room decorator scopes."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._send_response = AsyncMock(return_value="$response_id")
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED, agents=["general"], rooms=["!test:localhost"])
+    async def matching(ctx: SessionHookContext) -> None:
+        sequence.append(f"{ctx.scope.key}:{ctx.agent_name}:{ctx.room_id}:{ctx.thread_id}")
+
+    @hook(EVENT_SESSION_STARTED, agents=["other"], rooms=["!test:localhost"])
+    async def wrong_agent(ctx: SessionHookContext) -> None:
+        sequence.append(f"wrong-agent:{ctx.agent_name}")
+
+    @hook(EVENT_SESSION_STARTED, agents=["general"], rooms=["!elsewhere:localhost"])
+    async def wrong_room(ctx: SessionHookContext) -> None:
+        sequence.append(f"wrong-room:{ctx.room_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [matching, wrong_agent, wrong_room])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append("ai")
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        await coordinator.process_and_respond(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    assert sequence == ["ai", "agent:general:general:!test:localhost:$thread-root"]
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_does_not_emit_session_started_without_persisted_session(tmp_path: Path) -> None:
+    """session:started should not fire when the run never creates a persisted session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._send_response = AsyncMock(return_value="$response_id")
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(_ctx: SessionHookContext) -> None:
+        sequence.append("started")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            sequence.append("ai")
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        await coordinator.process_and_respond(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    assert sequence == ["ai"]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_emits_session_started_after_first_persisted_session(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should emit session:started when they create a new session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.send_text = AsyncMock(
+            side_effect=lambda request: sequence.append(f"send:{request.response_text}") or "$skill-reply",
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append(f"ai:{context.session_id}")
+            return "Skill response"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    assert sequence == [
+        "ai:!test:localhost:$thread-root",
+        "started:agent:general:!test:localhost:$thread-root:$thread-root",
+        "send:Skill response",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_uses_target_agent_storage_for_session_started(
+    tmp_path: Path,
+) -> None:
+    """Router skill-command replies should probe the target agent session storage."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name=ROUTER_AGENT_NAME)
+
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED, agents=["general"], rooms=["!test:localhost"])
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.agent_name}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps = replace(
+            coordinator.deps,
+            state_writer=ConversationStateWriter(
+                ConversationStateWriterDeps(
+                    runtime=coordinator.deps.runtime,
+                    logger=coordinator.deps.logger,
+                    runtime_paths=runtime_paths,
+                    agent_name=bot.agent_name,
+                ),
+            ),
+        )
+        coordinator.deps.delivery_gateway.send_text = AsyncMock(
+            side_effect=lambda request: sequence.append(f"send:{request.response_text}") or "$skill-reply",
+        )
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage = create_session_storage(
+                agent_name="general",
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=kwargs["execution_identity"],
+            )
+            try:
+                storage.upsert_session(
+                    AgentSession(
+                        session_id=context.session_id or "",
+                        agent_id="general",
+                        created_at=1,
+                        updated_at=1,
+                    ),
+                )
+            finally:
+                storage.close()
+            sequence.append(f"ai:{context.session_id}")
+            return "Skill response"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    assert sequence == [
+        "ai:!test:localhost:$thread-root",
+        "started:agent:general:general:!test:localhost:$thread-root:$thread-root",
+        "send:Skill response",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_returns_event_id_after_post_effect_failure(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should preserve the visible event id after late post-effect failures."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")),
+        patch(
+            "mindroom.response_runner.apply_post_response_effects",
+            new=AsyncMock(side_effect=RuntimeError("late boom")),
+        ),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.send_text = AsyncMock(return_value="$skill-reply")
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    coordinator.deps.logger.error.assert_called_once()
+    assert coordinator.deps.logger.error.call_args.kwargs["response_kind"] == "skill_command"
+    assert coordinator.deps.logger.error.call_args.kwargs["response_event_id"] == "$skill-reply"
+
+
+@pytest.mark.asyncio
+async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
+    tmp_path: Path,
+) -> None:
+    """session:started eligibility should degrade to False when the session probe fails."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(_ctx: SessionHookContext) -> None:
+        return None
+
+    class BrokenStorage:
+        def get_session(self, _session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            msg = "probe boom"
+            raise RuntimeError(msg)
+
+        def close(self) -> None:
+            return None
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        hook_registry=registry,
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+    )
+    target = MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg")
+    tool_context = coordinator.deps.tool_runtime.build_context(
+        target,
+        user_id="@alice:localhost",
+        session_id=target.session_id,
+    )
+
+    should_watch = coordinator._should_watch_session_started(
+        tool_context=tool_context,
+        session_id=target.session_id,
+        session_type=SessionType.AGENT,
+        create_storage=BrokenStorage,
+    )
+
+    assert should_watch is False
+    coordinator.deps.logger.exception.assert_called_once()
+    assert coordinator.deps.logger.exception.call_args.kwargs["session_id"] == target.session_id
+    assert coordinator.deps.logger.exception.call_args.kwargs["failure_reason"] == "probe boom"
+
+
+@pytest.mark.asyncio
+async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> None:
+    """A timed-out session hook should not block later session hooks or the response itself."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._send_response = AsyncMock(return_value="$response_id")
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED, priority=10, timeout_ms=10)
+    async def slow(_ctx: SessionHookContext) -> None:
+        sequence.append("slow")
+        await asyncio.sleep(0.05)
+
+    @hook(EVENT_SESSION_STARTED, priority=20)
+    async def fast(ctx: SessionHookContext) -> None:
+        sequence.append(f"fast:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [slow, fast])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append("ai")
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        await coordinator.process_and_respond(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    assert sequence == ["ai", "slow", "fast:$thread-root"]
+
+
+@pytest.mark.asyncio
+async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path) -> None:
+    """A failed session hook should fail open and let later hooks and delivery finish."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED, priority=10)
+    async def failing(_ctx: SessionHookContext) -> None:
+        sequence.append("failed")
+        msg = "hook failed"
+        raise RuntimeError(msg)
+
+    @hook(EVENT_SESSION_STARTED, priority=20)
+    async def fast(ctx: SessionHookContext) -> None:
+        sequence.append(f"fast:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [failing, fast])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.deliver_final.side_effect = AsyncMock(
+            side_effect=lambda *_args, **_kwargs: sequence.append("deliver")
+            or MagicMock(
+                event_id="$response_id",
+                response_text="Hello!",
+                delivery_kind="sent",
+            ),
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append("ai")
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        await coordinator.process_and_respond(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    assert sequence == ["ai", "failed", "fast:$thread-root", "deliver"]
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_emits_session_started_after_persisted_delivery_error(
+    tmp_path: Path,
+) -> None:
+    """session:started should still fire when streaming delivery fails after the session is persisted."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._handle_interactive_question = AsyncMock()
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+            chunks = [chunk async for chunk in request.response_stream]
+            accumulated = "".join(chunks)
+            sequence.append(f"deliver:{accumulated}")
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$terminal",
+                accumulated_text=accumulated,
+                tool_trace=[],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                context = get_tool_runtime_context()
+                assert context is not None
+                storage.session = AgentSession(
+                    session_id=context.session_id or "",
+                    agent_id="general",
+                    created_at=1,
+                    updated_at=1,
+                )
+                sequence.append("stream")
+                yield "Hello!"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        delivery = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+        )
+
+    assert delivery.event_id == "$terminal"
+    assert delivery.response_text == "Hello!"
+    assert sequence == [
+        "stream",
+        "deliver:Hello!",
+        "started:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_emits_session_started_after_persisted_cancellation(
+    tmp_path: Path,
+) -> None:
+    """session:started should still fire when a cancelled run has already persisted the session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._send_response = AsyncMock(return_value="$response_id")
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            cancel_message = "cancel"
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append("ai")
+            raise asyncio.CancelledError(cancel_message)
+
+        mock_ai.side_effect = fake_ai_response
+
+        with pytest.raises(asyncio.CancelledError, match="cancel"):
+            await coordinator.process_and_respond(
+                replace(
+                    _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                    existing_event_id="$thinking",
+                ),
+            )
+
+    assert sequence == [
+        "ai",
+        "started:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_emits_session_started_after_persisted_cancellation(
+    tmp_path: Path,
+) -> None:
+    """session:started should still fire when streamed delivery is cancelled after persistence."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._handle_interactive_question = AsyncMock()
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery_and_cancel(request: object) -> tuple[str, str]:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+                sequence.append(f"deliver:{accumulated}")
+            return "$msg_id", accumulated
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_cancel
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                cancel_message = "cancel"
+                context = get_tool_runtime_context()
+                assert context is not None
+                storage.session = AgentSession(
+                    session_id=context.session_id or "",
+                    agent_id="general",
+                    created_at=1,
+                    updated_at=1,
+                )
+                sequence.append("stream")
+                yield "Hello!"
+                raise asyncio.CancelledError(cancel_message)
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        with pytest.raises(asyncio.CancelledError, match="cancel"):
+            await coordinator.process_and_respond_streaming(
+                replace(
+                    _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+                    existing_event_id="$thinking",
+                ),
+            )
+
+    assert sequence == [
+        "stream",
+        "deliver:Hello!",
+        "started:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_exception(
+    tmp_path: Path,
+) -> None:
+    """Plain streaming exceptions should propagate their text to message:cancelled."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            hook_registry=HookRegistry.empty(),
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.generate_streaming_ai_response = AsyncMock(side_effect=RuntimeError("plain boom"))
+
+        event_id = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id is None
+    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    assert (
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+            "visible_response_event_id"
+        ]
+        == "$thinking"
+    )
+    assert (
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+            "failure_reason"
+        ]
+        == "plain boom"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_delivery_error(
+    tmp_path: Path,
+) -> None:
+    """session:started should still fire for team streams that fail after persisting the session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=SimpleNamespace(
+                config=config,
+                runtime_paths=runtime_paths,
+                _hook_room_state_querier=lambda: None,
+                _hook_room_state_putter=lambda: None,
+            ),
+        )
+
+        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+            chunks = [chunk async for chunk in request.response_stream]
+            accumulated = "".join(chunks)
+            sequence.append(f"deliver:{accumulated}")
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$team-terminal",
+                accumulated_text=accumulated,
+                tool_trace=[],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                session_id = kwargs["session_id"]
+                assert isinstance(session_id, str)
+                storage.session = TeamSession(
+                    session_id=session_id,
+                    team_id="ultimate",
+                    created_at=1,
+                    updated_at=1,
+                )
+                sequence.append("stream")
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+        request = replace(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+        )
+
+        event_id = await coordinator.generate_team_response_helper(
+            request,
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id == "$team-terminal"
+    assert sequence == [
+        "stream",
+        "deliver:Team hello",
+        "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_emits_session_started_after_persisted_cancellation(
+    tmp_path: Path,
+) -> None:
+    """session:started should still fire when a cancelled team run has already persisted the session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        with suppress(asyncio.CancelledError):
+            await response_function("$thinking")
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new_callable=AsyncMock) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=SimpleNamespace(
+                config=config,
+                runtime_paths=runtime_paths,
+                _hook_room_state_querier=lambda: None,
+                _hook_room_state_putter=lambda: None,
+            ),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_team_response(*_args: object, **kwargs: object) -> str:
+            cancel_message = "cancel"
+            session_id = kwargs["session_id"]
+            assert isinstance(session_id, str)
+            storage.session = TeamSession(
+                session_id=session_id,
+                team_id="ultimate",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append("team")
+            raise asyncio.CancelledError(cancel_message)
+
+        mock_team_response.side_effect = fake_team_response
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    assert sequence == [
+        "team",
+        "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_cancellation(
+    tmp_path: Path,
+) -> None:
+    """session:started should still fire when a cancelled team stream has already persisted the session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        with suppress(asyncio.CancelledError):
+            await response_function("$thinking")
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=SimpleNamespace(
+                config=config,
+                runtime_paths=runtime_paths,
+                _hook_room_state_querier=lambda: None,
+                _hook_room_state_putter=lambda: None,
+            ),
+        )
+
+        async def consume_delivery_and_cancel(request: object) -> tuple[str, str]:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+                sequence.append(f"deliver:{accumulated}")
+            return "$team-msg", accumulated
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_cancel
+
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                cancel_message = "cancel"
+                session_id = kwargs["session_id"]
+                assert isinstance(session_id, str)
+                storage.session = TeamSession(
+                    session_id=session_id,
+                    team_id="ultimate",
+                    created_at=1,
+                    updated_at=1,
+                )
+                sequence.append("stream")
+                yield "Team hello"
+                raise asyncio.CancelledError(cancel_message)
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    assert sequence == [
+        "stream",
+        "deliver:Team hello",
+        "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_uses_persisted_team_scope_for_session_started_hooks(
+    tmp_path: Path,
+) -> None:
+    """Ad hoc team session hooks should scope to the persisted team scope, not the router bot."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name=ROUTER_AGENT_NAME)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED, agents=["team_general"], rooms=["!test:localhost"])
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.agent_name}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new_callable=AsyncMock) as mock_team_response,
+        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def fake_team_response(*_args: object, **kwargs: object) -> str:
+            session_id = kwargs["session_id"]
+            assert isinstance(session_id, str)
+            storage.session = TeamSession(
+                session_id=session_id,
+                team_id="team_general",
+                created_at=1,
+                updated_at=1,
+            )
+            return "Team hello"
+
+        mock_team_response.side_effect = fake_team_response
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert sequence == ["started:team:team_general:team_general"]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_uses_delivery_result_failure_reason_for_cancelled_stream(
+    tmp_path: Path,
+) -> None:
+    """Team cancelled hooks should fall back to DeliveryResult.failure_reason when no exception was raised."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(return_value=("$team-msg", "Team hello"))
+        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
+            return_value=DeliveryResult(
+                event_id=None,
+                response_text="Team hello",
+                delivery_kind=None,
+                failure_reason="stream failure",
+            ),
+        )
+
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                session_id = kwargs["session_id"]
+                assert isinstance(session_id, str)
+                storage.session = TeamSession(
+                    session_id=session_id,
+                    team_id="ultimate",
+                    created_at=1,
+                    updated_at=1,
+                )
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    assert (
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+            "failure_reason"
+        ]
+        == "stream failure"
+    )
+    assert (
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+            "visible_response_event_id"
+        ]
+        == "$team-msg"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_locked_emits_session_started_after_persisted_cancellation(
+    tmp_path: Path,
+) -> None:
+    """session:started should still fire when a cancelled skill-command run has already persisted the session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "general"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            cancel_message = "cancel"
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append("ai")
+            raise asyncio.CancelledError(cancel_message)
+
+        mock_ai.side_effect = fake_ai_response
+
+        with pytest.raises(asyncio.CancelledError, match="cancel"):
+            await coordinator.send_skill_command_response_locked(
+                room_id="!test:localhost",
+                reply_to_event_id="$user_msg",
+                thread_id="$thread-root",
+                thread_history=(),
+                prompt="Hello",
+                agent_name="general",
+                user_id="@alice:localhost",
+            )
+
+    assert sequence == [
+        "ai",
+        "started:agent:general:!test:localhost:$thread-root:$thread-root",
+    ]
 
 
 class TestUserIdPassthrough:

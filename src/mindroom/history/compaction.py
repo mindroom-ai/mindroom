@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
+from uuid import uuid4
 
 from agno.agent._tools import determine_tools_for_model
 from agno.models.message import Message
@@ -26,9 +27,12 @@ from pydantic import BaseModel
 
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
+from mindroom.hooks import CompactionHookContext, emit
+from mindroom.hooks.types import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -100,6 +104,56 @@ class ResolvedCompactionRuntime:
 class _CompactionRewriteResult:
     summary_text: str
     compacted_run_count: int
+    compacted_messages: tuple[Message, ...]
+
+
+async def _emit_compaction_hook(
+    *,
+    event_name: str,
+    scope: HistoryScope,
+    messages: Sequence[Message],
+    session_id: str,
+    token_count_before: int,
+    token_count_after: int | None,
+    compaction_summary: str | None,
+) -> None:
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is None or not runtime_context.hook_registry.has_hooks(event_name):
+        return
+
+    bindings = resolve_tool_runtime_hook_bindings(runtime_context)
+    correlation_id = runtime_context.correlation_id or f"{event_name}:{session_id}:{uuid4().hex}"
+    context = CompactionHookContext(
+        event_name=event_name,
+        plugin_name="",
+        settings={},
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+        logger=logger.bind(event_name=event_name, session_id=session_id),
+        correlation_id=correlation_id,
+        message_sender=bindings.message_sender,
+        room_state_querier=bindings.room_state_querier,
+        room_state_putter=bindings.room_state_putter,
+        agent_name=scope.scope_id if scope.kind == "team" else runtime_context.agent_name,
+        scope=scope,
+        room_id=runtime_context.room_id,
+        thread_id=runtime_context.resolved_thread_id,
+        messages=list(messages),
+        session_id=session_id,
+        token_count_before=token_count_before,
+        token_count_after=token_count_after,
+        compaction_summary=compaction_summary,
+    )
+    await emit(runtime_context.hook_registry, event_name, context)
+
+
+def _should_collect_compaction_hook_messages() -> bool:
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is None:
+        return False
+    return runtime_context.hook_registry.has_hooks(EVENT_COMPACTION_BEFORE) or runtime_context.hook_registry.has_hooks(
+        EVENT_COMPACTION_AFTER,
+    )
 
 
 @timed("system_prompt_assembly.history_prepare.compaction")
@@ -145,6 +199,7 @@ async def compact_scope_history(
     )
     before_run_count = len(visible_runs)
     working_session = deepcopy(session)
+    collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     rewrite_result = await _rewrite_working_session_for_compaction(
         working_session=working_session,
         summary_model=summary_model,
@@ -154,12 +209,23 @@ async def compact_scope_history(
         history_settings=history_settings,
         available_history_budget=available_history_budget,
         summary_input_budget=summary_input_budget,
+        collect_compaction_hook_messages=collect_compaction_hook_messages,
         timing_scope=timing_scope,
     )
     if rewrite_result is None:
         cleared_state = clear_force_compaction_state(session, scope, state)
         storage.upsert_session(session)
         return cleared_state, None
+
+    await _emit_compaction_hook(
+        event_name=EVENT_COMPACTION_BEFORE,
+        scope=scope,
+        messages=rewrite_result.compacted_messages,
+        session_id=session.session_id,
+        token_count_before=before_tokens,
+        token_count_after=None,
+        compaction_summary=None,
+    )
 
     compacted_at = _iso_utc_now()
     new_state = HistoryScopeState(
@@ -206,6 +272,15 @@ async def compact_scope_history(
         notify=notify,
         history_budget_tokens=available_history_budget,
     )
+    await _emit_compaction_hook(
+        event_name=EVENT_COMPACTION_AFTER,
+        scope=scope,
+        messages=rewrite_result.compacted_messages,
+        session_id=session.session_id,
+        token_count_before=before_tokens,
+        token_count_after=after_tokens,
+        compaction_summary=rewrite_result.summary_text,
+    )
     return new_state, outcome
 
 
@@ -220,10 +295,12 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
     summary_input_budget: int,
+    collect_compaction_hook_messages: bool,
     timing_scope: str | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
+    compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
 
     while True:
@@ -284,6 +361,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
             update_scope_seen_event_ids(working_session, scope, compacted_seen_event_ids)
         working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
+        if collect_compaction_hook_messages:
+            compacted_messages.extend(_messages_for_runs(included_runs))
         if pending_selected_run_ids is not None:
             pending_selected_run_ids.difference_update(compacted_run_ids)
 
@@ -306,6 +385,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
+        compacted_messages=tuple(compacted_messages),
     )
 
 
@@ -813,6 +893,13 @@ def _seen_event_ids_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[
             continue
         seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
     return sorted(seen_event_ids)
+
+
+def _messages_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[Message]:
+    messages: list[Message] = []
+    for run in runs:
+        messages.extend(run.messages or [])
+    return messages
 
 
 def _serialize_run(run: RunOutput | TeamRunOutput, index: int) -> str:

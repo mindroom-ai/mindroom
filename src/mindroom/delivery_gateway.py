@@ -128,6 +128,7 @@ class ResponseHookService:
         envelope: MessageEnvelope,
         visible_response_event_id: str | None = None,
         response_kind: str = "ai",
+        failure_reason: str | None = None,
     ) -> None:
         """Emit message:cancelled when a response never reaches final delivery."""
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_CANCELLED):
@@ -139,6 +140,7 @@ class ResponseHookService:
                 envelope=envelope,
                 visible_response_event_id=visible_response_event_id,
                 response_kind=response_kind,
+                failure_reason=failure_reason,
             ),
         )
         await emit(self.hook_context.registry, EVENT_MESSAGE_CANCELLED, context)
@@ -154,6 +156,7 @@ class DeliveryResult:
     suppressed: bool = False
     option_map: dict[str, str] | None = None
     options_list: list[dict[str, str]] | None = None
+    failure_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -549,6 +552,7 @@ class DeliveryGateway:
             suppressed=False,
             option_map=interactive_response.option_map,
             options_list=interactive_response.options_list,
+            failure_reason="delivery_failed" if delivery_kind is None and not event_id else None,
         )
 
     async def send_compaction_notice(self, request: CompactionNoticeRequest) -> str | None:
