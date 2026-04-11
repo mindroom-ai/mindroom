@@ -18,6 +18,7 @@ from mindroom.attachments import (
     resolve_thread_attachment_ids,
 )
 from mindroom.coalescing import PreparedTextEvent
+from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.message_content import (
@@ -166,37 +167,38 @@ class InboundTurnNormalizer:
             reply_to_event_id=request.event.event_id,
             event_source=request.event.source,
         ).resolved_thread_id
-        prepared_voice = await prepare_voice_message(
-            client,
-            self.deps.storage_path,
-            request.room,
-            request.event,
-            self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            sender_domain=self.deps.sender_domain,
-            thread_id=effective_thread_id,
-        )
-        if prepared_voice is None:
-            return None
+        with bound_log_context(room_id=request.room.room_id, thread_id=effective_thread_id):
+            prepared_voice = await prepare_voice_message(
+                client,
+                self.deps.storage_path,
+                request.room,
+                request.event,
+                self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                sender_domain=self.deps.sender_domain,
+                thread_id=effective_thread_id,
+            )
+            if prepared_voice is None:
+                return None
 
-        return VoiceNormalizationResult(
-            event=PreparedTextEvent(
-                sender=request.event.sender,
-                event_id=request.event.event_id,
-                body=prepared_voice.text,
-                source={
-                    **prepared_voice.source,
-                    "content": {
-                        **prepared_voice.source.get("content", {}),
-                        "com.mindroom.source_kind": "voice",
+            return VoiceNormalizationResult(
+                event=PreparedTextEvent(
+                    sender=request.event.sender,
+                    event_id=request.event.event_id,
+                    body=prepared_voice.text,
+                    source={
+                        **prepared_voice.source,
+                        "content": {
+                            **prepared_voice.source.get("content", {}),
+                            "com.mindroom.source_kind": "voice",
+                        },
                     },
-                },
-                server_timestamp=request.event.server_timestamp,
-                is_synthetic=True,
-                source_kind_override="voice",
-            ),
-            effective_thread_id=effective_thread_id,
-        )
+                    server_timestamp=request.event.server_timestamp,
+                    is_synthetic=True,
+                    source_kind_override="voice",
+                ),
+                effective_thread_id=effective_thread_id,
+            )
 
     async def prepare_file_sidecar_text_event(
         self,

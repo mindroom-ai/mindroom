@@ -61,6 +61,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.ingress import HookIngressPolicy, hook_ingress_policy, is_automation_source_kind
 from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, TextNormalizationRequest
+from mindroom.logging_config import bound_log_context
 from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.message_target import MessageTarget
@@ -870,7 +871,8 @@ class DispatchPlanner:
             )
             return
 
-        self.deps.logger.info("Handling AI routing", event_id=event.event_id)
+        with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+            self.deps.logger.info("Handling AI routing", event_id=event.event_id)
 
         routing_text = message or event.body
         suggested_agent = await suggest_agent_for_message(
@@ -886,7 +888,8 @@ class DispatchPlanner:
                 "⚠️ I couldn't determine which agent should help with this. "
                 "Please try mentioning an agent directly with @ or rephrase your request."
             )
-            self.deps.logger.warning("Router failed to determine agent")
+            with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+                self.deps.logger.warning("Router failed to determine agent")
         else:
             response_text = f"@{suggested_agent} could you help with this?"
 
@@ -956,15 +959,16 @@ class DispatchPlanner:
             history_scope=None,
             conversation_target=resolved_target,
         )
-        if event_id:
-            self.deps.logger.info("Routed to agent", suggested_agent=suggested_agent)
-            self._mark_source_events_responded(
-                tracked_handled_turn.with_response_event_id(
-                    event_id,
-                ),
-            )
-        else:
-            self.deps.logger.error("Failed to route to agent", agent=suggested_agent)
+        with bound_log_context(**resolved_target.log_context):
+            if event_id:
+                self.deps.logger.info("Routed to agent", suggested_agent=suggested_agent)
+                self._mark_source_events_responded(
+                    tracked_handled_turn.with_response_event_id(
+                        event_id,
+                    ),
+                )
+            else:
+                self.deps.logger.error("Failed to route to agent", agent=suggested_agent)
 
     def _effective_response_action(self, action: ResponseAction) -> ResponseAction:
         """Apply configured-team execution behavior before running one response action."""
@@ -1010,7 +1014,8 @@ class DispatchPlanner:
             return
 
         if not dispatch.context.am_i_mentioned:
-            self.deps.logger.info("Will respond: only agent in thread")
+            with bound_log_context(**dispatch.target.log_context):
+                self.deps.logger.info("Will respond: only agent in thread")
 
         target_member_names: tuple[str, ...] | None = None
         if action.kind == "team":
@@ -1067,15 +1072,17 @@ class DispatchPlanner:
                     dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
             return
 
-        self.log_dispatch_latency(
-            event_id=event.event_id,
-            action_kind=action.kind,
-            dispatch_started_at=dispatch_started_at,
-            context_ready_monotonic=context_ready_monotonic,
-            payload_ready_monotonic=payload_ready_monotonic,
-        )
+        with bound_log_context(**dispatch.target.log_context):
+            self.log_dispatch_latency(
+                event_id=event.event_id,
+                action_kind=action.kind,
+                dispatch_started_at=dispatch_started_at,
+                context_ready_monotonic=context_ready_monotonic,
+                payload_ready_monotonic=payload_ready_monotonic,
+            )
 
-        self.deps.logger.info(processing_log, event_id=event.event_id)
+        with bound_log_context(**dispatch.target.log_context):
+            self.deps.logger.info(processing_log, event_id=event.event_id)
         try:
             if action.kind == "team":
                 assert action.form_team is not None
@@ -1124,11 +1131,12 @@ class DispatchPlanner:
                     ),
                 )
         except SuppressedPlaceholderCleanupError:
-            self.deps.logger.warning(
-                "Suppressed response cleanup failed",
-                source_event_id=event.event_id,
-                correlation_id=dispatch.correlation_id,
-            )
+            with bound_log_context(**dispatch.target.log_context):
+                self.deps.logger.warning(
+                    "Suppressed response cleanup failed",
+                    source_event_id=event.event_id,
+                    correlation_id=dispatch.correlation_id,
+                )
             raise
         if response_event_id is not None:
             self._mark_source_events_responded(

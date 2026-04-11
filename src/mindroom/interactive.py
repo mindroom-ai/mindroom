@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 import nio
 
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import is_agent_id
 
@@ -432,12 +432,13 @@ async def handle_reaction(
 
         selected_value = question.options[reaction_key]
 
-        logger.info(
-            "Received answer via reaction",
-            user=event.sender,
-            reaction=reaction_key,
-            value=selected_value,
-        )
+        with bound_log_context(room_id=question.room_id, thread_id=question.thread_id):
+            logger.info(
+                "Received answer via reaction",
+                user=event.sender,
+                reaction=reaction_key,
+                value=selected_value,
+            )
 
         # The emoji reaction itself is the user's response, so just consume the question.
         if _remove_active_question_locked(event.reacts_to):
@@ -507,12 +508,13 @@ def _handle_text_response_locked(
             continue
 
         selected_value = question.options[message_text]
-        logger.info(
-            "Received answer via text",
-            user=sender,
-            text=message_text,
-            value=selected_value,
-        )
+        with bound_log_context(room_id=room_id, thread_id=thread_id):
+            logger.info(
+                "Received answer via text",
+                user=sender,
+                text=message_text,
+                value=selected_value,
+            )
         if _remove_active_question_locked(question_event_id):
             _save_active_questions_locked()
         return (selected_value, question.thread_id)
@@ -626,16 +628,22 @@ def register_interactive_question(
             ),
         )
         _save_active_questions_locked()
-    logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
+    with bound_log_context(room_id=room_id, thread_id=thread_id):
+        logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
 
 
 def clear_interactive_question(event_id: str) -> None:
     """Remove one tracked interactive question when its message is edited away."""
     with _thread_lock:
+        question = _active_questions.get(event_id)
         if not _remove_active_question_locked(event_id):
             return
         _save_active_questions_locked()
-    logger.info("Cleared interactive question", event_id=event_id)
+    with bound_log_context(
+        room_id=question.room_id if question is not None else None,
+        thread_id=question.thread_id if question is not None else None,
+    ):
+        logger.info("Cleared interactive question", event_id=event_id)
 
 
 async def add_reaction_buttons(
