@@ -573,6 +573,13 @@ class TestCommandHandling:
 
             # Verify the command was handled
             bot._handle_command.assert_called_once()
+            bot.logger.info.assert_any_call(
+                "Received message",
+                event_id="$event123",
+                room_id="!test:server",
+                sender="@user:server",
+                thread_id="$thread123",
+            )
 
     @pytest.mark.asyncio
     async def test_router_command_blocked_by_reply_permissions(self) -> None:

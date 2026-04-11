@@ -178,14 +178,14 @@ def _store_active_question_locked(event_id: str, question: _InteractiveQuestion)
     _deleted_question_ids.discard(event_id)
 
 
-def _remove_active_question_locked(event_id: str) -> bool:
+def _remove_active_question_locked(event_id: str) -> _InteractiveQuestion | None:
     """Remove a tracked question and record the deletion for persistence."""
-    if event_id not in _active_questions:
-        return False
-    del _active_questions[event_id]
+    question = _active_questions.pop(event_id, None)
+    if question is None:
+        return None
     _dirty_question_ids.discard(event_id)
     _deleted_question_ids.add(event_id)
-    return True
+    return question
 
 
 def _apply_local_changes_locked(
@@ -435,12 +435,14 @@ async def handle_reaction(
         logger.info(
             "Received answer via reaction",
             user=event.sender,
+            room_id=question.room_id,
             reaction=reaction_key,
+            thread_id=question.thread_id,
             value=selected_value,
         )
 
         # The emoji reaction itself is the user's response, so just consume the question.
-        if _remove_active_question_locked(event.reacts_to):
+        if _remove_active_question_locked(event.reacts_to) is not None:
             _save_active_questions_locked()
 
         return (selected_value, question.thread_id)
@@ -510,10 +512,12 @@ def _handle_text_response_locked(
         logger.info(
             "Received answer via text",
             user=sender,
+            room_id=question.room_id,
             text=message_text,
+            thread_id=question.thread_id,
             value=selected_value,
         )
-        if _remove_active_question_locked(question_event_id):
+        if _remove_active_question_locked(question_event_id) is not None:
             _save_active_questions_locked()
         return (selected_value, question.thread_id)
     return None
@@ -626,16 +630,28 @@ def register_interactive_question(
             ),
         )
         _save_active_questions_locked()
-    logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
+    logger.info(
+        "Registered interactive question",
+        event_id=event_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        options=len(option_map),
+    )
 
 
 def clear_interactive_question(event_id: str) -> None:
     """Remove one tracked interactive question when its message is edited away."""
     with _thread_lock:
-        if not _remove_active_question_locked(event_id):
+        question = _remove_active_question_locked(event_id)
+        if question is None:
             return
         _save_active_questions_locked()
-    logger.info("Cleared interactive question", event_id=event_id)
+    logger.info(
+        "Cleared interactive question",
+        event_id=event_id,
+        room_id=question.room_id,
+        thread_id=question.thread_id,
+    )
 
 
 async def add_reaction_buttons(
@@ -667,7 +683,13 @@ async def add_reaction_buttons(
             },
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):
-            logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))
+            logger.warning(
+                "Failed to add reaction",
+                emoji=emoji_char,
+                error=str(reaction_response),
+                room_id=room_id,
+                thread_id=None,
+            )
 
 
 def _cleanup() -> None:

@@ -8,6 +8,7 @@ import sys
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
+import structlog
 
 from mindroom.constants import RuntimePaths
 from mindroom.logging_config import get_logger, setup_logging
@@ -59,6 +60,51 @@ def test_setup_logging_json_mode_emits_expected_fields(
     assert payload["logger"] == "tests.logging"
     assert payload["room_id"] == "!room:example.org"
     assert "timestamp" in payload
+
+
+def test_setup_logging_json_mode_defaults_thread_id_to_null_for_room_level_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Room-level logs should still emit a null thread_id field."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    structlog.contextvars.clear_contextvars()
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    with structlog.contextvars.bound_contextvars(room_id="!room:example.org"):
+        get_logger("tests.logging").info("room_level_event")
+
+    payload = _last_stderr_payload(capsys)
+
+    assert payload["event"] == "room_level_event"
+    assert payload["room_id"] == "!room:example.org"
+    assert payload["thread_id"] is None
+
+
+def test_setup_logging_json_mode_includes_thread_id_for_threaded_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Thread-scoped logs should include the bound thread id."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    structlog.contextvars.clear_contextvars()
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    with structlog.contextvars.bound_contextvars(
+        room_id="!room:example.org",
+        thread_id="$thread:example.org",
+    ):
+        get_logger("tests.logging").info("threaded_event")
+
+    payload = _last_stderr_payload(capsys)
+
+    assert payload["event"] == "threaded_event"
+    assert payload["room_id"] == "!room:example.org"
+    assert payload["thread_id"] == "$thread:example.org"
 
 
 def test_setup_logging_json_mode_includes_logger_for_foreign_logger(

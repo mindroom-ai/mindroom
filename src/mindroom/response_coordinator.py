@@ -10,6 +10,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
+from structlog.contextvars import bound_contextvars
 
 from mindroom import interactive
 from mindroom.agents import show_tool_calls_for_agent
@@ -493,11 +494,15 @@ class ResponseCoordinator:
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("lock_acquired")
             try:
-                if queued_human_message:
-                    queued_signal.consume_waiting_human_message()
-                    queued_human_message = False
-                with queued_message_signal_context(queued_signal):
-                    return await locked_operation(resolved_target)
+                with bound_contextvars(
+                    room_id=resolved_target.room_id,
+                    thread_id=resolved_target.resolved_thread_id,
+                ):
+                    if queued_human_message:
+                        queued_signal.consume_waiting_human_message()
+                        queued_human_message = False
+                    with queued_message_signal_context(queued_signal):
+                        return await locked_operation(resolved_target)
             finally:
                 if lock_acquired:
                     lifecycle_lock.release()
@@ -1127,6 +1132,7 @@ class ResponseCoordinator:
                 task,
                 None,
                 run_id=run_id,
+                thread_id=resolved_target.resolved_thread_id,
             )
 
             if message_to_track:
@@ -1641,17 +1647,18 @@ class ResponseCoordinator:
         )
         lifecycle_lock = self._response_lifecycle_lock(target)
         async with lifecycle_lock:
-            return await self.send_skill_command_response_locked(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                prompt=prompt,
-                agent_name=agent_name,
-                user_id=user_id,
-                reply_to_event=reply_to_event,
-                source_envelope=source_envelope,
-            )
+            with bound_contextvars(room_id=target.room_id, thread_id=target.resolved_thread_id):
+                return await self.send_skill_command_response_locked(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    thread_history=thread_history,
+                    prompt=prompt,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    reply_to_event=reply_to_event,
+                    source_envelope=source_envelope,
+                )
 
     async def send_skill_command_response_locked(
         self,

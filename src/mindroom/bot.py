@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import nio
+from structlog.contextvars import bind_contextvars, bound_contextvars
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -881,37 +882,12 @@ class AgentBot:
         room_id: str,
         event: nio.ReactionEvent,
         correlation_id: str,
+        thread_id: str | None,
     ) -> None:
         """Emit reaction:received after built-in handlers decline the reaction."""
         assert self.client is not None
         if not self.hook_registry.has_hooks(EVENT_REACTION_RECEIVED):
             return
-
-        normalized_target_event_id = event.reacts_to.strip()
-        thread_id: str | None = None
-        if normalized_target_event_id:
-            response = await self._conversation_access.get_event(room_id, normalized_target_event_id)
-            if isinstance(response, nio.RoomGetEventResponse):
-                target_info = EventInfo.from_event(response.event.source)
-                if target_info.thread_id:
-                    thread_id = target_info.thread_id
-                elif target_info.thread_id_from_edit:
-                    thread_id = target_info.thread_id_from_edit
-                elif not target_info.has_relations:
-                    thread_history = await self._conversation_resolver.fetch_thread_history(
-                        self.client,
-                        room_id,
-                        normalized_target_event_id,
-                    )
-                    if len(thread_history) > 1:
-                        thread_id = normalized_target_event_id
-            else:
-                self.logger.debug(
-                    "Failed to fetch reaction target event for hook context",
-                    room_id=room_id,
-                    target_event_id=normalized_target_event_id,
-                    error=str(response),
-                )
 
         context = ReactionReceivedContext(
             **self._hook_context_support.base_kwargs(EVENT_REACTION_RECEIVED, correlation_id),
@@ -923,6 +899,53 @@ class AgentBot:
             thread_id=thread_id,
         )
         await emit(self.hook_registry, EVENT_REACTION_RECEIVED, context)
+
+    async def _resolve_reaction_target_thread_id(
+        self,
+        *,
+        room_id: str,
+        target_event_id: str,
+    ) -> str | None:
+        """Resolve the canonical thread scope for one reaction target event."""
+        assert self.client is not None
+        normalized_target_event_id = target_event_id.strip()
+        if not normalized_target_event_id:
+            return None
+        resolved_thread_id: str | None = None
+        try:
+            response = await self._conversation_access.get_event(room_id, normalized_target_event_id)
+        except Exception as exc:
+            self.logger.debug(
+                "Failed to fetch reaction target event for hook context",
+                room_id=room_id,
+                target_event_id=normalized_target_event_id,
+                error=str(exc),
+            )
+            return None
+
+        if isinstance(response, nio.RoomGetEventResponse):
+            target_info = EventInfo.from_event(response.event.source)
+            if target_info.thread_id:
+                resolved_thread_id = target_info.thread_id
+            elif target_info.thread_id_from_edit:
+                resolved_thread_id = target_info.thread_id_from_edit
+            elif not target_info.has_relations:
+                thread_history = await self._conversation_resolver.fetch_thread_history(
+                    self.client,
+                    room_id,
+                    normalized_target_event_id,
+                )
+                if len(thread_history) > 1:
+                    resolved_thread_id = normalized_target_event_id
+            return resolved_thread_id
+
+        self.logger.debug(
+            "Failed to fetch reaction target event for hook context",
+            room_id=room_id,
+            target_event_id=normalized_target_event_id,
+            error=str(response),
+        )
+        return None
 
     async def _emit_agent_lifecycle_event(
         self,
@@ -1516,37 +1539,44 @@ class AgentBot:
             sender=event.sender,
             source=event.source,
         )
-        if self._is_trusted_internal_relay_event(event):
-            if dispatch_timing is not None:
-                dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
-                dispatch_timing.mark("gate_exit")
-            trusted_relay_event = cast("_TextDispatchEvent", event)
-            await self._dispatch_text_message(
-                room,
-                trusted_relay_event,
-                effective_requester_user_id,
-            )
-            return
-        await self._coalescing_gate.enqueue(
-            coalescing_key or await self._coalescing_key_for_event(room, event, effective_requester_user_id),
-            PendingEvent(
-                event=event,
-                room=room,
-                source_kind=source_kind,
-            ),
+        effective_coalescing_key = coalescing_key or await self._coalescing_key_for_event(
+            room,
+            event,
+            effective_requester_user_id,
         )
+        with bound_contextvars(room_id=room.room_id, thread_id=effective_coalescing_key[1]):
+            if self._is_trusted_internal_relay_event(event):
+                if dispatch_timing is not None:
+                    dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
+                    dispatch_timing.mark("gate_exit")
+                trusted_relay_event = cast("_TextDispatchEvent", event)
+                await self._dispatch_text_message(
+                    room,
+                    trusted_relay_event,
+                    effective_requester_user_id,
+                )
+                return
+            await self._coalescing_gate.enqueue(
+                effective_coalescing_key,
+                PendingEvent(
+                    event=event,
+                    room=room,
+                    source_kind=source_kind,
+                ),
+            )
 
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
         dispatch_event = build_batch_dispatch_event(batch)
         dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("gate_exit")
         batch_coalescing_key = await self._coalescing_key_for_event(
             batch.room,
             batch.primary_event,
             batch.requester_user_id,
         )
+        bind_contextvars(room_id=batch.room.room_id, thread_id=batch_coalescing_key[1])
+        if dispatch_timing is not None:
+            dispatch_timing.mark("gate_exit")
         # The first room message opens the gate with thread_id=None, but dispatch
         # resolves that turn into a new thread rooted at the source event ID.
         canonical_key = (
@@ -1560,6 +1590,7 @@ class AgentBot:
             batch.requester_user_id,
         )
         self._coalescing_gate.retarget(batch_coalescing_key, canonical_key)
+        bind_contextvars(thread_id=canonical_key[1])
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._dispatch_text_message(
                 batch.room,
@@ -1578,14 +1609,16 @@ class AgentBot:
 
     async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one text message inside the per-turn thread-history cache scope."""
-        self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
+event_info = EventInfo.from_event(event.source)
+        thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        bind_contextvars(room_id=room.room_id, thread_id=thread_id)
+        self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender, thread_id=thread_id)
         assert self.client is not None
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        event_info = EventInfo.from_event(event.source)
         await self._conversation_access.append_live_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
             return
@@ -1627,6 +1660,7 @@ class AgentBot:
         if should_handle_interactive_text_response(envelope):
             await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
         coalescing_thread_id = await self._conversation_resolver.coalescing_thread_id(room, prepared_event)
+        bind_contextvars(thread_id=coalescing_thread_id)
         target = self._conversation_resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -1721,6 +1755,7 @@ class AgentBot:
             if dispatch is None:
                 return
 
+            bind_contextvars(room_id=room.room_id, thread_id=dispatch.target.resolved_thread_id)
             # Commands always dispatch and bypass thread-history suppression.
             command = command_parser.parse(event.body) if not media_events else None
             if command:
@@ -1907,6 +1942,11 @@ class AgentBot:
             self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
             return
 
+        reaction_thread_id = await self._resolve_reaction_target_thread_id(
+            room_id=room.room_id,
+            target_event_id=event.reacts_to,
+        )
+        bind_contextvars(room_id=room.room_id, thread_id=reaction_thread_id)
         if event.key == "🛑":
             sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
@@ -1939,6 +1979,7 @@ class AgentBot:
             room_id=room.room_id,
             event=event,
             correlation_id=event.event_id,
+            thread_id=reaction_thread_id,
         )
 
     async def _handle_interactive_reaction_result(
@@ -2080,6 +2121,7 @@ class AgentBot:
         event: _MediaDispatchEvent,
     ) -> None:
         """Handle one media event inside the per-turn thread-history cache scope."""
+        bind_contextvars(room_id=room.room_id, thread_id=None)
         assert self.client is not None
 
         prechecked_event = self._precheck_dispatch_event(room, event)
@@ -2592,6 +2634,7 @@ class AgentBot:
             event,
             conversation_target=turn_record.conversation_target if turn_record is not None else None,
         )
+        bind_contextvars(room_id=room.room_id, thread_id=context.thread_id)
         persisted_turn_metadata = self._load_persisted_turn_metadata(
             room=room,
             thread_id=context.thread_id,
@@ -2756,7 +2799,6 @@ class AgentBot:
                     self._mark_source_events_responded(regeneration_handled_turn)
                 return
 
-        # Generate new response
         regenerated_event_id = await self._generate_response(
             room_id=room.room_id,
             prompt=regeneration_prompt,
@@ -2780,7 +2822,6 @@ class AgentBot:
             ),
         )
 
-        # Update the handled-turn ledger linkage for the edited source turn.
         if regenerated_event_id is not None:
             self._mark_source_events_responded(
                 regeneration_handled_turn.with_response_event_id(regenerated_event_id),

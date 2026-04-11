@@ -6,11 +6,13 @@ import logging
 import logging.config
 import os
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
 if TYPE_CHECKING:
+    from structlog.typing import Processor
+
     from mindroom.constants import RuntimePaths
 
 __all__ = ["get_logger", "setup_logging"]
@@ -39,6 +41,16 @@ class _NioValidationFilter(logging.Filter):
         return True
 
 
+def _add_default_thread_id(
+    _logger: logging.Logger,
+    _method_name: str,
+    event_dict: dict[str, object],
+) -> dict[str, object]:
+    """Ensure every structured log payload carries a thread_id key."""
+    event_dict.setdefault("thread_id", None)
+    return event_dict
+
+
 def setup_logging(
     *,
     level: str = "INFO",
@@ -61,7 +73,7 @@ def setup_logging(
 
     # Shared processors that don't affect output format
     timestamper = structlog.processors.TimeStamper(fmt="iso")
-    pre_chain = [
+    pre_chain: list[Processor] = [
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         timestamper,
@@ -155,9 +167,11 @@ def setup_logging(
     )
 
     # Configure structlog to use stdlib logging
-    structlog.configure(
-        processors=[
+    processors = cast(
+        "list[Processor]",
+        [
             structlog.contextvars.merge_contextvars,
+            _add_default_thread_id,
             structlog.stdlib.filter_by_level,
             structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
@@ -167,6 +181,9 @@ def setup_logging(
             structlog.processors.UnicodeDecoder(),
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
+    )
+    structlog.configure(
+        processors=processors,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,

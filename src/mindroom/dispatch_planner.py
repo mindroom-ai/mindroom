@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import nio
+from structlog.contextvars import bound_contextvars
 
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from mindroom.authorization import (
@@ -472,41 +473,42 @@ class DispatchPlanner:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        correlation_id = event.event_id
-        envelope = self.deps.resolver.build_message_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id=requester_user_id,
-            context=context,
-            target=target,
-        )
-        ingress_policy = hook_ingress_policy(envelope)
-        suppressed = await self.deps.hook_service.emit_message_received_hooks(
-            envelope=envelope,
-            correlation_id=correlation_id,
-            policy=ingress_policy,
-        )
-        if suppressed:
-            self._mark_source_events_responded(handled_turn)
-            return None
-
-        sender_agent_name = extract_agent_name(requester_user_id, self.deps.runtime.config, self.deps.runtime_paths)
-        if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
-            self.deps.logger.debug(
-                "ignore_unmentioned_agent_event",
-                agent=sender_agent_name,
-                event_label=event_label,
-                user_id=requester_user_id,
+        with bound_contextvars(room_id=room.room_id, thread_id=target.resolved_thread_id):
+            correlation_id = event.event_id
+            envelope = self.deps.resolver.build_message_envelope(
+                room_id=room.room_id,
+                event=event,
+                requester_user_id=requester_user_id,
+                context=context,
+                target=target,
             )
-            return None
+            ingress_policy = hook_ingress_policy(envelope)
+            suppressed = await self.deps.hook_service.emit_message_received_hooks(
+                envelope=envelope,
+                correlation_id=correlation_id,
+                policy=ingress_policy,
+            )
+            if suppressed:
+                self._mark_source_events_responded(handled_turn)
+                return None
 
-        return PreparedDispatch(
-            requester_user_id=requester_user_id,
-            context=context,
-            target=target,
-            correlation_id=correlation_id,
-            envelope=envelope,
-        )
+            sender_agent_name = extract_agent_name(requester_user_id, self.deps.runtime.config, self.deps.runtime_paths)
+            if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
+                self.deps.logger.debug(
+                    "ignore_unmentioned_agent_event",
+                    agent=sender_agent_name,
+                    event_label=event_label,
+                    user_id=requester_user_id,
+                )
+                return None
+
+            return PreparedDispatch(
+                requester_user_id=requester_user_id,
+                context=context,
+                target=target,
+                correlation_id=correlation_id,
+                envelope=envelope,
+            )
 
     async def resolve_text_dispatch_event(self, event: TextDispatchEvent) -> PreparedTextEvent:
         """Return one canonical text event for hooks, routing, and command handling."""

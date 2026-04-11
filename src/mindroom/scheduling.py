@@ -18,6 +18,7 @@ from agno.agent import Agent
 from cron_descriptor import get_description
 from croniter import croniter
 from pydantic import BaseModel, Field
+from structlog.contextvars import bind_contextvars
 
 from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_for_sender
@@ -744,6 +745,7 @@ async def _execute_scheduled_workflow(
         runtime_paths=runtime_paths,
     )
 
+    bind_contextvars(room_id=workflow.room_id, thread_id=target.resolved_thread_id)
     try:
         message_text = workflow.message
         if _ACTIVE_HOOK_REGISTRY.has_hooks(EVENT_SCHEDULE_FIRED):
@@ -793,14 +795,22 @@ async def _execute_scheduled_workflow(
             event_id=event_id,
         )
     except Exception as e:
-        logger.exception("Failed to execute scheduled workflow")
+        logger.exception(
+            "Failed to execute scheduled workflow",
+            room_id=workflow.room_id,
+            thread_id=target.resolved_thread_id,
+        )
         if workflow.room_id:
             error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
             error_content = await _build_scheduled_failure_content(client, workflow, target, error_message)
             try:
                 await send_message(client, workflow.room_id, error_content)
             except Exception:
-                logger.exception("Failed to send scheduled workflow failure message")
+                logger.exception(
+                    "Failed to send scheduled workflow failure message",
+                    room_id=workflow.room_id,
+                    thread_id=target.resolved_thread_id,
+                )
         return False
     else:
         return True

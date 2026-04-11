@@ -366,15 +366,29 @@ class DeliveryGateway:
 
         event_id = await send_message(client, request.room_id, content)
         if event_id:
-            self.deps.logger.info("Sent response", event_id=event_id, room_id=request.room_id)
+            self.deps.logger.info(
+                "Sent response",
+                event_id=event_id,
+                room_id=request.room_id,
+                thread_id=effective_thread_id,
+            )
             return event_id
-        self.deps.logger.error("Failed to send response to room", room_id=request.room_id)
+        self.deps.logger.error(
+            "Failed to send response to room",
+            room_id=request.room_id,
+            thread_id=effective_thread_id,
+        )
         return None
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
         client = self._client()
         config = self.deps.runtime.config
+        effective_thread_id = self.deps.resolver.build_message_target(
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            reply_to_event_id=None,
+        ).resolved_thread_id
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
@@ -412,9 +426,14 @@ class DeliveryGateway:
             request.new_text,
         )
         if isinstance(response, nio.RoomSendResponse):
-            self.deps.logger.info("Edited message", event_id=request.event_id)
+            self.deps.logger.info("Edited message", event_id=request.event_id, thread_id=effective_thread_id)
             return True
-        self.deps.logger.error("Failed to edit message", event_id=request.event_id, error=str(response))
+        self.deps.logger.error(
+            "Failed to edit message",
+            event_id=request.event_id,
+            thread_id=effective_thread_id,
+            error=str(response),
+        )
         return False
 
     async def redact_suppressed_response_event(
@@ -457,6 +476,7 @@ class DeliveryGateway:
             response_kind=response_kind,
             source_event_id=response_envelope.source_event_id,
             correlation_id=correlation_id,
+            thread_id=response_envelope.target.resolved_thread_id,
         )
         return await self.redact_suppressed_response_event(
             room_id=room_id,
@@ -483,6 +503,7 @@ class DeliveryGateway:
 
     async def deliver_final(self, request: FinalDeliveryRequest) -> DeliveryResult:
         """Apply before/after hooks around one final send or edit."""
+        resolved_target = request.target or request.response_envelope.target
         draft = (
             await self.deps.response_hooks.apply_before_response(
                 correlation_id=request.correlation_id,
@@ -515,6 +536,7 @@ class DeliveryGateway:
                 response_kind=request.response_kind,
                 source_event_id=request.response_envelope.source_event_id,
                 correlation_id=request.correlation_id,
+                thread_id=resolved_target.resolved_thread_id,
             )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 return await self.redact_suppressed_response_event(
@@ -532,7 +554,6 @@ class DeliveryGateway:
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
-        resolved_target = request.target or request.response_envelope.target
         if request.existing_event_id:
             edited = await self.edit_text(
                 EditTextRequest(
@@ -606,10 +627,15 @@ class DeliveryGateway:
                 "Sent compaction notice",
                 event_id=event_id,
                 room_id=request.room_id,
+                thread_id=effective_thread_id,
                 summary_model=request.outcome.summary_model,
             )
             return event_id
-        self.deps.logger.error("Failed to send compaction notice", room_id=request.room_id)
+        self.deps.logger.error(
+            "Failed to send compaction notice",
+            room_id=request.room_id,
+            thread_id=effective_thread_id,
+        )
         return None
 
     async def deliver_stream(
@@ -673,6 +699,7 @@ class DeliveryGateway:
                 "Streaming response was already delivered before a suppressing hook ran",
                 source_event_id=request.response_envelope.source_event_id,
                 correlation_id=request.correlation_id,
+                thread_id=request.target.resolved_thread_id,
             )
             return DeliveryResult(
                 event_id=request.streamed_event_id,
