@@ -356,15 +356,15 @@ def install_send_response_mock(bot: object, send_response: AsyncMock) -> None:
 
     async def _send_text(request: SendTextRequest) -> str | None:
         return await send_response(
-            request.room_id,
-            request.reply_to_event_id,
+            request.target.room_id,
+            request.target.reply_to_event_id,
             request.response_text,
-            request.thread_id,
-            reply_to_event=request.reply_to_event,
+            request.target.thread_id,
+            reply_to_event=None,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
-            thread_mode_override=request.thread_mode_override,
+            thread_mode_override=None,
             target=request.target,
         )
 
@@ -420,10 +420,10 @@ def install_edit_message_mock(bot: object, edit_message: AsyncMock) -> None:
 
     async def _edit_text(request: EditTextRequest) -> bool:
         return await edit_message(
-            request.room_id,
+            request.target.room_id,
             request.event_id,
             request.new_text,
-            request.thread_id,
+            request.target.thread_id,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
         )

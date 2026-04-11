@@ -2438,18 +2438,20 @@ class AgentBot:
         target: MessageTarget | None = None,
     ) -> str | None:
         """Send a response message to a room."""
+        resolved_target = target or self._conversation_resolver.build_message_target(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            event_source=reply_to_event.source if reply_to_event is not None else None,
+            thread_mode_override=thread_mode_override,
+        )
         return await self._delivery_gateway.send_text(
             SendTextRequest(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
+                target=resolved_target,
                 response_text=response_text,
-                thread_id=thread_id,
-                reply_to_event=reply_to_event,
                 skip_mentions=skip_mentions,
                 tool_trace=tool_trace,
                 extra_content=extra_content,
-                thread_mode_override=thread_mode_override,
-                target=target,
             ),
         )
 
@@ -2503,10 +2505,13 @@ class AgentBot:
         """
         return await self._delivery_gateway.edit_text(
             EditTextRequest(
-                room_id=room_id,
+                target=self._conversation_resolver.build_message_target(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=None,
+                ),
                 event_id=event_id,
                 new_text=new_text,
-                thread_id=thread_id,
                 tool_trace=tool_trace,
                 extra_content=extra_content,
             ),

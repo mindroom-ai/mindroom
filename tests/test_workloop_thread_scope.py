@@ -753,9 +753,6 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
         nonlocal delivery_result
         delivery_result = await gateway.deliver_final(
             FinalDeliveryRequest(
-                room_id="!room:localhost",
-                reply_to_event_id="$event",
-                thread_id=None,
                 target=response_envelope.target,
                 existing_event_id=None,
                 response_text="visible response",

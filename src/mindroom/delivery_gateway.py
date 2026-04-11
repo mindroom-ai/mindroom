@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from html import escape as html_escape
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
@@ -50,12 +50,6 @@ if TYPE_CHECKING:
     from mindroom.streaming import _StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
-
-
-class _ReplyEventWithSource(Protocol):
-    """Minimal reply event surface needed for threaded send resolution."""
-
-    source: dict[str, Any]
 
 
 class SuppressedPlaceholderCleanupError(RuntimeError):
@@ -166,26 +160,20 @@ class DeliveryResult:
 class SendTextRequest:
     """Parameters for one visible Matrix send."""
 
-    room_id: str
-    reply_to_event_id: str | None
+    target: MessageTarget
     response_text: str
-    thread_id: str | None
-    reply_to_event: _ReplyEventWithSource | None = None
     skip_mentions: bool = False
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
-    thread_mode_override: Literal["thread", "room"] | None = None
-    target: MessageTarget | None = None
 
 
 @dataclass(frozen=True)
 class EditTextRequest:
     """Parameters for one Matrix edit."""
 
-    room_id: str
+    target: MessageTarget
     event_id: str
     new_text: str
-    thread_id: str | None
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
 
@@ -194,10 +182,7 @@ class EditTextRequest:
 class FinalDeliveryRequest:
     """Parameters for final hook-wrapped response delivery."""
 
-    room_id: str
-    reply_to_event_id: str
-    thread_id: str | None
-    target: MessageTarget | None
+    target: MessageTarget
     existing_event_id: str | None
     response_text: str
     response_kind: str
@@ -213,10 +198,8 @@ class FinalDeliveryRequest:
 class CompactionNoticeRequest:
     """Parameters for a compaction notice send."""
 
-    room_id: str
-    reply_to_event_id: str
+    target: MessageTarget
     main_response_event_id: str
-    thread_id: str | None
     outcome: CompactionOutcome
 
 
@@ -224,14 +207,10 @@ class CompactionNoticeRequest:
 class StreamingDeliveryRequest:
     """Parameters for streamed Matrix delivery."""
 
-    room_id: str
-    reply_to_event_id: str
-    response_thread_id: str | None
+    target: MessageTarget
     response_stream: AsyncIterator[_StreamInputChunk]
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
-    target: MessageTarget | None = None
-    room_mode: bool = False
     header: str | None = None
     show_tool_calls: bool = False
     extra_content: dict[str, Any] | None = None
@@ -258,9 +237,6 @@ class DeliveryGatewayDeps:
 class FinalizeStreamedResponseRequest:
     """Parameters for finalizing one streamed Matrix response."""
 
-    room_id: str
-    reply_to_event_id: str
-    thread_id: str | None
     target: MessageTarget
     streamed_event_id: str
     streamed_text: str
@@ -321,13 +297,7 @@ class DeliveryGateway:
         """Send one response message to a room."""
         client = self._client()
         config = self.deps.runtime.config
-        resolved_target = request.target or self.deps.resolver.build_message_target(
-            room_id=request.room_id,
-            thread_id=request.thread_id,
-            reply_to_event_id=request.reply_to_event_id,
-            event_source=request.reply_to_event.source if request.reply_to_event else None,
-            thread_mode_override=request.thread_mode_override,
-        )
+        resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
 
         if effective_thread_id is None:
@@ -345,7 +315,7 @@ class DeliveryGateway:
         else:
             latest_thread_event_id = await get_latest_thread_event_id_if_needed(
                 client,
-                request.room_id,
+                resolved_target.room_id,
                 effective_thread_id,
                 resolved_target.reply_to_event_id,
             )
@@ -364,22 +334,23 @@ class DeliveryGateway:
         if request.skip_mentions:
             content["com.mindroom.skip_mentions"] = True
 
-        event_id = await send_message(client, request.room_id, content)
+        event_id = await send_message(client, resolved_target.room_id, content)
         if event_id:
-            self.deps.logger.info("Sent response", event_id=event_id, room_id=request.room_id)
+            self.deps.logger.info("Sent response", event_id=event_id, **resolved_target.log_context)
             return event_id
-        self.deps.logger.error("Failed to send response to room", room_id=request.room_id)
+        self.deps.logger.error("Failed to send response to room", **resolved_target.log_context)
         return None
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
         client = self._client()
         config = self.deps.runtime.config
+        target = request.target
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
                 self.deps.runtime_paths,
-                room_id=request.room_id,
+                room_id=target.room_id,
             )
             == "room"
         ):
@@ -394,9 +365,9 @@ class DeliveryGateway:
         else:
             content = await build_threaded_edit_content(
                 client,
-                room_id=request.room_id,
+                room_id=target.room_id,
                 new_text=request.new_text,
-                thread_id=request.thread_id,
+                thread_id=target.resolved_thread_id,
                 config=config,
                 runtime_paths=self.deps.runtime_paths,
                 sender_domain=self.deps.sender_domain,
@@ -406,15 +377,20 @@ class DeliveryGateway:
 
         response = await edit_message(
             client,
-            request.room_id,
+            target.room_id,
             request.event_id,
             content,
             request.new_text,
         )
         if isinstance(response, nio.RoomSendResponse):
-            self.deps.logger.info("Edited message", event_id=request.event_id)
+            self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
-        self.deps.logger.error("Failed to edit message", event_id=request.event_id, error=str(response))
+        self.deps.logger.error(
+            "Failed to edit message",
+            event_id=request.event_id,
+            error=str(response),
+            **target.log_context,
+        )
         return False
 
     async def redact_suppressed_response_event(
@@ -518,7 +494,7 @@ class DeliveryGateway:
             )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 return await self.redact_suppressed_response_event(
-                    room_id=request.room_id,
+                    room_id=request.target.room_id,
                     event_id=request.existing_event_id,
                     response_text=draft.response_text,
                     reason="Suppressed placeholder response",
@@ -532,14 +508,13 @@ class DeliveryGateway:
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
-        resolved_target = request.target or request.response_envelope.target
+        resolved_target = request.target
         if request.existing_event_id:
             edited = await self.edit_text(
                 EditTextRequest(
-                    room_id=request.room_id,
+                    target=resolved_target,
                     event_id=request.existing_event_id,
                     new_text=display_text,
-                    thread_id=resolved_target.resolved_thread_id,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 ),
@@ -549,13 +524,10 @@ class DeliveryGateway:
         else:
             event_id = await self.send_text(
                 SendTextRequest(
-                    room_id=request.room_id,
-                    reply_to_event_id=request.reply_to_event_id,
+                    target=resolved_target,
                     response_text=display_text,
-                    thread_id=request.thread_id,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
-                    target=resolved_target,
                 ),
             )
             delivery_kind = "sent" if event_id else None
@@ -584,11 +556,8 @@ class DeliveryGateway:
         client = self._client()
         summary_line = request.outcome.format_notice()
         formatted_body = f"<em>{html_escape(summary_line).replace(chr(10), '<br/>')}</em>"
-        effective_thread_id = self.deps.resolver.build_message_target(
-            room_id=request.room_id,
-            thread_id=request.thread_id,
-            reply_to_event_id=request.reply_to_event_id,
-        ).resolved_thread_id
+        target = request.target
+        effective_thread_id = target.resolved_thread_id
         content = build_message_content(
             summary_line,
             formatted_body=formatted_body,
@@ -600,16 +569,16 @@ class DeliveryGateway:
                 "com.mindroom.skip_mentions": True,
             },
         )
-        event_id = await send_message(client, request.room_id, content)
+        event_id = await send_message(client, target.room_id, content)
         if event_id:
             self.deps.logger.info(
                 "Sent compaction notice",
                 event_id=event_id,
-                room_id=request.room_id,
+                **target.log_context,
                 summary_model=request.outcome.summary_model,
             )
             return event_id
-        self.deps.logger.error("Failed to send compaction notice", room_id=request.room_id)
+        self.deps.logger.error("Failed to send compaction notice", **target.log_context)
         return None
 
     async def deliver_stream(
@@ -621,9 +590,9 @@ class DeliveryGateway:
         config = self.deps.runtime.config
         return await send_streaming_response(
             client,
-            request.room_id,
-            request.reply_to_event_id,
-            request.response_thread_id,
+            request.target.room_id,
+            request.target.reply_to_event_id,
+            request.target.resolved_thread_id,
             self.deps.sender_domain,
             config,
             self.deps.runtime_paths,
@@ -634,7 +603,7 @@ class DeliveryGateway:
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             target=request.target,
-            room_mode=request.room_mode,
+            room_mode=request.target.is_room_mode,
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
@@ -662,7 +631,7 @@ class DeliveryGateway:
             )
             if request.cleanup_suppressed_streamed_event:
                 return await self.cleanup_suppressed_streamed_response(
-                    room_id=request.room_id,
+                    room_id=request.target.room_id,
                     event_id=request.streamed_event_id,
                     response_text=request.streamed_text,
                     response_kind=request.response_kind,
@@ -689,9 +658,6 @@ class DeliveryGateway:
         if needs_final_edit:
             return await self.deliver_final(
                 FinalDeliveryRequest(
-                    room_id=request.room_id,
-                    reply_to_event_id=request.reply_to_event_id,
-                    thread_id=request.thread_id,
                     target=request.target,
                     existing_event_id=request.streamed_event_id,
                     response_text=draft.response_text,

@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
@@ -100,7 +101,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         task.done = MagicMock(return_value=False)  # done() is a regular method, not async
         bot.stop_manager.set_current(
             message_id="$message:example.com",
-            room_id="!test:example.com",
+            target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
             task=task,
         )
 
@@ -169,7 +170,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
     task.done = MagicMock(return_value=False)
     bot.stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -209,7 +210,7 @@ async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellabl
 
     stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -244,7 +245,7 @@ async def test_stop_manager_force_cancels_task_when_graceful_cancel_errors() -> 
 
     stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -281,7 +282,7 @@ async def test_stop_manager_immediately_cancels_task_even_when_acancel_run_succe
 
     stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -329,7 +330,7 @@ async def test_stop_manager_immediately_cancels_task_when_acancel_run_is_slow() 
 
     stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -378,7 +379,7 @@ async def test_stop_manager_retries_until_run_becomes_cancellable() -> None:
 
     stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -428,7 +429,7 @@ async def test_stop_manager_reprobes_when_retry_updates_run_id() -> None:
 
     stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -462,7 +463,7 @@ async def test_stop_manager_cleanup_uses_captured_run_id_after_task_finishes() -
 
     stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
         run_id="run-123",
     )
@@ -544,7 +545,7 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         task.done = MagicMock(return_value=False)  # done() is a regular method, not async
         bot.stop_manager.set_current(
             message_id="$message:example.com",
-            room_id="!test:example.com",
+            target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
             task=task,
         )
 
@@ -604,7 +605,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     task.done = MagicMock(return_value=False)
     bot.stop_manager.set_current(
         message_id="$message:example.com",
-        room_id="!test:example.com",
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
         task=task,
     )
 
