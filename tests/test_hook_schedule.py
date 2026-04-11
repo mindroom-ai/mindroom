@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import UTC, datetime
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -13,7 +15,14 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
 from mindroom.logging_config import setup_logging
-from mindroom.scheduling import ScheduledWorkflow, _execute_scheduled_workflow, set_scheduling_hook_registry
+from mindroom.scheduling import (
+    CronSchedule,
+    ScheduledWorkflow,
+    _execute_scheduled_workflow,
+    _run_cron_task,
+    _run_once_task,
+    set_scheduling_hook_registry,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -130,6 +139,84 @@ async def test_schedule_hook_suppression_log_includes_workflow_thread_context(
 
     assert suppression_payload["room_id"] == "!room:localhost"
     assert suppression_payload["thread_id"] == "$thread"
+
+
+@pytest.mark.asyncio
+async def test_one_time_task_cancel_log_includes_workflow_thread_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Runner cancellation logs should include one-time workflow room/thread context."""
+    config = _config(tmp_path)
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(seconds=30),
+        message="Later",
+        description="cancelled one-time",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        created_by="@user:localhost",
+    )
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=runtime_paths_for(config))
+    capsys.readouterr()
+
+    async def fake_get_pending_task_record(**_: object) -> SimpleNamespace:
+        return SimpleNamespace(workflow=workflow)
+
+    with patch("mindroom.scheduling._get_pending_task_record", new=fake_get_pending_task_record):
+        task = asyncio.create_task(_run_once_task(AsyncMock(), "task-1", workflow, config, runtime_paths_for(config)))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    payloads = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
+    cancel_payload = next(payload for payload in payloads if payload["event"] == "one_time_task_cancelled")
+
+    assert cancel_payload["room_id"] == "!room:localhost"
+    assert cancel_payload["thread_id"] == "$thread"
+
+
+@pytest.mark.asyncio
+async def test_cron_task_cancel_log_includes_workflow_thread_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Runner cancellation logs should include recurring workflow room/thread context."""
+    config = _config(tmp_path)
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(),
+        message="Recurring",
+        description="cancelled recurring",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        created_by="@user:localhost",
+    )
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=runtime_paths_for(config))
+    capsys.readouterr()
+
+    async def fake_get_pending_task_record(**_: object) -> SimpleNamespace:
+        return SimpleNamespace(workflow=workflow)
+
+    with patch("mindroom.scheduling._get_pending_task_record", new=fake_get_pending_task_record):
+        task = asyncio.create_task(
+            _run_cron_task(AsyncMock(), "task-1", workflow, {}, config, runtime_paths_for(config)),
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    payloads = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
+    cancel_payload = next(payload for payload in payloads if payload["event"] == "cron_task_cancelled")
+
+    assert cancel_payload["room_id"] == "!room:localhost"
+    assert cancel_payload["thread_id"] == "$thread"
 
 
 @pytest.mark.asyncio
