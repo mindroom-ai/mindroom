@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,8 +15,9 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.conversation_resolver import should_skip_mentions
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalDeliveryRequest
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalDeliveryRequest, SendTextRequest
 from mindroom.hooks import MessageEnvelope, ResponseDraft
+from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -298,6 +301,39 @@ def _delivery_envelope() -> MessageEnvelope:
         agent_name="email_agent",
         source_kind="message",
     )
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_send_text_logs_target_thread_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Direct send logs should include the resolved target room/thread."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    config = gateway.deps.runtime.config
+    target = MessageTarget.resolve("!test:server", "$thread", "$event123")
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=runtime_paths_for(config))
+    capsys.readouterr()
+    gateway = DeliveryGateway(replace(gateway.deps, logger=get_logger("tests.delivery")))
+
+    with (
+        patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
+        patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")),
+    ):
+        event_id = await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="formatted response",
+            ),
+        )
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert event_id == "$response"
+    assert payload["event"] == "Sent response"
+    assert payload["room_id"] == "!test:server"
+    assert payload["thread_id"] == "$thread"
 
 
 @pytest.mark.asyncio
