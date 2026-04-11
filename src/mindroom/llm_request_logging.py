@@ -48,9 +48,7 @@ _NON_API_MESSAGE_FIELDS = {
     "stop_after_tool_call",
     "add_to_agent_memory",
     "from_history",
-    "metrics",
     "references",
-    "created_at",
     "temporary",
 }
 type JSONScalar = str | int | float | bool | None

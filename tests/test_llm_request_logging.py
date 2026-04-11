@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.models.message import Message
+from agno.models.message import Message, MessageMetrics
 
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
@@ -65,8 +65,13 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
         default_log_dir=tmp_path / "unused",
     )
     messages = [
-        Message(role="system", content="s" * 600),
-        Message(role="user", content="hello"),
+        Message(role="system", content="s" * 600, created_at=111),
+        Message(
+            role="user",
+            content="hello",
+            created_at=222,
+            metrics=MessageMetrics(input_tokens=2, total_tokens=2, duration=1.5),
+        ),
     ]
     assistant_message = Message(role="assistant")
 
@@ -83,19 +88,23 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
     assert entries[0]["agent_name"] == "assistant"
     assert entries[0]["model_id"] == "test-model"
     assert entries[0]["system_prompt"] == "s" * 600
-    assert entries[0]["messages"] == [
-        {"role": "system", "content": "s" * 600},
-        {"role": "user", "content": "hello"},
-    ]
+    assert entries[0]["messages"][0]["role"] == "system"
+    assert entries[0]["messages"][0]["content"] == "s" * 600
+    assert entries[0]["messages"][0]["created_at"] == 111
+    assert entries[0]["messages"][1]["role"] == "user"
+    assert entries[0]["messages"][1]["content"] == "hello"
+    assert entries[0]["messages"][1]["created_at"] == 222
+    assert entries[0]["messages"][1]["metrics"]["input_tokens"] == 2
+    assert entries[0]["messages"][1]["metrics"]["total_tokens"] == 2
+    assert entries[0]["messages"][1]["metrics"]["duration"] == 1.5
     assert entries[0]["message_count"] == 2
     assert entries[0]["tools"] == [{"name": "search"}]
     assert entries[0]["tool_count"] == 1
     assert entries[0]["model_params"] == {"temperature": 0.7}
     assert "timestamp" in entries[0]
-    assert entries[1]["messages"] == [
-        {"role": "system", "content": "s" * 600},
-        {"role": "user", "content": "hello"},
-    ]
+    assert entries[1]["messages"][0]["created_at"] == 111
+    assert entries[1]["messages"][1]["created_at"] == 222
+    assert entries[1]["messages"][1]["metrics"]["input_tokens"] == 2
     assert entries[1]["tools"] == []
     assert entries[1]["tool_count"] == 0
 
