@@ -580,6 +580,59 @@ class TestCommandHandling:
             )
 
     @pytest.mark.asyncio
+    async def test_router_agent_logs_canonical_thread_scope_for_plain_reply_commands(self) -> None:
+        """Router command ingress logs should use the resolved thread scope, not only raw m.thread metadata."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
+            bot.client = AsyncMock()
+            bot.client.user_id = bot.agent_user.user_id
+            bot.logger = MagicMock()
+            bot._handle_command = AsyncMock()
+            bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
+
+            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "event_id": "$event123",
+                    "sender": "@user:server",
+                    "origin_server_ts": 1234567890,
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "!schedule in 5 minutes test",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$reply123"}},
+                    },
+                },
+            )
+
+            with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
+                await bot._on_message(room, event)
+
+            bot._handle_command.assert_called_once()
+            bot.logger.info.assert_any_call(
+                "Received message",
+                event_id="$event123",
+                room_id="!test:server",
+                sender="@user:server",
+                thread_id="$thread-root",
+            )
+
+    @pytest.mark.asyncio
     async def test_router_command_blocked_by_reply_permissions(self) -> None:
         """Router should ignore commands from senders disallowed by router reply rules."""
         agent_user = AgentMatrixUser(

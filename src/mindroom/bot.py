@@ -1579,14 +1579,15 @@ class AgentBot:
     async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one text message inside the per-turn thread-history cache scope."""
         event_info = EventInfo.from_event(event.source)
+        assert self.client is not None
+        ingress_thread_id = await self._conversation_resolver.coalescing_thread_id(room, event)
         self.logger.info(
             "Received message",
             event_id=event.event_id,
             room_id=room.room_id,
             sender=event.sender,
-            thread_id=event_info.thread_id or event_info.thread_id_from_edit,
+            thread_id=ingress_thread_id,
         )
-        assert self.client is not None
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
             room_id=room.room_id,
