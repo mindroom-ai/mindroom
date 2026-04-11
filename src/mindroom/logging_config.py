@@ -11,9 +11,11 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     from mindroom.constants import RuntimePaths
 
-__all__ = ["get_logger", "setup_logging"]
+__all__ = ["bound_log_context", "get_logger", "setup_logging"]
 
 
 class _NioValidationFilter(logging.Filter):
@@ -189,3 +191,8 @@ def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
 
     """
     return structlog.get_logger(name)
+
+
+def bound_log_context(**context: object) -> AbstractContextManager[None]:
+    """Temporarily bind structured log fields for the current async/task scope."""
+    return structlog.contextvars.bound_contextvars(**context)

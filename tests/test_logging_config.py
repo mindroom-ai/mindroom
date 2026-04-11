@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 
 from mindroom.constants import RuntimePaths
-from mindroom.logging_config import get_logger, setup_logging
+from mindroom.logging_config import bound_log_context, get_logger, setup_logging
+from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,6 +60,38 @@ def test_setup_logging_json_mode_emits_expected_fields(
     assert payload["logger"] == "tests.logging"
     assert payload["room_id"] == "!room:example.org"
     assert "timestamp" in payload
+
+
+def test_bound_log_context_from_message_target_binds_and_restores_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scoped log context should include target fields only within the active scope."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    target = MessageTarget.resolve(
+        room_id="!room:example.org",
+        thread_id="$thread",
+        reply_to_event_id="$reply",
+    )
+
+    with bound_log_context(**target.log_context):
+        get_logger("tests.logging").info("scoped_event")
+    get_logger("tests.logging").info("outside_scope")
+
+    lines = capsys.readouterr().err.strip().splitlines()
+    scoped_payload = json.loads(lines[0])
+    outside_payload = json.loads(lines[1])
+
+    assert scoped_payload["event"] == "scoped_event"
+    assert scoped_payload["room_id"] == "!room:example.org"
+    assert scoped_payload["thread_id"] == "$thread"
+    assert outside_payload["event"] == "outside_scope"
+    assert "room_id" not in outside_payload
+    assert "thread_id" not in outside_payload
 
 
 def test_setup_logging_json_mode_includes_logger_for_foreign_logger(
