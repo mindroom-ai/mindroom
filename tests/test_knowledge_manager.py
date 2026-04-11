@@ -704,10 +704,13 @@ async def test_initialize_shared_knowledge_managers_resumes_partial_index_when_c
     _DummyChromaDb.metadatas = [{"source_path": "a.md"}]
 
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
-    config = _knowledge_test_config(
-        agents={},
-        models={},
-        knowledge_bases={"research": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"research": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+        ),
+        runtime_paths,
     )
     reset_collection = MagicMock(side_effect=AssertionError("partial index resume must not reset the collection"))
     monkeypatch.setattr(KnowledgeManager, "_reset_collection", reset_collection)
