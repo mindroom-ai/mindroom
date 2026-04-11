@@ -48,6 +48,7 @@ from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
     is_automation_source_kind,
+    is_voice_event,
     should_handle_interactive_text_response,
 )
 from mindroom.inbound_turn_normalizer import (
@@ -199,11 +200,15 @@ class TurnController:
         """Return the effective requester for one command-dispatch event."""
         return self._requester_user_id(sender=event.sender, source=event.source)
 
+    def _sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
+        """Return whether one sender may supply trusted ingress metadata overrides."""
+        return extract_agent_name(sender_id, self.deps.runtime.config, self.deps.runtime_paths) is not None
+
     def _is_trusted_internal_relay_event(self, event: _DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
         if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
             return False
-        if extract_agent_name(event.sender, self.deps.runtime.config, self.deps.runtime_paths) is None:
+        if not self._sender_is_trusted_for_ingress_metadata(event.sender):
             return False
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
@@ -299,14 +304,20 @@ class TurnController:
         requester_user_id: str,
         thread_history: Sequence[ResolvedVisibleMessage],
     ) -> bool:
-        """Return True when a newer unresponded message from the same sender exists."""
+        """Return True when a newer unresponded message from the same requester exists."""
         if isinstance(event, PreparedTextEvent) and is_automation_source_kind(event.source_kind_override or ""):
             return False
         event_ts = event.server_timestamp
         if event_ts is None or not thread_history:
             return False
         for message in thread_history:
-            if message.sender != requester_user_id:
+            if (
+                self._requester_user_id(
+                    sender=message.sender,
+                    source={"content": message.content},
+                )
+                != requester_user_id
+            ):
                 continue
             if message.timestamp is None or message.timestamp <= event_ts:
                 continue
@@ -317,6 +328,7 @@ class TurnController:
             if (
                 message.body
                 and isinstance(message.body, str)
+                and not is_voice_event(message, sender_is_trusted=self._sender_is_trusted_for_ingress_metadata)
                 and command_parser.parse(message.body.strip()) is not None
             ):
                 continue
@@ -1228,7 +1240,10 @@ class TurnController:
                 dispatch_timing.mark("dispatch_prepare_ready")
             if dispatch is None:
                 return
-            command = command_parser.parse(event.body) if not media_events else None
+
+            command = None
+            if not media_events and dispatch.envelope.source_kind != "voice":
+                command = command_parser.parse(event.body)
             if command:
                 if self.deps.agent_name == ROUTER_AGENT_NAME:
                     await self._execute_command(

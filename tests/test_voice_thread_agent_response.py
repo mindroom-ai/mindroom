@@ -181,6 +181,66 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
 
 
 @pytest.mark.asyncio
+async def test_agent_responds_to_command_like_voice_transcription_in_thread(mock_home_bot: AgentBot) -> None:
+    """Voice-originated !commands must still reach the agent as normal text."""
+    bot = mock_home_bot
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
+
+    voice_transcription_event = MagicMock(spec=nio.RoomMessageText)
+    voice_transcription_event.event_id = "$transcription_command_like"
+    voice_transcription_event.server_timestamp = 1000
+    voice_transcription_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
+    voice_transcription_event.body = "!schedule turn on the guest room lights"
+    voice_transcription_event.source = {
+        "content": {
+            "body": "!schedule turn on the guest room lights",
+            "com.mindroom.source_kind": "voice",
+            ORIGINAL_SENDER_KEY: "@user:example.com",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+            },
+        },
+    }
+
+    thread_history = [
+        make_visible_message(event_id="$thread_root", sender="@user:example.com", body="@home what lights are on?"),
+        make_visible_message(
+            event_id="$home_response",
+            sender="@mindroom_home:localhost",
+            body="The living room and kitchen lights are currently on.",
+        ),
+    ]
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history),
+        ),
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
+        patch("mindroom.turn_controller.extract_agent_name") as mock_planner_extract_agent,
+        patch(
+            "mindroom.turn_policy.get_agents_in_thread",
+            return_value=[MatrixID.parse("@mindroom_home:localhost")],
+        ),
+        patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+    ):
+        mock_extract_agent.side_effect = _extract_agent_side_effect
+        mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
+        mock_planner_extract_agent.side_effect = _extract_agent_side_effect
+
+        await bot._on_message(room, voice_transcription_event)
+
+        bot._generate_response.assert_called_once()
+        call_kwargs = bot._generate_response.call_args[1]
+        assert call_kwargs["prompt"] == "!schedule turn on the guest room lights"
+        assert call_kwargs["reply_to_event_id"] == "$transcription_command_like"
+        assert call_kwargs["thread_id"] == "$thread_root"
+
+
+@pytest.mark.asyncio
 async def test_voice_transcription_permissions_use_original_sender(mock_home_bot: AgentBot) -> None:
     """Per-user reply permissions should apply to the original voice sender, not router."""
     bot = mock_home_bot
