@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -41,16 +39,12 @@ class MessageTarget:
     def for_scheduled_task(
         cls,
         workflow: ScheduledWorkflow,
-        *,
-        config: Config,
-        runtime_paths: RuntimePaths,
     ) -> MessageTarget:
         """Resolve the delivery target for one scheduled workflow execution."""
         if workflow.room_id is None:
             msg = "Scheduled workflows require room_id to resolve a MessageTarget"
             raise ValueError(msg)
 
-        del config, runtime_paths
         return cls.resolve(
             room_id=workflow.room_id,
             thread_id=None if workflow.new_thread else workflow.thread_id,

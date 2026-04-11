@@ -117,8 +117,6 @@ class TestScheduledWorkflow:
 
     def test_message_target_for_scheduled_task_uses_persisted_thread_id(self) -> None:
         """Scheduled workflows should honor the persisted thread even if live routing is room mode."""
-        config = MagicMock()
-        config.get_entity_thread_mode.return_value = "room"
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -129,15 +127,10 @@ class TestScheduledWorkflow:
             new_thread=False,
         )
 
-        target = MessageTarget.for_scheduled_task(
-            workflow,
-            config=config,
-            runtime_paths=MagicMock(),
-        )
+        target = MessageTarget.for_scheduled_task(workflow)
 
         assert target.resolved_thread_id == "$thread-root"
         assert target.session_id == "!room:server:$thread-root"
-        config.get_entity_thread_mode.assert_not_called()
 
 
 @pytest.mark.asyncio

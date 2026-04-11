@@ -403,20 +403,6 @@ def _cleanup_task_if_current(task_id: str, running_tasks: dict[str, asyncio.Task
         del running_tasks[task_id]
 
 
-def _scheduled_workflow_target(
-    workflow: ScheduledWorkflow,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> MessageTarget:
-    """Return the canonical target for one scheduled workflow snapshot."""
-    return MessageTarget.for_scheduled_task(
-        workflow,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-
-
 def _parse_task_records_from_state(
     room_id: str,
     state_response: nio.RoomGetStateResponse,
@@ -754,8 +740,6 @@ async def _execute_scheduled_workflow(
 
     target = MessageTarget.for_scheduled_task(
         workflow,
-        config=config,
-        runtime_paths=runtime_paths,
     )
 
     with bound_log_context(**target.log_context):
@@ -834,7 +818,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         logger.error("No room_id provided for recurring task", task_id=task_id)
         return
 
-    current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+    current_target = MessageTarget.for_scheduled_task(workflow)
     try:
         while True:
             latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
@@ -845,7 +829,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             latest_workflow = latest_task.workflow
             workflow = latest_workflow
-            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+            current_target = MessageTarget.for_scheduled_task(workflow)
             with bound_log_context(**current_target.log_context):
                 cron_schedule = latest_workflow.cron_schedule
                 if not cron_schedule:
@@ -878,11 +862,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
                     if _workflows_differ(workflow, refreshed_workflow):
                         workflow = refreshed_workflow
-                        current_target = _scheduled_workflow_target(
-                            workflow,
-                            config=config,
-                            runtime_paths=runtime_paths,
-                        )
+                        current_target = MessageTarget.for_scheduled_task(workflow)
                         workflow_changed = True
                         break
 
@@ -904,7 +884,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     return
                 if _workflows_differ(workflow, latest_workflow):
                     workflow = latest_workflow
-                    current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+                    current_target = MessageTarget.for_scheduled_task(workflow)
                     continue
 
                 await _execute_scheduled_workflow(client, workflow, config, runtime_paths, task_id=task_id)
@@ -943,7 +923,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
         logger.error("No room_id provided for one-time task", task_id=task_id)
         return
 
-    current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+    current_target = MessageTarget.for_scheduled_task(workflow)
     latest_pending_task: ScheduledTaskRecord | None = None
     try:
         while True:
@@ -955,7 +935,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
 
             latest_workflow = latest_task.workflow
             workflow = latest_workflow
-            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+            current_target = MessageTarget.for_scheduled_task(workflow)
             with bound_log_context(**current_target.log_context):
                 execute_at = latest_workflow.execute_at
                 if not execute_at:
@@ -980,7 +960,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
         latest_workflow = latest_before_execute.workflow
         latest_pending_task = latest_before_execute
         workflow = latest_workflow
-        current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+        current_target = MessageTarget.for_scheduled_task(workflow)
         with bound_log_context(**current_target.log_context):
             if not latest_workflow.execute_at:
                 logger.error("No execution time provided for one-time task", task_id=task_id)
@@ -1012,14 +992,14 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
             workflow = latest_pending_task.workflow
-            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+            current_target = MessageTarget.for_scheduled_task(workflow)
         with bound_log_context(**current_target.log_context):
             logger.info("one_time_task_cancelled", task_id=task_id)
         raise
     except Exception as e:
         if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
             workflow = latest_pending_task.workflow
-            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+            current_target = MessageTarget.for_scheduled_task(workflow)
         with bound_log_context(**current_target.log_context):
             logger.exception("one_time_task_failed", task_id=task_id)
             if workflow.room_id:
