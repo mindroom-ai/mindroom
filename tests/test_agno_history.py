@@ -41,6 +41,7 @@ from mindroom.history.compaction import (
     estimate_agent_static_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
+    estimate_session_summary_tokens,
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
@@ -1419,6 +1420,45 @@ def test_estimate_prompt_visible_history_tokens_honors_custom_system_message_rol
     assert estimated_tokens == estimate_history_messages_tokens(expected_messages)
 
 
+def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
+    session = _session(
+        "session-1",
+        summary=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+    )
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="messages", limit=3),
+        max_tool_calls_from_history=None,
+    )
+
+    estimated_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
+
+    expected_wrapper = (
+        "Here is a brief summary of your previous interactions:\n\n"
+        "<summary_of_previous_interactions>\n"
+        "merged summary\n"
+        "</summary_of_previous_interactions>\n\n"
+        "Note: this information is from previous interactions and may be outdated. "
+        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
+    )
+
+    assert estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
+    assert estimated_tokens == estimate_text_tokens(expected_wrapper)
+    assert estimated_tokens > 0
+
+
+def test_estimate_session_summary_tokens_none() -> None:
+    assert estimate_session_summary_tokens(None) == 0
+
+
+def test_estimate_session_summary_tokens_empty() -> None:
+    assert estimate_session_summary_tokens("") == 0
+    assert estimate_session_summary_tokens("   ") == 0
+
+
 @pytest.mark.asyncio
 async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -2781,7 +2821,7 @@ async def test_prepare_history_for_run_forced_compaction_leaves_no_effective_rep
     assert prepared.compaction_outcomes[0].runs_after == 0
     assert prepared.compaction_outcomes[0].summary == "merged summary"
     assert prepared.replay_plan is not None
-    assert prepared.replay_plan.mode == "configured"
+    assert prepared.replay_plan.mode == "disabled"
     assert prepared.replay_plan.estimated_tokens == 0
     assert prepared.replays_persisted_history is False
 
