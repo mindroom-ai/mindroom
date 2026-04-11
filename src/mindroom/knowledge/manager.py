@@ -502,14 +502,12 @@ class KnowledgeManager:
     def _startup_index_mode(self) -> Literal["full_reindex", "resume", "incremental"]:
         persisted_state = self._load_persisted_indexing_state()
         if persisted_state is None:
-            return "resume"
-        if persisted_state.settings != self._indexing_settings:
+            # A missing checkpoint can be legacy state worth resuming, but a
+            # present unreadable checkpoint is unsafe once vectors already exist.
+            return "full_reindex" if self._indexing_settings_path.exists() and self._has_existing_index() else "resume"
+        if persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING:
             return "full_reindex"
-        if persisted_state.status == _INDEXING_STATUS_RESETTING:
-            return "full_reindex"
-        if persisted_state.status == _INDEXING_STATUS_INDEXING:
-            return "resume"
-        if not self._has_existing_index():
+        if persisted_state.status == _INDEXING_STATUS_INDEXING or not self._has_existing_index():
             return "resume"
         return "incremental"
 

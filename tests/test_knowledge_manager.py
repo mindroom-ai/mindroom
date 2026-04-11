@@ -735,6 +735,49 @@ async def test_initialize_shared_knowledge_managers_resumes_partial_index_when_c
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_full_reindexes_when_checkpoint_is_corrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt checkpoint with existing vectors must force a safe full rebuild."""
+    _DummyChromaDb.metadatas = [{"source_path": "a.md"}]
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "a.md").write_text("A\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"research": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+        ),
+        runtime_paths,
+    )
+    seed_manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    seed_manager._indexing_settings_path.write_text("{not-json", encoding="utf-8")
+
+    initialize = AsyncMock()
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 1, "indexed_count": 0, "removed_count": 0})
+    monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+
+    try:
+        await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+
+        initialize.assert_awaited_once()
+        sync_indexed_files.assert_not_awaited()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_maintains_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
