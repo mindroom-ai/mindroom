@@ -36,6 +36,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
     install_send_response_mock,
+    replace_turn_engine_deps,
     runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
@@ -92,6 +93,15 @@ def _make_bot(
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     wrap_extracted_collaborators(bot)
+    replace_turn_engine_deps(
+        bot,
+        dispatch_planner=bot._dispatch_planner,
+        delivery_gateway=bot._delivery_gateway,
+        response_coordinator=bot._response_coordinator,
+        resolver=bot._conversation_resolver,
+        normalizer=bot._inbound_turn_normalizer,
+        state_writer=bot._conversation_state_writer,
+    )
     return bot
 
 
@@ -263,8 +273,13 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), media_events or []))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         assert calls == []
         await asyncio.sleep(0.03)
 
@@ -291,9 +306,19 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
     assert calls == [
@@ -313,9 +338,19 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
     assert mock_dispatch.await_count == 1
@@ -347,9 +382,19 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(image_event, room, source_kind="image", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            image_event,
+            room,
+            source_kind="image",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            text_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
     assert calls == [
@@ -382,13 +427,23 @@ async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> 
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            text_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         # Wait for debounce to fire (10ms) so gate enters upload grace
         await asyncio.sleep(0.02)
         assert calls == []
 
-        await bot._enqueue_for_dispatch(image_event, room, source_kind="image", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            image_event,
+            room,
+            source_kind="image",
+            requester_user_id="@user:localhost",
+        )
         await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [
@@ -422,15 +477,30 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
         _ = handled_turn
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            text_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         # Wait for debounce to fire (10ms) so gate enters upload grace
         await asyncio.sleep(0.02)
         assert calls == []
 
-        await bot._enqueue_for_dispatch(first_image, room, source_kind="image", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            first_image,
+            room,
+            source_kind="image",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.01)
-        await bot._enqueue_for_dispatch(second_image, room, source_kind="image", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            second_image,
+            room,
+            source_kind="image",
+            requester_user_id="@user:localhost",
+        )
         await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [(["$m1", "$img1", "$img2"], 2)]
@@ -456,13 +526,23 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         # Wait for debounce to fire (40ms) so gate enters upload grace
         await asyncio.sleep(0.06)
         assert calls == []
 
-        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
 
         assert calls == [("first turn", ["$m1"])]
 
@@ -494,11 +574,21 @@ async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Pa
         _ = handled_turn
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            text_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await _wait_for(lambda: len(calls) == 1)
 
-        await bot._enqueue_for_dispatch(image_event, room, source_kind="image", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            image_event,
+            room,
+            source_kind="image",
+            requester_user_id="@user:localhost",
+        )
         await _wait_for(lambda: len(calls) == 2)
 
     assert calls == [
@@ -527,9 +617,19 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(alice, room, source_kind="message", requester_user_id="@alice:localhost")
-        await bot._enqueue_for_dispatch(bob, room, source_kind="message", requester_user_id="@bob:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            alice,
+            room,
+            source_kind="message",
+            requester_user_id="@alice:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            bob,
+            room,
+            source_kind="message",
+            requester_user_id="@bob:localhost",
+        )
         await asyncio.sleep(0.03)
 
     assert sorted(calls) == [["$m1"], ["$m2"]]
@@ -642,9 +742,19 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(thread_a, room, source_kind="message", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(thread_b, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            thread_a,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            thread_b,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
     assert sorted(calls) == [["$m1"], ["$m2"]]
@@ -670,9 +780,19 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(command, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            command,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
 
     assert calls == [
         ("tell me more", ["$m1"]),
@@ -701,12 +821,27 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.01)
-        await bot._enqueue_for_dispatch(command, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            command,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.005)
-        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
         assert calls == [
@@ -743,13 +878,23 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            text_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         # Wait for debounce to fire (10ms) so gate enters upload grace
         await asyncio.sleep(0.02)
         assert calls == []
 
-        await bot._enqueue_for_dispatch(command_event, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            command_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
 
     assert calls == [
         ("first", ["$m1"]),
@@ -783,13 +928,28 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
 
-        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(third, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            third,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
         assert calls == [["$m1"]]
@@ -831,8 +991,13 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         _ = media_events, handled_turn
         calls.append(dispatched_event.body)
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(event, room, source_kind=source_kind, requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind=source_kind,
+            requester_user_id="@user:localhost",
+        )
 
     assert calls == [f"{source_kind} task"]
 
@@ -878,12 +1043,22 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first, room, source_kind="scheduled", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="scheduled",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
 
-        await bot._enqueue_for_dispatch(second, room, source_kind="scheduled", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="scheduled",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
         assert calls == [["$m1"]]
@@ -917,8 +1092,13 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         entered_dispatch.set()
         await release_dispatch.wait()
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
         await entered_dispatch.wait()
 
@@ -952,8 +1132,13 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await bot.prepare_for_sync_shutdown()
 
     assert calls == [("hello", ["$m1"])]
@@ -979,8 +1164,13 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         # Wait for debounce to fire (10ms) so gate enters upload grace
         await asyncio.sleep(0.02)
         assert calls == []
@@ -1016,13 +1206,23 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
             entered_dispatch.set()
             await release_dispatch.wait()
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
         await entered_dispatch.wait()
 
         # Enqueue another message while first is in-flight
-        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
 
         # Start shutdown — should wait for in-flight, then flush remaining without grace
         shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
@@ -1064,9 +1264,14 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
             entered_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         first_task = asyncio.create_task(
-            bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost"),
+            bot._turn_engine._enqueue_for_dispatch(
+                first,
+                room,
+                source_kind="message",
+                requester_user_id="@user:localhost",
+            ),
         )
         await entered_dispatch.wait()
 
@@ -1075,7 +1280,12 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
         assert bot._coalescing_gate._gates[retargeted_key].phase is GatePhase.IN_FLIGHT
 
         for followup in followups:
-            await bot._enqueue_for_dispatch(followup, room, source_kind="message", requester_user_id="@user:localhost")
+            await bot._turn_engine._enqueue_for_dispatch(
+                followup,
+                room,
+                source_kind="message",
+                requester_user_id="@user:localhost",
+            )
 
         gate = bot._coalescing_gate._gates[retargeted_key]
         assert gate.phase is GatePhase.IN_FLIGHT
@@ -1098,11 +1308,16 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     event = _text_event(event_id="$m1", body="hello")
 
     with (
-        patch.object(bot, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+        patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock()),
     ):
-        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         assert not bot._coalescing_gate.is_idle()
 
         await bot.cleanup()
@@ -1138,16 +1353,26 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         started_at = time.monotonic()
-        await bot._enqueue_for_dispatch(text_event, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            text_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         # Wait for debounce to fire (10ms) so gate enters upload grace
         await asyncio.sleep(0.02)
         assert calls == []
 
         for delay, image_event in zip((0.01, 0.01, 0.01, 0.01), image_events, strict=True):
             await asyncio.sleep(delay)
-            await bot._enqueue_for_dispatch(image_event, room, source_kind="image", requester_user_id="@user:localhost")
+            await bot._turn_engine._enqueue_for_dispatch(
+                image_event,
+                room,
+                source_kind="image",
+                requester_user_id="@user:localhost",
+            )
         await _wait_for(lambda: len(calls) == 1, deadline_seconds=0.5)
 
     assert calls == [["$m1", "$img1", "$img2", "$img3", "$img4"]]
@@ -1179,8 +1404,18 @@ async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> 
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
-        await bot._enqueue_for_dispatch(first, room, source_kind="message", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(second, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            first,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            second,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.05)
 
     assert bot.handled_turn_ledger.has_responded("$m1")
@@ -1212,8 +1447,13 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         # Zero debounce flushes synchronously — should already be dispatched
         await asyncio.sleep(0.01)
 
@@ -1241,9 +1481,19 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._enqueue_for_dispatch(first_cmd, room, source_kind="message", requester_user_id="@user:localhost")
-        await bot._enqueue_for_dispatch(second_cmd, room, source_kind="message", requester_user_id="@user:localhost")
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_engine._enqueue_for_dispatch(
+            first_cmd,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_engine._enqueue_for_dispatch(
+            second_cmd,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
 
     assert calls == [
         ("!help", ["$c1"]),
@@ -1258,9 +1508,14 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello")
 
-    with patch.object(bot, "_dispatch_text_message", new=AsyncMock()):
+    with patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock()):
         assert bot._coalescing_gate.is_idle()
-        await bot._enqueue_for_dispatch(event, room, source_kind="message", requester_user_id="@user:localhost")
+        await bot._turn_engine._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
         await asyncio.sleep(0.03)
 
     assert bot._coalescing_gate.is_idle()
@@ -1302,7 +1557,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
     ):
-        await bot._dispatch_text_message(room, older_event, "@user:localhost")
+        await bot._turn_engine._dispatch_text_message(room, older_event, "@user:localhost")
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
@@ -1339,7 +1594,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
-        await bot._dispatch_text_message(room, event, "@user:localhost")
+        await bot._turn_engine._dispatch_text_message(room, event, "@user:localhost")
 
     # Dispatch proceeded to completion
     assert bot.handled_turn_ledger.has_responded("$m1")
@@ -1565,7 +1820,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
-        await bot._dispatch_text_message(room, older_event, "@user:localhost")
+        await bot._turn_engine._dispatch_text_message(room, older_event, "@user:localhost")
 
     # The older message must NOT be suppressed — dispatch action should be called
     action_mock.assert_awaited_once()
@@ -1612,7 +1867,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
-        await bot._dispatch_text_message(room, older_event, "@user:localhost")
+        await bot._turn_engine._dispatch_text_message(room, older_event, "@user:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -1668,7 +1923,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
-        await bot._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
+        await bot._turn_engine._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -1716,7 +1971,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
-        await bot._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
+        await bot._turn_engine._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -1766,7 +2021,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._dispatch_planner, "log_dispatch_latency"),
     ):
-        await bot._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")
+        await bot._turn_engine._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")
 
     # First fire must NOT be suppressed
     action_mock.assert_awaited_once()
@@ -1809,7 +2064,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
     ):
-        await bot._dispatch_text_message(room, coalesced_event, "@user:localhost")
+        await bot._turn_engine._dispatch_text_message(room, coalesced_event, "@user:localhost")
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
@@ -1850,7 +2105,7 @@ async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> Non
         patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
     ):
-        await bot._dispatch_text_message(room, voice_event, "@user:localhost")
+        await bot._turn_engine._dispatch_text_message(room, voice_event, "@user:localhost")
 
     # Voice synthetic MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
@@ -1890,9 +2145,9 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
     handle_cmd_mock = AsyncMock()
     with (
         patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot, "_handle_command", new=handle_cmd_mock),
+        patch.object(bot._dispatch_planner, "execute_command", new=handle_cmd_mock),
     ):
-        await bot._dispatch_text_message(room, cmd_event, "@user:localhost")
+        await bot._turn_engine._dispatch_text_message(room, cmd_event, "@user:localhost")
 
     # Command must have been dispatched, not suppressed
     handle_cmd_mock.assert_awaited_once()

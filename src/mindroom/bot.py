@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import nio
@@ -22,11 +21,7 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     emit,
 )
-from mindroom.hooks.ingress import (
-    hook_ingress_policy,
-    is_automation_source_kind,
-    should_handle_interactive_text_response,
-)
+from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.sender import send_hook_message
 from mindroom.hooks.types import EVENT_AGENT_STARTED, EVENT_AGENT_STOPPED, EVENT_BOT_READY, EVENT_REACTION_RECEIVED
@@ -42,10 +37,6 @@ from mindroom.matrix.identity import (
     extract_agent_name,
     is_agent_id,
 )
-from mindroom.matrix.message_content import (
-    extract_edit_body,
-    is_v2_sidecar_text_preview,
-)
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
@@ -59,20 +50,10 @@ from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
-    matrix_run_metadata_for_handled_turn,
     record_handled_turn,
 )
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
-from mindroom.thread_utils import (
-    should_agent_respond,
-)
-from mindroom.timing import (
-    attach_dispatch_pipeline_timing,
-    create_dispatch_pipeline_timing,
-    get_dispatch_pipeline_timing,
-)
-from mindroom.timing import timing_scope as timing_scope_context
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -84,38 +65,21 @@ from . import constants, interactive
 from .agents import (
     create_agent,
     get_rooms_for_entity,
-    remove_run_by_event_id,
     show_tool_calls_for_agent,
 )
-from .attachments import (
-    merge_attachment_ids,
-    parse_attachment_ids_from_event_source,
-)
 from .authorization import (
-    get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import (
     CoalescedBatch,
     CoalescingGate,
-    CoalescingKey,
-    PendingEvent,
-    PreparedTextEvent,
-    build_batch_dispatch_event,
-    coalesced_prompt,
+    PreparedTextEvent,  # noqa: F401
 )
 from .commands import config_confirmation
-from .commands.handler import CommandEvent, _generate_welcome_message
-from .commands.parsing import Command, command_parser
+from .commands.handler import _generate_welcome_message
 from .constants import (
-    ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
-    STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_avatar_path,
 )
@@ -127,9 +91,6 @@ from .conversation_resolver import (
 from .conversation_state_writer import (
     ConversationStateWriter,
     ConversationStateWriterDeps,
-    LoadPersistedTurnMetadataRequest,
-    PersistedTurnMetadata,
-    RemoveStaleRunsRequest,
 )
 from .delivery_gateway import (
     DeliveryGateway,
@@ -145,22 +106,15 @@ from .dispatch_planner import (
     DispatchHookService,
     DispatchPlanner,
     DispatchPlannerDeps,
-    ResponseAction,
 )
-from .handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
+from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
+from .handled_turns import HandledTurnLedger, HandledTurnState
 from .inbound_turn_normalizer import (
-    BatchMediaAttachmentRequest,
     DispatchPayload,
-    DispatchPayloadWithAttachmentsRequest,
     InboundTurnNormalizer,
     InboundTurnNormalizerDeps,
-    TextNormalizationRequest,
-    VoiceNormalizationRequest,
 )
-from .knowledge.utils import (
-    KnowledgeAccessSupport,
-    MultiKnowledgeVectorDb,
-)
+from .knowledge.utils import KnowledgeAccessSupport, MultiKnowledgeVectorDb
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -188,6 +142,7 @@ from .scheduling import (
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
+from .turn_engine import TurnEngine, TurnEngineDeps
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -196,10 +151,8 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
-    from agno.media import Image
 
     from mindroom.config.main import Config
-    from mindroom.history.types import HistoryScope
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.event_cache import ConversationEventCache
     from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
@@ -345,25 +298,8 @@ type _MediaDispatchEvent = (
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
 )
-type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
-
-type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
-
-type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
 
 type _MessageContext = MessageContext
-
-
-@dataclass(frozen=True)
-class _PrecheckedEvent[T]:
-    """A raw or prepared event that has already passed ingress prechecks."""
-
-    event: T
-    requester_user_id: str
-
-
-type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
-type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
 
 
 class AgentBot:
@@ -401,6 +337,7 @@ class AgentBot:
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _standalone_runtime_support: StandaloneRuntimeSupport | None
+    _turn_engine: TurnEngine
 
     def __init__(
         self,
@@ -438,11 +375,12 @@ class AgentBot:
 
     def _init_runtime_components(self) -> None:
         """Initialize runtime-only helpers that depend on bound instance methods."""
-        stable_matrix_id = MatrixID.from_agent(
-            self.agent_name,
-            self.config.get_domain(self.runtime_paths),
-            self.runtime_paths,
-        )
+        runtime_matrix_id = self.config.get_ids(self.runtime_paths).get(self.agent_name)
+        if self.agent_user.user_id:
+            runtime_matrix_id = self.matrix_id
+        elif runtime_matrix_id is None:
+            msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
+            raise KeyError(msg)
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             enabled=self._coalescing_enabled,
@@ -481,7 +419,7 @@ class AgentBot:
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
-                matrix_id=stable_matrix_id,
+                matrix_id=runtime_matrix_id,
                 conversation_access=self._conversation_access,
             ),
         )
@@ -491,7 +429,7 @@ class AgentBot:
                 logger=self.logger,
                 storage_path=self.storage_path,
                 runtime_paths=self.runtime_paths,
-                sender_domain=stable_matrix_id.domain,
+                sender_domain=runtime_matrix_id.domain,
                 conversation_resolver=self._conversation_resolver,
             ),
         )
@@ -501,7 +439,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 logger=self.logger,
-                sender_domain=stable_matrix_id.domain,
+                sender_domain=runtime_matrix_id.domain,
                 resolver=self._conversation_resolver,
                 redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
@@ -515,7 +453,7 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             storage_path=self.storage_path,
             agent_name=self.agent_name,
-            matrix_id=stable_matrix_id,
+            matrix_id=runtime_matrix_id,
             resolver=self._conversation_resolver,
             hook_context=self._hook_context_support,
         )
@@ -534,7 +472,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 storage_path=self.storage_path,
                 agent_name=self.agent_name,
-                matrix_full_id=stable_matrix_id.full_id,
+                matrix_full_id=runtime_matrix_id.full_id,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
                 knowledge_access=self._knowledge_access_support,
@@ -546,6 +484,20 @@ class AgentBot:
         self._dispatch_hook_service = DispatchHookService(
             hook_context=self._hook_context_support,
         )
+        self._edit_regenerator = EditRegenerator(
+            EditRegeneratorDeps(
+                runtime=self._runtime_view,
+                get_logger=lambda: self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                get_handled_turn_ledger=lambda: self.handled_turn_ledger,
+                resolver=self._conversation_resolver,
+                state_writer=self._conversation_state_writer,
+                tool_runtime=self._tool_runtime_support,
+                dispatch_hook_service=self._dispatch_hook_service,
+                generate_response=lambda **kwargs: self._generate_response(**kwargs),
+            ),
+        )
         self._dispatch_planner = DispatchPlanner(
             DispatchPlannerDeps(
                 runtime=self._runtime_view,
@@ -554,13 +506,32 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 storage_path=self.storage_path,
                 agent_name=self.agent_name,
-                matrix_id=stable_matrix_id,
+                matrix_id=runtime_matrix_id,
                 normalizer=self._inbound_turn_normalizer,
                 resolver=self._conversation_resolver,
                 delivery_gateway=self._delivery_gateway,
                 response_coordinator=self._response_coordinator,
                 hook_service=self._dispatch_hook_service,
                 tool_runtime=self._tool_runtime_support,
+            ),
+        )
+        self._turn_engine = TurnEngine(
+            TurnEngineDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                matrix_id=runtime_matrix_id,
+                handled_turn_ledger=self.handled_turn_ledger,
+                conversation_access=self._conversation_access,
+                resolver=self._conversation_resolver,
+                normalizer=self._inbound_turn_normalizer,
+                dispatch_planner=self._dispatch_planner,
+                response_coordinator=self._response_coordinator,
+                delivery_gateway=self._delivery_gateway,
+                state_writer=self._conversation_state_writer,
+                coalescing_gate=self._coalescing_gate,
+                edit_regenerator=self._edit_regenerator,
             ),
         )
 
@@ -699,181 +670,6 @@ class AgentBot:
     ) -> None:
         """Mark one or more source events as handled by the same response."""
         record_handled_turn(self.handled_turn_ledger, handled_turn)
-
-    def _dispatch_matrix_run_metadata(
-        self,
-        handled_turn: HandledTurnState,
-    ) -> dict[str, Any] | None:
-        """Build run metadata extras for one dispatch turn."""
-        return matrix_run_metadata_for_handled_turn(handled_turn)
-
-    def _response_history_scope_for_action(
-        self,
-        response_action: ResponseAction,
-    ) -> HistoryScope | None:
-        """Return the persisted history scope used by one response action."""
-        if response_action.kind == "team":
-            assert response_action.form_team is not None
-            return self._conversation_state_writer.team_history_scope(response_action.form_team.eligible_members)
-        if response_action.kind == "individual":
-            return self._conversation_state_writer.history_scope()
-        return None
-
-    def _handled_turn_with_response_context(
-        self,
-        handled_turn: HandledTurnState,
-        *,
-        history_scope: HistoryScope | None,
-        conversation_target: MessageTarget | None,
-    ) -> HandledTurnState:
-        """Attach the persisted regeneration context for one response."""
-        return handled_turn.with_response_context(
-            response_owner=self.agent_name,
-            history_scope=history_scope,
-            conversation_target=conversation_target,
-        )
-
-    def _load_persisted_turn_metadata(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        thread_id: str | None,
-        original_event_id: str,
-        requester_user_id: str,
-    ) -> PersistedTurnMetadata | None:
-        """Load persisted run metadata for one edited turn when available."""
-        return self._conversation_state_writer.load_persisted_turn_metadata(
-            LoadPersistedTurnMetadataRequest(
-                room=room,
-                thread_id=thread_id,
-                original_event_id=original_event_id,
-                requester_user_id=requester_user_id,
-            ),
-            build_message_target=self._conversation_resolver.build_message_target,
-            build_tool_execution_identity=self._tool_runtime_support.build_execution_identity,
-        )
-
-    async def _edit_regeneration_context(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        *,
-        conversation_target: MessageTarget | None,
-    ) -> MessageContext:
-        """Return edit context, reusing the recorded thread root when available."""
-        context = await self._conversation_resolver.extract_message_context(room, event)
-        if conversation_target is None or conversation_target.resolved_thread_id is None:
-            return context
-        if context.thread_id == conversation_target.resolved_thread_id:
-            return context
-        assert self.client is not None
-        return MessageContext(
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=True,
-            thread_id=conversation_target.resolved_thread_id,
-            thread_history=await self._conversation_resolver.fetch_thread_history(
-                self.client,
-                room.room_id,
-                conversation_target.resolved_thread_id,
-            ),
-            mentioned_agents=context.mentioned_agents,
-            has_non_agent_mentions=context.has_non_agent_mentions,
-            requires_full_thread_history=context.requires_full_thread_history,
-        )
-
-    def _remove_stale_runs_for_turn_record(
-        self,
-        *,
-        turn_record: HandledTurnRecord,
-        recorded_turn_context_available: bool,
-        room: nio.MatrixRoom,
-        thread_id: str | None,
-        original_event_id: str,
-        requester_user_id: str,
-    ) -> None:
-        """Remove stale persisted runs using the recorded turn context when possible."""
-        if (
-            recorded_turn_context_available
-            and turn_record.conversation_target is not None
-            and turn_record.history_scope is not None
-        ):
-            self._conversation_state_writer.remove_stale_runs_for_turn_record(
-                turn_record=turn_record,
-                requester_user_id=requester_user_id,
-                build_tool_execution_identity=self._tool_runtime_support.build_execution_identity,
-                remove_run_by_event_id_fn=remove_run_by_event_id,
-            )
-            return
-        self._remove_stale_runs_for_edited_message(
-            room=room,
-            thread_id=thread_id,
-            original_event_id=original_event_id,
-            requester_user_id=requester_user_id,
-        )
-
-    def _has_newer_unresponded_in_thread(
-        self,
-        event: _TextDispatchEvent,
-        requester_user_id: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-    ) -> bool:
-        """Return True when a newer unresponded message from the same sender exists.
-
-        Guards against duplicate replies during backlog replay: if the bot
-        restarts and processes an older message while a newer one from the
-        same sender is already visible in the thread, the older dispatch
-        should be skipped.
-
-        Automation events (scheduled tasks, hooks) are always independent
-        actions and must never be suppressed.  Command messages (``!help``,
-        etc.) are also excluded — they are handled separately and should
-        not suppress earlier questions.
-        """
-        # Automation events (scheduled tasks, hooks) are independent — never suppress.
-        # User-originated synthetics (coalesced batches, voice) must still be guarded.
-        if isinstance(event, PreparedTextEvent) and is_automation_source_kind(event.source_kind_override or ""):
-            return False
-        event_ts = event.server_timestamp
-        if event_ts is None or not thread_history:
-            return False
-        for msg in thread_history:
-            if msg.sender != requester_user_id:
-                continue
-            if msg.timestamp is None or msg.timestamp <= event_ts:
-                continue
-            if msg.event_id == event.event_id:
-                continue
-            if self.handled_turn_ledger.has_responded(msg.event_id):
-                continue
-            # Commands are handled independently — skip them as suppression candidates.
-            if msg.body and isinstance(msg.body, str) and command_parser.parse(msg.body.strip()) is not None:
-                continue
-            self.logger.info(
-                "Skipping older message — newer unresponded message from same sender in thread",
-                skipped_event_id=event.event_id,
-                newer_event_id=msg.event_id,
-            )
-            return True
-        return False
-
-    def _should_skip_deep_synthetic_full_dispatch(
-        self,
-        *,
-        event_id: str,
-        envelope: MessageEnvelope,
-    ) -> bool:
-        """Return True when a deep synthetic hook relay must stop before dispatch."""
-        ingress_policy = hook_ingress_policy(envelope)
-        if ingress_policy.allow_full_dispatch:
-            return False
-        self.logger.debug(
-            "Ignoring deep synthetic hook relay before command/response dispatch",
-            event_id=event_id,
-            source_kind=envelope.source_kind,
-            hook_source=envelope.hook_source,
-            message_received_depth=envelope.message_received_depth,
-        )
-        return True
 
     async def _emit_reaction_received_hooks(
         self,
@@ -1486,406 +1282,13 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _coalescing_key_for_event(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        requester_user_id: str,
-    ) -> CoalescingKey:
-        """Return the sender/thread-scoped dispatch key for one event."""
-        return (
-            room.room_id,
-            await self._conversation_resolver.coalescing_thread_id(room, event),
-            requester_user_id,
-        )
-
-    async def _enqueue_for_dispatch(
-        self,
-        event: _DispatchEvent,
-        room: nio.MatrixRoom,
-        *,
-        source_kind: str,
-        requester_user_id: str | None = None,
-        coalescing_key: CoalescingKey | None = None,
-    ) -> None:
-        """Route one inbound event through the live coalescing gate."""
-        dispatch_timing = get_dispatch_pipeline_timing(event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("gate_enter")
-        effective_requester_user_id = requester_user_id or self._requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
-        if self._is_trusted_internal_relay_event(event):
-            if dispatch_timing is not None:
-                dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
-                dispatch_timing.mark("gate_exit")
-            trusted_relay_event = cast("_TextDispatchEvent", event)
-            await self._dispatch_text_message(
-                room,
-                trusted_relay_event,
-                effective_requester_user_id,
-            )
-            return
-        await self._coalescing_gate.enqueue(
-            coalescing_key or await self._coalescing_key_for_event(room, event, effective_requester_user_id),
-            PendingEvent(
-                event=event,
-                room=room,
-                source_kind=source_kind,
-            ),
-        )
-
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
-        """Dispatch one flushed batch through the normal text pipeline."""
-        dispatch_event = build_batch_dispatch_event(batch)
-        dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("gate_exit")
-        batch_coalescing_key = await self._coalescing_key_for_event(
-            batch.room,
-            batch.primary_event,
-            batch.requester_user_id,
-        )
-        # The first room message opens the gate with thread_id=None, but dispatch
-        # resolves that turn into a new thread rooted at the source event ID.
-        canonical_key = (
-            batch.room.room_id,
-            self._conversation_resolver.build_message_target(
-                room_id=batch.room.room_id,
-                thread_id=batch_coalescing_key[1],
-                reply_to_event_id=dispatch_event.event_id,
-                event_source=dispatch_event.source,
-            ).resolved_thread_id,
-            batch.requester_user_id,
-        )
-        self._coalescing_gate.retarget(batch_coalescing_key, canonical_key)
-        async with self._conversation_resolver.turn_thread_cache_scope():
-            await self._dispatch_text_message(
-                batch.room,
-                dispatch_event,
-                batch.requester_user_id,
-                media_events=batch.media_events or None,
-                handled_turn=HandledTurnState.create(
-                    batch.source_event_ids,
-                    source_event_prompts=batch.source_event_prompts,
-                ),
-            )
+        """Delegate one flushed coalesced batch to the turn engine."""
+        await self._turn_engine.handle_coalesced_batch(batch)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        async with self._conversation_resolver.turn_thread_cache_scope():
-            await self._handle_message_inner(room, event)
-
-    async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        """Handle one text message inside the per-turn thread-history cache scope."""
-        event_info = EventInfo.from_event(event.source)
-        assert self.client is not None
-        ingress_thread_id = await self._conversation_resolver.coalescing_thread_id(room, event)
-        self.logger.info(
-            "Received message",
-            event_id=event.event_id,
-            room_id=room.room_id,
-            sender=event.sender,
-            thread_id=ingress_thread_id,
-        )
-        dispatch_timing = create_dispatch_pipeline_timing(
-            event_id=event.event_id,
-            room_id=room.room_id,
-        )
-        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        await self._conversation_access.append_live_event(room.room_id, event, event_info=event_info)
-        if not isinstance(event.body, str):
-            return
-        # Skip messages that are still being streamed (use metadata, not text pattern)
-        event_content = event.source.get("content") if isinstance(event.source, dict) else None
-        if isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
-            STREAM_STATUS_PENDING,
-            STREAM_STATUS_STREAMING,
-        }:
-            return
-
-        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
-        if prechecked_event is None:
-            return
-
-        if event_info.is_edit:
-            await self._handle_message_edit(
-                room,
-                prechecked_event.event,
-                event_info,
-                requester_user_id=prechecked_event.requester_user_id,
-            )
-            return
-
-        prepared_event = await self._inbound_turn_normalizer.resolve_text_event(
-            TextNormalizationRequest(event=prechecked_event.event),
-        )
-        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
-        envelope = self._conversation_resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=prepared_event,
-            requester_user_id=prechecked_event.requester_user_id,
-        )
-        if self._should_skip_deep_synthetic_full_dispatch(
-            event_id=prepared_event.event_id,
-            envelope=envelope,
-        ):
-            return
-        if should_handle_interactive_text_response(envelope):
-            await interactive.handle_text_response(self.client, room, prepared_event, self.agent_name)
-        coalescing_thread_id = await self._conversation_resolver.coalescing_thread_id(room, prepared_event)
-        target = self._conversation_resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=prepared_event.event_id,
-            event_source=prepared_event.source,
-        )
-        if self._should_bypass_coalescing_for_active_thread_follow_up(
-            target=target,
-            source_kind=envelope.source_kind,
-            sender_id=prepared_event.sender,
-        ):
-            if dispatch_timing is not None:
-                dispatch_timing.mark("gate_enter")
-                dispatch_timing.note(
-                    coalescing_bypassed=True,
-                    coalescing_bypass_reason="active_thread_follow_up",
-                )
-                dispatch_timing.mark("gate_exit")
-            await self._dispatch_text_message(
-                room,
-                prepared_event,
-                prechecked_event.requester_user_id,
-            )
-            return
-        await self._enqueue_for_dispatch(
-            prechecked_event.event,
-            room,
-            source_kind="message",
-            requester_user_id=prechecked_event.requester_user_id,
-            coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
-        )
-
-    def _should_bypass_coalescing_for_active_thread_follow_up(
-        self,
-        *,
-        target: MessageTarget,
-        source_kind: str,
-        sender_id: str,
-    ) -> bool:
-        """Return whether one human thread follow-up should skip IN_FLIGHT coalescing."""
-        if target.resolved_thread_id is None:
-            return False
-        if is_automation_source_kind(source_kind):
-            return False
-        if is_agent_id(sender_id, self.config, self.runtime_paths):
-            return False
-        return self._response_coordinator.has_active_response_for_target(target)
-
-    async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
-        self,
-        room: nio.MatrixRoom,
-        event: _TextDispatchEvent | _PrecheckedTextDispatchEvent,
-        requester_user_id: str | None = None,
-        *,
-        media_events: list[_MediaDispatchEvent] | None = None,
-        handled_turn: HandledTurnState | None = None,
-    ) -> None:
-        """Run the normal text/command dispatch pipeline for a prepared text event."""
-        raw_event: _TextDispatchEvent
-        if isinstance(event, _PrecheckedEvent):
-            requester_user_id = event.requester_user_id
-            raw_event = cast("_TextDispatchEvent", event.event)
-        else:
-            raw_event = event
-        if requester_user_id is None:
-            msg = "requester_user_id is required when dispatching a raw event"
-            raise TypeError(msg)
-        router_event: _DispatchEvent = raw_event
-        event = await self._inbound_turn_normalizer.resolve_text_event(
-            TextNormalizationRequest(event=raw_event),
-        )
-        dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
-        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        timing_scope_token = timing_scope_context.set(event.event_id[:20] if event.event_id else "unknown")
-        try:
-            if dispatch_timing is not None:
-                dispatch_timing.mark("dispatch_start")
-            dispatch_started_at = time.monotonic()
-            handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
-
-            if dispatch_timing is not None:
-                dispatch_timing.mark("dispatch_prepare_start")
-            dispatch = await self._dispatch_planner.prepare_dispatch(
-                room,
-                event,
-                requester_user_id,
-                event_label="message",
-                handled_turn=handled_turn,
-            )
-            if dispatch_timing is not None:
-                dispatch_timing.mark("dispatch_prepare_ready")
-            if dispatch is None:
-                return
-
-            # Commands always dispatch and bypass thread-history suppression.
-            command = command_parser.parse(event.body) if not media_events else None
-            if command:
-                if self.agent_name == ROUTER_AGENT_NAME:
-                    await self._handle_command(
-                        room,
-                        _PrecheckedEvent(
-                            event=event,
-                            requester_user_id=requester_user_id,
-                        ),
-                        command,
-                        source_envelope=dispatch.envelope,
-                    )
-                return
-
-            if self._has_newer_unresponded_in_thread(
-                event,
-                requester_user_id,
-                dispatch.context.thread_history,
-            ):
-                self._mark_source_events_responded(handled_turn)
-                return
-            if self._should_skip_deep_synthetic_full_dispatch(
-                event_id=event.event_id,
-                envelope=dispatch.envelope,
-            ):
-                return
-            if dispatch.context.requires_full_thread_history:
-                await self._conversation_resolver.hydrate_dispatch_context(room, event, dispatch.context)
-            content = event.source.get("content") if isinstance(event.source, dict) else None
-            message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
-            message_extra_content: dict[str, Any] = {}
-            if message_attachment_ids:
-                message_extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
-            if isinstance(content, dict):
-                original_sender = content.get(ORIGINAL_SENDER_KEY)
-                if isinstance(original_sender, str):
-                    message_extra_content[ORIGINAL_SENDER_KEY] = original_sender
-                raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
-                if isinstance(raw_audio_fallback, bool) and raw_audio_fallback:
-                    message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-            router_extra_content = dict(message_extra_content)
-            if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
-                router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-            if dispatch_timing is not None:
-                dispatch_timing.mark("dispatch_plan_start")
-            plan = await self._dispatch_planner.plan_dispatch(
-                room,
-                event,
-                dispatch,
-                extra_content=router_extra_content or None,
-                media_events=media_events,
-                handled_turn=handled_turn,
-                router_event=media_events[0]
-                if media_events and len(handled_turn.source_event_ids) == 1
-                else router_event,
-            )
-            if dispatch_timing is not None:
-                dispatch_timing.mark("dispatch_plan_ready")
-            if plan.kind == "ignore":
-                if plan.handled_turn_outcome is not None:
-                    self._mark_source_events_responded(plan.handled_turn_outcome)
-                return
-            if plan.kind == "route":
-                route_event = plan.router_event or event
-                single_direct_media_route = (
-                    isinstance(
-                        route_event,
-                        nio.RoomMessageFile
-                        | nio.RoomEncryptedFile
-                        | nio.RoomMessageVideo
-                        | nio.RoomEncryptedVideo
-                        | nio.RoomMessageImage
-                        | nio.RoomEncryptedImage,
-                    )
-                    and media_events == [route_event]
-                    and handled_turn.source_event_ids == (event.event_id,)
-                )
-                routing_kwargs: dict[str, Any] = {
-                    "message": event.body if media_events else plan.router_message,
-                    "requester_user_id": dispatch.requester_user_id,
-                    "extra_content": plan.extra_content,
-                }
-                if plan.media_events is not None and not single_direct_media_route:
-                    routing_kwargs["media_events"] = plan.media_events
-                if (
-                    plan.handled_turn is not None
-                    and list(plan.handled_turn.source_event_ids) != [route_event.event_id]
-                    and not single_direct_media_route
-                ):
-                    routing_kwargs["handled_turn"] = self._handled_turn_with_response_context(
-                        plan.handled_turn,
-                        history_scope=None,
-                        conversation_target=dispatch.target,
-                    )
-                await self._handle_ai_routing(
-                    room,
-                    route_event,
-                    dispatch.context.thread_history,
-                    dispatch.context.thread_id,
-                    **routing_kwargs,
-                )
-                return
-            assert plan.response_action is not None
-            handled_turn = self._handled_turn_with_response_context(
-                handled_turn,
-                history_scope=self._response_history_scope_for_action(plan.response_action),
-                conversation_target=dispatch.target,
-            )
-            matrix_run_metadata = self._dispatch_matrix_run_metadata(handled_turn)
-
-            async def build_payload(context: MessageContext) -> DispatchPayload:
-                effective_thread_id = self._conversation_resolver.build_message_target(
-                    room_id=room.room_id,
-                    thread_id=context.thread_id,
-                    reply_to_event_id=event.event_id,
-                    event_source=event.source,
-                ).resolved_thread_id
-                media_attachment_ids: list[str] = []
-                fallback_images: list[Image] | None = None
-                if media_events:
-                    media_result = await self._inbound_turn_normalizer.register_batch_media_attachments(
-                        BatchMediaAttachmentRequest(
-                            room_id=room.room_id,
-                            thread_id=effective_thread_id,
-                            media_events=media_events,
-                        ),
-                    )
-                    media_attachment_ids = media_result.attachment_ids
-                    fallback_images = media_result.fallback_images
-                return await self._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
-                    DispatchPayloadWithAttachmentsRequest(
-                        room_id=room.room_id,
-                        prompt=event.body,
-                        current_attachment_ids=merge_attachment_ids(
-                            message_attachment_ids,
-                            media_attachment_ids,
-                        ),
-                        thread_id=context.thread_id,
-                        media_thread_id=effective_thread_id,
-                        thread_history=context.thread_history,
-                        fallback_images=fallback_images,
-                    ),
-                )
-
-            await self._dispatch_planner.execute_response_action(
-                room,
-                event,
-                dispatch,
-                plan.response_action,
-                build_payload,
-                processing_log="Processing",
-                dispatch_started_at=dispatch_started_at,
-                handled_turn=handled_turn,
-                matrix_run_metadata=matrix_run_metadata,
-            )
-        finally:
-            timing_scope_context.reset(timing_scope_token)
+        """Delegate one inbound text event to the turn engine."""
+        await self._turn_engine.handle_text_event(room, event)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
@@ -2003,280 +1406,13 @@ class AgentBot:
                 ),
             )
 
-    async def _on_audio_media_message(
-        self,
-        room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageAudio | nio.RoomEncryptedAudio],
-    ) -> None:
-        """Normalize audio into a synthetic text event and reuse text dispatch."""
-        assert self.client is not None
-        event = prechecked_event.event
-
-        if is_agent_id(event.sender, self.config, self.runtime_paths):
-            self.logger.debug(
-                "Ignoring agent audio event for voice transcription",
-                event_id=event.event_id,
-                sender=event.sender,
-            )
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return
-
-        normalized_voice = await self._inbound_turn_normalizer.prepare_voice_event(
-            VoiceNormalizationRequest(
-                room=room,
-                event=event,
-            ),
-        )
-        if normalized_voice is None:
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return
-
-        await self._maybe_send_visible_voice_echo(
-            room,
-            event,
-            text=normalized_voice.event.body,
-            thread_id=normalized_voice.effective_thread_id,
-        )
-
-        await self._enqueue_for_dispatch(
-            normalized_voice.event,
-            room,
-            source_kind="voice",
-            requester_user_id=prechecked_event.requester_user_id,
-        )
-
-    async def _maybe_send_visible_voice_echo(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
-        *,
-        text: str,
-        thread_id: str | None,
-    ) -> str | None:
-        """Optionally post a display-only router echo for normalized audio."""
-        if self.agent_name != ROUTER_AGENT_NAME or not self.config.voice.visible_router_echo:
-            return None
-
-        existing_visible_echo_event_id = self.handled_turn_ledger.get_visible_echo_event_id(event.event_id)
-        if existing_visible_echo_event_id is not None:
-            return existing_visible_echo_event_id
-
-        visible_echo_event_id = await self._send_response(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            response_text=text,
-            thread_id=thread_id,
-            skip_mentions=True,
-        )
-        if visible_echo_event_id is not None:
-            self.handled_turn_ledger.record_visible_echo(event.event_id, visible_echo_event_id)
-        return visible_echo_event_id
-
     async def _on_media_message(
         self,
         room: nio.MatrixRoom,
         event: _MediaDispatchEvent,
     ) -> None:
-        """Handle image/file/video/audio events and dispatch media-aware responses."""
-        async with self._conversation_resolver.turn_thread_cache_scope():
-            await self._handle_media_message_inner(room, event)
-
-    async def _handle_media_message_inner(
-        self,
-        room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
-    ) -> None:
-        """Handle one media event inside the per-turn thread-history cache scope."""
-        assert self.client is not None
-
-        prechecked_event = self._precheck_dispatch_event(room, event)
-        if prechecked_event is None:
-            return
-
-        if await self._dispatch_special_media_as_text(room, prechecked_event):
-            return
-        event = prechecked_event.event
-        await self._enqueue_for_dispatch(
-            event,
-            room,
-            source_kind="image" if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage) else "media",
-            requester_user_id=prechecked_event.requester_user_id,
-        )
-
-    async def _dispatch_special_media_as_text(
-        self,
-        room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedMediaDispatchEvent,
-    ) -> bool:
-        """Handle media events that normalize into the text dispatch pipeline."""
-        event = prechecked_event.event
-        if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
-            await self._on_audio_media_message(
-                room,
-                _PrecheckedEvent(
-                    event=event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                ),
-            )
-            return True
-        if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
-            return await self._dispatch_file_sidecar_text_preview(
-                room,
-                _PrecheckedEvent(
-                    event=event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                ),
-            )
-        return False
-
-    async def _dispatch_file_sidecar_text_preview(
-        self,
-        room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageFile | nio.RoomEncryptedFile],
-    ) -> bool:
-        """Dispatch one sidecar-backed file preview through the normal text pipeline."""
-        event = prechecked_event.event
-        if not is_v2_sidecar_text_preview(event.source):
-            return False
-
-        prepared_text_event = await self._inbound_turn_normalizer.prepare_file_sidecar_text_event(event)
-        assert prepared_text_event is not None
-        assert self.client is not None
-        envelope = self._conversation_resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=prepared_text_event,
-            requester_user_id=prechecked_event.requester_user_id,
-        )
-        if self._should_skip_deep_synthetic_full_dispatch(
-            event_id=prepared_text_event.event_id,
-            envelope=envelope,
-        ):
-            return True
-        if should_handle_interactive_text_response(envelope):
-            await interactive.handle_text_response(self.client, room, prepared_text_event, self.agent_name)
-        await self._dispatch_text_message(
-            room,
-            _PrecheckedEvent(
-                event=prepared_text_event,
-                requester_user_id=prechecked_event.requester_user_id,
-            ),
-        )
-        return True
-
-    def _requester_user_id(
-        self,
-        *,
-        sender: str,
-        source: object,
-    ) -> str:
-        """Return the effective requester for reply-permission checks."""
-        source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
-        content = source_dict.get("content") if source_dict is not None else None
-        if (
-            sender == self.matrix_id.full_id
-            and isinstance(content, dict)
-            and isinstance(content.get(ORIGINAL_SENDER_KEY), str)
-        ):
-            return content[ORIGINAL_SENDER_KEY]
-        return get_effective_sender_id_for_reply_permissions(
-            sender,
-            source_dict,
-            self.config,
-            self.runtime_paths,
-        )
-
-    def _requester_user_id_for_event(
-        self,
-        event: CommandEvent,
-    ) -> str:
-        """Return the effective requester for per-user reply checks."""
-        return self._requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
-
-    def _is_trusted_internal_relay_event(self, event: _DispatchEvent) -> bool:
-        """Return whether one agent-authored relay should bypass user-turn coalescing."""
-        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
-            return False
-        if extract_agent_name(event.sender, self.config, self.runtime_paths) is None:
-            return False
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        if not isinstance(content, dict):
-            return False
-        if content.get("com.mindroom.source_kind") == "scheduled":
-            return False
-        original_sender = content.get(ORIGINAL_SENDER_KEY)
-        return isinstance(original_sender, str) and bool(original_sender)
-
-    def _precheck_event(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent | _InboundMediaEvent,
-        *,
-        is_edit: bool = False,
-    ) -> str | None:
-        """Common early-exit checks shared by text/media/voice handlers.
-
-        Returns the effective requester user ID when the event should be
-        processed, or ``None`` when the event should be skipped.
-
-        Checks (in order): self-authored, already processed (skipped for
-        edits so restart recovery works), effective requester
-        authorization, and per-agent reply permissions.
-        """
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        source_kind = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
-        requester_user_id = self._requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
-
-        if requester_user_id == self.matrix_id.full_id and source_kind != "hook_dispatch":
-            return None
-
-        # Edits bypass the dedup check: if an edit is redelivered after a
-        # restart the bot should still regenerate the response.
-        if not is_edit and self.handled_turn_ledger.has_responded(event.event_id):
-            return None
-
-        if not is_authorized_sender(
-            requester_user_id,
-            self.config,
-            room.room_id,
-            self.runtime_paths,
-            room_alias=room.canonical_alias,
-        ):
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return None
-
-        if not self._dispatch_planner.can_reply_to_sender(requester_user_id):
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return None
-
-        return requester_user_id
-
-    def _precheck_dispatch_event[T: _DispatchEvent](
-        self,
-        room: nio.MatrixRoom,
-        event: T,
-        *,
-        is_edit: bool = False,
-    ) -> _PrecheckedEvent[T] | None:
-        """Return a typed prechecked event for ingress handlers.
-
-        Raw Matrix handlers must call this once before dispatch so downstream
-        helpers never need to guess whether requester resolution and sender
-        gating already happened.
-        """
-        requester_user_id = self._precheck_event(room, event, is_edit=is_edit)
-        if requester_user_id is None:
-            return None
-        return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
-
-    async def _resolve_text_dispatch_event(self, event: _TextDispatchEvent) -> PreparedTextEvent:
-        """Return one canonical text event for hooks, routing, and command handling."""
-        return await self._dispatch_planner.resolve_text_dispatch_event(event)
+        """Delegate one inbound media event to the turn engine."""
+        await self._turn_engine.handle_media_event(room, event)
 
     def _should_queue_follow_up_in_active_response_thread(
         self,
@@ -2539,310 +1675,6 @@ class AgentBot:
             self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
             return False
         return True
-
-    async def _handle_ai_routing(
-        self,
-        room: nio.MatrixRoom,
-        event: _DispatchEvent,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        thread_id: str | None = None,
-        message: str | None = None,
-        *,
-        requester_user_id: str,
-        extra_content: dict[str, Any] | None = None,
-        media_events: list[_MediaDispatchEvent] | None = None,
-        handled_turn: HandledTurnState | None = None,
-    ) -> None:
-        await self._dispatch_planner.execute_router_relay(
-            room,
-            event,
-            thread_history,
-            thread_id,
-            message=message,
-            requester_user_id=requester_user_id,
-            extra_content=extra_content,
-            media_events=media_events,
-            handled_turn=handled_turn,
-        )
-
-    async def _handle_message_edit(  # noqa: C901, PLR0911, PLR0912, PLR0915
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
-        event_info: EventInfo,
-        *,
-        requester_user_id: str,
-    ) -> None:
-        """Handle an edited message by regenerating the agent's response.
-
-        Args:
-            room: The Matrix room
-            event: The edited message event
-            event_info: Information about the edit event
-            requester_user_id: Effective requester resolved during raw-event precheck
-
-        """
-        if not event_info.original_event_id:
-            self.logger.debug("Edit event has no original event ID")
-            return
-        original_event_id = event_info.original_event_id
-
-        # Skip edits from other agents
-        sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
-        if sender_agent_name:
-            self.logger.debug("ignoring_edit_from_other_agent", agent=sender_agent_name)
-            return
-
-        # Known limitations for edit regeneration (ISSUE-110 Phase 5):
-        # - Team-scoped responses regenerate with canonical history scope, not recorded scope.
-        # - Router relay edits regenerate as AI responses instead of re-running router dispatch.
-        # - Missing-ledger recovery loses response_owner/history_scope/conversation_target metadata.
-        # These are acceptable because these edge cases do not occur in current usage.
-        turn_record = self.handled_turn_ledger.get_turn_record(original_event_id)
-        context = await self._edit_regeneration_context(
-            room,
-            event,
-            conversation_target=turn_record.conversation_target if turn_record is not None else None,
-        )
-        persisted_turn_metadata = self._load_persisted_turn_metadata(
-            room=room,
-            thread_id=context.thread_id,
-            original_event_id=original_event_id,
-            requester_user_id=requester_user_id,
-        )
-        if turn_record is None:
-            if persisted_turn_metadata is None:
-                self.logger.debug(
-                    "No handled turn record found for edited message",
-                    original_event_id=original_event_id,
-                )
-                return
-            turn_record = HandledTurnRecord(
-                anchor_event_id=persisted_turn_metadata.anchor_event_id,
-                source_event_ids=persisted_turn_metadata.source_event_ids,
-                response_event_id=persisted_turn_metadata.response_event_id,
-                source_event_prompts=persisted_turn_metadata.source_event_prompts,
-            )
-        recorded_turn_context_available = bool(
-            turn_record.conversation_target is not None and turn_record.history_scope is not None,
-        )
-        response_owner_missing = turn_record.response_owner is None
-        if response_owner_missing and persisted_turn_metadata is not None:
-            turn_record = replace(turn_record, response_owner=self.agent_name)
-        response_event_id = (
-            persisted_turn_metadata.response_event_id
-            if persisted_turn_metadata is not None and persisted_turn_metadata.response_event_id is not None
-            else turn_record.response_event_id
-        )
-        if response_event_id is None:
-            self.logger.debug("missing_previous_response_for_edit", event_id=original_event_id)
-            return
-        regeneration_target = turn_record.conversation_target or self._conversation_resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=turn_record.anchor_event_id,
-        )
-        regeneration_history_scope = turn_record.history_scope or self._conversation_state_writer.history_scope()
-        regeneration_response_owner = turn_record.response_owner or self.agent_name
-        if regeneration_response_owner != self.agent_name:
-            self.logger.debug(
-                "Ignoring edited message for turn owned by another entity",
-                original_event_id=original_event_id,
-                response_owner=regeneration_response_owner,
-            )
-            return
-        needs_turn_record_backfill = (
-            turn_record.response_event_id != response_event_id
-            or response_owner_missing
-            or turn_record.history_scope is None
-            or turn_record.conversation_target is None
-            or (
-                turn_record.is_coalesced
-                and turn_record.source_event_prompts is None
-                and persisted_turn_metadata is not None
-                and persisted_turn_metadata.source_event_prompts is not None
-            )
-        )
-        coalesced_source_event_prompts = turn_record.source_event_prompts
-        if (
-            coalesced_source_event_prompts is None
-            and persisted_turn_metadata is not None
-            and persisted_turn_metadata.is_coalesced
-        ):
-            coalesced_source_event_prompts = persisted_turn_metadata.source_event_prompts
-
-        self.logger.info(
-            "Regenerating response for edited message",
-            original_event_id=original_event_id,
-            response_event_id=response_event_id,
-        )
-
-        edited_content, _ = await extract_edit_body(event.source, self.client)
-        if edited_content is None:
-            self.logger.debug("Edited message missing resolved body", event_id=event.event_id)
-            return
-        regeneration_handled_turn = HandledTurnState.create(
-            turn_record.source_event_ids,
-            response_event_id=response_event_id,
-            response_owner=regeneration_response_owner,
-            history_scope=regeneration_history_scope,
-            conversation_target=regeneration_target,
-        )
-        regeneration_turn_record = replace(
-            turn_record,
-            response_event_id=response_event_id,
-            response_owner=regeneration_response_owner,
-            history_scope=regeneration_history_scope,
-            conversation_target=regeneration_target,
-        )
-        if regeneration_turn_record.is_coalesced:
-            if coalesced_source_event_prompts is None:
-                self.logger.warning(
-                    "Skipping edited coalesced turn regeneration without persisted source prompts",
-                    original_event_id=original_event_id,
-                    anchor_event_id=regeneration_turn_record.anchor_event_id,
-                )
-                return
-            updated_prompt_map = dict(coalesced_source_event_prompts)
-            updated_prompt_map[original_event_id] = edited_content
-            rebuilt_prompt_parts: list[str] = []
-            for source_event_id in regeneration_turn_record.source_event_ids:
-                prompt_part = updated_prompt_map.get(source_event_id)
-                if prompt_part is None:
-                    self.logger.warning(
-                        "Skipping edited coalesced turn regeneration with incomplete prompt map",
-                        original_event_id=original_event_id,
-                        missing_source_event_id=source_event_id,
-                        anchor_event_id=regeneration_turn_record.anchor_event_id,
-                    )
-                    return
-                rebuilt_prompt_parts.append(prompt_part)
-            regeneration_prompt = coalesced_prompt(rebuilt_prompt_parts)
-            regeneration_handled_turn = HandledTurnState.create(
-                regeneration_turn_record.source_event_ids,
-                response_event_id=response_event_id,
-                source_event_prompts=updated_prompt_map,
-                response_owner=regeneration_response_owner,
-                history_scope=regeneration_history_scope,
-                conversation_target=regeneration_target,
-            )
-            regeneration_turn_record = replace(regeneration_turn_record, source_event_prompts=updated_prompt_map)
-            regeneration_matrix_run_metadata = self._dispatch_matrix_run_metadata(regeneration_handled_turn)
-        else:
-            regeneration_prompt = edited_content
-            regeneration_matrix_run_metadata = None
-        envelope = self._conversation_resolver.build_message_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id=requester_user_id,
-            context=context,
-            target=regeneration_target,
-            body=edited_content,
-            source_kind="edit",
-        )
-        ingress_policy = hook_ingress_policy(envelope)
-        if await self._dispatch_hook_service.emit_message_received_hooks(
-            envelope=envelope,
-            correlation_id=event.event_id,
-            policy=ingress_policy,
-        ):
-            self._mark_source_events_responded(regeneration_handled_turn)
-            return
-
-        if turn_record.response_owner is None:
-            should_respond = should_agent_respond(
-                agent_name=self.agent_name,
-                am_i_mentioned=context.am_i_mentioned,
-                is_thread=context.is_thread,
-                room=room,
-                thread_history=context.thread_history,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                mentioned_agents=context.mentioned_agents,
-                has_non_agent_mentions=context.has_non_agent_mentions,
-                sender_id=requester_user_id,
-            )
-            if not should_respond and not regeneration_turn_record.is_coalesced:
-                self.logger.debug("Agent should not respond to edited message")
-                if needs_turn_record_backfill:
-                    self._mark_source_events_responded(regeneration_handled_turn)
-                return
-
-        # Generate new response
-        regenerated_event_id = await self._generate_response(
-            room_id=room.room_id,
-            prompt=regeneration_prompt,
-            reply_to_event_id=regeneration_turn_record.anchor_event_id,
-            thread_id=regeneration_target.thread_id,
-            target=regeneration_target,
-            thread_history=context.thread_history,
-            existing_event_id=response_event_id,
-            existing_event_is_placeholder=False,
-            user_id=requester_user_id,
-            response_envelope=envelope,
-            correlation_id=event.event_id,
-            matrix_run_metadata=regeneration_matrix_run_metadata,
-            on_lifecycle_lock_acquired=lambda: self._remove_stale_runs_for_turn_record(
-                turn_record=regeneration_turn_record,
-                recorded_turn_context_available=recorded_turn_context_available,
-                room=room,
-                thread_id=context.thread_id,
-                original_event_id=original_event_id,
-                requester_user_id=requester_user_id,
-            ),
-        )
-
-        # Update the handled-turn ledger linkage for the edited source turn.
-        if regenerated_event_id is not None:
-            self._mark_source_events_responded(
-                regeneration_handled_turn.with_response_event_id(regenerated_event_id),
-            )
-            self.logger.info("Successfully regenerated response for edited message")
-        else:
-            if needs_turn_record_backfill:
-                self._mark_source_events_responded(regeneration_handled_turn)
-            self.logger.info(
-                "Suppressed regeneration left existing response unchanged",
-                original_event_id=original_event_id,
-                response_event_id=response_event_id,
-            )
-
-    def _remove_stale_runs_for_edited_message(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        thread_id: str | None,
-        original_event_id: str,
-        requester_user_id: str,
-    ) -> None:
-        """Remove persisted runs tied to the pre-edit message before regenerating."""
-        self._conversation_state_writer.remove_stale_runs_for_edited_message(
-            RemoveStaleRunsRequest(
-                room=room,
-                thread_id=thread_id,
-                original_event_id=original_event_id,
-                requester_user_id=requester_user_id,
-            ),
-            build_message_target=self._conversation_resolver.build_message_target,
-            build_tool_execution_identity=self._tool_runtime_support.build_execution_identity,
-            remove_run_by_event_id_fn=remove_run_by_event_id,
-        )
-
-    async def _handle_command(
-        self,
-        room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedTextDispatchEvent,
-        command: Command,
-        *,
-        source_envelope: MessageEnvelope | None = None,
-    ) -> None:
-        await self._dispatch_planner.execute_command(
-            room=room,
-            event=prechecked_event.event,
-            requester_user_id=prechecked_event.requester_user_id,
-            command=command,
-            source_envelope=source_envelope,
-        )
 
 
 class TeamBot(AgentBot):

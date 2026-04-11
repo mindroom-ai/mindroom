@@ -207,6 +207,7 @@ class TestRoutingRegression:
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
                 router=RouterConfig(model="default"),
+                authorization={"default_room_access": True},
             ),
             tmp_path,
         )
@@ -345,10 +346,11 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._handle_ai_routing(
+        await router_bot._dispatch_planner.execute_router_relay(
             mock_room,
             message_event,
-            thread_history=[],
+            [],
+            None,
             requester_user_id="@bob:localhost",
         )
 
@@ -647,6 +649,7 @@ class TestRoutingRegression:
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+                authorization={"default_room_access": True},
             ),
             tmp_path,
         )

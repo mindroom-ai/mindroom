@@ -33,7 +33,6 @@ from mindroom.bot import (
     MultiKnowledgeVectorDb,
     PreparedTextEvent,
     TeamBot,
-    _PrecheckedEvent,
     _thread_summary_message_count_hint,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -98,6 +97,7 @@ from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_r
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.turn_engine import _PrecheckedEvent
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -107,6 +107,7 @@ from tests.conftest import (
     patch_response_coordinator_module,
     replace_delivery_gateway_deps,
     replace_response_coordinator_deps,
+    replace_turn_engine_deps,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -128,7 +129,17 @@ def _make_matrix_client_mock() -> AsyncMock:
 
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
     """Wrap frozen extracted collaborators so tests can patch their methods."""
-    return cast("AgentBot", wrap_extracted_collaborators(bot))
+    wrapped_bot = cast("AgentBot", wrap_extracted_collaborators(bot))
+    replace_turn_engine_deps(
+        wrapped_bot,
+        resolver=wrapped_bot._conversation_resolver,
+        normalizer=wrapped_bot._inbound_turn_normalizer,
+        dispatch_planner=wrapped_bot._dispatch_planner,
+        response_coordinator=wrapped_bot._response_coordinator,
+        delivery_gateway=wrapped_bot._delivery_gateway,
+        state_writer=wrapped_bot._conversation_state_writer,
+    )
+    return wrapped_bot
 
 
 def _replace_dispatch_planner_deps(bot: AgentBot, **changes: object) -> DispatchPlanner:
@@ -137,6 +148,26 @@ def _replace_dispatch_planner_deps(bot: AgentBot, **changes: object) -> Dispatch
     updated_planner = DispatchPlanner(replace(planner.deps, **changes))
     bot._dispatch_planner = updated_planner
     wrap_extracted_collaborators(bot, "_dispatch_planner")
+    engine_changes = {
+        name: value
+        for name, value in changes.items()
+        if name
+        in {
+            "logger",
+            "handled_turn_ledger",
+            "resolver",
+            "normalizer",
+            "response_coordinator",
+            "delivery_gateway",
+            "state_writer",
+            "coalescing_gate",
+        }
+    }
+    replace_turn_engine_deps(
+        bot,
+        dispatch_planner=bot._dispatch_planner,
+        **engine_changes,
+    )
     return updated_planner
 
 
@@ -4064,6 +4095,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -4072,7 +4104,10 @@ class TestAgentBot:
 
         event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_unauth")
 
-        with patch("mindroom.bot.is_authorized_sender", return_value=False):
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=False),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=False),
+        ):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
@@ -4109,9 +4144,11 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -4135,6 +4172,7 @@ class TestAgentBot:
         wrap_extracted_collaborators(bot, "_dispatch_planner")
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch.object(bot._dispatch_planner, "can_reply_to_sender", return_value=False),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
@@ -4195,6 +4233,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4302,6 +4341,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4431,6 +4471,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4503,6 +4544,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4584,6 +4626,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4618,11 +4661,13 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+        bot._dispatch_planner.execute_router_relay = AsyncMock()
 
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
@@ -4660,7 +4705,7 @@ class TestAgentBot:
             patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
             patch("mindroom.dispatch_planner.has_multiple_non_agent_users_in_thread", return_value=False),
             patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
@@ -4669,7 +4714,7 @@ class TestAgentBot:
             ]
             await bot._on_media_message(room, event)
 
-        bot._handle_ai_routing.assert_called_once_with(
+        bot._dispatch_planner.execute_router_relay.assert_called_once_with(
             room,
             event,
             [],
@@ -4695,11 +4740,13 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+        bot._dispatch_planner.execute_router_relay = AsyncMock()
 
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
@@ -4753,7 +4800,7 @@ class TestAgentBot:
             patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
             patch("mindroom.dispatch_planner.has_multiple_non_agent_users_in_thread", return_value=False),
             patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
                 new_callable=AsyncMock,
@@ -4766,9 +4813,9 @@ class TestAgentBot:
             ]
             await bot._on_media_message(room, event)
 
-        bot._handle_ai_routing.assert_called_once()
+        bot._dispatch_planner.execute_router_relay.assert_called_once()
         mock_register_file.assert_not_awaited()
-        call_kwargs = bot._handle_ai_routing.call_args.kwargs
+        call_kwargs = bot._dispatch_planner.execute_router_relay.call_args.kwargs
         assert call_kwargs["message"] == "[Attached file]"
         assert call_kwargs["requester_user_id"] == "@user:localhost"
         assert call_kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@user:localhost"}
@@ -4799,6 +4846,7 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
         bot._send_response = AsyncMock(return_value="$route")
         install_send_response_mock(bot, bot._send_response)
 
@@ -4849,7 +4897,7 @@ class TestAgentBot:
                 return_value=attachment_record,
             ) as mock_register_file,
         ):
-            await bot._handle_ai_routing(
+            await bot._dispatch_planner.execute_router_relay(
                 room=room,
                 event=event,
                 thread_history=[],
@@ -4890,6 +4938,7 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
         bot._send_response = AsyncMock(return_value="$route")
         install_send_response_mock(bot, bot._send_response)
 
@@ -4927,7 +4976,7 @@ class TestAgentBot:
                 return_value=attachment_record,
             ) as mock_register_image,
         ):
-            await bot._handle_ai_routing(
+            await bot._dispatch_planner.execute_router_relay(
                 room=room,
                 event=event,
                 thread_history=[],
@@ -4987,6 +5036,8 @@ class TestAgentBot:
         router_bot.handled_turn_ledger.has_responded.return_value = False
         general_bot.handled_turn_ledger = MagicMock()
         general_bot.handled_turn_ledger.has_responded.return_value = False
+        _replace_dispatch_planner_deps(router_bot, handled_turn_ledger=router_bot.handled_turn_ledger)
+        _replace_dispatch_planner_deps(general_bot, handled_turn_ledger=general_bot.handled_turn_ledger)
         router_bot._send_response = AsyncMock(return_value="$route")
         install_send_response_mock(router_bot, router_bot._send_response)
         general_bot._generate_response = AsyncMock()
@@ -5047,6 +5098,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -5093,10 +5145,12 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+        bot._dispatch_planner.execute_router_relay = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
                 am_i_mentioned=False,
@@ -5137,7 +5191,7 @@ class TestAgentBot:
                     config.get_ids(runtime_paths_for(config))["general"],
                 ],
             ),
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
@@ -5145,9 +5199,9 @@ class TestAgentBot:
             await bot._on_message(room, text_event)
             await bot._on_media_message(room, image_event)
 
-        assert bot._handle_ai_routing.await_count == 2
-        first_call = bot._handle_ai_routing.await_args_list[0].kwargs
-        second_call = bot._handle_ai_routing.await_args_list[1].kwargs
+        assert bot._dispatch_planner.execute_router_relay.await_count == 2
+        first_call = bot._dispatch_planner.execute_router_relay.await_args_list[0].kwargs
+        second_call = bot._dispatch_planner.execute_router_relay.await_args_list[1].kwargs
         assert first_call["requester_user_id"] == "@user:localhost"
         assert first_call["message"] is None
         assert second_call["requester_user_id"] == "@user:localhost"
@@ -5171,10 +5225,12 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handle_ai_routing = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.handled_turn_ledger.has_responded.return_value = False
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+        bot._dispatch_planner.execute_router_relay = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
                 am_i_mentioned=False,
@@ -5206,7 +5262,7 @@ class TestAgentBot:
                 "mindroom.dispatch_planner.get_available_agents_for_sender",
                 return_value=[config.get_ids(runtime_paths_for(config))["calculator"]],
             ),
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
@@ -5214,7 +5270,7 @@ class TestAgentBot:
             await bot._on_message(room, text_event)
             await bot._on_media_message(room, image_event)
 
-        bot._handle_ai_routing.assert_not_awaited()
+        bot._dispatch_planner.execute_router_relay.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_agent_receives_images_from_thread_root_after_routing(
@@ -5265,6 +5321,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.extract_agent_name", return_value="router"),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
@@ -6015,6 +6072,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.handled_turn_ledger = MagicMock()
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         event = MagicMock()
@@ -6245,6 +6303,7 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
         bot.handled_turn_ledger = MagicMock()
+        _replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
         full_history = [
             ResolvedVisibleMessage.synthetic(
                 sender="@user:localhost",
@@ -6310,7 +6369,7 @@ class TestAgentBot:
             ),
             patch.object(bot._dispatch_planner, "log_dispatch_latency"),
         ):
-            await bot._dispatch_text_message(
+            await bot._turn_engine._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -6374,7 +6433,7 @@ class TestAgentBot:
             ) as mock_build_payload,
             patch.object(bot._dispatch_planner, "execute_response_action", new=AsyncMock()) as mock_execute,
         ):
-            await bot._dispatch_text_message(
+            await bot._turn_engine._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -6442,10 +6501,10 @@ class TestAgentBot:
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
             patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-            patch.object(bot, "_has_newer_unresponded_in_thread", return_value=False),
-            patch.object(bot, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch.object(bot._turn_engine, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_engine, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
-            await bot._dispatch_text_message(
+            await bot._turn_engine._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 handled_turn=HandledTurnState.create(
@@ -6559,10 +6618,10 @@ class TestAgentBot:
                 "execute_router_relay",
                 new=AsyncMock(side_effect=fake_execute_router_relay),
             ),
-            patch.object(bot, "_has_newer_unresponded_in_thread", return_value=False),
-            patch.object(bot, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch.object(bot._turn_engine, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_engine, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
-            await bot._dispatch_text_message(
+            await bot._turn_engine._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 handled_turn=coalesced_turn,
@@ -6609,10 +6668,10 @@ class TestAgentBot:
         )
 
         with (
-            patch.object(bot, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
         ):
-            await bot._enqueue_for_dispatch(event, room, source_kind="message")
+            await bot._turn_engine._enqueue_for_dispatch(event, room, source_kind="message")
 
         mock_dispatch.assert_awaited_once_with(room, event, "@user:localhost")
         mock_enqueue.assert_not_awaited()
@@ -6671,7 +6730,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                bot,
+                bot._turn_engine,
                 "_precheck_dispatch_event",
                 return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             ),
@@ -6683,8 +6742,8 @@ class TestAgentBot:
                 "mindroom.conversation_resolver.ConversationResolver.build_ingress_envelope",
                 return_value=envelope,
             ),
-            patch.object(bot, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.bot.should_handle_interactive_text_response", return_value=False),
+            patch.object(bot._turn_engine, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_engine.should_handle_interactive_text_response", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -6695,7 +6754,7 @@ class TestAgentBot:
                 "has_active_response_for_target",
                 return_value=True,
             ) as mock_has_active_response,
-            patch.object(bot, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
         ):
             await bot._on_message(room, event)
@@ -6719,6 +6778,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.logger = MagicMock()
+        _replace_dispatch_planner_deps(bot, logger=bot.logger, handled_turn_ledger=bot.handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -6812,6 +6872,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.logger = MagicMock()
+        _replace_dispatch_planner_deps(bot, logger=bot.logger, handled_turn_ledger=bot.handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -6928,6 +6989,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -7005,6 +7067,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.logger = MagicMock()
+        _replace_dispatch_planner_deps(bot, logger=bot.logger, handled_turn_ledger=bot.handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7078,6 +7141,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.logger = MagicMock()
+        _replace_dispatch_planner_deps(bot, logger=bot.logger, handled_turn_ledger=bot.handled_turn_ledger)
         _replace_dispatch_planner_deps(bot, logger=bot.logger, handled_turn_ledger=bot.handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -7256,6 +7320,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot.handled_turn_ledger = MagicMock()
         bot.logger = MagicMock()
+        _replace_dispatch_planner_deps(bot, logger=bot.logger, handled_turn_ledger=bot.handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
