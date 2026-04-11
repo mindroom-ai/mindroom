@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom import constants, interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import CompactionNoticeRequest
+from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.timing import timed
 
@@ -25,7 +26,6 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_access import ConversationReadAccess
-    from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -150,10 +150,12 @@ class PostResponseEffectsSupport:
                 continue
             await self.delivery_gateway.send_compaction_notice(
                 CompactionNoticeRequest(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
+                    target=MessageTarget.resolve(
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        reply_to_event_id=reply_to_event_id,
+                    ),
                     main_response_event_id=main_response_event_id,
-                    thread_id=thread_id,
                     outcome=outcome,
                 ),
             )

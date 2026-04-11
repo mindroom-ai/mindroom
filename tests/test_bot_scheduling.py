@@ -355,13 +355,11 @@ class TestBotScheduleCommands:
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args
         assert "✅" in call_args[0][2] or "Task ID" in call_args[0][2]
-        # The thread_id should be None (will be handled by _send_response)
-        # and the event should be passed for thread creation
-        reply_to_event = call_args[1].get("reply_to_event")
-        assert reply_to_event is not None
-        assert reply_to_event.event_id == event.event_id
-        assert reply_to_event.body == event.body
-        assert reply_to_event.source == event.source
+        target = call_args[1].get("target")
+        assert target is not None
+        assert target.room_id == room.room_id
+        assert target.reply_to_event_id == event.event_id
+        assert target.resolved_thread_id == event.event_id
 
 
 class TestBotTaskRestoration:

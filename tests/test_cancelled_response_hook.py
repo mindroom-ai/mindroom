@@ -358,9 +358,6 @@ async def test_suppressed_delivery_emits_cancelled_hook(
     if mode == "final":
         result = await gateway.deliver_final(
             FinalDeliveryRequest(
-                room_id="!room:localhost",
-                reply_to_event_id="$event",
-                thread_id=None,
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 existing_event_id=None,
                 response_text="suppressed",
@@ -374,9 +371,6 @@ async def test_suppressed_delivery_emits_cancelled_hook(
     else:
         result = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
-                room_id="!room:localhost",
-                reply_to_event_id="$event",
-                thread_id=None,
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 streamed_event_id="$stream",
                 streamed_text="suppressed",
@@ -455,9 +449,6 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         if mode == "final":
             delivery_result = await gateway.deliver_final(
                 FinalDeliveryRequest(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$event",
-                    thread_id=None,
                     target=MessageTarget.resolve("!room:localhost", None, "$event"),
                     existing_event_id=None,
                     response_text="visible response",
@@ -472,9 +463,6 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
 
         delivery_result = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
-                room_id="!room:localhost",
-                reply_to_event_id="$event",
-                thread_id=None,
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 streamed_event_id="$stream",
                 streamed_text="visible response",

@@ -878,9 +878,9 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
 
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert request.reply_to_event_id == "$voice_event"
+    assert request.target.reply_to_event_id == "$voice_event"
     assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
-    assert request.thread_id == "$voice_event"
+    assert request.target.thread_id == "$voice_event"
     assert request.skip_mentions is True
 
 
@@ -956,11 +956,11 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert bot._delivery_gateway.send_text.await_count == 2
     echo_request = bot._delivery_gateway.send_text.call_args_list[0].args[0]
     handoff_request = bot._delivery_gateway.send_text.call_args_list[1].args[0]
-    assert echo_request.reply_to_event_id == "$voice_event"
+    assert echo_request.target.reply_to_event_id == "$voice_event"
     assert echo_request.response_text == f"{VOICE_PREFIX}summarize this audio"
     assert echo_request.skip_mentions is True
     assert echo_request.extra_content is None
-    assert handoff_request.reply_to_event_id == "$voice_event"
+    assert handoff_request.target.reply_to_event_id == "$voice_event"
     assert handoff_request.response_text == "@home could you help with this?"
     assert handoff_request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
@@ -1111,7 +1111,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
 
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert request.reply_to_event_id == "$voice_event"
+    assert request.target.reply_to_event_id == "$voice_event"
     assert request.response_text == "@home could you help with this?"
     assert request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",

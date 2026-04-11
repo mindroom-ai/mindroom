@@ -27,6 +27,11 @@ class MessageTarget:
         """Return whether the target resolves to room-level delivery."""
         return self.resolved_thread_id is None
 
+    @property
+    def log_context(self) -> dict[str, str | None]:
+        """Return the canonical room/thread log fields for this target."""
+        return {"room_id": self.room_id, "thread_id": self.resolved_thread_id}
+
     @staticmethod
     def _build_session_id(room_id: str, resolved_thread_id: str | None) -> str:
         """Build the canonical persisted session ID for one target."""

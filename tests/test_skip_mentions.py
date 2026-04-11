@@ -323,9 +323,6 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
     ):
         result = await gateway.deliver_final(
             FinalDeliveryRequest(
-                room_id="!test:server",
-                reply_to_event_id="$event123",
-                thread_id="$thread",
                 target=_delivery_envelope().target,
                 existing_event_id=None,
                 response_text="raw response",
@@ -366,9 +363,6 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
     ):
         result = await gateway.deliver_final(
             FinalDeliveryRequest(
-                room_id="!test:server",
-                reply_to_event_id="$event123",
-                thread_id="$thread",
                 target=_delivery_envelope().target,
                 existing_event_id="$existing",
                 response_text="raw response",

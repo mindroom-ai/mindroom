@@ -766,13 +766,16 @@ class DispatchPlanner:
             reply_to_event: nio.RoomMessageText | None = None,
             skip_mentions: bool = False,
         ) -> str | None:
+            target = self.deps.resolver.build_message_target(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+                event_source=reply_to_event.source if reply_to_event is not None else None,
+            )
             return await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
+                    target=target,
                     response_text=response_text,
-                    thread_id=thread_id,
-                    reply_to_event=reply_to_event,
                     skip_mentions=skip_mentions,
                 ),
             )
@@ -941,11 +944,8 @@ class DispatchPlanner:
 
         event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                response_text=response_text,
-                thread_id=resolved_target.thread_id,
                 target=resolved_target,
+                response_text=response_text,
                 extra_content=routed_extra_content or None,
             ),
         )
@@ -996,10 +996,8 @@ class DispatchPlanner:
             assert action.rejection_message is not None
             response_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
+                    target=dispatch.target,
                     response_text=action.rejection_message,
-                    thread_id=dispatch.context.thread_id,
                 ),
             )
             self._mark_source_events_responded(
@@ -1150,10 +1148,12 @@ class DispatchPlanner:
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
         return await self.deps.delivery_gateway.send_text(
             SendTextRequest(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
+                target=self.deps.resolver.build_message_target(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=reply_to_event_id,
+                ),
                 response_text=error_text,
-                thread_id=thread_id,
                 extra_content=terminal_extra_content,
             ),
         )

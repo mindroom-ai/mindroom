@@ -1834,9 +1834,13 @@ class TestAgentBot:
         done_task = asyncio.create_task(asyncio.sleep(0))
         other_room_task = asyncio.create_task(asyncio.sleep(60))
         await done_task
-        bot.stop_manager.set_current("$active", "!test:localhost", running_task)
-        bot.stop_manager.set_current("$done", "!test:localhost", done_task)
-        bot.stop_manager.set_current("$other-room", "!other:localhost", other_room_task)
+        bot.stop_manager.set_current("$active", MessageTarget.resolve("!test:localhost", None, "$active"), running_task)
+        bot.stop_manager.set_current("$done", MessageTarget.resolve("!test:localhost", None, "$done"), done_task)
+        bot.stop_manager.set_current(
+            "$other-room",
+            MessageTarget.resolve("!other:localhost", None, "$other-room"),
+            other_room_task,
+        )
 
         try:
             mock_ai_response = AsyncMock(return_value="Handled")
@@ -1954,9 +1958,13 @@ class TestAgentBot:
         done_task = asyncio.create_task(asyncio.sleep(0))
         other_room_task = asyncio.create_task(asyncio.sleep(60))
         await done_task
-        bot.stop_manager.set_current("$active", "!test:localhost", running_task)
-        bot.stop_manager.set_current("$done", "!test:localhost", done_task)
-        bot.stop_manager.set_current("$other-room", "!other:localhost", other_room_task)
+        bot.stop_manager.set_current("$active", MessageTarget.resolve("!test:localhost", None, "$active"), running_task)
+        bot.stop_manager.set_current("$done", MessageTarget.resolve("!test:localhost", None, "$done"), done_task)
+        bot.stop_manager.set_current(
+            "$other-room",
+            MessageTarget.resolve("!other:localhost", None, "$other-room"),
+            other_room_task,
+        )
 
         try:
             mock_stream = AsyncMock(return_value=mock_streaming_response())
@@ -2226,9 +2234,6 @@ class TestAgentBot:
 
         delivery = await gateway.deliver_final(
             FinalDeliveryRequest(
-                room_id="!test:localhost",
-                reply_to_event_id="$event123",
-                thread_id="$thread123",
                 target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
                 existing_event_id="$placeholder",
                 existing_event_is_placeholder=True,
@@ -2296,9 +2301,6 @@ class TestAgentBot:
 
         delivery = await gateway.deliver_final(
             FinalDeliveryRequest(
-                room_id="!test:localhost",
-                reply_to_event_id="$event123",
-                thread_id="$thread123",
                 target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
                 existing_event_id="$existing",
                 existing_event_is_placeholder=False,
@@ -2363,9 +2365,6 @@ class TestAgentBot:
         with pytest.raises(SuppressedPlaceholderCleanupError):
             await gateway.deliver_final(
                 FinalDeliveryRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event123",
-                    thread_id="$thread123",
                     target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
                     existing_event_id="$placeholder",
                     existing_event_is_placeholder=True,
@@ -6991,7 +6990,7 @@ class TestAgentBot:
             tool_trace=None,
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
             thread_mode_override=None,
-            target=None,
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
         )
 
     @pytest.mark.asyncio

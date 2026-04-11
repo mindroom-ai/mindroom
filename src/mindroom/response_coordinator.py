@@ -465,7 +465,7 @@ class ResponseCoordinator:
         return {
             event_id
             for event_id, tracked in self.deps.stop_manager.tracked_messages.items()
-            if tracked.room_id == room_id and not tracked.task.done()
+            if tracked.target.room_id == room_id and not tracked.task.done()
         }
 
     async def _run_locked_response_lifecycle(
@@ -731,14 +731,6 @@ class ResponseCoordinator:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        room_mode = (
-            self.deps.runtime.config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=request.room_id,
-            )
-            == "room"
-        )
         use_streaming = await should_use_streaming(
             self._client(),
             request.room_id,
@@ -901,15 +893,11 @@ class ResponseCoordinator:
 
                     event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
                         StreamingDeliveryRequest(
-                            room_id=request.room_id,
-                            reply_to_event_id=request.reply_to_event_id,
-                            response_thread_id=delivery_target.resolved_thread_id,
+                            target=delivery_target,
                             response_stream=response_stream,
                             existing_event_id=delivery_request.existing_event_id,
                             adopt_existing_placeholder=delivery_request.existing_event_id is not None
                             and delivery_request.existing_event_is_placeholder,
-                            target=delivery_target,
-                            room_mode=room_mode,
                             header=None,
                             show_tool_calls=show_tool_calls,
                             streaming_cls=ReplacementStreamingResponse,
@@ -929,9 +917,6 @@ class ResponseCoordinator:
                 delivery_kind: Literal["sent", "edited"] = "edited" if message_id else "sent"
                 delivery_result = await self.deps.delivery_gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
-                        room_id=request.room_id,
-                        reply_to_event_id=request.reply_to_event_id,
-                        thread_id=request.thread_id,
                         target=delivery_target,
                         streamed_event_id=event_id,
                         streamed_text=accumulated,
@@ -1001,10 +986,9 @@ class ResponseCoordinator:
                         cancelled_text, extra_content = self._cancelled_response_update(restart=restart)
                         await self.deps.delivery_gateway.edit_text(
                             EditTextRequest(
-                                room_id=request.room_id,
+                                target=delivery_target,
                                 event_id=message_id,
                                 new_text=cancelled_text,
-                                thread_id=delivery_target.resolved_thread_id,
                                 extra_content=extra_content,
                             ),
                         )
@@ -1012,9 +996,6 @@ class ResponseCoordinator:
 
                 delivery_result = await self.deps.delivery_gateway.deliver_final(
                     FinalDeliveryRequest(
-                        room_id=request.room_id,
-                        reply_to_event_id=request.reply_to_event_id,
-                        thread_id=request.thread_id,
                         target=delivery_target,
                         existing_event_id=message_id,
                         existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
@@ -1102,11 +1083,8 @@ class ResponseCoordinator:
                 assert not existing_event_id
                 initial_message_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
-                        room_id=room_id,
-                        reply_to_event_id=reply_to_event_id,
-                        response_text=thinking_message,
-                        thread_id=thread_id,
                         target=resolved_target,
+                        response_text=thinking_message,
                         extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                     ),
                 )
@@ -1123,7 +1101,7 @@ class ResponseCoordinator:
 
             self.deps.stop_manager.set_current(
                 tracked_message_id,
-                room_id,
+                resolved_target,
                 task,
                 None,
                 run_id=run_id,
@@ -1147,7 +1125,7 @@ class ResponseCoordinator:
 
                 if show_stop_button:
                     self.deps.logger.info("Adding stop button", message_id=message_to_track)
-                    await self.deps.stop_manager.add_stop_button(self._client(), room_id, message_to_track)
+                    await self.deps.stop_manager.add_stop_button(self._client(), message_to_track)
 
             try:
                 await task
@@ -1390,15 +1368,11 @@ class ResponseCoordinator:
             )
             event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
                 StreamingDeliveryRequest(
-                    room_id=request.room_id,
-                    reply_to_event_id=request.reply_to_event_id,
-                    response_thread_id=runtime.response_thread_id,
+                    target=runtime.resolved_target,
                     response_stream=wrapped_response_stream,
                     existing_event_id=request.existing_event_id,
                     adopt_existing_placeholder=request.existing_event_id is not None
                     and request.existing_event_is_placeholder,
-                    target=runtime.resolved_target,
-                    room_mode=runtime.room_mode,
                     show_tool_calls=self._show_tool_calls(),
                     extra_content=response_extra_content,
                     tool_trace_collector=tool_trace,
@@ -1460,10 +1434,9 @@ class ResponseCoordinator:
                 cancelled_text, extra_content = self._cancelled_response_update(restart=restart)
                 await self.deps.delivery_gateway.edit_text(
                     EditTextRequest(
-                        room_id=request.room_id,
+                        target=runtime.resolved_target,
                         event_id=request.existing_event_id,
                         new_text=cancelled_text,
-                        thread_id=runtime.response_thread_id,
                         extra_content=extra_content,
                     ),
                 )
@@ -1478,9 +1451,6 @@ class ResponseCoordinator:
         )
         delivery = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
-                room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
                 target=runtime.resolved_target,
                 existing_event_id=request.existing_event_id,
                 existing_event_is_placeholder=request.existing_event_is_placeholder,
@@ -1595,9 +1565,6 @@ class ResponseCoordinator:
 
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
-                room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
                 target=runtime.resolved_target,
                 streamed_event_id=event_id,
                 streamed_text=accumulated,
@@ -1747,12 +1714,8 @@ class ResponseCoordinator:
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                response_text=response.formatted_text,
-                thread_id=thread_id,
                 target=resolved_target,
-                reply_to_event=reply_to_event,
+                response_text=response.formatted_text,
                 skip_mentions=True,
                 tool_trace=tool_trace if show_tool_calls else None,
                 extra_content=run_metadata_content or None,
