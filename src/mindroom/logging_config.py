@@ -64,6 +64,7 @@ def setup_logging(
     # Shared processors that don't affect output format
     timestamper = structlog.processors.TimeStamper(fmt="iso")
     pre_chain = [
+        structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         timestamper,

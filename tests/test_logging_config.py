@@ -114,6 +114,27 @@ def test_setup_logging_json_mode_includes_logger_for_foreign_logger(
     assert "timestamp" in payload
 
 
+def test_setup_logging_json_mode_foreign_logger_inherits_bound_log_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Foreign loggers should include active structured room/thread context."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    with bound_log_context(room_id="!room:example.org", thread_id="$thread:example.org"):
+        logging.getLogger("test.foreign").info("foreign scoped message")
+
+    payload = _last_stderr_payload(capsys)
+
+    assert payload["event"] == "foreign scoped message"
+    assert payload["logger"] == "test.foreign"
+    assert payload["room_id"] == "!room:example.org"
+    assert payload["thread_id"] == "$thread:example.org"
+
+
 def test_setup_logging_text_mode_does_not_emit_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

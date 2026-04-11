@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,10 +13,11 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
-from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 async def _drain_stop_cleanup(stop_manager: StopManager) -> None:
@@ -257,6 +259,39 @@ async def test_stop_manager_force_cancels_task_when_graceful_cancel_errors() -> 
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_stop_manager_logs_tracked_thread_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stop-manager logs should include tracked room/thread metadata."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=test_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    stop_manager = StopManager()
+    task = MagicMock()
+    task.done.return_value = False
+    target = MessageTarget.resolve("!room:example.org", "$thread:example.org", "$message:example.org")
+
+    stop_manager.set_current(
+        message_id="$message:example.org",
+        target=target,
+        task=task,
+    )
+    assert await stop_manager.handle_stop_reaction("$message:example.org") is True
+
+    payloads = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
+    tracking_payload = next(payload for payload in payloads if payload["event"] == "Tracking message generation")
+    stop_payload = next(payload for payload in payloads if payload["event"] == "Handling stop reaction")
+
+    assert tracking_payload["room_id"] == "!room:example.org"
+    assert tracking_payload["thread_id"] == "$thread:example.org"
+    assert stop_payload["room_id"] == "!room:example.org"
+    assert stop_payload["thread_id"] == "$thread:example.org"
 
 
 @pytest.mark.asyncio

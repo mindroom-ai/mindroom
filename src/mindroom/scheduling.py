@@ -31,7 +31,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client import (
     get_latest_thread_event_id_if_needed,
     send_message,
@@ -744,66 +744,67 @@ async def _execute_scheduled_workflow(
         runtime_paths=runtime_paths,
     )
 
-    try:
-        message_text = workflow.message
-        if _ACTIVE_HOOK_REGISTRY.has_hooks(EVENT_SCHEDULE_FIRED):
-            context = ScheduleFiredContext(
-                event_name=EVENT_SCHEDULE_FIRED,
-                plugin_name="",
-                settings={},
-                config=config,
-                runtime_paths=runtime_paths,
-                logger=logger.bind(event_name=EVENT_SCHEDULE_FIRED),
-                correlation_id=f"{EVENT_SCHEDULE_FIRED}:{task_id}",
-                message_sender=build_hook_message_sender(client, config, runtime_paths),
-                room_state_querier=build_hook_room_state_querier(client),
-                room_state_putter=build_hook_room_state_putter(client),
-                task_id=task_id,
-                workflow=workflow,
-                room_id=workflow.room_id,
-                thread_id=target.resolved_thread_id,
-                created_by=workflow.created_by,
-                message_text=message_text,
-            )
-            await emit(_ACTIVE_HOOK_REGISTRY, EVENT_SCHEDULE_FIRED, context)
-            if context.suppress:
-                logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=workflow.room_id)
-                return False
-            message_text = context.message_text
+    with bound_log_context(**target.log_context):
+        try:
+            message_text = workflow.message
+            if _ACTIVE_HOOK_REGISTRY.has_hooks(EVENT_SCHEDULE_FIRED):
+                context = ScheduleFiredContext(
+                    event_name=EVENT_SCHEDULE_FIRED,
+                    plugin_name="",
+                    settings={},
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    logger=logger.bind(event_name=EVENT_SCHEDULE_FIRED),
+                    correlation_id=f"{EVENT_SCHEDULE_FIRED}:{task_id}",
+                    message_sender=build_hook_message_sender(client, config, runtime_paths),
+                    room_state_querier=build_hook_room_state_querier(client),
+                    room_state_putter=build_hook_room_state_putter(client),
+                    task_id=task_id,
+                    workflow=workflow,
+                    room_id=workflow.room_id,
+                    thread_id=target.resolved_thread_id,
+                    created_by=workflow.created_by,
+                    message_text=message_text,
+                )
+                await emit(_ACTIVE_HOOK_REGISTRY, EVENT_SCHEDULE_FIRED, context)
+                if context.suppress:
+                    logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=workflow.room_id)
+                    return False
+                message_text = context.message_text
 
-        content = await _build_workflow_message_content(
-            client,
-            workflow,
-            target,
-            config,
-            runtime_paths,
-            message_text,
-        )
-        if workflow.created_by:
-            content[ORIGINAL_SENDER_KEY] = workflow.created_by
-        content["com.mindroom.source_kind"] = "scheduled"
-        event_id = await send_message(client, workflow.room_id, content)
-        if event_id is None:
-            _raise_scheduled_workflow_send_error()
-        logger.info(
-            "Executed scheduled workflow",
-            description=workflow.description,
-            thread_id=target.resolved_thread_id,
-            new_thread=workflow.new_thread,
-            event_id=event_id,
-        )
-    except Exception as e:
-        logger.exception("Failed to execute scheduled workflow")
-        if workflow.room_id:
-            error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
-            error_content = await _build_scheduled_failure_content(client, workflow, target, error_message)
-            try:
-                await send_message(client, workflow.room_id, error_content)
-            except Exception:
-                logger.exception("Failed to send scheduled workflow failure message")
-        return False
-    else:
-        return True
+            content = await _build_workflow_message_content(
+                client,
+                workflow,
+                target,
+                config,
+                runtime_paths,
+                message_text,
+            )
+            if workflow.created_by:
+                content[ORIGINAL_SENDER_KEY] = workflow.created_by
+            content["com.mindroom.source_kind"] = "scheduled"
+            event_id = await send_message(client, workflow.room_id, content)
+            if event_id is None:
+                _raise_scheduled_workflow_send_error()
+            logger.info(
+                "Executed scheduled workflow",
+                description=workflow.description,
+                thread_id=target.resolved_thread_id,
+                new_thread=workflow.new_thread,
+                event_id=event_id,
+            )
+        except Exception as e:
+            logger.exception("Failed to execute scheduled workflow")
+            if workflow.room_id:
+                error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
+                error_content = await _build_scheduled_failure_content(client, workflow, target, error_message)
+                try:
+                    await send_message(client, workflow.room_id, error_content)
+                except Exception:
+                    logger.exception("Failed to send scheduled workflow failure message")
+            return False
+        else:
+            return True
 
 
 async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915

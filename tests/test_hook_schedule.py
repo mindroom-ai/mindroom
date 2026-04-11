@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
+from mindroom.logging_config import setup_logging
 from mindroom.scheduling import ScheduledWorkflow, _execute_scheduled_workflow, set_scheduling_hook_registry
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -98,6 +100,36 @@ async def test_schedule_hook_can_suppress_synthetic_message(tmp_path: Path) -> N
         await _execute_scheduled_workflow(AsyncMock(), _workflow("Do not send"), config, runtime_paths_for(config))
 
     mock_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_schedule_hook_suppression_log_includes_workflow_thread_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Suppression logs should carry the workflow room/thread context."""
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def suppress(ctx: ScheduleFiredContext) -> None:
+        ctx.suppress = True
+
+    config = _config(tmp_path)
+    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [suppress])]))
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=runtime_paths_for(config))
+    capsys.readouterr()
+
+    with patch("mindroom.scheduling.send_message", new=AsyncMock()):
+        await _execute_scheduled_workflow(AsyncMock(), _workflow("Do not send"), config, runtime_paths_for(config))
+
+    payloads = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
+    suppression_payload = next(
+        payload for payload in payloads if payload["event"] == "Scheduled workflow suppressed by hook"
+    )
+
+    assert suppression_payload["room_id"] == "!room:localhost"
+    assert suppression_payload["thread_id"] == "$thread"
 
 
 @pytest.mark.asyncio
