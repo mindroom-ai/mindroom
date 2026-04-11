@@ -101,11 +101,9 @@ class PostResponseEffectsSupport:
     async def _timed_thread_summary(
         self,
         *,
-        thread_id: str,
         summary_coro: Awaitable[None],
     ) -> None:
         """Run thread-summary generation with duration logging."""
-        del thread_id
         await summary_coro
 
     async def _register_interactive_delivery(
@@ -178,7 +176,6 @@ class PostResponseEffectsSupport:
         )
         create_background_task(
             self._timed_thread_summary(
-                thread_id=thread_id,
                 summary_coro=summary_coro,
             ),
             name=f"thread_summary_{room_id}_{thread_id}",

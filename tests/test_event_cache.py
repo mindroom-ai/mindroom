@@ -679,7 +679,7 @@ async def test_redaction_removes_individual_event_cache_entry(tmp_path: Path) ->
             [_cache_source(root_event), _cache_source(reply_event)],
         )
         assert await cache.get_event("!room:localhost", "$reply") is not None
-        redacted = await cache.redact_event("!room:localhost", "$reply", thread_id="$thread_root")
+        redacted = await cache.redact_event("!room:localhost", "$reply")
         cached_event = await cache.get_event("!room:localhost", "$reply")
     finally:
         await cache.close()
@@ -739,7 +739,7 @@ async def test_redacting_original_removes_dependent_cached_edits_from_thread_his
         )
         history_before = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
 
-        redacted = await cache.redact_event("!room:localhost", "$reply", thread_id="$thread_root")
+        redacted = await cache.redact_event("!room:localhost", "$reply")
         latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
         cached_edit = await cache.get_event("!room:localhost", "$reply_edit")
         history_after = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
