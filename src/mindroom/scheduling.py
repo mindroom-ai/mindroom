@@ -403,6 +403,20 @@ def _cleanup_task_if_current(task_id: str, running_tasks: dict[str, asyncio.Task
         del running_tasks[task_id]
 
 
+def _scheduled_workflow_target(
+    workflow: ScheduledWorkflow,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> MessageTarget:
+    """Return the canonical target for one scheduled workflow snapshot."""
+    return MessageTarget.for_scheduled_task(
+        workflow,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+
 def _parse_task_records_from_state(
     room_id: str,
     state_response: nio.RoomGetStateResponse,
@@ -820,23 +834,18 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         logger.error("No room_id provided for recurring task", task_id=task_id)
         return
 
+    current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
     try:
         while True:
             latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
             if not latest_task:
-                with bound_log_context(
-                    **MessageTarget.for_scheduled_task(
-                        workflow,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                    ).log_context,
-                ):
+                with bound_log_context(**current_target.log_context):
                     logger.info("Recurring task is no longer pending, stopping", task_id=task_id)
                 return
 
             latest_workflow = latest_task.workflow
             workflow = latest_workflow
-            current_target = MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths)
+            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
             with bound_log_context(**current_target.log_context):
                 cron_schedule = latest_workflow.cron_schedule
                 if not cron_schedule:
@@ -869,6 +878,11 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
                     if _workflows_differ(workflow, refreshed_workflow):
                         workflow = refreshed_workflow
+                        current_target = _scheduled_workflow_target(
+                            workflow,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                        )
                         workflow_changed = True
                         break
 
@@ -890,6 +904,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     return
                 if _workflows_differ(workflow, latest_workflow):
                     workflow = latest_workflow
+                    current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
                     continue
 
                 await _execute_scheduled_workflow(client, workflow, config, runtime_paths, task_id=task_id)
@@ -897,21 +912,18 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
                     return
     except asyncio.CancelledError:
-        with bound_log_context(
-            **MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths).log_context,
-        ):
+        with bound_log_context(**current_target.log_context):
             logger.info("cron_task_cancelled", task_id=task_id)
         raise
     except Exception as e:
-        target = MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths)
-        with bound_log_context(**target.log_context):
+        with bound_log_context(**current_target.log_context):
             logger.exception("cron_task_failed", task_id=task_id)
             if workflow.room_id:
                 error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
                 error_content = await _build_scheduled_failure_content(
                     client,
                     workflow,
-                    target,
+                    current_target,
                     error_message,
                 )
                 await send_message(client, workflow.room_id, error_content)
@@ -931,24 +943,19 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
         logger.error("No room_id provided for one-time task", task_id=task_id)
         return
 
+    current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
     latest_pending_task: ScheduledTaskRecord | None = None
     try:
         while True:
             latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
             if not latest_task:
-                with bound_log_context(
-                    **MessageTarget.for_scheduled_task(
-                        workflow,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                    ).log_context,
-                ):
+                with bound_log_context(**current_target.log_context):
                     logger.info("One-time task is no longer pending, stopping", task_id=task_id)
                 return
 
             latest_workflow = latest_task.workflow
             workflow = latest_workflow
-            current_target = MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths)
+            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
             with bound_log_context(**current_target.log_context):
                 execute_at = latest_workflow.execute_at
                 if not execute_at:
@@ -966,16 +973,14 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             task_id=task_id,
         )
         if not latest_before_execute:
-            with bound_log_context(
-                **MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths).log_context,
-            ):
+            with bound_log_context(**current_target.log_context):
                 logger.info("One-time task was cancelled before execution, stopping", task_id=task_id)
             return
 
         latest_workflow = latest_before_execute.workflow
         latest_pending_task = latest_before_execute
         workflow = latest_workflow
-        current_target = MessageTarget.for_scheduled_task(workflow, config=config, runtime_paths=runtime_paths)
+        current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
         with bound_log_context(**current_target.log_context):
             if not latest_workflow.execute_at:
                 logger.error("No execution time provided for one-time task", task_id=task_id)
@@ -1005,27 +1010,24 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     status=final_status,
                 )
     except asyncio.CancelledError:
-        current_workflow = latest_pending_task.workflow if latest_pending_task is not None else workflow
-        with bound_log_context(
-            **MessageTarget.for_scheduled_task(
-                current_workflow,
-                config=config,
-                runtime_paths=runtime_paths,
-            ).log_context,
-        ):
+        if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
+            workflow = latest_pending_task.workflow
+            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+        with bound_log_context(**current_target.log_context):
             logger.info("one_time_task_cancelled", task_id=task_id)
         raise
     except Exception as e:
-        current_workflow = latest_pending_task.workflow if latest_pending_task is not None else workflow
-        target = MessageTarget.for_scheduled_task(current_workflow, config=config, runtime_paths=runtime_paths)
-        with bound_log_context(**target.log_context):
+        if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
+            workflow = latest_pending_task.workflow
+            current_target = _scheduled_workflow_target(workflow, config=config, runtime_paths=runtime_paths)
+        with bound_log_context(**current_target.log_context):
             logger.exception("one_time_task_failed", task_id=task_id)
             if workflow.room_id:
                 error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
                 error_content = await _build_scheduled_failure_content(
                     client,
                     workflow,
-                    target,
+                    current_target,
                     error_message,
                 )
                 await send_message(client, workflow.room_id, error_content)
