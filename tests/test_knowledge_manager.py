@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -687,6 +688,96 @@ async def test_sync_indexed_files_does_not_suppress_retry_for_previously_indexed
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_resumes_partial_index_when_checkpoint_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup should resume a partial legacy index instead of wiping it when no checkpoint exists."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "a.md").write_text("A\n", encoding="utf-8")
+    (docs_path / "b.md").write_text("B\n", encoding="utf-8")
+    _DummyChromaDb.metadatas = [{"source_path": "a.md"}]
+
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"research": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+        ),
+        runtime_paths,
+    )
+    reset_collection = MagicMock(side_effect=AssertionError("partial index resume must not reset the collection"))
+    monkeypatch.setattr(KnowledgeManager, "_reset_collection", reset_collection)
+
+    try:
+        managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+        manager = managers["research"]
+
+        assert manager._indexed_files == {"a.md", "b.md"}
+        assert {metadata["source_path"] for metadata in _DummyChromaDb.metadatas if isinstance(metadata, dict)} == {
+            "a.md",
+            "b.md",
+        }
+        payload = json.loads(manager._indexing_settings_path.read_text(encoding="utf-8"))
+        assert payload == {
+            "settings": list(manager._indexing_settings),
+            "status": "complete",
+        }
+        reset_collection.assert_not_called()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_full_reindexes_when_checkpoint_is_corrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt checkpoint with existing vectors must force a safe full rebuild."""
+    _DummyChromaDb.metadatas = [{"source_path": "a.md"}]
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "a.md").write_text("A\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"research": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+        ),
+        runtime_paths,
+    )
+    seed_manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    seed_manager._indexing_settings_path.write_text("{not-json", encoding="utf-8")
+
+    initialize = AsyncMock()
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 1, "indexed_count": 0, "removed_count": 0})
+    monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+
+    try:
+        await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+
+        initialize.assert_awaited_once()
+        sync_indexed_files.assert_not_awaited()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_maintains_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1050,7 +1141,7 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
     )
 
     sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
-    sync_indexed_files = AsyncMock()
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
     start_watcher = AsyncMock()
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
     monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
@@ -1061,7 +1152,14 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
         await ensure_agent_knowledge_managers("mind", config, runtime_paths_for(config), execution_identity=identity)
 
         assert sync_git_repository.await_count == 2
-        sync_indexed_files.assert_not_awaited()
+        sync_git_repository.assert_has_awaits(
+            [
+                call(index_changes=False),
+                call(index_changes=False),
+            ],
+            any_order=False,
+        )
+        assert sync_indexed_files.await_count == 2
         start_watcher.assert_not_awaited()
     finally:
         await shutdown_shared_knowledge_managers()
@@ -1081,8 +1179,10 @@ async def test_initialize_shared_git_knowledge_starts_background_sync_when_watch
     runtime_paths = runtime_paths_for(config)
     start_watcher = AsyncMock()
     sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
     monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
 
     try:
         await initialize_shared_knowledge_managers(
@@ -1093,7 +1193,8 @@ async def test_initialize_shared_git_knowledge_starts_background_sync_when_watch
         )
 
         start_watcher.assert_awaited_once()
-        sync_git_repository.assert_awaited_once()
+        sync_git_repository.assert_awaited_once_with(index_changes=False)
+        sync_indexed_files.assert_awaited_once()
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -1380,6 +1481,81 @@ async def test_initialize_shared_knowledge_managers_full_reindex_on_cold_setting
 
         initialize.assert_awaited_once()
         sync_indexed_files.assert_not_awaited()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_reindex_restart_resumes_partial_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restarted process should continue from partial reindex progress instead of wiping it."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager._MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES", 1)
+
+    def _clear_dummy_collection(_vector_db: _DummyChromaDb) -> None:
+        _DummyChromaDb.metadatas.clear()
+
+    monkeypatch.setattr(_DummyChromaDb, "delete", _clear_dummy_collection)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "a.md").write_text("A\n", encoding="utf-8")
+    (docs_path / "b.md").write_text("B\n", encoding="utf-8")
+    config = _make_config(docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    interrupted_manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    original_index_file_locked = interrupted_manager._index_file_locked
+    indexed_paths: list[str] = []
+
+    async def _interrupt_after_first_file(resolved_path: Path, *, upsert: bool) -> bool:
+        indexed = await original_index_file_locked(resolved_path, upsert=upsert)
+        indexed_paths.append(interrupted_manager._relative_path(resolved_path))
+        if len(indexed_paths) == 1:
+            message = "simulated crash"
+            raise RuntimeError(message)
+        return indexed
+
+    monkeypatch.setattr(interrupted_manager, "_index_file_locked", _interrupt_after_first_file)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await interrupted_manager.reindex_all()
+
+    interrupted_payload = json.loads(interrupted_manager._indexing_settings_path.read_text(encoding="utf-8"))
+    assert interrupted_payload == {
+        "settings": list(interrupted_manager._indexing_settings),
+        "status": "indexing",
+    }
+    assert {metadata["source_path"] for metadata in _DummyChromaDb.metadatas if isinstance(metadata, dict)} == {
+        indexed_paths[0],
+    }
+
+    reset_collection = MagicMock(side_effect=AssertionError("restart resume must not reset the collection"))
+    monkeypatch.setattr(KnowledgeManager, "_reset_collection", reset_collection)
+
+    try:
+        managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+        resumed_manager = managers["research"]
+
+        assert resumed_manager._indexed_files == {"a.md", "b.md"}
+        assert {metadata["source_path"] for metadata in _DummyChromaDb.metadatas if isinstance(metadata, dict)} == {
+            "a.md",
+            "b.md",
+        }
+        resumed_payload = json.loads(resumed_manager._indexing_settings_path.read_text(encoding="utf-8"))
+        assert resumed_payload == {
+            "settings": list(resumed_manager._indexing_settings),
+            "status": "complete",
+        }
+        reset_collection.assert_not_called()
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -2034,6 +2210,65 @@ async def test_initialize_git_backed_base_syncs_before_single_full_reindex(
 
     sync_git_repository.assert_awaited_once_with(index_changes=False)
     reindex_all.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_resumes_partial_git_index_with_full_file_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git-backed resume should refresh the checkout, then reconcile against the full file set."""
+    _DummyChromaDb.metadatas = [{"source_path": "doc.md"}]
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge")
+    runtime_paths = runtime_paths_for(config)
+    seed_manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    seed_manager._save_persisted_indexing_state("indexing")
+
+    git_calls: list[bool] = []
+    sync_calls = 0
+    initialize_calls = 0
+
+    async def _fake_sync_git_repository(
+        _manager: KnowledgeManager,
+        *,
+        index_changes: bool = True,
+    ) -> dict[str, int | bool]:
+        git_calls.append(index_changes)
+        return {"updated": False, "changed_count": 0, "removed_count": 0}
+
+    async def _fake_sync_indexed_files(_manager: KnowledgeManager) -> dict[str, int]:
+        nonlocal sync_calls
+        sync_calls += 1
+        return {"loaded_count": 1, "indexed_count": 1, "removed_count": 0}
+
+    async def _fake_initialize(_manager: KnowledgeManager) -> None:
+        nonlocal initialize_calls
+        initialize_calls += 1
+
+    def _unexpected_reset_collection(_manager: KnowledgeManager) -> None:
+        message = "git resume should not reset the collection"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _fake_sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", _fake_sync_indexed_files)
+    monkeypatch.setattr(KnowledgeManager, "initialize", _fake_initialize)
+    monkeypatch.setattr(KnowledgeManager, "_reset_collection", _unexpected_reset_collection)
+
+    try:
+        await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+
+        assert git_calls == [False]
+        assert sync_calls == 1
+        assert initialize_calls == 0
+    finally:
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio

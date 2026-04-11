@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.chunking.fixed import FixedSizeChunking
@@ -54,6 +54,20 @@ _SOURCE_SIZE_KEY = "source_size"
 _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
+_INDEXING_STATUS_RESETTING = "resetting"
+_INDEXING_STATUS_INDEXING = "indexing"
+_INDEXING_STATUS_COMPLETE = "complete"
+_INDEXING_STATUSES = {
+    _INDEXING_STATUS_RESETTING,
+    _INDEXING_STATUS_INDEXING,
+    _INDEXING_STATUS_COMPLETE,
+}
+
+
+@dataclass(frozen=True)
+class _PersistedIndexingState:
+    settings: tuple[str, ...]
+    status: Literal["resetting", "indexing", "complete"]
 
 
 def _resolve_knowledge_path(
@@ -427,22 +441,56 @@ class KnowledgeManager:
             raise RuntimeError(msg)
         return knowledge_path
 
-    def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
+    def _load_persisted_indexing_state(self) -> _PersistedIndexingState | None:
         if not self._indexing_settings_path.exists():
             return None
         try:
             payload = json.loads(self._indexing_settings_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
-            return None
-        return tuple(payload)
 
-    def _save_persisted_indexing_settings(self) -> None:
+        settings: tuple[str, ...] | None = None
+        status: Literal["resetting", "indexing", "complete"] | None = None
+        if isinstance(payload, list):
+            if all(isinstance(item, str) for item in payload):
+                settings = tuple(payload)
+                status = _INDEXING_STATUS_COMPLETE
+        elif isinstance(payload, dict):
+            raw_settings = payload.get("settings")
+            raw_status = payload.get("status")
+            if (
+                isinstance(raw_settings, list)
+                and all(isinstance(item, str) for item in raw_settings)
+                and raw_status in _INDEXING_STATUSES
+            ):
+                settings = tuple(raw_settings)
+                status = raw_status
+
+        if settings is None or status is None:
+            return None
+        return _PersistedIndexingState(settings, status)
+
+    def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
+        persisted_state = self._load_persisted_indexing_state()
+        return persisted_state.settings if persisted_state is not None else None
+
+    def _save_persisted_indexing_state(
+        self,
+        status: Literal["resetting", "indexing", "complete"],
+    ) -> None:
         self._indexing_settings_path.write_text(
-            json.dumps(list(self._indexing_settings)),
+            json.dumps(
+                {
+                    "settings": list(self._indexing_settings),
+                    "status": status,
+                },
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
+
+    def _save_persisted_indexing_settings(self) -> None:
+        self._save_persisted_indexing_state(_INDEXING_STATUS_COMPLETE)
 
     def _has_existing_index(self) -> bool:
         vector_db = self._knowledge.vector_db
@@ -451,11 +499,20 @@ class KnowledgeManager:
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
         return collection.count() > 0
 
+    def _startup_index_mode(self) -> Literal["full_reindex", "resume", "incremental"]:
+        persisted_state = self._load_persisted_indexing_state()
+        if persisted_state is None:
+            # A missing checkpoint can be legacy state worth resuming, but a
+            # present unreadable checkpoint is unsafe once vectors already exist.
+            return "full_reindex" if self._indexing_settings_path.exists() and self._has_existing_index() else "resume"
+        if persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING:
+            return "full_reindex"
+        if persisted_state.status == _INDEXING_STATUS_INDEXING or not self._has_existing_index():
+            return "resume"
+        return "incremental"
+
     def _needs_full_reindex_on_create(self) -> bool:
-        persisted_settings = self._load_persisted_indexing_settings()
-        if persisted_settings is None:
-            return self._has_existing_index()
-        return persisted_settings != self._indexing_settings
+        return self._startup_index_mode() == "full_reindex"
 
     def matches(
         self,
@@ -1053,10 +1110,12 @@ class KnowledgeManager:
         files = self.list_files()
 
         async with self._lock:
+            await asyncio.to_thread(self._save_persisted_indexing_state, _INDEXING_STATUS_RESETTING)
             await asyncio.to_thread(self._reset_collection)
             async with self._state_lock:
                 self._indexed_files.clear()
                 self._indexed_signatures.clear()
+            await asyncio.to_thread(self._save_persisted_indexing_state, _INDEXING_STATUS_INDEXING)
             indexed_count = await self._reindex_files_locked(files)
             await asyncio.to_thread(self._save_persisted_indexing_settings)
             return indexed_count
@@ -1146,6 +1205,19 @@ async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[
     return await manager.sync_indexed_files()
 
 
+async def _resume_manager_without_full_reindex(manager: KnowledgeManager) -> dict[str, Any]:
+    if manager._git_config() is not None:
+        git_result = await manager.sync_git_repository(index_changes=False)
+        sync_result = await manager.sync_indexed_files()
+        return {
+            "git_updated": git_result["updated"],
+            "git_changed_count": git_result["changed_count"],
+            "git_removed_count": git_result["removed_count"],
+            **sync_result,
+        }
+    return await manager.sync_indexed_files()
+
+
 def _shared_knowledge_manager_init_lock(base_id: str) -> asyncio.Lock:
     lock = _shared_knowledge_manager_init_locks.get(base_id)
     if lock is None:
@@ -1204,16 +1276,31 @@ async def _create_knowledge_manager_for_target(
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
-    if reindex_on_create or manager._needs_full_reindex_on_create():
+    startup_mode: Literal["full_reindex", "resume", "incremental"] = (
+        "full_reindex" if reindex_on_create else manager._startup_index_mode()
+    )
+    if startup_mode == "full_reindex":
         await manager.initialize()
     else:
-        sync_result = await _sync_manager_without_full_reindex(manager)
+        if startup_mode == "resume":
+            sync_result = await _resume_manager_without_full_reindex(manager)
+        else:
+            sync_result = await _sync_manager_without_full_reindex(manager)
         await asyncio.to_thread(manager._save_persisted_indexing_settings)
         sync_log_context: dict[str, object] = {
             "base_id": target.key.base_id,
             "path": str(manager.knowledge_path),
+            "startup_mode": startup_mode,
         }
-        if manager._git_config() is not None:
+        if "git_updated" in sync_result:
+            sync_log_context.update(
+                {
+                    "git_updated": sync_result["git_updated"],
+                    "git_changed_count": sync_result["git_changed_count"],
+                    "git_removed_count": sync_result["git_removed_count"],
+                },
+            )
+        elif manager._git_config() is not None:
             sync_log_context.update(
                 {
                     "updated": sync_result["updated"],
@@ -1221,7 +1308,7 @@ async def _create_knowledge_manager_for_target(
                     "removed_count": sync_result["removed_count"],
                 },
             )
-        else:
+        if "loaded_count" in sync_result:
             sync_log_context.update(
                 {
                     "loaded_count": sync_result["loaded_count"],
