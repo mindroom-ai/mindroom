@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +36,18 @@ from mindroom.tools.openbb import openbb_tools
 
 HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool_extras_sync.py"
 TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
+
+
+def _base_dependency_names() -> set[str]:
+    """Return normalized base dependency names declared in pyproject.toml."""
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    dependency_names: set[str] = set()
+    for dependency in pyproject["project"]["dependencies"]:
+        name = dependency.split(";", 1)[0].strip()
+        for separator in ("[", " ", "<", ">", "=", "!", "~"):
+            name = name.split(separator, 1)[0]
+        dependency_names.add(name.lower().replace("_", "-"))
+    return dependency_names
 
 
 def test_all_tools_can_be_imported() -> None:
@@ -102,6 +115,22 @@ def test_tool_extras_in_sync_with_pyproject() -> None:
     if result.returncode != 0:
         output = (result.stdout + result.stderr).strip()
         pytest.fail(f"Tool extras out of sync with pyproject.toml:\n{output}")
+
+
+def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
+    """Core runtime modules should not rely on transitive dependencies."""
+    base_dependencies = _base_dependency_names()
+    required_runtime_dependencies = {
+        "src/mindroom/constants.py": "pydantic-settings",
+        "src/mindroom/matrix/client.py": "aiohttp",
+        "src/mindroom/matrix/event_cache.py": "aiosqlite",
+        "src/mindroom/mcp/transports.py": "anyio",
+    }
+
+    for module_path, dependency_name in required_runtime_dependencies.items():
+        assert dependency_name in base_dependencies, (
+            f"{module_path} imports {dependency_name!r} directly and it should be declared in project.dependencies"
+        )
 
 
 def test_full_runtime_image_keeps_sentence_transformers_runtime_only() -> None:

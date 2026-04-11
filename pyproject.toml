@@ -19,7 +19,10 @@ classifiers = [
 dynamic = [ "version" ]
 dependencies = [
   "agno[anthropic,google,ollama,openai]==2.5.13",
+  "aiohttp>=3.13.3",
+  "aiosqlite>=0.20",
   "anthropic>=0.70",
+  "anyio>=4.10",
   "cerebras-cloud-sdk>=1.46",
   "chromadb>=1.0.15",
   "cron-descriptor>=1.4.5",
@@ -37,6 +40,7 @@ dependencies = [
   "mem0ai>=0.1.115",
   "openai",
   "pydantic>=2",
+  "pydantic-settings>=2.10.1",
   "pygments>=2.20",
   "pyjwt>=2.8",
   "python-dotenv>=1",
