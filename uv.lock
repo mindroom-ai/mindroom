@@ -3193,7 +3193,10 @@ name = "mindroom"
 source = { editable = "." }
 dependencies = [
     { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+    { name = "aiohttp" },
+    { name = "aiosqlite" },
     { name = "anthropic" },
+    { name = "anyio" },
     { name = "cerebras-cloud-sdk" },
     { name = "chromadb" },
     { name = "cron-descriptor" },
@@ -3211,6 +3214,7 @@ dependencies = [
     { name = "mem0ai" },
     { name = "openai" },
     { name = "pydantic" },
+    { name = "pydantic-settings" },
     { name = "pygments" },
     { name = "pyjwt" },
     { name = "python-dotenv" },
@@ -3561,7 +3565,10 @@ dev = [
 requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.5.13" },
+    { name = "aiohttp", specifier = ">=3.13.3" },
+    { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "anthropic", specifier = ">=0.70" },
+    { name = "anyio", specifier = ">=4.10.0" },
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'" },
     { name = "atlassian-python-api", marker = "extra == 'confluence'" },
@@ -3655,6 +3662,7 @@ requires-dist = [
     { name = "pydantic", marker = "extra == 'config-manager'", specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'jina'", specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'self-config'", specifier = ">=2" },
+    { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "pygithub", marker = "extra == 'github'", specifier = ">=2.5" },
     { name = "pygments", specifier = ">=2.20" },
     { name = "pyjwt", specifier = ">=2.8" },

@@ -540,7 +540,7 @@ async def test_reindex_all_uses_bounded_file_concurrency(dummy_manager: Knowledg
         active -= 1
         return True
 
-    dummy_manager._index_file_locked = _fake_index  # type: ignore[method-assign]
+    dummy_manager._index_file_locked = _fake_index
 
     indexed_count = await dummy_manager.reindex_all()
 
