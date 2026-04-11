@@ -1,15 +1,17 @@
-"""Lightweight opt-in LLM request logging."""
+"""Opt-in LLM request logging."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
-from dataclasses import fields, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from agno.models.message import Message
+from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -37,6 +39,20 @@ _SKIP_MODEL_PARAM_NAMES = {
     "default_headers",
     "default_query",
 }
+_NON_API_MESSAGE_FIELDS = {
+    "id",
+    "reasoning_content",
+    "tool_name",
+    "tool_args",
+    "tool_call_error",
+    "stop_after_tool_call",
+    "add_to_agent_memory",
+    "from_history",
+    "references",
+    "temporary",
+}
+type JSONScalar = str | int | float | bool | None
+type JSONValue = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 
 
 def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
@@ -47,14 +63,14 @@ def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -
 def _system_prompt(messages: Sequence[Message], model: Model) -> str:
     for message in messages:
         if message.role == "system":
-            return message.get_content_string()[:500]
-    return (model.system_prompt or "")[:500]
+            return message.get_content_string()
+    return model.system_prompt or ""
 
 
-def _model_params(model: Model) -> dict[str, Any]:
+def _model_params(model: Model) -> dict[str, JSONValue]:
     if not is_dataclass(model):
         return {}
-    payload: dict[str, Any] = {}
+    payload: dict[str, JSONValue] = {}
     for field in fields(model):
         if field.name in _SKIP_MODEL_PARAM_NAMES:
             continue
@@ -69,11 +85,46 @@ def _model_params(model: Model) -> dict[str, Any]:
     return payload
 
 
-def _write_jsonl_line(path: Path, payload: dict[str, Any]) -> None:
+def _write_jsonl_line(path: Path, payload: dict[str, JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload))
         handle.write("\n")
+
+
+def _json_safe(value: object) -> JSONValue:
+    normalized: object = value
+    if isinstance(normalized, BaseModel):
+        normalized = normalized.model_dump(mode="python", exclude_none=True)
+    elif not isinstance(normalized, type) and is_dataclass(normalized):
+        normalized = asdict(normalized)
+
+    if isinstance(normalized, dict):
+        return {str(key): _json_safe(item) for key, item in normalized.items()}
+    if isinstance(normalized, (list, tuple, set)):
+        return [_json_safe(item) for item in normalized]
+    if isinstance(normalized, bytes):
+        return {
+            "__type__": "bytes",
+            "base64": base64.b64encode(normalized).decode("ascii"),
+        }
+    if isinstance(normalized, Path):
+        return str(normalized)
+    if isinstance(normalized, str | int | float | bool) or normalized is None:
+        return normalized
+    return repr(normalized)
+
+
+def _request_message_payloads(messages: Sequence[Message]) -> list[dict[str, JSONValue]]:
+    payloads: list[dict[str, JSONValue]] = []
+    for message in messages:
+        payload = message.model_dump(
+            mode="python",
+            exclude_none=True,
+            exclude=_NON_API_MESSAGE_FIELDS,
+        )
+        payloads.append(cast("dict[str, JSONValue]", _json_safe(payload)))
+    return payloads
 
 
 def _request_messages(value: object) -> list[Message] | None:
@@ -82,9 +133,9 @@ def _request_messages(value: object) -> list[Message] | None:
     return None
 
 
-def _request_tools(value: object) -> list[dict[str, Any]] | None:
+def _request_tools(value: object) -> list[dict[str, JSONValue]] | None:
     if isinstance(value, list) and all(isinstance(tool, dict) for tool in value):
-        return cast("list[dict[str, Any]]", value)
+        return cast("list[dict[str, JSONValue]]", value)
     return None
 
 
@@ -93,11 +144,11 @@ async def write_llm_request_log(
     model: Model,
     agent_name: str,
     messages: Sequence[Message],
-    tools: list[dict[str, Any]] | None,
+    tools: list[dict[str, JSONValue]] | None,
     log_dir: str | None,
     default_log_dir: Path,
 ) -> None:
-    """Persist one request-summary record for an LLM invocation."""
+    """Persist one request record for an LLM invocation."""
     now = datetime.now().astimezone()
     await asyncio.to_thread(
         _write_jsonl_line,
@@ -107,7 +158,9 @@ async def write_llm_request_log(
             "agent_name": agent_name,
             "model_id": model.id,
             "system_prompt": _system_prompt(messages, model),
+            "messages": _request_message_payloads(messages),
             "message_count": len(messages),
+            "tools": _json_safe(tools),
             "tool_count": len(tools or []),
             "model_params": _model_params(model),
         },
