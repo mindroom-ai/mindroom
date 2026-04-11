@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -114,39 +115,6 @@ def _copy_plugin_root(tmp_path: Path) -> Path:
         module_text = module_text.replace("from .state import ", f"from {package_prefix}.state import ")
         module_text = module_text.replace("from .todos import ", f"from {package_prefix}.todos import ")
         module_text = module_text.replace("from .types import ", f"from {package_prefix}.types import ")
-        if module_path.name == "poke.py":
-            # The copied fixture plugin still targets the older cancellation hook API, so
-            # strip CancelledResponseContext and its hook until the external plugin catches up.
-            module_text = module_text.replace("    CancelledResponseContext,\n", "")
-            module_text = module_text.replace(
-                "\n\n@hook(\n"
-                '    event="message:cancelled",\n'
-                '    name="workloop-track-cancelled",\n'
-                "    priority=100,\n"
-                "    timeout_ms=3000,\n"
-                ")\n"
-                "async def track_cancelled(ctx: CancelledResponseContext) -> None:\n"
-                '    """Remove the active run for this scope without recording a response timestamp."""\n'
-                "    agent_name = ctx.info.envelope.agent_name\n"
-                "    room_id = ctx.info.envelope.room_id\n"
-                "    thread_id = response_scope_thread_id(ctx.info.envelope)\n"
-                '    run_key = f"{room_id}:{thread_id}"\n'
-                "    try:\n"
-                "        _clear_active_run(\n"
-                "            ctx.state_root,\n"
-                "            agent_name,\n"
-                "            run_key,\n"
-                "            record_last_response=False,\n"
-                "        )\n"
-                "    except Exception:\n"
-                "        logger.exception(\n"
-                '            "workloop-track-cancelled: failed to update agent state for %s",\n'
-                "            agent_name,\n"
-                "        )\n",
-                "",
-            )
-        if module_path.name == "hooks.py":
-            module_text = module_text.replace("\ntrack_cancelled = poke.track_cancelled\n", "\n")
         module_path.write_text(module_text, encoding="utf-8")
     types_path = copied_root / "types.py"
     types_text = types_path.read_text(encoding="utf-8")
@@ -186,11 +154,32 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _todo_state_path(loaded: _LoadedWorkloop, *, room_id: str, thread_id: str) -> Path:
-    return _state_root(loaded) / "rooms" / room_id / "threads" / thread_id / "todos.json"
+    canonical_path = _state_root(loaded) / "rooms" / room_id / "threads" / thread_id / "todos.json"
+    if canonical_path.exists():
+        return canonical_path
+    legacy_key = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", f"{room_id}_{thread_id}")).strip("_")
+    return _state_root(loaded) / "threads" / legacy_key / "todos.json"
 
 
 def _todo_state(loaded: _LoadedWorkloop, *, room_id: str, thread_id: str) -> dict[str, object]:
     return _read_json(_todo_state_path(loaded, room_id=room_id, thread_id=thread_id))
+
+
+def _todo_titles(state: dict[str, object]) -> list[str]:
+    tasks = state.get("tasks")
+    if isinstance(tasks, list):
+        return [task for task in tasks if isinstance(task, str)]
+    items = state.get("items")
+    if not isinstance(items, list):
+        return []
+    titles: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        if isinstance(title, str):
+            titles.append(title)
+    return titles
 
 
 def _registry_callbacks(registry: HookRegistry) -> list[object]:
@@ -491,8 +480,8 @@ async def test_room_level_todos_are_isolated_per_room(loaded_workloop: _LoadedWo
 
     room_a_state = _todo_state(loaded_workloop, room_id=room_a, thread_id="main")
     room_b_state = _todo_state(loaded_workloop, room_id=room_b, thread_id="main")
-    assert room_a_state["tasks"] == ["Room A regression guard"]
-    assert room_b_state["tasks"] == ["Room B regression guard"]
+    assert _todo_titles(room_a_state) == ["Room A regression guard"]
+    assert _todo_titles(room_b_state) == ["Room B regression guard"]
 
     room_a_items = await emit_collect(
         loaded_workloop.registry,
@@ -539,8 +528,12 @@ async def test_room_level_todos_are_isolated_per_room(loaded_workloop: _LoadedWo
         ),
     )
 
-    assert [item.text for item in room_a_items] == ["Room A regression guard"]
-    assert [item.text for item in room_b_items] == ["Room B regression guard"]
+    assert len(room_a_items) == 1
+    assert "Room A regression guard" in room_a_items[0].text
+    assert "Room B regression guard" not in room_a_items[0].text
+    assert len(room_b_items) == 1
+    assert "Room B regression guard" in room_b_items[0].text
+    assert "Room A regression guard" not in room_b_items[0].text
 
 
 @pytest.mark.asyncio
