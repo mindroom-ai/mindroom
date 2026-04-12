@@ -646,6 +646,14 @@ class TurnController:
                 source_event_id=selection.question_event_id,
             )
             return
+        selection_matrix_run_metadata = self.deps.turn_store.matrix_run_metadata(
+            HandledTurnState.from_source_event_id(selection.question_event_id),
+            additional_source_event_ids=(
+                (source_event_id,)
+                if source_event_id is not None and source_event_id != selection.question_event_id
+                else ()
+            ),
+        )
 
         try:
             response_event_id = await self.deps.response_runner.generate_response(
@@ -659,6 +667,7 @@ class TurnController:
                     existing_event_is_placeholder=True,
                     user_id=user_id,
                     target=ack_target,
+                    matrix_run_metadata=selection_matrix_run_metadata,
                 ),
             )
         except SuppressedPlaceholderCleanupError:

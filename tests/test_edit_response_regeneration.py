@@ -24,7 +24,11 @@ from mindroom.agents import get_agent_session, remove_run_by_event_id
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import (
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    ROUTER_AGENT_NAME,
+    resolve_runtime_paths,
+)
 from mindroom.conversation_state_writer import ConversationStateWriter
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
@@ -1788,6 +1792,194 @@ def test_load_turn_record_prefers_newest_matching_run(tmp_path: Path) -> None:
     }
 
 
+def test_load_turn_record_preserves_persisted_anchor_for_interactive_selection(tmp_path: Path) -> None:
+    """Selection-triggered runs should keep the original question anchor when reloaded."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+
+    _record_handled_turn(
+        bot._handled_turn_ledger,
+        ["$selection:example.com"],
+        response_event_id="$response-ledger:example.com",
+    )
+
+    session_id = create_session_id("!test:example.com", None)
+    storage = MagicMock()
+    storage.get_session.return_value = AgentSession(
+        session_id=session_id,
+        runs=[
+            RunOutput(
+                run_id="run-selection",
+                session_id=session_id,
+                metadata={
+                    "matrix_event_id": "$question:example.com",
+                    "matrix_source_event_ids": ["$selection:example.com"],
+                    "matrix_response_event_id": "$response-persisted:example.com",
+                },
+            ),
+        ],
+    )
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+
+    with patch.object(
+        bot._conversation_state_writer,
+        "create_history_scope_storage",
+        return_value=storage,
+    ):
+        loaded_turn = bot._turn_store.load_turn_record(
+            room=room,
+            thread_id=None,
+            original_event_id="$selection:example.com",
+            requester_user_id="@user:example.com",
+        )
+
+    assert loaded_turn is not None
+    assert loaded_turn.record.anchor_event_id == "$question:example.com"
+    assert loaded_turn.record.source_event_ids == ("$selection:example.com",)
+    assert loaded_turn.record.response_event_id == "$response-persisted:example.com"
+    assert loaded_turn.requires_backfill is True
+
+
+@pytest.mark.asyncio
+async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp_path: Path) -> None:
+    """Editing a numeric selection should keep the original question anchor and selection lookup metadata."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.rooms = {}
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+    _record_handled_turn(
+        bot._handled_turn_ledger,
+        ["$selection:example.com"],
+        response_event_id="$response:example.com",
+    )
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* 2",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "2",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$selection:example.com",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* 2",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "2",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$selection:example.com",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+        "origin_server_ts": 1000000,
+        "type": "m.room.message",
+        "room_id": "!test:example.com",
+    }
+
+    session_id = create_session_id("!test:example.com", None)
+    storage = MagicMock()
+    storage.get_session.return_value = AgentSession(
+        session_id=session_id,
+        runs=[
+            RunOutput(
+                run_id="run-selection",
+                session_id=session_id,
+                metadata={
+                    "matrix_event_id": "$question:example.com",
+                    "matrix_source_event_ids": ["$selection:example.com"],
+                    "matrix_response_event_id": "$response:example.com",
+                },
+            ),
+        ],
+    )
+    generate_response = AsyncMock(return_value="$response-new:example.com")
+    replace_edit_regenerator_deps(bot, generate_response=generate_response)
+
+    with (
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+            return_value=storage,
+        ),
+        patch.object(
+            bot._ingress_hook_runner,
+            "emit_message_received_hooks",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_full_thread_history=False,
+        )
+
+        await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    generate_response.assert_awaited_once()
+    call_kwargs = generate_response.call_args.kwargs
+    assert call_kwargs["reply_to_event_id"] == "$question:example.com"
+    assert call_kwargs["matrix_run_metadata"] == {
+        MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+    }
+
+
 def test_load_turn_record_prefers_newest_match_across_thread_and_room_sessions(tmp_path: Path) -> None:
     """TurnStore should compare matching persisted runs across thread and room scopes."""
     agent_user = AgentMatrixUser(
@@ -2991,6 +3183,9 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     assert request.reply_to_event_id == "$question:example.com"
     assert request.thread_id == "$thread:example.com"
     assert request.existing_event_id == "$ack:example.com"
+    assert request.matrix_run_metadata == {
+        MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+    }
     assert bot._handled_turn_ledger.has_responded("$question:example.com")
     assert bot._handled_turn_ledger.get_response_event_id("$question:example.com") == "$response:example.com"
     assert bot._handled_turn_ledger.has_responded("$selection:example.com")
