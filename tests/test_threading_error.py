@@ -2713,7 +2713,7 @@ class TestThreadingBehavior:
                 AsyncMock(return_value="$router_response:localhost"),
             ) as mock_send,
         ):
-            await bot._handle_ai_routing(
+            await bot._dispatch_planner.execute_router_relay(
                 room,
                 event,
                 thread_history=[],

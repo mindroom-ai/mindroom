@@ -11,7 +11,8 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import wrap_extracted_collaborators
+from mindroom.turn_engine import _PrecheckedEvent
+from tests.conftest import replace_turn_engine_deps, wrap_extracted_collaborators
 
 
 @pytest.mark.asyncio
@@ -52,32 +53,10 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
+    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
-
-    # Create an original message event
-    original_event = nio.RoomMessageText.from_dict(
-        {
-            "content": {
-                "body": "Original message",
-                "msgtype": "m.text",
-            },
-            "event_id": "$original:example.com",
-            "sender": "@user:example.com",
-            "origin_server_ts": 1000000,
-            "type": "m.room.message",
-            "room_id": "!test:example.com",
-        },
-    )
-    original_event.source = {
-        "content": {
-            "body": "Original message",
-            "msgtype": "m.text",
-        },
-        "event_id": "$original:example.com",
-        "sender": "@user:example.com",
-    }
 
     # Create an edit event - this is what Matrix sends when a message is edited
     edit_event = nio.RoomMessageText.from_dict(
@@ -120,23 +99,20 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
 
     # Mock the routing method that would be called for the router
     with (
-        patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
-        patch.object(bot._dispatch_planner, "can_reply_to_sender", return_value=True),
-        patch.object(bot, "_load_persisted_turn_metadata", return_value=None),
+        patch.object(
+            bot._turn_engine,
+            "_precheck_dispatch_event",
+            return_value=_PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com"),
+        ),
+        patch.object(bot._turn_engine, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
+        patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
     ):
-        # Process the original message - this should trigger routing
-        await bot._on_message(room, original_event)
-
-        # The router should have attempted to route the original message
-        assert mock_routing.called, "Router should process original messages"
-        mock_routing.reset_mock()
-
-        # Process the edit event - this should NOT trigger routing
+        # Process the edit event - this should not re-enter normal dispatch.
         await bot._on_message(room, edit_event)
 
-        # The router should NOT have attempted to route the edit
-        # This assertion will FAIL with the current code and PASS once fixed
-        assert not mock_routing.called, "Router should NOT process edit events as new messages"
+        mock_dispatch.assert_not_awaited()
+        mock_handle_edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -171,6 +147,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
+    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
 
@@ -218,18 +195,23 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
 
     # Mock the routing method
     with (
-        patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
-        patch.object(bot, "_load_persisted_turn_metadata", return_value=None),
+        patch.object(
+            bot._turn_engine,
+            "_precheck_dispatch_event",
+            side_effect=[
+                _PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com") for edit_event in edit_events
+            ],
+        ),
+        patch.object(bot._turn_engine, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
+        patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
     ):
         # Process all edit events
         for edit_event in edit_events:
             await bot._on_message(room, edit_event)
 
-        # None of the edits should have triggered routing
-        # This will FAIL with current code (it will be called 3 times)
-        assert not mock_routing.called, (
-            f"Router should not process any edit events, but was called {mock_routing.call_count} times"
-        )
+        assert not mock_dispatch.called
+        assert mock_handle_edit.await_count == len(edit_events)
 
 
 @pytest.mark.asyncio
@@ -264,6 +246,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
+    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 
@@ -309,7 +292,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Mock the generate_response method
     with (
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
-        patch.object(bot, "_load_persisted_turn_metadata", return_value=None),
+        patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
     ):
         # Process the edit event
         await bot._on_message(room, edit_event)

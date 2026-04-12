@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, _PrecheckedEvent
+from mindroom.bot import AgentBot
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -116,9 +116,10 @@ class TestResponseTrackingRegression:
         mock_room.room_id = test_room_id
 
         # Process command first time
-        await bot._handle_command(
+        await bot._dispatch_planner.execute_command(
             mock_room,
-            _PrecheckedEvent(event=command_event, requester_user_id="@user:localhost"),
+            command_event,
+            "@user:localhost",
             command,
         )
 
@@ -135,9 +136,10 @@ class TestResponseTrackingRegression:
         bot.client.room_send.reset_mock()
 
         # Process same command again (simulating restart)
-        await bot._handle_command(
+        await bot._dispatch_planner.execute_command(
             mock_room,
-            _PrecheckedEvent(event=command_event, requester_user_id="@user:localhost"),
+            command_event,
+            "@user:localhost",
             command,
         )
 
@@ -288,7 +290,7 @@ class TestResponseTrackingRegression:
         }
 
         # Process routing
-        await bot._handle_ai_routing(
+        await bot._dispatch_planner.execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -318,7 +320,7 @@ class TestResponseTrackingRegression:
         mock_suggest_agent.reset_mock()
 
         # Process same message again (simulating restart)
-        await bot._handle_ai_routing(
+        await bot._dispatch_planner.execute_router_relay(
             mock_room,
             message_event,
             [],

@@ -303,10 +303,11 @@ class TestAIRouting:
         with patch("mindroom.dispatch_planner.suggest_agent_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
-                await bot._handle_ai_routing(
+                await bot._dispatch_planner.execute_router_relay(
                     mock_room,
                     mock_event,
                     [],
+                    None,
                     requester_user_id="@user:localhost",
                 )
 

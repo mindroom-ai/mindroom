@@ -26,7 +26,7 @@ from mindroom.ai import (
     queued_message_signal_context,
     stream_agent_response,
 )
-from mindroom.bot import AgentBot, _PrecheckedEvent
+from mindroom.bot import AgentBot
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -42,6 +42,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest
 from mindroom.teams import TeamMode, _create_team_instance
+from mindroom.turn_engine import _PrecheckedEvent
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -668,14 +669,14 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
         patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot, "_has_newer_unresponded_in_thread", return_value=True),
+        patch.object(bot._turn_engine, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(
             bot._dispatch_planner,
             "plan_dispatch",
             new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
         ) as mock_plan,
     ):
-        await bot._dispatch_text_message(
+        await bot._turn_engine._dispatch_text_message(
             room,
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )

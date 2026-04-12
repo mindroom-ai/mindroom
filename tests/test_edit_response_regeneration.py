@@ -40,6 +40,8 @@ from tests.conftest import (
     install_generate_response_mock,
     patch_response_coordinator_module,
     replace_dispatch_planner_deps,
+    replace_edit_regenerator_deps,
+    replace_turn_engine_deps,
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
@@ -327,7 +329,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             ai_response=mock_ai_response,
         ),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond") as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond") as mock_should_respond,
         patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value="$edit")) as mock_edit,
     ):
         # Setup mocks
@@ -454,7 +456,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
             "emit_message_received_hooks",
             new_callable=AsyncMock,
         ) as mock_emit_hooks,
-        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=False) as mock_should_respond,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -558,7 +560,7 @@ async def test_bot_edit_regeneration_uses_hydrated_mentions_for_response_gating(
             "emit_message_received_hooks",
             new_callable=AsyncMock,
         ) as mock_emit_hooks,
-        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=False) as mock_should_respond,
     ):
         mock_emit_hooks.return_value = False
 
@@ -657,7 +659,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             new_callable=AsyncMock,
             return_value=[],
         ) as mock_fetch_history,
-        patch("mindroom.bot.should_agent_respond") as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond") as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "remove_stale_runs_for_turn_record",
@@ -679,7 +681,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -890,7 +892,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             "create_storage_for_history_scope",
             return_value=storage,
         ),
-        patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -1038,6 +1040,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
+    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -1233,12 +1236,12 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=False) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
         ) as mock_create_storage,
-        patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=True) as mock_remove_run,
         patch.object(
             bot,
             "_generate_response",
@@ -1255,7 +1258,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -1383,12 +1386,12 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=True) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
         ) as mock_create_storage,
-        patch("mindroom.bot.remove_run_by_event_id", return_value=False) as mock_remove_run,
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=False) as mock_remove_run,
         patch.object(
             bot,
             "_generate_response",
@@ -1405,7 +1408,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -1506,12 +1509,12 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=True) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
         ) as mock_create_storage,
-        patch("mindroom.bot.remove_run_by_event_id", return_value=False) as mock_remove_run,
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=False) as mock_remove_run,
         patch.object(
             bot,
             "_generate_response",
@@ -1528,7 +1531,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -1643,13 +1646,13 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=False) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
             return_value=storage,
         ) as mock_create_storage,
-        patch("mindroom.bot.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=True) as mock_remove_run,
         patch.object(
             bot,
             "_generate_response",
@@ -1666,7 +1669,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -1768,7 +1771,7 @@ def test_load_persisted_turn_metadata_prefers_newest_matching_run(tmp_path: Path
         "create_history_scope_storage",
         return_value=storage,
     ):
-        metadata = bot._load_persisted_turn_metadata(
+        metadata = bot._edit_regenerator.load_persisted_turn_metadata(
             room=room,
             thread_id=None,
             original_event_id="$first:example.com",
@@ -1851,7 +1854,7 @@ def test_load_persisted_turn_metadata_prefers_newest_match_across_thread_and_roo
         "create_history_scope_storage",
         side_effect=[threaded_storage, room_storage],
     ):
-        metadata = bot._load_persisted_turn_metadata(
+        metadata = bot._edit_regenerator.load_persisted_turn_metadata(
             room=room,
             thread_id="$thread:example.com",
             original_event_id="$first:example.com",
@@ -1892,6 +1895,11 @@ def test_remove_stale_runs_for_edited_message_uses_internal_state_writer_helpers
         replace(state_writer.deps, logger=captured_logger),
     )
     bot.logger = rebound_logger
+    replace_edit_regenerator_deps(
+        bot,
+        state_writer=bot._conversation_state_writer,
+        logger=bot.logger,
+    )
 
     storage = MagicMock()
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -1907,9 +1915,9 @@ def test_remove_stale_runs_for_edited_message_uses_internal_state_writer_helpers
             "create_history_scope_storage",
             return_value=storage,
         ) as mock_create_history_scope_storage,
-        patch("mindroom.bot.remove_run_by_event_id", return_value=True),
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=True),
     ):
-        bot._remove_stale_runs_for_edited_message(
+        bot._edit_regenerator.remove_stale_runs_for_edited_message(
             room=room,
             thread_id=None,
             original_event_id="$original:example.com",
@@ -2009,7 +2017,7 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(bot, "_remove_stale_runs_for_edited_message") as mock_fallback_cleanup,
+        patch.object(bot._edit_regenerator, "remove_stale_runs_for_edited_message") as mock_fallback_cleanup,
         patch.object(
             bot._conversation_state_writer,
             "remove_stale_runs_for_turn_record",
@@ -2030,7 +2038,7 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -2180,13 +2188,13 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=False),
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=False),
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
             return_value=storage,
         ),
-        patch("mindroom.bot.remove_run_by_event_id", return_value=True),
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=True),
         patch.object(bot, "_generate_response", new_callable=AsyncMock, return_value=None) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
@@ -2198,7 +2206,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -2307,13 +2315,13 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=False) as mock_should_respond,
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
             return_value=storage,
         ),
-        patch("mindroom.bot.remove_run_by_event_id", return_value=True),
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=True),
         patch.object(
             bot,
             "_generate_response",
@@ -2330,7 +2338,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
             has_non_agent_mentions=False,
         )
 
-        await bot._handle_message_edit(
+        await bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -2521,8 +2529,8 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             "extract_message_context",
             new_callable=AsyncMock,
         ) as mock_context,
-        patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
-        patch("mindroom.bot.remove_run_by_event_id", return_value=True),
+        patch("mindroom.edit_regenerator.should_agent_respond", return_value=True) as mock_should_respond,
+        patch("mindroom.edit_regenerator.remove_run_by_event_id", return_value=True),
         patch.object(
             restarted_bot,
             "_generate_response",
@@ -2539,7 +2547,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             has_non_agent_mentions=False,
         )
 
-        await restarted_bot._handle_message_edit(
+        await restarted_bot._edit_regenerator.handle_message_edit(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
@@ -2984,7 +2992,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
         patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
@@ -3042,6 +3050,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
     # Mock logger
     bot.logger = MagicMock()
+    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -3091,7 +3100,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
         patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
@@ -3160,6 +3169,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
+    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     room = Mock(spec=nio.MatrixRoom)
     room.room_id = "!test:example.com"
@@ -3193,8 +3203,8 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     # Test that authorization check works
     with (
-        patch("mindroom.bot.is_authorized_sender", return_value=False) as mock_is_auth,
-        patch.object(bot, "_handle_message_edit") as mock_handle_edit,
+        patch("mindroom.turn_engine.is_authorized_sender", return_value=False) as mock_is_auth,
+        patch.object(bot._edit_regenerator, "handle_message_edit") as mock_handle_edit,
     ):
         await bot._on_message(room, edit_event)
         # Verify authorization was checked
@@ -3241,6 +3251,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Mock logger
     bot.logger = MagicMock()
+    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -3282,7 +3293,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Mock is_authorized_sender to return False
     with (
-        patch("mindroom.bot.is_authorized_sender", return_value=False) as mock_is_authorized,
+        patch("mindroom.turn_engine.is_authorized_sender", return_value=False) as mock_is_authorized,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
     ):
         # Process the voice event

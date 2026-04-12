@@ -38,6 +38,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
+            authorization={"default_room_access": True},
         ),
         test_runtime_paths(tmp_path),
     )

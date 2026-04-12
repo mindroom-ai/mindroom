@@ -13,7 +13,7 @@ import nio
 import pytest
 from pydantic import ValidationError
 
-from mindroom.bot import AgentBot, _PrecheckedEvent
+from mindroom.bot import AgentBot
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -445,11 +445,11 @@ class TestRouterHandoffThreadMode:
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
-            await bot._handle_ai_routing(
+            await bot._dispatch_planner.execute_router_relay(
                 room,
                 self._routing_event(),
-                thread_history=[],
-                thread_id="$thread_root",
+                [],
+                "$thread_root",
                 requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_not_called()
@@ -485,11 +485,11 @@ class TestRouterHandoffThreadMode:
                 return_value="$latest",
             ) as mock_get_latest,
         ):
-            await bot._handle_ai_routing(
+            await bot._dispatch_planner.execute_router_relay(
                 room,
                 self._routing_event(),
-                thread_history=[],
-                thread_id="$thread_root",
+                [],
+                "$thread_root",
                 requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_awaited_once()
@@ -999,10 +999,11 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._handle_command(
-                room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
-                command,
+            await bot._dispatch_planner.execute_command(
+                room=room,
+                event=event,
+                requester_user_id="@user:localhost",
+                command=command,
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
