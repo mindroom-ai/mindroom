@@ -910,13 +910,32 @@ def estimate_prompt_visible_history_tokens(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> int:
-    """Estimate the raw persisted history Agno would replay for one run."""
+    """Estimate the durable summary plus visible persisted history for one run."""
+    summary_tokens = estimate_session_summary_tokens(_current_summary_text(session))
     history_messages = _history_messages_for_session(
         session=session,
         scope=scope,
         history_settings=history_settings,
     )
-    return estimate_history_messages_tokens(history_messages)
+    return summary_tokens + estimate_history_messages_tokens(history_messages)
+
+
+def estimate_session_summary_tokens(summary_text: str | None) -> int:
+    """Estimate prompt-visible tokens contributed by one stored session summary."""
+    if summary_text is None:
+        return 0
+    normalized_summary = summary_text.strip()
+    if not normalized_summary:
+        return 0
+    wrapper = (
+        "Here is a brief summary of your previous interactions:\n\n"
+        "<summary_of_previous_interactions>\n"
+        f"{normalized_summary}\n"
+        "</summary_of_previous_interactions>\n\n"
+        "Note: this information is from previous interactions and may be outdated. "
+        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
+    )
+    return estimate_text_tokens(wrapper)
 
 
 def estimate_history_messages_tokens(messages: list[Message]) -> int:
