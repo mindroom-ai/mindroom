@@ -55,7 +55,6 @@ from mindroom.connections import (
     default_connection_id,
     required_connection_auth_kind,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
@@ -124,14 +123,6 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
     OSError,
     UnicodeError,
 )
-
-
-@dataclass(frozen=True)
-class _LegacyInlineApiKey:
-    """One inline API key migrated out of legacy config shape."""
-
-    service: str
-    api_key: str
 
 
 def iter_config_validation_messages(
@@ -256,306 +247,6 @@ def _normalize_optional_config_sections(data: dict[str, object]) -> None:
             data[name] = {}
     if data.get("plugins") is None:
         data["plugins"] = []
-
-
-def _normalized_nonempty_string(value: object) -> str | None:
-    """Return one stripped string value, or ``None`` when blank/non-string."""
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _normalized_mapping(value: object) -> dict[str, object] | None:
-    """Return one shallow-copied mapping when the input is a dict."""
-    if not isinstance(value, dict):
-        return None
-    return cast("dict[str, object]", dict(value))
-
-
-def _normalized_root_connections(data: dict[str, object]) -> dict[str, dict[str, object]]:
-    """Return the mutable root connections mapping."""
-    raw_connections = data.get("connections")
-    if not isinstance(raw_connections, dict):
-        raw_connections = {}
-        data["connections"] = raw_connections
-
-    normalized_connections = cast("dict[str, dict[str, object]]", raw_connections)
-    for connection_id, connection_data in list(cast("dict[object, object]", raw_connections).items()):
-        if not isinstance(connection_id, str):
-            raw_connections.pop(connection_id, None)
-            continue
-        connection_mapping = _normalized_mapping(connection_data)
-        if connection_mapping is None:
-            raw_connections.pop(connection_id, None)
-            continue
-        normalized_connections[connection_id] = connection_mapping
-    return normalized_connections
-
-
-def _normalized_connection_service(connection: dict[str, object]) -> str | None:
-    """Return one raw connection's backing service name when present."""
-    return _normalized_nonempty_string(connection.get("service"))
-
-
-def _connection_supports_api_key(connection: dict[str, object], *, provider: str) -> bool:
-    """Return whether one raw connection is compatible with API key migration."""
-    return (
-        canonical_connection_provider(_normalized_nonempty_string(connection.get("provider")) or "") == provider
-        and connection.get("auth_kind") == "api_key"
-        and _normalized_connection_service(connection) is not None
-    )
-
-
-def _legacy_identifier_component(label: str) -> str:
-    """Return one service/id-safe legacy migration component."""
-    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_")
-    return normalized or "legacy"
-
-
-def _next_legacy_connection_spec(
-    connections: dict[str, dict[str, object]],
-    *,
-    provider: str,
-    label: str,
-) -> tuple[str, str]:
-    """Return a unique connection id/service pair for one migrated inline key."""
-    existing_services = {
-        service
-        for connection in connections.values()
-        if (service := _normalized_connection_service(connection)) is not None
-    }
-    suffix_base = _legacy_identifier_component(label)
-    attempt = 1
-    while True:
-        suffix = suffix_base if attempt == 1 else f"{suffix_base}_{attempt}"
-        connection_id = f"{provider}/{suffix}"
-        service = f"{provider}_{suffix}"
-        if connection_id not in connections and service not in existing_services:
-            return connection_id, service
-        attempt += 1
-
-
-def _assign_legacy_api_key_connection(
-    *,
-    root_data: dict[str, object],
-    provider: str,
-    purpose: Literal["chat_model", "embedder", "memory_llm", "voice_stt"],
-    preferred_connection_id: str | None,
-    legacy_label: str,
-    api_key: str,
-    migrated_credentials: dict[str, str],
-) -> str:
-    """Create or reuse one API-key connection for a migrated inline credential."""
-    canonical_provider = canonical_connection_provider(provider)
-    connections = _normalized_root_connections(root_data)
-
-    def can_use(service: str) -> bool:
-        existing_key = migrated_credentials.get(service)
-        return existing_key is None or existing_key == api_key
-
-    candidate_connection_id = _normalized_nonempty_string(preferred_connection_id) or default_connection_id(
-        provider=provider,
-        purpose=purpose,
-    )
-    if candidate_connection_id is not None:
-        connection = connections.get(candidate_connection_id)
-        if connection is None:
-            candidate_config = default_connection_config(provider=provider, purpose=purpose)
-            if candidate_config is not None and candidate_config.auth_kind == "api_key" and candidate_config.service is not None:
-                if can_use(candidate_config.service):
-                    connections[candidate_connection_id] = {
-                        "provider": candidate_config.provider,
-                        "service": candidate_config.service,
-                        "auth_kind": candidate_config.auth_kind,
-                    }
-                    migrated_credentials[candidate_config.service] = api_key
-                    return candidate_connection_id
-        else:
-            service = _normalized_connection_service(connection)
-            if (
-                service is not None
-                and _connection_supports_api_key(connection, provider=canonical_provider)
-                and can_use(service)
-            ):
-                migrated_credentials[service] = api_key
-                return candidate_connection_id
-
-    legacy_connection_id, legacy_service = _next_legacy_connection_spec(
-        connections,
-        provider=canonical_provider,
-        label=legacy_label,
-    )
-    connections[legacy_connection_id] = {
-        "provider": canonical_provider,
-        "service": legacy_service,
-        "auth_kind": "api_key",
-    }
-    migrated_credentials[legacy_service] = api_key
-    return legacy_connection_id
-
-
-def _migrate_legacy_model_api_keys(
-    root_data: dict[str, object],
-    *,
-    migrated_credentials: dict[str, str],
-) -> None:
-    """Rewrite legacy ``models.<name>.api_key`` fields into named connections."""
-    models = _normalized_mapping(root_data.get("models"))
-    if models is None:
-        return
-    root_data["models"] = models
-    for model_name, raw_model in models.items():
-        model_data = _normalized_mapping(raw_model)
-        if model_data is None:
-            continue
-        models[model_name] = model_data
-        provider = _normalized_nonempty_string(model_data.get("provider"))
-        if provider is None or required_connection_auth_kind(provider=provider, purpose="chat_model") != "api_key":
-            continue
-        api_key = _normalized_nonempty_string(model_data.pop("api_key", None))
-        if api_key is None:
-            continue
-        model_data["connection"] = _assign_legacy_api_key_connection(
-            root_data=root_data,
-            provider=provider,
-            purpose="chat_model",
-            preferred_connection_id=_normalized_nonempty_string(model_data.get("connection")),
-            legacy_label=f"legacy_model_{model_name}",
-            api_key=api_key,
-            migrated_credentials=migrated_credentials,
-        )
-
-
-def _migrate_legacy_memory_api_keys(
-    root_data: dict[str, object],
-    *,
-    migrated_credentials: dict[str, str],
-) -> None:
-    """Rewrite legacy memory inline API keys into named connections."""
-    memory = _normalized_mapping(root_data.get("memory"))
-    if memory is None:
-        return
-    root_data["memory"] = memory
-
-    embedder = _normalized_mapping(memory.get("embedder"))
-    if embedder is not None:
-        memory["embedder"] = embedder
-        embedder_config = _normalized_mapping(embedder.get("config"))
-        if embedder_config is not None:
-            embedder["config"] = embedder_config
-            provider = _normalized_nonempty_string(embedder.get("provider"))
-            if (
-                provider is not None
-                and required_connection_auth_kind(provider=provider, purpose="embedder") == "api_key"
-            ):
-                api_key = _normalized_nonempty_string(embedder_config.pop("api_key", None))
-                if api_key is not None:
-                    embedder_config["connection"] = _assign_legacy_api_key_connection(
-                        root_data=root_data,
-                        provider=provider,
-                        purpose="embedder",
-                        preferred_connection_id=_normalized_nonempty_string(embedder_config.get("connection")),
-                        legacy_label="legacy_memory_embedder",
-                        api_key=api_key,
-                        migrated_credentials=migrated_credentials,
-                    )
-
-    llm = _normalized_mapping(memory.get("llm"))
-    if llm is None:
-        return
-    memory["llm"] = llm
-    llm_config = _normalized_mapping(llm.get("config"))
-    if llm_config is None:
-        return
-    llm["config"] = llm_config
-    provider = _normalized_nonempty_string(llm.get("provider"))
-    if provider is None or required_connection_auth_kind(provider=provider, purpose="memory_llm") != "api_key":
-        return
-    api_key = _normalized_nonempty_string(llm_config.pop("api_key", None))
-    if api_key is None:
-        return
-    llm["connection"] = _assign_legacy_api_key_connection(
-        root_data=root_data,
-        provider=provider,
-        purpose="memory_llm",
-        preferred_connection_id=_normalized_nonempty_string(llm.get("connection")),
-        legacy_label="legacy_memory_llm",
-        api_key=api_key,
-        migrated_credentials=migrated_credentials,
-    )
-
-
-def _migrate_legacy_voice_api_keys(
-    root_data: dict[str, object],
-    *,
-    migrated_credentials: dict[str, str],
-) -> None:
-    """Rewrite legacy ``voice.stt.api_key`` fields into named connections."""
-    voice = _normalized_mapping(root_data.get("voice"))
-    if voice is None:
-        return
-    root_data["voice"] = voice
-    stt = _normalized_mapping(voice.get("stt"))
-    if stt is None:
-        return
-    voice["stt"] = stt
-    provider = _normalized_nonempty_string(stt.get("provider"))
-    if provider is None or required_connection_auth_kind(provider=provider, purpose="voice_stt") != "api_key":
-        return
-    api_key = _normalized_nonempty_string(stt.pop("api_key", None))
-    if api_key is None:
-        return
-    stt["connection"] = _assign_legacy_api_key_connection(
-        root_data=root_data,
-        provider=provider,
-        purpose="voice_stt",
-        preferred_connection_id=_normalized_nonempty_string(stt.get("connection")),
-        legacy_label="legacy_voice_stt",
-        api_key=api_key,
-        migrated_credentials=migrated_credentials,
-    )
-
-
-def _migrate_legacy_inline_api_keys(root_data: dict[str, object]) -> tuple[_LegacyInlineApiKey, ...]:
-    """Rewrite legacy inline API key config fields into connection references."""
-    migrated_credentials: dict[str, str] = {}
-    _migrate_legacy_model_api_keys(root_data, migrated_credentials=migrated_credentials)
-    _migrate_legacy_memory_api_keys(root_data, migrated_credentials=migrated_credentials)
-    _migrate_legacy_voice_api_keys(root_data, migrated_credentials=migrated_credentials)
-    return tuple(
-        _LegacyInlineApiKey(service=service, api_key=api_key)
-        for service, api_key in sorted(migrated_credentials.items())
-    )
-
-
-def _persist_legacy_inline_api_keys(
-    migrated_credentials: tuple[_LegacyInlineApiKey, ...],
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Persist migrated inline API keys into the shared credentials store."""
-    if not migrated_credentials:
-        return
-    shared_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    for credential in migrated_credentials:
-        existing = shared_manager.load_credentials(credential.service)
-        if existing == {"api_key": credential.api_key, "_source": "ui"}:
-            continue
-        shared_manager.save_credentials(
-            credential.service,
-            {"api_key": credential.api_key, "_source": "ui"},
-        )
-
-
-def _normalized_config_data(data: object) -> tuple[object, tuple[_LegacyInlineApiKey, ...]]:
-    """Return config input with legacy optional sections and inline credentials normalized."""
-    if not isinstance(data, dict):
-        return data, ()
-
-    normalized_data = cast("dict[str, object]", deepcopy(data))
-    _normalize_optional_config_sections(normalized_data)
-    migrated_credentials = _migrate_legacy_inline_api_keys(normalized_data)
-    return normalized_data, migrated_credentials
 
 
 def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> AuthoredOptionalModel:
@@ -1316,7 +1007,10 @@ class Config(BaseModel):
         strict_connection_validation: bool = False,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        normalized_data, migrated_credentials = _normalized_config_data(data)
+        normalized_data = data
+        if isinstance(data, dict):
+            normalized_data = cast("dict[str, object]", deepcopy(data))
+            _normalize_optional_config_sections(normalized_data)
         config = cls.model_validate(
             normalized_data,
             context={
@@ -1334,7 +1028,6 @@ class Config(BaseModel):
                 config._validate_authored_tool_entries(runtime_paths)
         except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
-        _persist_legacy_inline_api_keys(migrated_credentials, runtime_paths)
         return config
 
     def authored_model_dump(self) -> dict[str, Any]:

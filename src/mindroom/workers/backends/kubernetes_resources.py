@@ -702,7 +702,7 @@ class KubernetesResourceManager:
                 connection.service
                 for connection in runtime_config.connections.values()
                 if connection.service is not None and connection.auth_kind == "google_adc"
-            }
+            },
         )
         return tuple(services) or ("google_vertex_adc",)
 

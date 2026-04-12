@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Any, NoReturn, cast
+from typing import Any, ClassVar, NoReturn, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -1594,88 +1594,11 @@ def test_google_connect_uses_pending_oauth_state(
     assert issued_state["state"] != "general"
 
 
-def test_google_connect_accepts_legacy_env_seeded_oauth_client_without_connection(
-    api_key_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Legacy env-seeded Google OAuth client credentials should still allow connect without google/oauth config."""
-    config = Config.model_validate(
-        {
-            "connections": _openai_test_connections(),
-            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-            "agents": {},
-        },
-    )
-
-    class _FakeFlow:
-        def authorization_url(
-            self,
-            *,
-            access_type: str,
-            include_granted_scopes: str,
-            prompt: str,
-            state: str,
-        ) -> tuple[str, str]:
-            assert access_type == "offline"
-            assert include_granted_scopes == "true"
-            assert prompt == "consent"
-            assert state
-            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
-
-    class _FakeFlowFactory:
-        @staticmethod
-        def from_client_config(
-            client_config: object,
-            *,
-            scopes: list[str],
-            redirect_uri: str,
-        ) -> _FakeFlow:
-            assert client_config == {
-                "web": {
-                    "client_id": "legacy-client-id",
-                    "client_secret": "legacy-client-secret",
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                    "redirect_uris": ["http://localhost:8765/api/google/callback"],
-                }
-            }
-            assert scopes
-            assert redirect_uri == "http://localhost:8765/api/google/callback"
-            return _FakeFlow()
-
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    runtime_paths = main._app_runtime_paths(api_key_client.app)
-    get_runtime_credentials_manager(runtime_paths).shared_manager().save_credentials(
-        "google_oauth_client",
-        {
-            "client_id": "legacy-client-id",
-            "client_secret": "legacy-client-secret",
-            "_source": "env",
-        },
-    )
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        runtime_paths,
-        config.model_dump(),
-    )
-    monkeypatch.setattr(
-        "mindroom.api.google_integration._ensure_google_packages",
-        lambda _runtime_paths: (object, object, _FakeFlowFactory),
-    )
-
-    response = api_key_client.post("/api/google/connect")
-
-    assert response.status_code == 200
-    assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
-
-
-def test_google_connect_rejects_broken_configured_oauth_connection_even_with_legacy_fallback_present(
+def test_google_connect_rejects_broken_configured_oauth_connection(
     api_key_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """Configured google/oauth connections must not silently fall back to the legacy shared bucket."""
+    """Configured google/oauth connections should fail instead of using any fallback."""
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
@@ -1683,15 +1606,6 @@ def test_google_connect_rejects_broken_configured_oauth_connection_even_with_leg
     config["connections"]["google/oauth"]["service"] = "google_oauth_custom"
     temp_config_file.write_text(yaml.dump(config), encoding="utf-8")
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-    runtime_credentials = get_runtime_credentials_manager(runtime_paths)
-    runtime_credentials.shared_manager().save_credentials(
-        "google_oauth_client",
-        {
-            "client_id": "legacy-client-id",
-            "client_secret": "legacy-client-secret",
-            "_source": "env",
-        },
-    )
     _publish_committed_runtime_config(
         api_key_client.app,
         runtime_paths,
@@ -1814,8 +1728,8 @@ def test_google_build_token_data_omits_oauth_client_secret_material() -> None:
     class _FakeCredentials:
         token = "google-token"  # noqa: S105
         refresh_token = "google-refresh-token"  # noqa: S105
-        token_uri = "https://oauth2.googleapis.com/token"
-        scopes = ["scope-a", "scope-b"]
+        token_uri = "https://oauth2.googleapis.com/token"  # noqa: S105
+        scopes: ClassVar[list[str]] = ["scope-a", "scope-b"]
         id_token = None
 
     token_data = google_integration._build_google_token_data(_FakeCredentials())
@@ -1874,8 +1788,8 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
         headers={"Authorization": "Bearer test-key"},
     )
 
-    assert connect_response.status_code == 503
-    assert "google/oauth client connection" in connect_response.json()["detail"]
+    assert connect_response.status_code == 500
+    assert "google/oauth" in connect_response.json()["detail"]
 
 
 def test_google_reset_clears_worker_scoped_google_tokens(api_key_client: TestClient) -> None:

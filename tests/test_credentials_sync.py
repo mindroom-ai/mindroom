@@ -112,12 +112,12 @@ class TestCredentialsSync:
 
         assert get_ollama_host(runtime_paths=runtime_paths) == "http://test:11434"
 
-    def test_sync_env_targets_configured_custom_connection_services(
+    def test_sync_env_uses_fixed_default_services_even_when_config_uses_custom_services(
         self,
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Env sync should seed the configured backing services, not only hard-coded defaults."""
+        """Env sync should only seed the conventional default service buckets."""
         google_vertex_adc_path = temp_credentials_dir.parent / "google-vertex-adc.json"
         config_path = temp_credentials_dir.parent / "config.yaml"
         config_path.write_text(
@@ -161,27 +161,29 @@ class TestCredentialsSync:
         sync_env_to_credentials(runtime_paths=runtime_paths)
 
         cm = CredentialsManager(base_path=temp_credentials_dir)
-        assert cm.load_credentials("openai_team_a") == {
+        assert cm.load_credentials("openai") == {
             "api_key": "sk-test-openai-key",
             "_source": "env",
         }
-        assert cm.load_credentials("google_oauth_custom") == {
+        assert cm.load_credentials("google_oauth_client") == {
             "client_id": "google-client-id",
             "client_secret": "google-client-secret",
             "_source": "env",
         }
-        assert cm.load_credentials("google_vertex_adc_custom") == {
+        assert cm.load_credentials("google_vertex_adc") == {
             "application_credentials_path": str(google_vertex_adc_path),
             "_source": "env",
         }
-        assert cm.load_credentials("openai") is None
+        assert cm.load_credentials("openai_team_a") is None
+        assert cm.load_credentials("google_oauth_custom") is None
+        assert cm.load_credentials("google_vertex_adc_custom") is None
 
-    def test_sync_env_only_targets_default_provider_connection_service(
+    def test_sync_env_does_not_seed_named_non_default_services(
         self,
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Provider env sync should not overwrite every same-provider named connection."""
+        """Provider env sync should ignore named connection services beyond the conventional default buckets."""
         config_path = temp_credentials_dir.parent / "config.yaml"
         config_path.write_text(
             (
@@ -221,10 +223,11 @@ class TestCredentialsSync:
         sync_env_to_credentials(runtime_paths=runtime_paths)
 
         cm = CredentialsManager(base_path=temp_credentials_dir)
-        assert cm.load_credentials("openai_default_service") == {
+        assert cm.load_credentials("openai") == {
             "api_key": "sk-default-only",
             "_source": "env",
         }
+        assert cm.load_credentials("openai_default_service") is None
         assert cm.load_credentials("openai_research_service") is None
         assert cm.load_credentials("openai_embeddings_service") is None
 

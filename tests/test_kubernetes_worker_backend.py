@@ -402,8 +402,9 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
     state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
     expected_worker_root = Path(env_values["MINDROOM_STORAGE_PATH"])
-    expected_credentials_path = expected_worker_root / ".runtime" / credentials_path.name
-    local_credentials_path = runtime_paths.storage_root / state_subpath / ".runtime" / credentials_path.name
+    mirrored_credentials_name = f"google_vertex_adc-{credentials_path.name}"
+    expected_credentials_path = expected_worker_root / ".runtime" / mirrored_credentials_name
+    local_credentials_path = runtime_paths.storage_root / state_subpath / ".runtime" / mirrored_credentials_name
 
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
@@ -578,9 +579,7 @@ def test_kubernetes_backend_mirrors_custom_google_adc_services(tmp_path: Path) -
         purpose="chat_model",
         runtime_paths=worker_runtime_paths,
     )
-    expected_worker_adc_path = (
-        f"/app/worker/{state_subpath}/.runtime/google_vertex_adc_custom-{credentials_path.name}"
-    )
+    expected_worker_adc_path = f"/app/worker/{state_subpath}/.runtime/google_vertex_adc_custom-{credentials_path.name}"
 
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == expected_worker_adc_path
     assert connection_google_application_credentials_path(resolved_connection) == expected_worker_adc_path
@@ -694,12 +693,12 @@ def test_kubernetes_backend_disambiguates_same_named_google_adc_files_by_service
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == primary_worker_adc_path
     assert Path(primary_worker_adc_path).name == "google_vertex_adc_primary-adc.json"
     assert Path(secondary_worker_adc_path).name == "google_vertex_adc_secondary-adc.json"
-    assert (
-        local_storage_root / state_subpath / ".runtime" / Path(primary_worker_adc_path).name
-    ).read_text(encoding="utf-8") == '{"project":"primary"}\n'
-    assert (
-        local_storage_root / state_subpath / ".runtime" / Path(secondary_worker_adc_path).name
-    ).read_text(encoding="utf-8") == '{"project":"secondary"}\n'
+    assert (local_storage_root / state_subpath / ".runtime" / Path(primary_worker_adc_path).name).read_text(
+        encoding="utf-8",
+    ) == '{"project":"primary"}\n'
+    assert (local_storage_root / state_subpath / ".runtime" / Path(secondary_worker_adc_path).name).read_text(
+        encoding="utf-8",
+    ) == '{"project":"secondary"}\n'
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

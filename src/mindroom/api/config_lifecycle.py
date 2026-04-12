@@ -18,7 +18,6 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
-from mindroom.connections import canonical_connection_provider
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
@@ -26,6 +25,7 @@ from mindroom.config.main import (
     iter_config_validation_messages,
 )
 from mindroom.config.main import load_config as load_runtime_config_model
+from mindroom.connections import canonical_connection_provider
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger

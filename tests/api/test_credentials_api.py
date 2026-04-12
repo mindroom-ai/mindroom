@@ -9,9 +9,8 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants
-from mindroom.api import config_lifecycle
+from mindroom.api import config_lifecycle, main
 from mindroom.api import credentials as credentials_api
-from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
@@ -580,7 +579,7 @@ class TestCredentialsAPI:
         )
         _publish_committed_runtime_config(client.app, config)
         mock_credentials_manager.load_credentials.return_value = {
-            "application_credentials_path": "/tmp/google-adc.json",
+            "application_credentials_path": "/tmp/google-adc.json",  # noqa: S108
             "_source": "ui",
         }
         response = client.get("/api/credentials/google_vertex_adc_custom/status")
@@ -711,7 +710,7 @@ class TestCredentialsAPI:
             "openai",
         ]
         mock_credentials_manager.load_credentials.return_value = {
-            "application_credentials_path": "/tmp/google-adc.json",
+            "application_credentials_path": "/tmp/google-adc.json",  # noqa: S108
             "_source": "ui",
         }
 
@@ -725,7 +724,7 @@ class TestCredentialsAPI:
         assert get_response.json() == {
             "service": "google_vertex_adc",
             "credentials": {
-                "application_credentials_path": "/tmp/google-adc.json",
+                "application_credentials_path": "/tmp/google-adc.json",  # noqa: S108
             },
         }
         assert status_response.status_code == 200

@@ -306,7 +306,9 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
         backend_managed_services = (
-            current_snapshot.backend_managed_services if current_snapshot.runtime_paths == runtime_paths else frozenset()
+            current_snapshot.backend_managed_services
+            if current_snapshot.runtime_paths == runtime_paths
+            else frozenset()
         )
         current_state.snapshot = _published_snapshot(
             current_snapshot,
