@@ -163,7 +163,7 @@ Two different API keys using the same `X-Session-Id` value will not share a sess
 
 If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns.
 This lets a user continue one long coding flow instead of starting a fresh Claude process on every request.
-See [Claude Agent Sessions](tools/builtin.md#claude-agent-sessions) for configuration details.
+See the `claude_agent` section in [Agent Orchestration](tools/agent-orchestration.md) for configuration details.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 

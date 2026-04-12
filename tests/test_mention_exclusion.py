@@ -11,6 +11,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamResolution
 from tests.conftest import (
@@ -98,14 +99,16 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     install_send_response_mock(general_bot, general_bot._send_response)
     install_generate_response_mock(general_bot, general_bot._generate_response)
 
-    mock_context = Mock()
-    mock_context.am_i_mentioned = False
-    mock_context.is_thread = True
-    mock_context.thread_id = "$thread_root"
-    mock_context.thread_history = []
-    mock_context.mentioned_agents = [config.get_ids(runtime_paths_for(config))["research"]]
-    mock_context.has_non_agent_mentions = False
-    mock_context.requires_full_thread_history = False
+    mock_context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=True,
+        thread_id="$thread_root",
+        thread_history=[],
+        replay_guard_history=[],
+        mentioned_agents=[config.get_ids(runtime_paths_for(config))["research"]],
+        has_non_agent_mentions=False,
+        requires_full_thread_history=False,
+    )
     unwrap_extracted_collaborator(general_bot._conversation_resolver).extract_dispatch_context = AsyncMock(
         return_value=mock_context,
     )
@@ -190,17 +193,19 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     install_send_response_mock(general_bot, general_bot._send_response)
     install_generate_response_mock(general_bot, general_bot._generate_response)
 
-    mock_context = Mock()
-    mock_context.am_i_mentioned = True
-    mock_context.is_thread = True
-    mock_context.thread_id = "$thread_root"
-    mock_context.thread_history = []
-    mock_context.mentioned_agents = [
-        config.get_ids(runtime_paths_for(config))["general"],
-        config.get_ids(runtime_paths_for(config))["research"],
-    ]
-    mock_context.has_non_agent_mentions = False
-    mock_context.requires_full_thread_history = False
+    mock_context = MessageContext(
+        am_i_mentioned=True,
+        is_thread=True,
+        thread_id="$thread_root",
+        thread_history=[],
+        replay_guard_history=[],
+        mentioned_agents=[
+            config.get_ids(runtime_paths_for(config))["general"],
+            config.get_ids(runtime_paths_for(config))["research"],
+        ],
+        has_non_agent_mentions=False,
+        requires_full_thread_history=False,
+    )
     unwrap_extracted_collaborator(general_bot._conversation_resolver).extract_dispatch_context = AsyncMock(
         return_value=mock_context,
     )

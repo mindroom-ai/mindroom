@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
+    CoalescingGate,
     GatePhase,
     PendingEvent,
     PreparedTextEvent,
@@ -44,7 +45,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.handled_turns import HandledTurnState
@@ -235,11 +236,13 @@ def _prepared_dispatch(
     body: str = "hello",
     thread_id: str | None = None,
 ) -> PreparedDispatch:
+    history: list[ResolvedVisibleMessage] = []
     context = MessageContext(
         am_i_mentioned=True,
         is_thread=thread_id is not None,
         thread_id=thread_id,
-        thread_history=[],
+        thread_history=history,
+        replay_guard_history=history,
         mentioned_agents=[],
         has_non_agent_mentions=False,
     )
@@ -266,6 +269,12 @@ def _prepared_dispatch(
             source_kind="message",
         ),
     )
+
+
+def _set_context_histories(dispatch: PreparedDispatch, history: Sequence[ResolvedVisibleMessage]) -> None:
+    """Keep replay-snapshot and planning history aligned for tests that need both."""
+    dispatch.context.thread_history = list(history)
+    dispatch.context.replay_guard_history = list(history)
 
 
 @pytest.mark.asyncio
@@ -1313,6 +1322,38 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_retargeted_sleeping_timer_flushes_under_current_key() -> None:
+    """A timer scheduled before retarget must still flush the gate after re-keying."""
+    room = _make_room()
+    dispatched_source_event_ids: list[list[str]] = []
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(
+            side_effect=lambda batch: dispatched_source_event_ids.append(batch.source_event_ids),
+        ),
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    old_key = ("!room:localhost", None, "@user:localhost")
+    new_key = ("!room:localhost", "$m1", "@user:localhost")
+
+    await gate.enqueue(
+        old_key,
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    gate.retarget(old_key, new_key)
+
+    await _wait_for(lambda: len(dispatched_source_event_ids) == 1)
+
+    assert dispatched_source_event_ids == [["$m1"]]
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     """Drain pending debounce tasks when a bot is cleaned up."""
     bot = _make_bot(tmp_path, debounce_ms=1000)
@@ -1564,7 +1605,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         thread_id=None,
         latest_event_id="$m2",
     )
-    dispatch.context.thread_history = [newer_msg]
+    _set_context_histories(dispatch, [newer_msg])
 
     action_mock = AsyncMock()
     with (
@@ -1576,6 +1617,63 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
     assert bot._handled_turn_ledger.has_responded("$m1")
+
+
+@pytest.mark.asyncio
+async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_path: Path) -> None:
+    """Media-backed turns must use replay snapshot history even after hydration mutates planning history."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    image_event = _image_event(event_id="$img1", server_timestamp=1000)
+    dispatch_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$img1",
+        body="[Attached image]",
+        source={"content": {"msgtype": "m.text", "body": "[Attached image]"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$img1", body="[Attached image]")
+    dispatch.context.requires_full_thread_history = True
+    hydrated_msg = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="hydrated newer message",
+        timestamp=2000,
+        event_id="$img2",
+        content={"body": "hydrated newer message"},
+        thread_id=None,
+        latest_event_id="$img2",
+    )
+
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+
+    async def hydrate_context(*_args: object) -> None:
+        dispatch.context.thread_history = [hydrated_msg]
+        dispatch.context.requires_full_thread_history = False
+
+    newer_mock = MagicMock(return_value=False)
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+        patch.object(
+            bot._conversation_resolver,
+            "hydrate_dispatch_context",
+            new=AsyncMock(side_effect=hydrate_context),
+        ) as hydrate_mock,
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=newer_mock),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            dispatch_event,
+            "@user:localhost",
+            media_events=[image_event],
+        )
+
+    hydrate_mock.assert_awaited_once()
+    newer_mock.assert_called_once()
+    assert list(newer_mock.call_args.args[2]) == []
+    action_mock.assert_awaited_once()
+    assert not bot._handled_turn_ledger.has_responded("$img1")
 
 
 @pytest.mark.asyncio
@@ -1816,7 +1914,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         thread_id=None,
         latest_event_id="$m2",
     )
-    dispatch.context.thread_history = [newer_cmd]
+    _set_context_histories(dispatch, [newer_cmd])
     bot._send_response = AsyncMock(return_value="$placeholder")
     bot._generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
@@ -1863,7 +1961,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         thread_id=None,
         latest_event_id="$m2",
     )
-    dispatch.context.thread_history = [newer_cmd]
+    _set_context_histories(dispatch, [newer_cmd])
     bot._send_response = AsyncMock(return_value="$placeholder")
     bot._generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
@@ -1919,7 +2017,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         thread_id=None,
         latest_event_id="$s2",
     )
-    dispatch.context.thread_history = [newer_msg]
+    _set_context_histories(dispatch, [newer_msg])
     bot._send_response = AsyncMock(return_value="$placeholder")
     bot._generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
@@ -1967,7 +2065,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         thread_id=None,
         latest_event_id="$h2",
     )
-    dispatch.context.thread_history = [newer_msg]
+    _set_context_histories(dispatch, [newer_msg])
     bot._send_response = AsyncMock(return_value="$placeholder")
     bot._generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
@@ -2017,7 +2115,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         thread_id=None,
         latest_event_id="$s2",
     )
-    dispatch.context.thread_history = [second_fire_msg]
+    _set_context_histories(dispatch, [second_fire_msg])
     bot._send_response = AsyncMock(return_value="$placeholder")
     bot._generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
@@ -2071,7 +2169,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         thread_id=None,
         latest_event_id="$m2",
     )
-    dispatch.context.thread_history = [newer_msg]
+    _set_context_histories(dispatch, [newer_msg])
 
     action_mock = AsyncMock()
     with (
@@ -2083,6 +2181,51 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
     assert bot._handled_turn_ledger.has_responded("$m1")
+
+
+@pytest.mark.asyncio
+async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Path) -> None:
+    """Media-backed coalesced user batches must still be suppressed by newer-user replay snapshots."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    image_event = _image_event(event_id="$img1", server_timestamp=1000)
+    coalesced_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$img1",
+        body="[Attached image]",
+        source={"content": {"msgtype": "m.text", "body": "[Attached image]"}},
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="image",
+    )
+    dispatch = _prepared_dispatch(event_id="$img1", body="[Attached image]")
+
+    newer_msg = ResolvedVisibleMessage(
+        sender="@user:localhost",
+        body="newer message",
+        timestamp=2000,
+        event_id="$img2",
+        content={"body": "newer message"},
+        thread_id=None,
+        latest_event_id="$img2",
+    )
+    _set_context_histories(dispatch, [newer_msg])
+
+    action_mock = AsyncMock()
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            coalesced_event,
+            "@user:localhost",
+            media_events=[image_event],
+        )
+
+    # Media-backed coalesced user batch MUST still be suppressed.
+    action_mock.assert_not_awaited()
+    assert bot._handled_turn_ledger.has_responded("$img1")
 
 
 @pytest.mark.asyncio
@@ -2142,7 +2285,7 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
         thread_id=None,
         latest_event_id="$c2",
     )
-    dispatch.context.thread_history = [newer_msg]
+    _set_context_histories(dispatch, [newer_msg])
 
     handle_cmd_mock = AsyncMock()
     with (

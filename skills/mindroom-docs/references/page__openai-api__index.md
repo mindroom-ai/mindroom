@@ -146,7 +146,7 @@ Session IDs are namespaced internally with a hash of the API key to prevent cros
 
 ### Claude Agent tool sessions
 
-If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See [Claude Agent Sessions](https://docs.mindroom.chat/tools/builtin/#claude-agent-sessions) for configuration details.
+If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See the `claude_agent` section in [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/index.md) for configuration details.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 

@@ -1254,16 +1254,15 @@ class TurnController:
                         source_envelope=dispatch.envelope,
                     )
                 return
-            if dispatch.context.requires_full_thread_history:
-                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
-
             if self._has_newer_unresponded_in_thread(
                 event,
                 requester_user_id,
-                dispatch.context.thread_history,
+                dispatch.context.replay_guard_history,
             ):
                 self._mark_source_events_responded(handled_turn)
                 return
+            if dispatch.context.requires_full_thread_history:
+                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             if self._should_skip_deep_synthetic_full_dispatch(
                 event_id=event.event_id,
                 envelope=dispatch.envelope,

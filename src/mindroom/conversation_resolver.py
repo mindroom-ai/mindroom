@@ -68,6 +68,7 @@ class MessageContext:
     thread_history: Sequence[ResolvedVisibleMessage]
     mentioned_agents: list[MatrixID]
     has_non_agent_mentions: bool
+    replay_guard_history: Sequence[ResolvedVisibleMessage] = field(default_factory=tuple)
     requires_full_thread_history: bool = False
 
 
@@ -410,6 +411,7 @@ class ConversationResolver:
             thread_history=thread_history,
             mentioned_agents=mentioned_agents,
             has_non_agent_mentions=has_non_agent_mentions,
+            replay_guard_history=thread_history,
             requires_full_thread_history=requires_full_thread_history,
         )
 
@@ -419,7 +421,7 @@ class ConversationResolver:
         event: DispatchEvent,
         context: MessageContext,
     ) -> None:
-        """Replace lightweight thread snapshots with full history once a reply is required."""
+        """Replace lightweight thread snapshots with full planning history once a reply is required."""
         if not context.requires_full_thread_history or context.thread_id is None:
             context.requires_full_thread_history = False
             return
