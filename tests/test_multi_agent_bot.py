@@ -3642,7 +3642,7 @@ class TestAgentBot:
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch(
-                "mindroom.response_runner.apply_post_response_effects",
+                "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),
             ),
         ):

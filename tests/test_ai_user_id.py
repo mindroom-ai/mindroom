@@ -600,7 +600,7 @@ async def test_send_skill_command_response_emits_session_started_after_first_per
 
     with (
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
-        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock()),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -667,7 +667,7 @@ async def test_send_skill_command_response_uses_target_agent_storage_for_session
 
     with (
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
-        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock()),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -748,7 +748,7 @@ async def test_send_skill_command_response_returns_event_id_after_post_effect_fa
     with (
         patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")),
         patch(
-            "mindroom.response_runner.apply_post_response_effects",
+            "mindroom.response_lifecycle.apply_post_response_effects",
             new=AsyncMock(side_effect=RuntimeError("late boom")),
         ),
     ):
@@ -1227,7 +1227,7 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
     with (
         patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -1571,7 +1571,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.team_response", new_callable=AsyncMock) as mock_team_response,
-        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -1621,7 +1621,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
-        patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,

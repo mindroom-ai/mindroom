@@ -485,7 +485,12 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
     """Patch module-level response coordinator seams on the real current owner."""
     with ExitStack() as stack:
         for name, replacement in changes.items():
-            stack.enter_context(patch(f"mindroom.response_runner.{name}", new=replacement))
+            target = (
+                f"mindroom.response_lifecycle.{name}"
+                if name == "apply_post_response_effects"
+                else f"mindroom.response_runner.{name}"
+            )
+            stack.enter_context(patch(target, new=replacement))
         yield
 
 
