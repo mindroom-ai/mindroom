@@ -2086,44 +2086,32 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> None:
-    """Voice-originated synthetics (source_kind='voice') must be guarded."""
-    bot = _make_bot(tmp_path)
+async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -> None:
+    """Non-voice !commands must still take the command execution path."""
+    bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    command_event = PreparedTextEvent(
         sender="@user:localhost",
-        event_id="$v1",
-        body="transcribed voice",
+        event_id="$c1",
+        body="!schedule tomorrow at 9am turn off the lights",
         source={
-            "content": {"msgtype": "m.text", "body": "transcribed voice", "com.mindroom.source_kind": "voice"},
+            "content": {
+                "msgtype": "m.text",
+                "body": "!schedule tomorrow at 9am turn off the lights",
+            },
         },
         server_timestamp=1000,
-        is_synthetic=True,
-        source_kind_override="voice",
     )
-    dispatch = _prepared_dispatch(event_id="$v1", body="transcribed voice")
+    dispatch = _prepared_dispatch(event_id="$c1", body="!schedule tomorrow at 9am turn off the lights")
 
-    newer_msg = ResolvedVisibleMessage(
-        sender="@user:localhost",
-        body="newer text",
-        timestamp=2000,
-        event_id="$v2",
-        content={"body": "newer text"},
-        thread_id=None,
-        latest_event_id="$v2",
-    )
-    dispatch.context.thread_history = [newer_msg]
-
-    action_mock = AsyncMock()
+    handle_cmd_mock = AsyncMock()
     with (
         patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+        patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, voice_event, "@user:localhost")
+        await bot._turn_controller._dispatch_text_message(room, command_event, "@user:localhost")
 
-    # Voice synthetic MUST be suppressed — not an automation event
-    action_mock.assert_not_awaited()
-    assert bot._handled_turn_ledger.has_responded("$v1")
+    handle_cmd_mock.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Test that voice handler correctly formats agent mentions."""
+"""Test that voice handler normalizes mentions without rewriting commands."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.voice_handler import (
-    _is_speculative_command_rewrite,
     _process_transcription,
     _sanitize_unavailable_mentions,
 )
@@ -69,8 +68,8 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         result = await _process_transcription_for_test("HomeAssistant turn on the lights", config)
         assert result == "@home turn on the lights"
 
-    # Test 2: Agent with command
-    mock_response.content = "!schedule in 10 minutes @home turn off the lights"
+    # Test 2: Agent mention stays natural language
+    mock_response.content = "@home schedule to turn off the lights in 10 minutes"
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
         patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
@@ -84,7 +83,7 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
             "hey home assistant schedule to turn off the lights in 10 minutes",
             config,
         )
-        assert result == "!schedule in 10 minutes @home turn off the lights"
+        assert result == "@home schedule to turn off the lights in 10 minutes"
 
     # Test 3: Research agent (multi-word display name)
     mock_response.content = "@research find papers on AI"
@@ -137,6 +136,10 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
         assert "@calc or @mindroom_calc (spoken as: Calculator)" in captured_prompt
         assert "use EXACT agent name after @" in captured_prompt
         assert 'use "@home" NOT "@homeassistant"' in captured_prompt
+        assert "NEVER rewrite speech into Matrix bot commands" in captured_prompt
+        assert "!schedule" not in captured_prompt
+        assert "!help" not in captured_prompt
+        assert "!skill" not in captured_prompt
 
 
 @pytest.mark.asyncio
@@ -239,30 +242,9 @@ def test_sanitize_unavailable_mentions_direct(
     assert result == expected
 
 
-@pytest.mark.parametrize(
-    ("transcription", "formatted_message", "expected"),
-    [
-        ("How do agent sessions work?", "!skill session list", True),
-        ("Can you explain this concept?", "!help", True),
-        ("run skill session list", "!skill session list", False),
-        ("help command", "!help", False),
-        ("show me help", "!help", False),
-        ("What is my schedule today?", "!list_schedules", False),
-        ("@research can you help me?", "@research can you help me?", False),
-    ],
-)
-def test_is_speculative_command_rewrite(
-    transcription: str,
-    formatted_message: str,
-    expected: bool,
-) -> None:
-    """Only explicit command intent should survive command rewrites."""
-    assert _is_speculative_command_rewrite(transcription, formatted_message) is expected
-
-
 @pytest.mark.asyncio
-async def test_voice_transcription_rejects_invented_skill_command() -> None:
-    """A general sessions question must not be rewritten into !skill."""
+async def test_voice_transcription_does_not_rewrite_schedule_language_to_command() -> None:
+    """Voice normalization should keep schedule phrasing as plain text."""
     config = _voice_config({})
 
     with (
@@ -271,76 +253,12 @@ async def test_voice_transcription_rejects_invented_skill_command() -> None:
     ):
         mock_agent = MagicMock()
         mock_response = MagicMock()
-        mock_response.content = "!skill session list"
+        mock_response.content = "schedule something tomorrow"
         mock_agent.arun = AsyncMock(return_value=mock_response)
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        transcription = "How do agent sessions work?"
-        result = await _process_transcription_for_test(transcription, config)
+        result = await _process_transcription_for_test("schedule something tomorrow", config)
 
-    assert result == transcription
-
-
-@pytest.mark.asyncio
-async def test_voice_transcription_keeps_explicit_skill_command() -> None:
-    """Explicit skill intent should continue to produce !skill commands."""
-    config = _voice_config({})
-
-    with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "!skill session list"
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
-        result = await _process_transcription_for_test("run skill session list", config)
-
-    assert result == "!skill session list"
-
-
-@pytest.mark.asyncio
-async def test_voice_transcription_rejects_invented_help_command() -> None:
-    """A general question must not be rewritten into !help."""
-    config = _voice_config({})
-
-    with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "!help"
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
-        transcription = "What is photosynthesis?"
-        result = await _process_transcription_for_test(transcription, config)
-
-    assert result == transcription
-
-
-@pytest.mark.asyncio
-async def test_voice_transcription_keeps_explicit_help_command() -> None:
-    """Explicit help intent should continue to produce !help commands."""
-    config = _voice_config({})
-
-    with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "!help"
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
-        result = await _process_transcription_for_test("help command", config)
-
-    assert result == "!help"
+    assert result == "schedule something tomorrow"
+    assert not result.startswith("!")

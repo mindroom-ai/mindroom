@@ -1,4 +1,4 @@
-"""Voice message handler with speech-to-text and intelligent command recognition."""
+"""Voice message handler with speech-to-text and light transcript normalization."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from agno.media import Audio
 from mindroom.ai import get_model_instance
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import get_available_agents_for_sender
-from mindroom.commands.parsing import get_command_list
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -40,13 +39,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
-)
-_VOICE_COMMAND_PATTERN = re.compile(r"^!(?P<command>[a-zA-Z][a-zA-Z0-9_-]*)\b")
-_VOICE_SKILL_INTENT_PATTERN = re.compile(
-    r"^\s*skill\b|\b(?:run|use|execute|invoke|trigger)\s+(?:the\s+)?skill\b|\b(?:bang|exclamation(?:\s+mark)?)\s+skill\b",
-)
-_VOICE_HELP_INTENT_PATTERN = re.compile(
-    r"^\s*help\b|\bshow(?: me)?\s+(?:the\s+)?help\b|\bhelp\s+command\b|\bwhat\s+commands?\b",
 )
 
 
@@ -393,7 +385,7 @@ async def _process_transcription(
     available_agent_names: list[str] | None = None,
     available_team_names: list[str] | None = None,
 ) -> str:
-    """Process transcription to recognize commands and agent names.
+    """Process transcription to normalize mentions and light ASR cleanup.
 
     Args:
         transcription: Raw transcription text
@@ -403,7 +395,7 @@ async def _process_transcription(
         available_team_names: Optional room-scoped list of available team names
 
     Returns:
-        Formatted message with proper commands and mentions
+        Formatted message with proper mentions and cleanup
 
     """
     try:
@@ -430,8 +422,8 @@ async def _process_transcription(
         )
 
         # Build the prompt for the AI
-        prompt = f"""You are a voice command processor for a Matrix chat bot system.
-Your task is to lightly normalize spoken transcriptions while preserving user intent.
+        prompt = f"""You are a voice transcription normalizer for a Matrix chat bot system.
+Your task is to lightly normalize spoken transcriptions while preserving natural language and user intent.
 
 Available agents (use EXACT agent name after @):
 {agent_list}
@@ -441,36 +433,23 @@ Available teams (use EXACT team name after @):
 
 Examples of correct formatting:
 - User says "HomeAssistant turn on the fan" → "@home turn on the fan"  (NOT @homeassistant)
-- User says "schedule turn off the lights in 10 minutes" → "!schedule in 10 minutes turn off the lights"
-- User says "hey home assistant agent schedule to turn off the guest room lights in 10 seconds" → "!schedule in 10 seconds @home turn off the guest room lights"
-- User says "cancel schedule ABC123" → "!cancel_schedule ABC123"
-- User says "list my schedules" → "!list_schedules"
+- User says "research agent find papers on AI" → "@research find papers on AI"
+- User says "at research can you help me" → "@research can you help me"
+- User says "schedule something tomorrow" → "schedule something tomorrow"  (NOT a !command)
 
-{get_command_list()}
-
-CRITICAL RULES:
+Rules:
 1. ALWAYS use the EXACT agent name (the part before the parentheses) after @, NOT the display name
    - If agent is listed as "@home (spoken as: HomeAssistant)", use "@home" NOT "@homeassistant"
-2. DEFAULT: keep natural language exactly as-is (except minor ASR fixes and mention normalization)
-3. Only emit a !command when command intent is explicit and unambiguous
-   - Explicit command intent examples: "schedule ...", "run skill ...", "cancel schedule ...", "help command"
-   - Non-command examples that must stay natural language:
-     - "What is my schedule today?" (question, not !list_schedules)
-     - "How do agent sessions work?" (question, not !skill session list)
-     - "Can you explain skills?" (question, not !skill)
-4. If command intent is uncertain, DO NOT create any !command
-5. !schedule commands MUST include a time (in X minutes, at 3pm, tomorrow, etc.)
-   - The time should come right after !schedule
-6. When both command AND agent are mentioned, command comes FIRST
-7. Agent mentions come FIRST when just addressing them (no command):
+2. DEFAULT: keep natural language exactly as-is, except for minor ASR fixes and mention normalization
+3. NEVER rewrite speech into Matrix bot commands or invent leading ! prefixes
+4. Agent mentions come FIRST when just addressing them:
    - "research agent, find papers" → "@research find papers"
    - "ask the email agent to check mail" → "@email check mail"
-8. Fix common speech recognition errors (e.g., "at research" → "@research")
-9. Be smart about intent - "ask the research agent" means "@research"
-10. Keep the natural language but add proper formatting
-11. ONLY mention agents/teams listed above as available in this room
-12. If no relevant available agent/team is listed, do not add any @mention
-13. Never invent command arguments that were not spoken
+5. Fix common speech recognition errors (e.g., "at research" → "@research")
+6. Be smart about intent - "ask the research agent" means "@research"
+7. ONLY mention agents/teams listed above as available in this room
+8. If no relevant available agent/team is listed, do not add any @mention
+9. Never invent words, commands, or arguments that were not spoken
 
 Transcription: "{transcription}"
 
@@ -481,8 +460,8 @@ Output the formatted message only, no explanation:"""
 
         # Create an agent for voice command processing
         agent = Agent(
-            name="VoiceCommandProcessor",
-            role="Normalize voice transcriptions while preserving command and mention intent",
+            name="VoiceTranscriptionNormalizer",
+            role="Normalize voice transcriptions while preserving natural language and mention intent",
             model=model,
         )
 
@@ -492,18 +471,11 @@ Output the formatted message only, no explanation:"""
 
         # Extract the content from the response
         if response and response.content:
-            processed_message = _sanitize_unavailable_mentions(
+            return _sanitize_unavailable_mentions(
                 response.content.strip(),
                 allowed_entities=set(agent_names) | set(team_names),
                 configured_entities=set(config.agents) | set(config.teams),
             )
-            if _is_speculative_command_rewrite(transcription, processed_message):
-                return _sanitize_unavailable_mentions(
-                    transcription.strip(),
-                    allowed_entities=set(agent_names) | set(team_names),
-                    configured_entities=set(config.agents) | set(config.teams),
-                )
-            return processed_message
 
     except Exception as e:
         logger.exception("Error processing transcription")
@@ -562,19 +534,3 @@ def _sanitize_unavailable_mentions(
         return match.group(0)[1:]
 
     return _VOICE_MENTION_PATTERN.sub(_replace, text)
-
-
-def _is_speculative_command_rewrite(transcription: str, formatted_message: str) -> bool:
-    """Return True when model output invents a command not clearly requested by the user."""
-    if not formatted_message:
-        return False
-    match = _VOICE_COMMAND_PATTERN.match(formatted_message.strip())
-    if match is None:
-        return False
-    command_name = match.group("command").lower().replace("-", "_")
-    normalized_transcription = transcription.strip().lower()
-    if command_name == "skill":
-        return _VOICE_SKILL_INTENT_PATTERN.search(normalized_transcription) is None
-    if command_name == "help":
-        return _VOICE_HELP_INTENT_PATTERN.search(normalized_transcription) is None
-    return False

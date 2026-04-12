@@ -13,6 +13,7 @@ import nio
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from .hooks.ingress import is_voice_event
 from .matrix.media import extract_media_caption
 
 if TYPE_CHECKING:
@@ -142,11 +143,17 @@ def is_coalescing_exempt_source_kind(
     return _effective_source_kind(event, fallback_source_kind) in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
-def is_command_event(event: DispatchEvent) -> bool:
+def is_command_event(
+    event: DispatchEvent,
+    *,
+    fallback_source_kind: str | None = None,
+) -> bool:
     """Return whether a dispatch event should bypass coalescing as a command."""
     if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
         return False
-    if _effective_source_kind(event) in {"image", "media"}:
+    if fallback_source_kind == "voice" or is_voice_event(event):
+        return False
+    if _effective_source_kind(event, fallback_source_kind) in {"image", "media"}:
         return False
     return command_parser.parse(event.body) is not None
 
@@ -407,7 +414,7 @@ class CoalescingGate:
             return
 
         # Path 2: command interrupt — flush pending, dispatch command solo
-        if is_command_event(pending_event.event):
+        if is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
             gate = self._gates.get(key)
             if gate is not None:
                 self._cancel_timer(gate)
