@@ -296,7 +296,7 @@ async def _generate_summary(
     )
     response = await cached_agent_run(
         agent=agent,
-        full_prompt=prompt,
+        run_input=prompt,
         session_id=f"thread_summary_{session_hash}",
     )
     content = response.content

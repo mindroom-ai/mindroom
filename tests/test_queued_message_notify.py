@@ -10,19 +10,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.db.base import SessionType
 from agno.media import Image
 from agno.models.message import Message
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 from mindroom.ai import (
     QUEUED_MESSAGE_NOTICE_TEXT,
+    PreparedAgentRun,
     ai_response,
-    cleanup_queued_notice_state,
     install_queued_message_notice_hook,
     queued_message_signal_context,
     stream_agent_response,
@@ -66,6 +63,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
+
+    from agno.session.team import TeamSession
 
 
 def _config(tmp_path: Path) -> Config:
@@ -122,6 +121,15 @@ def _prepared_text_event(*, event_id: str = "$event") -> PreparedTextEvent:
         body="hello",
         source={"content": {"body": "hello"}},
         server_timestamp=1234,
+    )
+
+
+def _prepared_run(agent: object, *, prompt: str = "prompt") -> PreparedAgentRun:
+    return PreparedAgentRun(
+        agent=agent,
+        messages=(Message(role="user", content=prompt),),
+        unseen_event_ids=[],
+        prepared_history=MagicMock(),
     )
 
 
@@ -968,8 +976,8 @@ def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) -> None:
-    """Loaded session history should be scrubbed before replay planning sees it."""
+async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path) -> None:
+    """Loaded session history should strip stale queued notices before replay."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     storage.session = AgentSession(
@@ -993,7 +1001,7 @@ async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) ->
         scope_context: object | None = None,
         *_args: object,
         **_kwargs: object,
-    ) -> tuple[object, str, list[str], object]:
+    ) -> PreparedAgentRun:
         assert scope_context is not None
         session = scope_context.session
         assert session is not None
@@ -1012,7 +1020,7 @@ async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) ->
                 tools=[],
             ),
         )
-        return agent, "prompt", [], MagicMock()
+        return _prepared_run(agent)
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
@@ -1035,8 +1043,8 @@ async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_ai_response_strips_notice_from_run_output_and_session(tmp_path: Path) -> None:
-    """Non-streaming runs should scrub the hidden notice from both return state and persisted history."""
+async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: Path) -> None:
+    """Non-streaming runs should strip the hidden notice from returned and persisted history."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -1077,7 +1085,7 @@ async def test_ai_response_strips_notice_from_run_output_and_session(tmp_path: P
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt", [], MagicMock()))),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
@@ -1097,8 +1105,8 @@ async def test_ai_response_strips_notice_from_run_output_and_session(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_ai_response_strips_notice_from_session_after_exception(tmp_path: Path) -> None:
-    """Non-streaming cleanup should still scrub persisted notices after an exception."""
+async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path: Path) -> None:
+    """Non-streaming failures should still scrub persisted notices."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -1127,7 +1135,7 @@ async def test_ai_response_strips_notice_from_session_after_exception(tmp_path: 
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt", [], MagicMock()))),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
@@ -1146,7 +1154,7 @@ async def test_ai_response_strips_notice_from_session_after_exception(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_response_strips_notice_from_session(tmp_path: Path) -> None:
+async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path) -> None:
     """Streaming runs should also scrub the hidden notice from persisted history."""
     config = _config(tmp_path)
     storage = _FakeStorage()
@@ -1177,7 +1185,7 @@ async def test_stream_agent_response_strips_notice_from_session(tmp_path: Path) 
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt", [], MagicMock()))),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
@@ -1223,62 +1231,3 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
             function_call_results=[Message(role="tool", content="tool result")],
         )
         assert _notice_count(messages) == 1
-
-
-def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
-    """Team cleanup should recurse into nested member responses."""
-    run_output = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        messages=[_queued_notice_message()],
-        member_responses=[
-            RunOutput(
-                run_id="member-run-1",
-                session_id="session-1",
-                messages=[_queued_notice_message()],
-            ),
-        ],
-        status=RunStatus.completed,
-    )
-    storage = _FakeStorage()
-    storage.session = TeamSession(
-        session_id="session-1",
-        runs=[
-            TeamRunOutput(
-                run_id="run-1",
-                session_id="session-1",
-                messages=[_queued_notice_message()],
-                member_responses=[
-                    RunOutput(
-                        run_id="member-run-1",
-                        session_id="session-1",
-                        messages=[_queued_notice_message()],
-                    ),
-                ],
-                status=RunStatus.completed,
-            ),
-        ],
-    )
-
-    cleanup_queued_notice_state(
-        run_output=run_output,
-        storage=storage,
-        session_id="session-1",
-        session_type=SessionType.TEAM,
-        entity_name="queued-notice-team",
-    )
-
-    assert _notice_count(run_output.messages or []) == 0
-    assert run_output.member_responses is not None
-    nested_member_run = run_output.member_responses[0]
-    assert isinstance(nested_member_run, RunOutput)
-    assert _notice_count(nested_member_run.messages or []) == 0
-    assert storage.upserted is True
-    assert storage.session is not None
-    stored_team_run = storage.session.runs[0]
-    assert isinstance(stored_team_run, TeamRunOutput)
-    assert _notice_count(stored_team_run.messages or []) == 0
-    assert stored_team_run.member_responses is not None
-    stored_member_run = stored_team_run.member_responses[0]
-    assert isinstance(stored_member_run, RunOutput)
-    assert _notice_count(stored_member_run.messages or []) == 0

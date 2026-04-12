@@ -169,6 +169,22 @@ async def build_memory_enhanced_prompt(
     )
 
 
+async def build_memory_prompt_parts(
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> memory_functions.MemoryPromptParts:
+    return await memory_functions.build_memory_prompt_parts(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+        get_tool_execution_identity(),
+    )
+
+
 async def store_conversation_memory(
     prompt: str,
     agent_name: str | list[str],
@@ -769,6 +785,27 @@ async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, confi
     assert "[File memory entrypoint (agent)]" in enhanced
     assert "Project uses FastAPI." in enhanced
     assert "How do we build the API?" in enhanced
+
+
+@pytest.mark.asyncio
+async def test_file_backend_build_memory_prompt_parts_splits_entrypoint_from_turn_context(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("# Memory\n\nProject uses FastAPI.\n", encoding="utf-8")
+    await add_agent_memory("Deployment runbook lives in docs/deploy.md", "general", storage_path, config)
+
+    prompt_parts = await build_memory_prompt_parts("deployment runbook", "general", storage_path, config)
+
+    assert "[File memory entrypoint (agent)]" in prompt_parts.session_preamble
+    assert "Project uses FastAPI." in prompt_parts.session_preamble
+    assert "Deployment runbook lives in docs/deploy.md" in prompt_parts.turn_context
+    assert "Project uses FastAPI." not in prompt_parts.turn_context
 
 
 @pytest.mark.asyncio

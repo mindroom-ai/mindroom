@@ -158,7 +158,7 @@ class IngressHookRunner:
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
         )
-        model_prompt: str | None = None
+        model_prompt = payload.model_prompt
         strip_transient_enrichment_after_run = False
         if self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH):
             context = MessageEnrichContext(

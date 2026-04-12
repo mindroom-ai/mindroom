@@ -10,7 +10,6 @@ import nio
 
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
-    append_attachment_ids_prompt,
     merge_attachment_ids,
     parse_attachment_ids_from_thread_history,
     register_file_or_video_attachment,
@@ -345,8 +344,17 @@ class InboundTurnNormalizer:
             attachment_images = (
                 [*attachment_images, *request.fallback_images] if attachment_images else list(request.fallback_images)
             )
+        attachment_prompt = (
+            (
+                "Available attachment IDs: "
+                f"{', '.join(resolved_attachment_ids)}. Use tool calls to inspect or process them."
+            )
+            if resolved_attachment_ids
+            else None
+        )
         return DispatchPayload(
-            prompt=append_attachment_ids_prompt(request.prompt, resolved_attachment_ids),
+            prompt=request.prompt,
+            model_prompt=attachment_prompt,
             media=MediaInputs.from_optional(
                 audio=attachment_audio,
                 images=attachment_images,

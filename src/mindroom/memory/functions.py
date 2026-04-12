@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -54,6 +55,14 @@ if TYPE_CHECKING:
     from ._shared import ScopedMemoryCrud
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class MemoryPromptParts:
+    """Stable and turn-local prompt fragments used by the AI layer."""
+
+    session_preamble: str = ""
+    turn_context: str = ""
 
 
 def _create_memory_factory(
@@ -347,7 +356,7 @@ async def delete_agent_memory(
 
 
 @timed("system_prompt_assembly.memory_enhancement")
-async def build_memory_enhanced_prompt(
+async def build_memory_prompt_parts(
     prompt: str,
     agent_name: str,
     storage_path: Path,
@@ -355,9 +364,10 @@ async def build_memory_enhanced_prompt(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     timing_scope: str | None = None,
-) -> str:
-    """Build a prompt enhanced with relevant memories."""
+) -> MemoryPromptParts:
+    """Split stable entrypoint context from turn-local searched memories."""
     logger.debug("Building enhanced prompt", agent=agent_name)
+    use_file_backend = use_file_memory_backend(config, agent_name=agent_name)
     agent_memories = await search_agent_memories(
         prompt,
         agent_name,
@@ -370,7 +380,9 @@ async def build_memory_enhanced_prompt(
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
-    if use_file_memory_backend(config, agent_name=agent_name):
+    session_preamble = ""
+    context_type = "agent"
+    if use_file_backend:
         agent_entrypoint = _load_agent_file_entrypoint_context(
             agent_name,
             storage_path,
@@ -379,18 +391,38 @@ async def build_memory_enhanced_prompt(
             execution_identity,
             timing_scope,
         )
-        context_chunks: list[str] = []
         if agent_entrypoint:
-            context_chunks.append(f"[File memory entrypoint (agent)]\n{agent_entrypoint}")
-        if agent_memories:
-            context_chunks.append(_format_memories_as_context(agent_memories, "agent file"))
-        if context_chunks:
-            return f"{'\n\n'.join(context_chunks)}\n\n{prompt}"
-        return prompt
+            session_preamble = f"[File memory entrypoint (agent)]\n{agent_entrypoint}"
+        context_type = "agent file"
 
-    if not agent_memories:
-        return prompt
-    return f"{_format_memories_as_context(agent_memories, 'agent')}\n\n{prompt}"
+    turn_context = _format_memories_as_context(agent_memories, context_type) if agent_memories else ""
+    return MemoryPromptParts(
+        session_preamble=session_preamble,
+        turn_context=turn_context,
+    )
+
+
+async def build_memory_enhanced_prompt(
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    timing_scope: str | None = None,
+) -> str:
+    """Compatibility wrapper that preserves the legacy monolithic prompt shape."""
+    prompt_parts = await build_memory_prompt_parts(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        timing_scope=timing_scope,
+    )
+    prompt_chunks = [chunk for chunk in (prompt_parts.session_preamble, prompt_parts.turn_context, prompt) if chunk]
+    return "\n\n".join(prompt_chunks)
 
 
 async def store_conversation_memory(

@@ -20,9 +20,9 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.execution_preparation import (
-    _build_prompt_with_unseen,
     _classify_partial_reply,
     _clean_partial_reply_body,
+    _context_messages_from_visible_messages,
     _get_unseen_event_ids_for_metadata,
     _get_unseen_messages_for_sender,
     _PartialReplyKind,
@@ -294,22 +294,24 @@ class TestCleanPartialReplyBody:
 class TestUnseenMessagesPartialReplies:
     """Test unseen-context extraction for self-authored partial replies."""
 
-    def test_mixed_partial_reply_header_warns_about_live_and_interrupted_content(self) -> None:
-        """Mixed partial states should use the combined warning header."""
-        prompt = _build_prompt_with_unseen(
-            "Continue.",
+    def test_mixed_partial_reply_states_preserve_structured_context_messages(self) -> None:
+        """Mixed partial states should survive as stable structured context messages."""
+        context_messages = _context_messages_from_visible_messages(
             [
                 _make_visible_message(sender="You (reply still streaming)", body="Live draft"),
                 _make_visible_message(sender="You (interrupted reply draft)", body="Interrupted draft"),
             ],
-            partial_reply_kinds={_PartialReplyKind.IN_PROGRESS, _PartialReplyKind.INTERRUPTED},
+            response_sender_id=None,
         )
 
-        assert "Some partial content from your previous response is still being delivered" in prompt
-        assert "Other partial content was interrupted before completion" in prompt
+        assert [message.role for message in context_messages] == ["user", "user"]
+        assert [message.content for message in context_messages] == [
+            "You (reply still streaming): Live draft",
+            "You (interrupted reply draft): Interrupted draft",
+        ]
 
-    def test_includes_streaming_self_reply_with_cleaned_body_and_header(self) -> None:
-        """Inject still-streaming self replies with the non-duplication warning header."""
+    def test_includes_streaming_self_reply_with_original_sender_and_body(self) -> None:
+        """Inject still-streaming self replies without relabeling or rewriting them."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -338,14 +340,18 @@ class TestUnseenMessagesPartialReplies:
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
         assert in_progress_event_ids == {"e2"}
         assert len(unseen) == 1
+        assert unseen[0].sender == agent_id
         assert unseen[0].body == "Partial reply"
 
-        prompt = _build_prompt_with_unseen("Answer the new question.", unseen, partial_reply_kinds=partial_reply_kinds)
-        assert "Your previous response is still being delivered." in prompt
-        assert "Do NOT repeat or redo that work." in prompt
+        context_messages = _context_messages_from_visible_messages(
+            unseen,
+            response_sender_id=agent_id,
+        )
+        assert [message.role for message in context_messages] == ["assistant"]
+        assert [message.content for message in context_messages] == ["Partial reply"]
 
-    def test_includes_interrupted_self_reply_with_interrupted_header(self) -> None:
-        """Inject interrupted self replies with the continuation-oriented warning header."""
+    def test_includes_interrupted_self_reply_without_rewriting_body(self) -> None:
+        """Inject interrupted self replies without relabeling or stripping markers."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -373,11 +379,17 @@ class TestUnseenMessagesPartialReplies:
         assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
         assert in_progress_event_ids == set()
         assert len(unseen) == 1
-        assert unseen[0].body == "Partial answer"
+        assert unseen[0].sender == agent_id
+        assert unseen[0].body == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
 
-        prompt = _build_prompt_with_unseen("Continue.", unseen, partial_reply_kinds=partial_reply_kinds)
-        assert "Your previous response was interrupted before completion." in prompt
-        assert "Continue from where you left off if appropriate." in prompt
+        context_messages = _context_messages_from_visible_messages(
+            unseen,
+            response_sender_id=agent_id,
+        )
+        assert [message.role for message in context_messages] == ["assistant"]
+        assert [message.content for message in context_messages] == [
+            f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}",
+        ]
 
     def test_in_progress_partial_reply_event_ids_are_excluded_from_seen_metadata(self) -> None:
         """Keep live self partial replies out of seen metadata until they become terminal."""
@@ -434,7 +446,7 @@ class TestUnseenMessagesPartialReplies:
 
         assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
         assert in_progress_event_ids == set()
-        assert unseen[0].body == "Partial reply"
+        assert unseen[0].body == f"Partial reply\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
     def test_placeholder_only_self_reply_is_not_injected(self) -> None:
         """Do not inject placeholder-only self replies as meaningful unseen context."""
@@ -571,7 +583,7 @@ class TestUnseenMessagesPartialReplies:
         assert updated_kinds == {_PartialReplyKind.INTERRUPTED}
         assert updated_in_progress_event_ids == set()
         assert [msg.event_id for msg in updated_unseen] == ["e1"]
-        assert updated_unseen[0].body == "Partial reply"
+        assert updated_unseen[0].body == f"Partial reply\n\n{_CANCELLED_RESPONSE_NOTE}"
 
 
 class TestThreadHistoryStreamStatus:

@@ -31,7 +31,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
-from mindroom.ai import _prepare_agent_and_prompt, build_prompt_with_thread_history
+from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -86,6 +86,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.memory import MemoryPromptParts
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -2842,7 +2843,7 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -2860,7 +2861,7 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
             thread_history=thread_history,
         )
 
-    expected_fallback_prompt = build_prompt_with_thread_history("Current prompt", thread_history)
+    expected_fallback_prompt = "alice: Earlier context\n\nbob: More context\n\nCurrent prompt"
     assert mock_prepare.await_args is not None
     assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens(
         live_agent,
@@ -2892,7 +2893,7 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -2928,7 +2929,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -2938,7 +2939,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
             return_value=PreparedHistoryState(replays_persisted_history=False),
         ),
     ):
-        prepared_agent, full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             "test_agent",
             "Current prompt",
             runtime_paths,
@@ -2946,9 +2947,12 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
             thread_history=thread_history,
         )
 
+    prepared_agent = prepared_run.agent
+    full_prompt = prepared_run.prompt_text
+    prepared = prepared_run.prepared_history
     assert prepared_agent is live_agent
     assert prepared.replays_persisted_history is False
-    assert full_prompt == build_prompt_with_thread_history("Current prompt", thread_history)
+    assert full_prompt == "alice: Earlier context\n\nbob: More context\n\nCurrent prompt"
 
 
 def _make_test_compaction_outcome() -> CompactionOutcome:
@@ -2988,7 +2992,7 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
     original_outcome = _make_test_compaction_outcome()
     collector = [original_outcome]
     prepared_execution = PreparedExecutionContext(
-        final_prompt="Current prompt",
+        messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
@@ -2996,14 +3000,14 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
     )
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
             "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
-        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             "test_agent",
             "Current prompt",
             runtime_paths,
@@ -3011,6 +3015,7 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
             compaction_outcomes_collector=collector,
         )
 
+    prepared = prepared_run.prepared_history
     assert collector[0] is prepared.compaction_outcomes[0]
     assert collector[0] is not original_outcome
     assert collector[0].role_instructions_tokens is not None
@@ -3035,7 +3040,7 @@ async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_
     original_outcome = _make_test_compaction_outcome()
     collector: list[CompactionOutcome] = []
     prepared_execution = PreparedExecutionContext(
-        final_prompt="Current prompt",
+        messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
@@ -3043,14 +3048,14 @@ async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_
     )
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
             "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
-        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             "test_agent",
             "Current prompt",
             runtime_paths,
@@ -3058,6 +3063,7 @@ async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_
             compaction_outcomes_collector=collector,
         )
 
+    prepared = prepared_run.prepared_history
     assert len(collector) == 1
     assert collector[0] is prepared.compaction_outcomes[0]
     assert collector[0] is not original_outcome
@@ -3082,7 +3088,7 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
 
     original_outcome = _make_test_compaction_outcome()
     prepared_execution = PreparedExecutionContext(
-        final_prompt="Current prompt",
+        messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
@@ -3090,14 +3096,14 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
     )
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
             "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
-        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             "test_agent",
             "Current prompt",
             runtime_paths,
@@ -3105,6 +3111,7 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
             compaction_outcomes_collector=None,
         )
 
+    prepared = prepared_run.prepared_history
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0] is not original_outcome
     assert prepared.compaction_outcomes[0].role_instructions_tokens is not None
@@ -3124,7 +3131,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
 
     original_outcome = _make_test_compaction_outcome()
     prepared_execution = PreparedExecutionContext(
-        final_prompt="x" * 248,
+        messages=(Message(role="user", content="x" * 248),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
@@ -3132,14 +3139,14 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     )
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="x" * 248)),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
             "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
-        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             "test_agent",
             "Current prompt",
             runtime_paths,
@@ -3147,6 +3154,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
             compaction_outcomes_collector=None,
         )
 
+    prepared = prepared_run.prepared_history
     outcome = prepared.compaction_outcomes[0]
     assert outcome.role_instructions_tokens == 0
     assert outcome.tool_definition_tokens == 0
@@ -3165,7 +3173,7 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
     live_agent = _agent()
     collector: list[CompactionOutcome] = []
     prepared_execution = PreparedExecutionContext(
-        final_prompt="Current prompt",
+        messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
@@ -3173,14 +3181,14 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
     )
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
             "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
-        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             "test_agent",
             "Current prompt",
             runtime_paths,
@@ -3188,6 +3196,7 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
             compaction_outcomes_collector=collector,
         )
 
+    prepared = prepared_run.prepared_history
     assert collector == []
     assert prepared.compaction_outcomes == []
 
@@ -3666,9 +3675,9 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         assert scope_context is not None
         with (
             patch("mindroom.ai.create_agent", return_value=live_agent),
-            patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="Current prompt")),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         ):
-            agent, full_prompt, unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+            prepared_run = await _prepare_agent_and_prompt(
                 "test_agent",
                 "Current prompt",
                 runtime_paths,
@@ -3682,6 +3691,10 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
                 reply_to_event_id="event-3",
             )
 
+    agent = prepared_run.agent
+    full_prompt = prepared_run.prompt_text
+    unseen_event_ids = prepared_run.unseen_event_ids
+    prepared = prepared_run.prepared_history
     assert unseen_event_ids == ["event-2"]
     assert prepared.replays_persisted_history is True
     assert "Fresh follow-up" in full_prompt
@@ -3689,7 +3702,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     assert "stored summary" not in full_prompt
     assert "<history_context>" not in full_prompt
 
-    response = await agent.arun(full_prompt, session_id="session-1")
+    response = await agent.arun(prepared_run.run_input, session_id="session-1")
 
     assert response.content == "ok"
     assert [message.role for message in recording_model.seen_messages[:2]] == ["user", "assistant"]
@@ -3699,10 +3712,177 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         "run-2 answer",
     ]
 
+    unseen_user_message = recording_model.seen_messages[-2]
+    assert unseen_user_message.role == "user"
+    assert unseen_user_message.content == "alice: Fresh follow-up"
+
     final_user_message = recording_model.seen_messages[-1]
     assert final_user_message.role == "user"
-    assert isinstance(final_user_message.content, str)
-    assert "Fresh follow-up" in final_user_message.content
-    assert "Already seen" not in final_user_message.content
-    assert "Current prompt" in final_user_message.content
-    assert "stored summary" not in final_user_message.content
+    assert final_user_message.content == "Current prompt"
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_keeps_prior_request_message_prefix_byte_identical(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    recording_model = RecordingModel(id="recording-model", provider="fake")
+    recorded_requests: list[list[dict[str, str]]] = []
+
+    prompt_parts_by_prompt = {
+        "First prompt": MemoryPromptParts(
+            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
+            turn_context="turn context one",
+        ),
+        "Second prompt": MemoryPromptParts(
+            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
+            turn_context="turn context two",
+        ),
+        "Third prompt": MemoryPromptParts(
+            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
+            turn_context="turn context three",
+        ),
+    }
+
+    async def fake_build_memory_prompt_parts(
+        prompt: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> MemoryPromptParts:
+        return prompt_parts_by_prompt[prompt]
+
+    def create_agent_stub(*_args: object, **_kwargs: object) -> Agent:
+        return _agent(
+            model=recording_model,
+            db=storage,
+            num_history_runs=10,
+        )
+
+    with (
+        patch(
+            "mindroom.ai.create_agent",
+            side_effect=create_agent_stub,
+        ),
+        patch(
+            "mindroom.ai.build_memory_prompt_parts",
+            new=AsyncMock(side_effect=fake_build_memory_prompt_parts),
+        ),
+    ):
+        for prompt in ("First prompt", "Second prompt", "Third prompt"):
+            prepared_run = await _prepare_agent_and_prompt(
+                "test_agent",
+                prompt,
+                runtime_paths,
+                config,
+                session_id="session-1",
+            )
+            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
+            recorded_requests.append(
+                [
+                    {
+                        "role": message.role,
+                        "content": str(message.content),
+                    }
+                    for message in recording_model.seen_messages
+                ],
+            )
+
+    second_request = recorded_requests[1]
+    third_request = recorded_requests[2]
+
+    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
+    assert third_request[-1]["content"] == "Third prompt\n\nturn context three"
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_strips_timestamped_current_turn_duplication_from_model_prompt(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    recording_model = RecordingModel(id="recording-model", provider="fake")
+    recorded_requests: list[list[dict[str, str]]] = []
+
+    prompt_parts_by_prompt = {
+        "First prompt": MemoryPromptParts(
+            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
+            turn_context="turn context one",
+        ),
+        "Second prompt": MemoryPromptParts(
+            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
+            turn_context="turn context two",
+        ),
+        "Third prompt": MemoryPromptParts(
+            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
+            turn_context="turn context three",
+        ),
+    }
+    model_prompt_by_prompt = {
+        "First prompt": (
+            "[2026-03-20 08:15 PDT] First prompt\n\n"
+            "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+        ),
+        "Second prompt": (
+            "[2026-03-20 08:16 PDT] Second prompt\n\n"
+            "Available attachment IDs: att_2. Use tool calls to inspect or process them."
+        ),
+        "Third prompt": (
+            "[2026-03-20 08:17 PDT] Third prompt\n\n"
+            "Available attachment IDs: att_3. Use tool calls to inspect or process them."
+        ),
+    }
+
+    async def fake_build_memory_prompt_parts(
+        prompt: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> MemoryPromptParts:
+        return prompt_parts_by_prompt[prompt]
+
+    def create_agent_stub(*_args: object, **_kwargs: object) -> Agent:
+        return _agent(
+            model=recording_model,
+            db=storage,
+            num_history_runs=10,
+        )
+
+    with (
+        patch(
+            "mindroom.ai.create_agent",
+            side_effect=create_agent_stub,
+        ),
+        patch(
+            "mindroom.ai.build_memory_prompt_parts",
+            new=AsyncMock(side_effect=fake_build_memory_prompt_parts),
+        ),
+    ):
+        for prompt in ("First prompt", "Second prompt", "Third prompt"):
+            prepared_run = await _prepare_agent_and_prompt(
+                "test_agent",
+                prompt,
+                runtime_paths,
+                config,
+                session_id="session-1",
+                model_prompt=model_prompt_by_prompt[prompt],
+            )
+            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
+            recorded_requests.append(
+                [
+                    {
+                        "role": message.role,
+                        "content": str(message.content),
+                    }
+                    for message in recording_model.seen_messages
+                ],
+            )
+
+    second_request = recorded_requests[1]
+    third_request = recorded_requests[2]
+
+    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
+    assert third_request[-1]["content"] == (
+        "Third prompt\n\n"
+        "turn context three\n\n"
+        "Available attachment IDs: att_3. Use tool calls to inspect or process them."
+    )

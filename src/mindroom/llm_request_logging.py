@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +16,7 @@ from agno.models.message import Message
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from agno.models.base import Model
     from agno.models.response import ModelResponse
@@ -53,6 +55,7 @@ _NON_API_MESSAGE_FIELDS = {
 }
 type JSONScalar = str | int | float | bool | None
 type JSONValue = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+_REQUEST_CONTEXT = ContextVar[dict[str, JSONValue] | None]("mindroom_llm_request_log_context", default=None)
 
 
 def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
@@ -139,6 +142,22 @@ def _request_tools(value: object) -> list[dict[str, JSONValue]] | None:
     return None
 
 
+@contextmanager
+def bind_llm_request_log_context(**context: object) -> Iterator[None]:
+    """Bind per-run request metadata so log entries can be attributed later."""
+    existing_context = _REQUEST_CONTEXT.get() or {}
+    bound_context = dict(existing_context)
+    for key, value in context.items():
+        if value is None:
+            continue
+        bound_context[str(key)] = _json_safe(value)
+    token = _REQUEST_CONTEXT.set(bound_context or None)
+    try:
+        yield
+    finally:
+        _REQUEST_CONTEXT.reset(token)
+
+
 async def write_llm_request_log(
     *,
     model: Model,
@@ -150,11 +169,13 @@ async def write_llm_request_log(
 ) -> None:
     """Persist one request record for an LLM invocation."""
     now = datetime.now().astimezone()
+    request_context = _REQUEST_CONTEXT.get() or {}
     await asyncio.to_thread(
         _write_jsonl_line,
         _daily_log_path(log_dir, default_log_dir, now),
         {
             "timestamp": now.isoformat(),
+            **request_context,
             "agent_name": agent_name,
             "model_id": model.id,
             "system_prompt": _system_prompt(messages, model),

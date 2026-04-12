@@ -302,9 +302,6 @@ async def apply_post_response_effects(  # noqa: C901
             outcome.compaction_outcomes,
         )
 
-    if not outcome.strip_transient_enrichment_before_effects:
-        strip_transient_enrichment()
-
     if deps.queue_memory_persistence is not None:
         try:
             deps.queue_memory_persistence()
@@ -332,6 +329,9 @@ async def apply_post_response_effects(  # noqa: C901
                 run_id=outcome.response_run_id,
                 response_event_id=outcome.resolved_event_id,
             )
+
+    if not outcome.strip_transient_enrichment_before_effects:
+        strip_transient_enrichment()
 
     if (
         outcome.resolved_event_id is not None

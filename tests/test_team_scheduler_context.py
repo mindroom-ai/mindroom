@@ -149,7 +149,6 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
             thread_history=[],
             requester_user_id="@user:localhost",
             response_envelope=_response_envelope(),
-            strip_transient_enrichment_after_run=False,
             correlation_id="corr-team-non-streaming",
         )
 
@@ -344,7 +343,6 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
             thread_history=[],
             requester_user_id="@user:localhost",
             response_envelope=_response_envelope(),
-            strip_transient_enrichment_after_run=False,
             correlation_id="corr-team-streaming",
         )
 

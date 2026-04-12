@@ -29,7 +29,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.execution_preparation import build_prompt_with_thread_history
 from mindroom.history.runtime import (
     ScopeSessionContext,
     close_team_runtime_sqlite_dbs,
@@ -1187,13 +1186,11 @@ async def _prepare_openai_team_prompt(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
 ) -> str:
     """Prepare the final prompt for one OpenAI-compatible team run."""
-    fallback_prompt = build_prompt_with_thread_history(prompt, thread_history)
     prepared_execution = await prepare_materialized_team_execution(
         scope_context=scope_context,
         agents=agents,
         team=team,
         message=prompt,
-        fallback_prompt=fallback_prompt,
         thread_history=thread_history,
         config=config,
         runtime_paths=runtime_paths,

@@ -708,7 +708,6 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             media=request.media,
             attachment_ids=attachment_ids,
             model_prompt=request.model_prompt,
-            strip_transient_enrichment_after_run=request.strip_transient_enrichment_after_run,
             system_enrichment_items=request.system_enrichment_items,
             response_envelope=request.response_envelope,
             correlation_id=request.correlation_id,

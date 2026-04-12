@@ -1319,7 +1319,7 @@ class TestGenerateSummary:
         assert "Do NOT copy" in instructions
 
         conversation = _build_conversation_text(history)
-        prompt = mock_run.await_args.kwargs["full_prompt"]
+        prompt = mock_run.await_args.kwargs["run_input"]
         assert prompt == f"<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
 
     async def test_summary_returned(self) -> None:
