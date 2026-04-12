@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from agno.db.base import SessionType
+from agno.media import Image
 from agno.models.message import Message
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
@@ -153,6 +154,28 @@ class _FakeStorage:
 
 
 class _FakeModel:
+    def format_function_call_results(
+        self,
+        messages: list[Message],
+        function_call_results: list[Message],
+        _compress_tool_results: bool = False,
+        **_kwargs: object,
+    ) -> None:
+        messages.extend(function_call_results)
+
+    def _handle_function_call_media(
+        self,
+        messages: list[Message],
+        function_call_results: list[Message],
+        send_media_to_model: bool = True,
+    ) -> None:
+        if not send_media_to_model:
+            return
+        if any(message.images or message.videos or message.audio or message.files for message in function_call_results):
+            messages.append(Message(role="user", content="Take note of the following content"))
+
+
+class _FakeModelWithoutFunctionCallMedia:
     def format_function_call_results(
         self,
         messages: list[Message],
@@ -687,8 +710,8 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
     assert coordinator._thread_queued_signals == {}
 
 
-def test_notice_hook_injects_once_per_turn_and_skips_stop_after_tool_call() -> None:
-    """The injected notice should be once per turn, avoid double wrapping, and skip stop-after-tool-call results."""
+def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call() -> None:
+    """The injected notice should stay unique, remain last, avoid double wrapping, and skip stop-after-tool-call results."""
     model = _FakeModel()
     install_queued_message_notice_hook(model)
     install_queued_message_notice_hook(model)
@@ -727,8 +750,91 @@ def test_notice_hook_injects_once_per_turn_and_skips_stop_after_tool_call() -> N
         )
 
     assert _notice_count(queued_messages) == 1
+    assert queued_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
     assert _notice_count(next_turn_messages) == 1
+    assert next_turn_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
     assert _notice_count(stop_after_messages) == 0
+
+
+def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
+    """Repeated tool rounds should keep exactly one queued notice at the end of the prompt."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+        messages = [Message(role="user", content="hello")]
+        for index in range(5):
+            model.format_function_call_results(
+                messages=messages,
+                function_call_results=[Message(role="tool", content=f"result {index}")],
+            )
+
+            assert _notice_count(messages) == 1
+            assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+
+
+def test_stop_after_tool_call_strips_stale_notice_without_readding() -> None:
+    """A stop-after-tool-call round should remove any stale queued notice and not append a new one."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model)
+
+    messages = [Message(role="user", content="hello")]
+    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
+        )
+
+    assert _notice_count(messages) == 0
+    assert messages[-1].content == "done"
+
+
+def test_notice_reinjects_after_media_follow_up_message() -> None:
+    """Agno appends media follow-up messages after tool formatting, so the queued notice must be reappended."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+        messages = [Message(role="user", content="hello")]
+        function_call_results = [
+            Message(
+                role="tool",
+                content="generated image",
+                images=[Image(url="https://example.com/image.png")],
+            ),
+        ]
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=function_call_results,
+        )
+        model._handle_function_call_media(
+            messages=messages,
+            function_call_results=function_call_results,
+        )
+
+    assert _notice_count(messages) == 1
+    assert messages[-2].content == "Take note of the following content"
+    assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+
+
+def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
+    """Missing media support must not disable queued notices for formatted tool results."""
+    model = _FakeModelWithoutFunctionCallMedia()
+    install_queued_message_notice_hook(model)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+        messages = [Message(role="user", content="hello")]
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+
+    assert _notice_count(messages) == 1
+    assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
 
 
 @pytest.mark.asyncio
