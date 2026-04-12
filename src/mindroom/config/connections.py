@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mindroom.credentials import validate_service_name
 
 ConnectionAuthKind = Literal["api_key", "google_adc", "oauth_client", "none"]
+_RESERVED_CONNECTION_SERVICES = frozenset({"google"})
 
 
 class ConnectionConfig(BaseModel):
@@ -42,7 +43,11 @@ class ConnectionConfig(BaseModel):
         if "/" in value:
             msg = "service must not contain '/'"
             raise ValueError(msg)
-        return validate_service_name(value)
+        normalized = validate_service_name(value)
+        if normalized in _RESERVED_CONNECTION_SERVICES:
+            msg = f"service '{normalized}' is reserved for backend-managed Google token storage"
+            raise ValueError(msg)
+        return normalized
 
     @model_validator(mode="after")
     def validate_service_requirement(self) -> Self:

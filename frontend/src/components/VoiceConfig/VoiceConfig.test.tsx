@@ -88,7 +88,7 @@ describe('VoiceConfig', () => {
 
     expect(screen.getByText('Current Effective Settings')).toBeInTheDocument();
     expect(screen.getByText('OpenAI-compatible API')).toBeInTheDocument();
-    expect(screen.getByText('OpenAI')).toBeInTheDocument();
+    expect(screen.getByText('openai')).toBeInTheDocument();
     expect(screen.getByText('http://localhost:8080/v1/audio/transcriptions')).toBeInTheDocument();
     expect(screen.getAllByText('openai/stt').length).toBeGreaterThan(0);
   });
@@ -105,6 +105,57 @@ describe('VoiceConfig', () => {
     const hostInput = document.getElementById('stt-base-url') as HTMLInputElement;
     expect(hostInput).toBeInTheDocument();
     expect(hostInput).toHaveValue('http://localhost:8080');
+  });
+
+  it('preserves a non-openai STT provider when editing and saving', async () => {
+    const config = createConfig();
+    if (!config.voice) throw new Error('Expected voice config');
+    config.voice.stt.provider = 'groq';
+    config.voice.stt.connection = 'groq/default';
+    config.voice.stt.host = '';
+
+    setMockStore(config);
+
+    render(<VoiceConfig />);
+
+    fireEvent.change(document.getElementById('stt-model') as HTMLInputElement, {
+      target: { value: 'whisper-large-v3' },
+    });
+
+    await waitFor(() => {
+      expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
+        enabled: true,
+        visible_router_echo: false,
+        stt: {
+          provider: 'groq',
+          model: 'whisper-large-v3',
+          host: '',
+          connection: 'groq/default',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
+      expect(screen.getByText('groq')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Voice Configuration' }));
+
+    await waitFor(() => {
+      expect(mockUpdateVoiceConfig).toHaveBeenLastCalledWith({
+        enabled: true,
+        visible_router_echo: false,
+        stt: {
+          provider: 'groq',
+          model: 'whisper-large-v3',
+          host: '',
+          connection: 'groq/default',
+        },
+        intelligence: {
+          model: 'default',
+        },
+      });
+    });
   });
 
   it('uses default openai endpoint when base url is cleared', async () => {

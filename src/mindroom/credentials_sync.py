@@ -1,5 +1,9 @@
 """Sync shared named-service credentials from runtime env into CredentialsManager."""
 
+from collections import defaultdict
+
+from mindroom.config.main import load_config
+from mindroom.connections import canonical_connection_provider
 from mindroom.constants import RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.logging_config import get_logger
@@ -16,6 +20,44 @@ _ENV_TO_SERVICE_MAP = {
     "GROQ_API_KEY": "groq",
     "GOOGLE_APPLICATION_CREDENTIALS": "google_vertex_adc",
 }
+_API_KEY_ENV_TO_PROVIDER = {
+    "OPENAI_API_KEY": "openai",
+    "ANTHROPIC_API_KEY": "anthropic",
+    "GOOGLE_API_KEY": "google",
+    "OPENROUTER_API_KEY": "openrouter",
+    "DEEPSEEK_API_KEY": "deepseek",
+    "CEREBRAS_API_KEY": "cerebras",
+    "GROQ_API_KEY": "groq",
+}
+
+
+def _configured_connection_targets(
+    runtime_paths: RuntimePaths,
+) -> tuple[dict[str, set[str]], set[str], set[str]]:
+    """Return configured shared credential services grouped by auth purpose."""
+    try:
+        runtime_config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    except Exception as exc:
+        logger.debug(
+            "credential_env_sync_config_unavailable",
+            config_path=str(runtime_paths.config_path),
+            error=str(exc),
+        )
+        return {}, set(), set()
+
+    api_key_services: dict[str, set[str]] = defaultdict(set)
+    google_adc_services: set[str] = set()
+    google_oauth_services: set[str] = set()
+    for connection in runtime_config.connections.values():
+        if connection.service is None:
+            continue
+        if connection.auth_kind == "api_key":
+            api_key_services[canonical_connection_provider(connection.provider)].add(connection.service)
+        elif connection.auth_kind == "google_adc":
+            google_adc_services.add(connection.service)
+        elif connection.auth_kind == "oauth_client" and canonical_connection_provider(connection.provider) == "google":
+            google_oauth_services.add(connection.service)
+    return api_key_services, google_adc_services, google_oauth_services
 
 
 def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
@@ -96,39 +138,48 @@ def _sync_service_credentials(
     return True
 
 
-def _sync_google_vertex_adc_credentials(runtime_paths: RuntimePaths) -> bool:
-    """Seed/update google_vertex_adc from GOOGLE_APPLICATION_CREDENTIALS."""
+def _sync_google_vertex_adc_credentials(runtime_paths: RuntimePaths, services: set[str]) -> int:
+    """Seed/update configured ADC services from GOOGLE_APPLICATION_CREDENTIALS."""
     adc_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
     if adc_path is None:
         logger.debug("No GOOGLE_APPLICATION_CREDENTIALS path found for google_vertex_adc")
-        return False
+        return 0
 
-    return _sync_service_credentials(
-        service="google_vertex_adc",
-        credentials={"application_credentials_path": str(adc_path)},
-        runtime_paths=runtime_paths,
-        env_var="GOOGLE_APPLICATION_CREDENTIALS",
-    )
+    synced_count = 0
+    for service in sorted(services or {"google_vertex_adc"}):
+        if _sync_service_credentials(
+            service=service,
+            credentials={"application_credentials_path": str(adc_path)},
+            runtime_paths=runtime_paths,
+            env_var="GOOGLE_APPLICATION_CREDENTIALS",
+        ):
+            synced_count += 1
+    return synced_count
 
 
-def _sync_google_oauth_client_credentials(runtime_paths: RuntimePaths) -> bool:
-    """Seed/update google_oauth_client from GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."""
+def _sync_google_oauth_client_credentials(runtime_paths: RuntimePaths, services: set[str]) -> int:
+    """Seed/update configured Google OAuth client services from GOOGLE_CLIENT_ID/SECRET."""
     client_id = get_secret_from_env("GOOGLE_CLIENT_ID", runtime_paths=runtime_paths)
     client_secret = get_secret_from_env("GOOGLE_CLIENT_SECRET", runtime_paths=runtime_paths)
     if not client_id or not client_secret:
-        return False
+        return 0
 
-    return _sync_service_credentials(
-        service="google_oauth_client",
-        credentials={"client_id": client_id, "client_secret": client_secret},
-        runtime_paths=runtime_paths,
-        env_var="GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET",
-    )
+    synced_count = 0
+    for service in sorted(services or {"google_oauth_client"}):
+        if _sync_service_credentials(
+            service=service,
+            credentials={"client_id": client_id, "client_secret": client_secret},
+            runtime_paths=runtime_paths,
+            env_var="GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET",
+        ):
+            synced_count += 1
+    return synced_count
 
 
 def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     """Sync supported shared named-service env values into CredentialsManager."""
     synced_count = 0
+    api_key_services, google_adc_services, google_oauth_services = _configured_connection_targets(runtime_paths)
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
         if env_var == "GOOGLE_APPLICATION_CREDENTIALS":
@@ -141,19 +192,22 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
 
         logger.debug("credential_env_value_found", env_var=env_var, value_length=len(env_value))
 
-        if _sync_service_credentials(
-            service=service,
-            credentials={"api_key": env_value},
-            runtime_paths=runtime_paths,
-            env_var=env_var,
-        ):
-            synced_count += 1
+        target_services = api_key_services.get(_API_KEY_ENV_TO_PROVIDER[env_var]) or {service}
+        for target_service in sorted(target_services):
+            if _sync_service_credentials(
+                service=target_service,
+                credentials={"api_key": env_value},
+                runtime_paths=runtime_paths,
+                env_var=env_var,
+            ):
+                synced_count += 1
 
-    if _sync_google_vertex_adc_credentials(runtime_paths=runtime_paths):
-        synced_count += 1
+    synced_count += _sync_google_vertex_adc_credentials(runtime_paths=runtime_paths, services=google_adc_services)
 
-    if _sync_google_oauth_client_credentials(runtime_paths=runtime_paths):
-        synced_count += 1
+    synced_count += _sync_google_oauth_client_credentials(
+        runtime_paths=runtime_paths,
+        services=google_oauth_services,
+    )
 
     if _sync_github_private_credentials(runtime_paths=runtime_paths):
         synced_count += 1

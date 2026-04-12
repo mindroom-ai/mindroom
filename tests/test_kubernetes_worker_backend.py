@@ -13,7 +13,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.connections import connection_google_application_credentials_path, resolve_connection
 from mindroom.constants import deserialize_runtime_paths, resolve_primary_runtime_paths
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -508,6 +508,80 @@ def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == expected_worker_adc_path
     assert connection_google_application_credentials_path(resolved_connection) == expected_worker_adc_path
     assert local_adc_copy.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+
+
+def test_kubernetes_backend_mirrors_custom_google_adc_services(tmp_path: Path) -> None:
+    """Dedicated workers should rewrite every configured google_adc service payload."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        (
+            "connections:\n"
+            "  vertexai_claude/default:\n"
+            "    provider: vertexai_claude\n"
+            "    service: google_vertex_adc_custom\n"
+            "    auth_kind: google_adc\n"
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+        ),
+        encoding="utf-8",
+    )
+    credentials_path = tmp_path / "adc-custom.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    local_storage_root = tmp_path / "local-shared-storage"
+    local_storage_root.mkdir()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=local_storage_root,
+        process_env={SHARED_CREDENTIALS_PATH_ENV: str(local_storage_root / "credentials")},
+    )
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "google_vertex_adc_custom",
+        {
+            "application_credentials_path": str(credentials_path),
+            "_source": "env",
+        },
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/app/worker",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    worker_runtime_paths = _worker_connection_runtime_paths(
+        config_path=config_path,
+        storage_root=local_storage_root,
+        worker_key=_TEST_SCOPED_WORKER_KEY_A,
+    )
+    resolved_connection = resolve_connection(
+        Config(
+            connections={
+                "vertexai_claude/default": {
+                    "provider": "vertexai_claude",
+                    "service": "google_vertex_adc_custom",
+                    "auth_kind": "google_adc",
+                },
+            },
+        ),
+        provider="vertexai_claude",
+        purpose="chat_model",
+        runtime_paths=worker_runtime_paths,
+    )
+    expected_worker_adc_path = f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
+
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == expected_worker_adc_path
+    assert connection_google_application_credentials_path(resolved_connection) == expected_worker_adc_path
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

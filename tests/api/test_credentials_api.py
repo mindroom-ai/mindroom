@@ -529,7 +529,7 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/list")
 
         assert response.status_code == 200
-        assert response.json() == ["openai"]
+        assert response.json() == ["google_vertex_adc_custom", "openai"]
 
     def test_backend_managed_service_rejects_generic_get_credentials(
         self,
@@ -556,11 +556,12 @@ class TestCredentialsAPI:
         assert response.status_code == 403
         assert "not available through the generic credentials API" in response.json()["detail"]
 
-    def test_backend_managed_service_rejects_generic_status(
+    def test_google_adc_service_allows_generic_status(
         self,
         client: TestClient,
+        mock_credentials_manager: MagicMock,
     ) -> None:
-        """Backend-managed Google auth services should be hidden from the status endpoint too."""
+        """Google ADC services should remain editable through the generic credentials API."""
         config = Config.model_validate(
             {
                 "connections": {
@@ -576,10 +577,18 @@ class TestCredentialsAPI:
             },
         )
         _publish_committed_runtime_config(client.app, config)
+        mock_credentials_manager.load_credentials.return_value = {
+            "application_credentials_path": "/tmp/google-adc.json",
+            "_source": "ui",
+        }
         response = client.get("/api/credentials/google_vertex_adc_custom/status")
 
-        assert response.status_code == 403
-        assert "not available through the generic credentials API" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json() == {
+            "service": "google_vertex_adc_custom",
+            "has_credentials": True,
+            "key_names": ["application_credentials_path"],
+        }
 
     def test_google_token_bucket_rejects_generic_get_credentials(
         self,
@@ -674,12 +683,12 @@ class TestCredentialsAPI:
         assert data["service"] == "google_gemini"
         assert data["has_key"] is True
 
-    def test_implicit_default_vertex_connection_hides_backend_managed_service(
+    def test_implicit_default_vertex_connection_keeps_adc_service_visible(
         self,
         client: TestClient,
         mock_credentials_manager: MagicMock,
     ) -> None:
-        """Synthesized Vertex defaults must still hide backend-managed ADC services."""
+        """Synthesized Vertex defaults should not hide ADC services from the generic editor."""
         config = Config.validate_with_runtime(
             {
                 "models": {
@@ -699,23 +708,36 @@ class TestCredentialsAPI:
             "google_vertex_adc",
             "openai",
         ]
+        mock_credentials_manager.load_credentials.return_value = {
+            "application_credentials_path": "/tmp/google-adc.json",
+            "_source": "ui",
+        }
 
         list_response = client.get("/api/credentials/list")
         get_response = client.get("/api/credentials/google_vertex_adc")
         status_response = client.get("/api/credentials/google_vertex_adc/status")
 
         assert list_response.status_code == 200
-        assert list_response.json() == ["openai"]
-        assert get_response.status_code == 403
-        assert "not available through the generic credentials API" in get_response.json()["detail"]
-        assert status_response.status_code == 403
-        assert "not available through the generic credentials API" in status_response.json()["detail"]
+        assert list_response.json() == ["google_vertex_adc", "openai"]
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "google_vertex_adc",
+            "credentials": {
+                "application_credentials_path": "/tmp/google-adc.json",
+            },
+        }
+        assert status_response.status_code == 200
+        assert status_response.json() == {
+            "service": "google_vertex_adc",
+            "has_credentials": True,
+            "key_names": ["application_credentials_path"],
+        }
 
     def test_openai_only_config_hides_stale_google_env_seeded_credentials(
         self,
         client: TestClient,
     ) -> None:
-        """Well-known backend-managed Google services stay hidden even when config no longer references them."""
+        """Only the dedicated Google OAuth client service should stay hidden without config references."""
         config = Config.model_validate(
             {
                 "connections": _openai_test_connections(),
@@ -747,10 +769,9 @@ class TestCredentialsAPI:
         oauth_response = client.get("/api/credentials/google_oauth_client")
 
         assert list_response.status_code == 200
-        assert "google_vertex_adc" not in list_response.json()
+        assert "google_vertex_adc" in list_response.json()
         assert "google_oauth_client" not in list_response.json()
-        assert vertex_response.status_code == 403
-        assert "not available through the generic credentials API" in vertex_response.json()["detail"]
+        assert vertex_response.status_code == 200
         assert oauth_response.status_code == 403
         assert "not available through the generic credentials API" in oauth_response.json()["detail"]
 

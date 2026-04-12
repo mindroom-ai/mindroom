@@ -112,6 +112,70 @@ class TestCredentialsSync:
 
         assert get_ollama_host(runtime_paths=runtime_paths) == "http://test:11434"
 
+    def test_sync_env_targets_configured_custom_connection_services(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Env sync should seed the configured backing services, not only hard-coded defaults."""
+        google_vertex_adc_path = temp_credentials_dir.parent / "google-vertex-adc.json"
+        config_path = temp_credentials_dir.parent / "config.yaml"
+        config_path.write_text(
+            (
+                "connections:\n"
+                "  openai/default:\n"
+                "    provider: openai\n"
+                "    service: openai_team_a\n"
+                "    auth_kind: api_key\n"
+                "  google/oauth:\n"
+                "    provider: google\n"
+                "    service: google_oauth_custom\n"
+                "    auth_kind: oauth_client\n"
+                "  vertexai_claude/default:\n"
+                "    provider: vertexai_claude\n"
+                "    service: google_vertex_adc_custom\n"
+                "    auth_kind: google_adc\n"
+                "models:\n"
+                "  default:\n"
+                "    provider: openai\n"
+                "    id: gpt-5.4\n"
+                "router:\n"
+                "  model: default\n"
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-key")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(google_vertex_adc_path))
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "google-client-id")
+        monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "google-client-secret")
+
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=temp_credentials_dir.parent,
+            process_env={
+                **dict(os.environ),
+                SHARED_CREDENTIALS_PATH_ENV: str(temp_credentials_dir),
+            },
+        )
+
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("openai_team_a") == {
+            "api_key": "sk-test-openai-key",
+            "_source": "env",
+        }
+        assert cm.load_credentials("google_oauth_custom") == {
+            "client_id": "google-client-id",
+            "client_secret": "google-client-secret",
+            "_source": "env",
+        }
+        assert cm.load_credentials("google_vertex_adc_custom") == {
+            "application_credentials_path": str(google_vertex_adc_path),
+            "_source": "env",
+        }
+        assert cm.load_credentials("openai") is None
+
     def test_sync_env_does_not_overwrite_ui_credentials(
         self,
         temp_credentials_dir: Path,

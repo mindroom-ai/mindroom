@@ -238,6 +238,36 @@ def test_different_providers_with_extra_kwargs() -> None:
     assert anthropic_model.max_tokens == 2048
 
 
+def test_model_specific_credentials_override_provider_service_credentials() -> None:
+    """Model-scoped credentials should still work even without a shared provider bucket."""
+    config_data = {
+        "connections": {
+            "openai/default": _api_key_connection("openai"),
+        },
+        "models": {
+            "research": {
+                "provider": "openai",
+                "id": "gpt-4.1-mini",
+            },
+        },
+        "router": {
+            "model": "research",
+        },
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "model:research",
+        {"api_key": "model-only-key", "_source": "test"},
+    )
+
+    model = get_model_instance(config, runtime_paths, "research")
+
+    assert model.id == "gpt-4.1-mini"
+    assert model.api_key == "model-only-key"
+
+
 def test_model_without_extra_kwargs() -> None:
     """Test that models work fine without extra_kwargs."""
     config_data = {

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
-_BACKEND_MANAGED_GOOGLE_SERVICES = frozenset({"google", "google_vertex_adc", "google_oauth_client"})
+_BACKEND_MANAGED_GOOGLE_SERVICES = frozenset({"google", "google_oauth_client"})
 _pending_oauth_state_lock = threading.Lock()
 
 
@@ -90,13 +90,8 @@ def _configured_backend_managed_services(request: Request) -> frozenset[str]:
         service
         for connection_data in runtime_config.connections.values()
         if isinstance(service := connection_data.service, str)
-        and (
-            connection_data.auth_kind == "google_adc"
-            or (
-                connection_data.auth_kind == "oauth_client"
-                and canonical_connection_provider(connection_data.provider) == "google"
-            )
-        )
+        and connection_data.auth_kind == "oauth_client"
+        and canonical_connection_provider(connection_data.provider) == "google"
     }
     return reserved_services | frozenset(services)
 

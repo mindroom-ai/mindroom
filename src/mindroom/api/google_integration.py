@@ -117,16 +117,7 @@ def _get_oauth_credentials(
     config: Config,
 ) -> dict[str, Any] | None:
     """Get OAuth credentials from the shared google/oauth connection."""
-    try:
-        resolved_connection = resolve_connection(
-            config,
-            provider="google",
-            purpose="google_oauth_client",
-            runtime_paths=runtime_paths,
-        )
-    except ValueError:
-        return None
-    oauth_client = connection_oauth_client(resolved_connection)
+    oauth_client = _google_oauth_client_pair(runtime_paths, config=config)
     if oauth_client is None:
         return None
     client_id, client_secret = oauth_client
@@ -141,6 +132,41 @@ def _get_oauth_credentials(
             "redirect_uris": [_redirect_uri(runtime_paths)],
         },
     }
+
+
+def _legacy_google_oauth_client_pair(runtime_paths: RuntimePaths) -> tuple[str, str] | None:
+    """Return the legacy shared Google OAuth client payload when present."""
+    credentials = get_runtime_credentials_manager(runtime_paths).shared_manager().load_credentials("google_oauth_client")
+    if not isinstance(credentials, dict):
+        return None
+    client_id = credentials.get("client_id")
+    client_secret = credentials.get("client_secret")
+    if not isinstance(client_id, str) or not isinstance(client_secret, str):
+        return None
+    normalized_client_id = client_id.strip()
+    normalized_client_secret = client_secret.strip()
+    if not normalized_client_id or not normalized_client_secret:
+        return None
+    return normalized_client_id, normalized_client_secret
+
+
+def _google_oauth_client_pair(
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+) -> tuple[str, str] | None:
+    """Resolve the active Google OAuth client, keeping env-seeded legacy fallbacks working."""
+    try:
+        resolved_connection = resolve_connection(
+            config,
+            provider="google",
+            purpose="google_oauth_client",
+            runtime_paths=runtime_paths,
+        )
+    except ValueError:
+        return _legacy_google_oauth_client_pair(runtime_paths)
+    oauth_client = connection_oauth_client(resolved_connection)
+    return oauth_client or _legacy_google_oauth_client_pair(runtime_paths)
 
 
 def _require_oauth_credentials(
@@ -161,8 +187,6 @@ def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
         "token": creds.token,
         "refresh_token": creds.refresh_token,
         "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
         "scopes": creds.scopes,
         "_source": "ui",
     }
@@ -173,7 +197,12 @@ def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
     return token_data
 
 
-def _get_google_credentials(target: RequestCredentialsTarget, runtime_paths: RuntimePaths) -> Credentials | None:
+def _get_google_credentials(
+    target: RequestCredentialsTarget,
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+) -> Credentials | None:
     """Get Google credentials from stored token."""
     token_data = load_credentials_for_target("google", target)
     if not token_data:
@@ -181,12 +210,13 @@ def _get_google_credentials(target: RequestCredentialsTarget, runtime_paths: Run
 
     try:
         google_request_cls, credentials_cls, _ = _ensure_google_packages(runtime_paths)
+        oauth_client = _google_oauth_client_pair(runtime_paths, config=config)
         creds = credentials_cls(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri"),
-            client_id=token_data.get("client_id"),
-            client_secret=token_data.get("client_secret"),
+            client_id=oauth_client[0] if oauth_client is not None else token_data.get("client_id"),
+            client_secret=oauth_client[1] if oauth_client is not None else token_data.get("client_secret"),
             scopes=token_data.get("scopes", _SCOPES),
         )
 
@@ -269,14 +299,34 @@ def _save_oauth_client_credentials(
 def _reset_google_credentials(
     runtime_paths: RuntimePaths,
     *,
-    oauth_client_service: str | None,
+    oauth_client_services: set[str],
 ) -> RuntimePaths:
     """Clear shared Google OAuth client credentials and persisted tokens."""
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    if oauth_client_service is not None:
-        credentials_manager.shared_manager().delete_credentials(oauth_client_service)
+    shared_manager = credentials_manager.shared_manager()
+    for oauth_client_service in sorted(oauth_client_services | {"google_oauth_client"}):
+        shared_manager.delete_credentials(oauth_client_service)
     credentials_manager.delete_credentials("google")
+    if shared_manager.base_path != credentials_manager.base_path:
+        shared_manager.delete_credentials("google")
+    workers_root = runtime_paths.storage_root / "workers"
+    if workers_root.exists():
+        for credentials_path in workers_root.glob("*/credentials/google_credentials.json"):
+            credentials_path.unlink(missing_ok=True)
+        for credentials_path in workers_root.glob("*/.shared_credentials/google_credentials.json"):
+            credentials_path.unlink(missing_ok=True)
     return runtime_paths
+
+
+def _google_oauth_client_services(config: Config) -> set[str]:
+    """Return every configured Google OAuth client backing service."""
+    return {
+        connection.service
+        for connection in config.connections.values()
+        if connection.service is not None
+        and connection.auth_kind == "oauth_client"
+        and canonical_connection_provider(connection.provider) == "google"
+    }
 
 
 @router.get("/status")
@@ -287,7 +337,7 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
     config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     has_credentials = _get_oauth_credentials(runtime_paths, config=config) is not None
 
-    creds = _get_google_credentials(target, runtime_paths)
+    creds = _get_google_credentials(target, runtime_paths, config=config)
 
     if not creds:
         return GoogleStatus(
@@ -487,23 +537,20 @@ async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    oauth_client_service: str | None = None
+    oauth_client_services: set[str] = set()
     try:
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
         config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
         snapshot = _require_request_snapshot(request)
-        try:
-            oauth_client_service = _google_oauth_client_service(config)
-        except GoogleOAuthNotConfiguredError:
-            oauth_client_service = None
+        oauth_client_services = _google_oauth_client_services(config)
         _reload_api_runtime_config(
             request.app,
             api_runtime_paths(request),
             expected_snapshot=snapshot,
             mutate_runtime=lambda runtime_paths: _reset_google_credentials(
                 runtime_paths,
-                oauth_client_service=oauth_client_service,
+                oauth_client_services=oauth_client_services,
             ),
         )
     except HTTPException:

@@ -1593,6 +1593,83 @@ def test_google_connect_uses_pending_oauth_state(
     assert issued_state["state"] != "general"
 
 
+def test_google_connect_accepts_legacy_env_seeded_oauth_client_without_connection(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy env-seeded Google OAuth client credentials should still allow connect without google/oauth config."""
+    config = Config.model_validate(
+        {
+            "connections": _openai_test_connections(),
+            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+            "agents": {},
+        },
+    )
+
+    class _FakeFlow:
+        def authorization_url(
+            self,
+            *,
+            access_type: str,
+            include_granted_scopes: str,
+            prompt: str,
+            state: str,
+        ) -> tuple[str, str]:
+            assert access_type == "offline"
+            assert include_granted_scopes == "true"
+            assert prompt == "consent"
+            assert state
+            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
+
+    class _FakeFlowFactory:
+        @staticmethod
+        def from_client_config(
+            client_config: object,
+            *,
+            scopes: list[str],
+            redirect_uri: str,
+        ) -> _FakeFlow:
+            assert client_config == {
+                "web": {
+                    "client_id": "legacy-client-id",
+                    "client_secret": "legacy-client-secret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                    "redirect_uris": ["http://localhost:8765/api/google/callback"],
+                }
+            }
+            assert scopes
+            assert redirect_uri == "http://localhost:8765/api/google/callback"
+            return _FakeFlow()
+
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    get_runtime_credentials_manager(runtime_paths).shared_manager().save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "legacy-client-id",
+            "client_secret": "legacy-client-secret",
+            "_source": "env",
+        },
+    )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        runtime_paths,
+        config.model_dump(),
+    )
+    monkeypatch.setattr(
+        "mindroom.api.google_integration._ensure_google_packages",
+        lambda _runtime_paths: (object, object, _FakeFlowFactory),
+    )
+
+    response = api_key_client.post("/api/google/connect")
+
+    assert response.status_code == 200
+    assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
+
+
 def test_google_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
     """Google connect must reject draft-only execution-scope overrides."""
     config = _config_with_worker_scope("user")
@@ -1697,6 +1774,27 @@ def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
     assert captured_client_config["redirect_uris"] == ["http://localhost:8765/api/google/callback"]
 
 
+def test_google_build_token_data_omits_oauth_client_secret_material() -> None:
+    """Stored Google token payloads should not duplicate OAuth client id/secret fields."""
+
+    class _FakeCredentials:
+        token = "google-token"  # noqa: S105
+        refresh_token = "google-refresh-token"  # noqa: S105
+        token_uri = "https://oauth2.googleapis.com/token"
+        scopes = ["scope-a", "scope-b"]
+        id_token = None
+
+    token_data = google_integration._build_google_token_data(_FakeCredentials())
+
+    assert token_data == {
+        "token": "google-token",
+        "refresh_token": "google-refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "scopes": ["scope-a", "scope-b"],
+        "_source": "ui",
+    }
+
+
 def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
     api_key_client: TestClient,
     temp_config_file: Path,
@@ -1744,6 +1842,30 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
 
     assert connect_response.status_code == 503
     assert "google/oauth client connection" in connect_response.json()["detail"]
+
+
+def test_google_reset_clears_worker_scoped_google_tokens(api_key_client: TestClient) -> None:
+    """Google reset should clear persisted google token buckets from dedicated worker scopes too."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    runtime_credentials = get_runtime_credentials_manager(runtime_paths)
+    runtime_credentials.for_worker("worker-a").save_credentials(
+        "google",
+        {"token": "worker-google-token", "_source": "ui"},
+    )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        runtime_paths,
+        config.model_dump(),
+    )
+
+    response = api_key_client.post(
+        "/api/google/reset",
+        headers={"Authorization": "Bearer test-key"},
+    )
+
+    assert response.status_code == 200
+    assert runtime_credentials.for_worker("worker-a").load_credentials("google") is None
 
 
 def test_google_configure_returns_503_when_oauth_connection_missing(
@@ -1808,11 +1930,7 @@ def test_google_reset_clears_tokens_and_returns_success_when_oauth_connection_mi
     assert response.status_code == 200
     assert response.json() == {"success": True, "message": "Google integration reset successfully"}
     assert runtime_credentials.load_credentials("google") is None
-    assert runtime_credentials.shared_manager().load_credentials("google_oauth_client") == {
-        "client_id": "configured-client-id",
-        "client_secret": "configured-client-secret",
-        "_source": "ui",
-    }
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_client") is None
 
 
 def test_google_runtime_refresh_keeps_config_cache_live(
@@ -1905,6 +2023,40 @@ def test_google_configure_and_reset_use_configured_oauth_connection_service(
     assert reset_response.status_code == 200
     assert runtime_credentials.shared_manager().load_credentials("google_oauth_custom") is None
     assert runtime_credentials.load_credentials("google") is None
+
+
+def test_config_save_deletes_removed_google_oauth_service_credentials(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Config saves should delete Google OAuth client services removed from the active config."""
+    initial_config = _config_with_worker_scope("shared").model_dump()
+    initial_config["connections"]["google/oauth"]["service"] = "google_oauth_custom"
+    temp_config_file.write_text(yaml.dump(initial_config), encoding="utf-8")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        runtime_paths,
+        initial_config,
+    )
+    runtime_credentials = get_runtime_credentials_manager(runtime_paths)
+    runtime_credentials.shared_manager().save_credentials(
+        "google_oauth_custom",
+        {
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+            "_source": "ui",
+        },
+    )
+
+    response = api_key_client.put(
+        "/api/config/save",
+        headers={"Authorization": "Bearer test-key"},
+        json=_authored_config_payload("general"),
+    )
+
+    assert response.status_code == 200
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_custom") is None
 
 
 def test_google_configure_surfaces_runtime_validation_failures(
