@@ -87,7 +87,6 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Mock logger
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")

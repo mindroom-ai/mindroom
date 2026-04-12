@@ -7185,7 +7185,6 @@ class TestAgentBot:
         bot._handled_turn_ledger = MagicMock()
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger, handled_turn_ledger=bot._handled_turn_ledger)
-        _replace_turn_policy_deps(bot, logger=bot.logger, handled_turn_ledger=bot._handled_turn_ledger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
