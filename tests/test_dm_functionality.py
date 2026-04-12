@@ -376,9 +376,6 @@ class TestDMIntegration:
             if "researcher" in config.get_ids(runtime_paths_for(config))
             else "@mindroom_researcher:localhost"
         )
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        bot._handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.orchestrator = orchestrator
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
@@ -474,9 +471,6 @@ class TestDMIntegration:
 
         bot.client = AsyncMock()
         bot.client.user_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        bot._handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)

@@ -10,28 +10,13 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.constants import resolve_runtime_paths
-from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import replace_turn_controller_deps, wrap_extracted_collaborators
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _record_handled_turn(
-    ledger: HandledTurnLedger,
-    source_event_ids: list[str],
-    *,
-    response_event_id: str | None = None,
-) -> None:
-    """Record one handled turn through the typed ledger API."""
-    ledger.record_handled_turn(
-        HandledTurnState.create(
-            source_event_ids,
-            response_event_id=response_event_id,
-        ),
-    )
 
 
 @pytest.mark.asyncio
@@ -81,12 +66,9 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
 
-    # Create real HandledTurnLedger with the test path
-    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -94,12 +76,17 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Simulate that the bot has already responded to the original message
     original_event_id = "$original:example.com"
     response_event_id = "$response:example.com"
-    _record_handled_turn(bot._handled_turn_ledger, [original_event_id], response_event_id=response_event_id)
+    bot._turn_store.mark_handled(
+        HandledTurnState.create(
+            [original_event_id],
+            response_event_id=response_event_id,
+        ),
+    )
 
     # Also mark the edit event as "seen" (simulating it was delivered before restart)
     # With the correct implementation, edits should still be processed
     edit_event_id = "$edit:example.com"
-    _record_handled_turn(bot._handled_turn_ledger, [edit_event_id])
+    bot._turn_store.mark_handled(HandledTurnState.create([edit_event_id]))
 
     # Create an edit event that would be redelivered after restart
     edit_event = nio.RoomMessageText.from_dict(
@@ -193,19 +180,16 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
 
-    # Create real HandledTurnLedger with the test path
-    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 
     # Mark a message as already responded to
     message_event_id = "$message:example.com"
-    _record_handled_turn(bot._handled_turn_ledger, [message_event_id])
+    bot._turn_store.mark_handled(HandledTurnState.create([message_event_id]))
 
     # Create a regular message event (not an edit)
     message_event = nio.RoomMessageText.from_dict(

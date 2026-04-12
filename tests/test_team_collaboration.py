@@ -128,10 +128,6 @@ class TestTeamFormation:
         # Setup bots
         research_bot.client = AsyncMock()
         analyst_bot.client = AsyncMock()
-        research_bot._handled_turn_ledger = MagicMock()
-        research_bot._handled_turn_ledger.has_responded.return_value = False
-        analyst_bot._handled_turn_ledger = MagicMock()
-        analyst_bot._handled_turn_ledger.has_responded.return_value = False
 
         # Create message mentioning both agents
         message_event: dict[str, Any] = {
@@ -453,8 +449,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_team_formation(self) -> None:
         """Test that multiple agents in a DM room form a team when no one is mentioned."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
@@ -518,8 +512,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_thread_single_agent_no_team(self) -> None:
         """In a DM with multiple agents, a thread with a single agent should not form a team."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
@@ -568,8 +560,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
         """DM fallback should degrade to the remaining supported single agent."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -615,8 +605,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_unavailable_agents_degrade_to_individual(self) -> None:
         """Implicit thread continuation should not reject when one historical agent is off-room."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -660,8 +648,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_ignores_configured_team_participants(self) -> None:
         """Implicit thread teams must ignore configured team bots instead of treating them as leaf members."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -728,8 +714,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_previously_mentioned_off_room_agents_degrade_to_individual(self) -> None:
         """Implicit thread mentions should degrade instead of surfacing explicit-request rejection."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -773,8 +757,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_the_entire_team_request(self) -> None:
         """Explicit team requests must reject members that are not available in the room."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -822,8 +804,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
         """Explicit sender visibility of [] must not fall back to room-visible agents."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -870,8 +850,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
         """Explicit rejects should preserve the full requested-member failure state."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -922,8 +900,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:
         """Mixed shared/private mentions should reject the whole ad hoc team request."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -971,8 +947,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_unsupported_non_materializable_member_keeps_requested_member_statuses(self) -> None:
         """Explicit rejects should keep requested-member eligibility separate from delivery ownership."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -1028,8 +1002,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:
         """Mixed reject causes should explain the actual member failures instead of flattening them."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
@@ -1090,8 +1062,6 @@ class TestRouterTeamFormation:
         self,
     ) -> None:
         """Ad hoc team formation must reject explicit member sets that reach private agents."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import nio  # noqa: PLC0415
 
         from mindroom.teams import decide_team_formation  # noqa: PLC0415

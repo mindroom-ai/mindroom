@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom import constants
@@ -12,7 +13,6 @@ from mindroom.conversation_state_writer import (
     RemoveStaleRunsRequest,
 )
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
-from mindroom.post_response_effects import matrix_run_metadata_for_handled_turn
 
 if TYPE_CHECKING:
     import nio
@@ -38,7 +38,7 @@ class TurnStoreDeps:
     """Collaborators needed to read and write durable turn state."""
 
     agent_name: str
-    handled_turn_ledger: HandledTurnLedger
+    tracking_base_path: Path | str
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
@@ -49,38 +49,43 @@ class TurnStore:
     """Own the runtime-facing durable turn record for one entity."""
 
     deps: TurnStoreDeps
+    _ledger: HandledTurnLedger = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Construct the private handled-turn ledger for this runtime entity."""
+        self._ledger = HandledTurnLedger(
+            self.deps.agent_name,
+            base_path=Path(self.deps.tracking_base_path),
+        )
 
     def mark_handled(self, handled_turn: HandledTurnState) -> None:
         """Persist one terminal handled-turn outcome."""
-        visible_echo_event_id = (
-            handled_turn.visible_echo_event_id
-            or self.deps.handled_turn_ledger.visible_echo_event_id_for_sources(
-                handled_turn.source_event_ids,
-            )
+        visible_echo_event_id = handled_turn.visible_echo_event_id or self.visible_echo_event_id_for_sources(
+            handled_turn.source_event_ids,
         )
-        self.deps.handled_turn_ledger.record_handled_turn(
+        self._ledger.record_handled_turn(
             handled_turn.with_visible_echo_event_id(visible_echo_event_id),
         )
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
-        return self.deps.handled_turn_ledger.has_responded(event_id)
+        return self._ledger.has_responded(event_id)
 
     def get_visible_echo_event_id(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo for one source event."""
-        return self.deps.handled_turn_ledger.get_visible_echo_event_id(source_event_id)
+        return self._ledger.get_visible_echo_event_id(source_event_id)
 
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo before the turn reaches a terminal outcome."""
-        self.deps.handled_turn_ledger.record_visible_echo(source_event_id, echo_event_id)
+        self._ledger.record_visible_echo(source_event_id, echo_event_id)
 
     def visible_echo_event_id_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
         """Return the first visible echo already tracked for one or more source events."""
-        return self.deps.handled_turn_ledger.visible_echo_event_id_for_sources(source_event_ids)
+        return self._ledger.visible_echo_event_id_for_sources(source_event_ids)
 
     def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
         """Return the ledger-backed turn record for one source event when available."""
-        return self.deps.handled_turn_ledger.get_turn_record(source_event_id)
+        return self._ledger.get_turn_record(source_event_id)
 
     def default_history_scope(self) -> HistoryScope:
         """Return the default persisted history scope for this runtime entity."""
@@ -98,7 +103,7 @@ class TurnStore:
         extra triggering events, such as a numeric interactive reply whose response
         still anchors to the original question event.
         """
-        metadata = matrix_run_metadata_for_handled_turn(handled_turn) or {}
+        metadata = self._matrix_run_metadata_for_handled_turn(handled_turn) or {}
         if additional_source_event_ids:
             source_event_ids = [
                 event_id
@@ -113,6 +118,20 @@ class TurnStore:
                 metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = source_event_ids
         return metadata or None
 
+    @staticmethod
+    def _matrix_run_metadata_for_handled_turn(
+        handled_turn: HandledTurnState,
+    ) -> dict[str, Any] | None:
+        """Build persisted run metadata for one handled turn."""
+        if not handled_turn.is_coalesced:
+            return None
+        metadata: dict[str, Any] = {
+            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(handled_turn.source_event_ids),
+        }
+        if handled_turn.source_event_prompts:
+            metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
+        return metadata
+
     def load_turn_record(
         self,
         *,
@@ -122,7 +141,7 @@ class TurnStore:
         requester_user_id: str,
     ) -> LoadedTurnRecord | None:
         """Load one merged durable turn record for an edited or replayed source event."""
-        turn_record = self.deps.handled_turn_ledger.get_turn_record(original_event_id)
+        turn_record = self._ledger.get_turn_record(original_event_id)
         ledger_turn_record = turn_record
         persisted_turn_metadata = self.deps.state_writer.load_persisted_turn_metadata(
             LoadPersistedTurnMetadataRequest(
