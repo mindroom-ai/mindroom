@@ -339,6 +339,7 @@ class AgentBot:
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _standalone_runtime_support: StandaloneRuntimeSupport | None
     _turn_controller: TurnController
+    handled_turn_ledger: HandledTurnLedger
 
     def __init__(
         self,
@@ -369,6 +370,10 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
+        )
+        self.handled_turn_ledger = HandledTurnLedger(
+            self.agent_name,
+            base_path=self.storage_path / "tracking",
         )
         self._standalone_runtime_support = None
         self._deferred_overdue_task_drain_task = None
@@ -788,13 +793,6 @@ class AgentBot:
             execution_identity=execution_identity,
             hook_registry=self.hook_registry,
         )
-
-    @cached_property
-    def handled_turn_ledger(self) -> HandledTurnLedger:
-        """Get or create the handled-turn ledger for this agent."""
-        # Use the tracking subdirectory, not the root storage path
-        tracking_dir = self.storage_path / "tracking"
-        return HandledTurnLedger(self.agent_name, base_path=tracking_dir)
 
     @cached_property
     def stop_manager(self) -> StopManager:
