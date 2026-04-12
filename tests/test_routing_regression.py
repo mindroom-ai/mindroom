@@ -105,8 +105,8 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.is_user_online")
-    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_runner.is_user_online")
+    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
@@ -177,7 +177,7 @@ class TestRoutingRegression:
         assert mock_suggest_agent.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.dispatch_planner.suggest_agent_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
@@ -623,7 +623,7 @@ class TestRoutingRegression:
     @patch("mindroom.teams.get_agent_knowledge")
     @patch("mindroom.teams.create_agent")
     @patch("mindroom.teams.Team.arun")
-    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.config.main.Config.from_yaml")
     async def test_multiple_mentions_each_responds_once(
@@ -736,8 +736,8 @@ class TestRoutingRegression:
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.is_user_online")
-    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_runner.is_user_online")
+    @patch("mindroom.response_runner.ai_response")
     async def test_router_message_has_completion_marker(
         self,
         mock_ai_response: AsyncMock,

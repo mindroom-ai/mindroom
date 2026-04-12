@@ -1,4 +1,4 @@
-"""Conversation resolution and envelope assembly for bot dispatch."""
+"""Own conversation identity and ingress envelope assembly for inbound turns."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ class ConversationResolverDeps:
 
 @dataclass
 class ConversationResolver:
-    """Resolve conversation targets, context, and normalized envelopes."""
+    """Resolve thread roots, reply-chain context, history, mentions, and ingress envelopes."""
 
     deps: ConversationResolverDeps
     reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches)

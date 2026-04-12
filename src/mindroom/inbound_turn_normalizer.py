@@ -1,4 +1,4 @@
-"""Inbound text, voice, and media normalization for bot dispatch."""
+"""Own raw input shaping for inbound Matrix turns."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ class InboundTurnNormalizerDeps:
 
 @dataclass(frozen=True)
 class InboundTurnNormalizer:
-    """Normalize raw inbound events into dispatch-ready forms."""
+    """Turn raw text, voice, sidecar, and media events into canonical turn inputs."""
 
     deps: InboundTurnNormalizerDeps
 

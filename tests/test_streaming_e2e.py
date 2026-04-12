@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 @pytest.mark.e2e  # Mark as end-to-end test
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-@patch("mindroom.response_coordinator.is_user_online")
+@patch("mindroom.response_runner.is_user_online")
 @patch("mindroom.matrix.users._ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
@@ -246,7 +246,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         }
 
         # Mock AI response for helper (streaming)
-        with patch("mindroom.response_coordinator.stream_agent_response") as mock_streaming:
+        with patch("mindroom.response_runner.stream_agent_response") as mock_streaming:
 
             async def stream_response(
                 _agent_name: str,
@@ -332,7 +332,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         }
 
         # Mock AI response for calculator (non-streaming)
-        with patch("mindroom.response_coordinator.ai_response") as mock_ai:
+        with patch("mindroom.response_runner.ai_response") as mock_ai:
             mock_ai.return_value = "The answer is 4"
 
             # Also mock that calculator is mentioned
@@ -478,7 +478,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         }
 
         # Mock AI response
-        with patch("mindroom.response_coordinator.ai_response") as mock_ai:
+        with patch("mindroom.response_runner.ai_response") as mock_ai:
             mock_ai.return_value = "2+2 equals 4"
 
             # Mock that calculator is mentioned

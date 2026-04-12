@@ -96,7 +96,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     original_event.source = original_event.__dict__["source"]
 
     # Process original message with mocked AI response
-    with patch("mindroom.response_coordinator.ai_response", AsyncMock(return_value="Original: 4")):
+    with patch("mindroom.response_runner.ai_response", AsyncMock(return_value="Original: 4")):
         await bot._on_message(room, original_event)
 
     # Verify bot responded

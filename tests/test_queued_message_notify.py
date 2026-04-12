@@ -40,9 +40,9 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
-from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest
+from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
-from mindroom.turn_engine import _PrecheckedEvent
+from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -249,14 +249,14 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
     queued_signal = coordinator._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
         with patch.object(
-            ResponseCoordinator,
+            ResponseRunner,
             "generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ) as mock_locked:
@@ -288,14 +288,14 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
     bot = _bot(tmp_path)
     response_envelope = _envelope(source_kind="scheduled")
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
     queued_signal = coordinator._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
         with patch.object(
-            ResponseCoordinator,
+            ResponseRunner,
             "generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ):
@@ -325,14 +325,14 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
 async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_path: Path) -> None:
     """A second human turn should queue even before the first acquires the lifecycle lock."""
     bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lock = _PrelockBarrierLock()
     response_envelope = _envelope()
     response_target = response_envelope.target
     observed_pending: dict[str, int] = {}
 
     async def fake_generate_response_locked(
-        _self: ResponseCoordinator,
+        _self: ResponseRunner,
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
@@ -345,7 +345,7 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
 
     with (
         patch.object(coordinator, "_response_lifecycle_lock", return_value=lock),
-        patch.object(ResponseCoordinator, "generate_response_locked", new=fake_generate_response_locked),
+        patch.object(ResponseRunner, "generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
             bot._generate_response(
@@ -387,7 +387,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     bot = _bot(tmp_path)
     response_envelope = _envelope(source_kind="scheduled")
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
     await lifecycle_lock.acquire()
     lifecycle_started = asyncio.Event()
@@ -401,7 +401,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     try:
         with (
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
                     return_value=DeliveryResult(
@@ -412,13 +412,13 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 ),
             ),
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=fake_run_cancellable_response),
             ) as mock_run_cancellable_response,
-            patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.response_coordinator.reprioritize_auto_flush_sessions", new=MagicMock()),
-            patch("mindroom.response_coordinator.apply_post_response_effects", new=AsyncMock()),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.reprioritize_auto_flush_sessions", new=MagicMock()),
+            patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock()),
         ):
             task = asyncio.create_task(
                 bot._generate_response(
@@ -446,7 +446,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
 async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(tmp_path: Path) -> None:
     """Threaded turns with an empty cached history should still refresh after lock handoff."""
     bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
     fresh_history = [SimpleNamespace(event_id="$reply", body="updated")]
 
@@ -476,14 +476,14 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
     queued_signal = coordinator._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
         with patch.object(
-            ResponseCoordinator,
+            ResponseRunner,
             "generate_team_response_helper_locked",
             new=AsyncMock(return_value="$team-response"),
         ) as mock_locked:
@@ -517,14 +517,14 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
     queued_signal = coordinator._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
-    async def fake_locked(_self: ResponseCoordinator, *_args: object, **_kwargs: object) -> str:
+    async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
         if len(observed_pending) == 1:
             second_turn_started.set()
@@ -533,7 +533,7 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseCoordinator, "generate_response_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "generate_response_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._generate_response(
                     room_id="!room:localhost",
@@ -584,14 +584,14 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
     bot = _bot(tmp_path)
     response_envelope = _envelope()
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
     queued_signal = coordinator._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
-    async def fake_locked(_self: ResponseCoordinator, *_args: object, **_kwargs: object) -> str:
+    async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
         if len(observed_pending) == 1:
             second_turn_started.set()
@@ -600,7 +600,7 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseCoordinator, "generate_team_response_helper_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "generate_team_response_helper_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._generate_team_response_helper(
                     room_id="!room:localhost",
@@ -669,21 +669,21 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
         patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._turn_engine, "_has_newer_unresponded_in_thread", return_value=True),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(
             bot._dispatch_planner,
             "plan_dispatch",
             new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
         ) as mock_plan,
     ):
-        await bot._turn_engine._dispatch_text_message(
+        await bot._turn_controller._dispatch_text_message(
             room,
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )
 
     assert bot.handled_turn_ledger.has_responded("$older")
     mock_plan.assert_not_awaited()
-    coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert coordinator._thread_queued_signals == {}
 
 

@@ -1,4 +1,4 @@
-"""Response lifecycle coordination extracted from ``bot.py``."""
+"""Response lifecycle execution extracted from ``bot.py``."""
 
 from __future__ import annotations
 
@@ -302,7 +302,7 @@ class TeamResponseRequest:
 
 
 @dataclass(frozen=True)
-class ResponseCoordinatorDeps:
+class ResponseRunnerDeps:
     """Explicit collaborators for the response lifecycle."""
 
     runtime: BotRuntimeView
@@ -336,10 +336,10 @@ class _PreparedResponseRuntime:
 
 
 @dataclass
-class ResponseCoordinator:
-    """Coordinate one response lifecycle while keeping bot seams patchable."""
+class ResponseRunner:
+    """Run one response lifecycle while keeping bot seams patchable."""
 
-    deps: ResponseCoordinatorDeps
+    deps: ResponseRunnerDeps
     _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(default_factory=dict, init=False)
     _thread_queued_signals: dict[tuple[str, str | None], _QueuedMessageState] = field(default_factory=dict, init=False)
     _in_flight_response_count: int = field(default=0, init=False)

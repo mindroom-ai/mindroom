@@ -38,10 +38,10 @@ from mindroom.thread_utils import create_session_id
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
-    patch_response_coordinator_module,
+    patch_response_runner_module,
     replace_dispatch_planner_deps,
     replace_edit_regenerator_deps,
-    replace_turn_engine_deps,
+    replace_turn_controller_deps,
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
@@ -324,7 +324,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     mock_streaming = AsyncMock(return_value=False)
     mock_ai_response = AsyncMock(return_value="The answer is 6")
     with (
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             should_use_streaming=mock_streaming,
             ai_response=mock_ai_response,
         ),
@@ -452,7 +452,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
-            bot._dispatch_hook_service,
+            bot._ingress_hook_runner,
             "emit_message_received_hooks",
             new_callable=AsyncMock,
         ) as mock_emit_hooks,
@@ -556,7 +556,7 @@ async def test_bot_edit_regeneration_uses_hydrated_mentions_for_response_gating(
 
     with (
         patch.object(
-            bot._dispatch_hook_service,
+            bot._ingress_hook_runner,
             "emit_message_received_hooks",
             new_callable=AsyncMock,
         ) as mock_emit_hooks,
@@ -868,17 +868,17 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             team_response=mock_team_response,
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=noop_typing_indicator,
         ),
         patch(
-            "mindroom.response_coordinator.apply_post_response_effects",
+            "mindroom.response_runner.apply_post_response_effects",
             new=AsyncMock(),
         ),
         patch(
-            "mindroom.response_coordinator.DeliveryGateway.deliver_final",
+            "mindroom.response_runner.DeliveryGateway.deliver_final",
             new=AsyncMock(
                 return_value=DeliveryResult(
                     event_id=response_event_id,
@@ -1040,7 +1040,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -2154,13 +2154,13 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     with (
         patch.object(bot._conversation_state_writer, "create_history_scope_storage", return_value=storage),
         patch(
-            "mindroom.response_coordinator.ResponseCoordinator.process_and_respond",
+            "mindroom.response_runner.ResponseRunner.process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
-        patch("mindroom.response_coordinator.reprioritize_auto_flush_sessions"),
-        patch("mindroom.response_coordinator.mark_auto_flush_dirty_session"),
+        patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),
+        patch("mindroom.response_runner.mark_auto_flush_dirty_session"),
         patch.object(Config, "get_agent_memory_backend", return_value="none"),
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
         ),
     ):
@@ -2434,13 +2434,13 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         )
 
     with (
-        patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch(
-            "mindroom.response_coordinator.ResponseCoordinator.process_and_respond",
+            "mindroom.response_runner.ResponseRunner.process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
-        patch("mindroom.response_coordinator.reprioritize_auto_flush_sessions"),
-        patch("mindroom.response_coordinator.mark_auto_flush_dirty_session"),
+        patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),
+        patch("mindroom.response_runner.mark_auto_flush_dirty_session"),
         patch.object(Config, "get_agent_memory_backend", return_value="none"),
     ):
         response_event_id = await bot._generate_response(
@@ -2992,7 +2992,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
-        patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
@@ -3050,7 +3050,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -3100,7 +3100,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
-        patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
@@ -3169,7 +3169,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     room = Mock(spec=nio.MatrixRoom)
     room.room_id = "!test:example.com"
@@ -3203,7 +3203,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     # Test that authorization check works
     with (
-        patch("mindroom.turn_engine.is_authorized_sender", return_value=False) as mock_is_auth,
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=False) as mock_is_auth,
         patch.object(bot._edit_regenerator, "handle_message_edit") as mock_handle_edit,
     ):
         await bot._on_message(room, edit_event)
@@ -3251,7 +3251,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -3293,7 +3293,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Mock is_authorized_sender to return False
     with (
-        patch("mindroom.turn_engine.is_authorized_sender", return_value=False) as mock_is_authorized,
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=False) as mock_is_authorized,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
     ):
         # Process the voice event

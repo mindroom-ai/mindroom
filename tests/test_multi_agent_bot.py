@@ -92,22 +92,22 @@ from mindroom.orchestrator import (
     _SignalAwareUvicornServer,
     main,
 )
-from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest, _merge_response_extra_content
+from mindroom.response_runner import ResponseRequest, ResponseRunner, _merge_response_extra_content
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.turn_engine import _PrecheckedEvent
+from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_edit_message_mock,
     install_generate_response_mock,
     install_send_response_mock,
-    patch_response_coordinator_module,
+    patch_response_runner_module,
     replace_delivery_gateway_deps,
-    replace_response_coordinator_deps,
-    replace_turn_engine_deps,
+    replace_response_runner_deps,
+    replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -130,12 +130,12 @@ def _make_matrix_client_mock() -> AsyncMock:
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
     """Wrap frozen extracted collaborators so tests can patch their methods."""
     wrapped_bot = cast("AgentBot", wrap_extracted_collaborators(bot))
-    replace_turn_engine_deps(
+    replace_turn_controller_deps(
         wrapped_bot,
         resolver=wrapped_bot._conversation_resolver,
         normalizer=wrapped_bot._inbound_turn_normalizer,
         dispatch_planner=wrapped_bot._dispatch_planner,
-        response_coordinator=wrapped_bot._response_coordinator,
+        response_runner=wrapped_bot._response_runner,
         delivery_gateway=wrapped_bot._delivery_gateway,
         state_writer=wrapped_bot._conversation_state_writer,
     )
@@ -157,13 +157,13 @@ def _replace_dispatch_planner_deps(bot: AgentBot, **changes: object) -> Dispatch
             "handled_turn_ledger",
             "resolver",
             "normalizer",
-            "response_coordinator",
+            "response_runner",
             "delivery_gateway",
             "state_writer",
             "coalescing_gate",
         }
     }
-    replace_turn_engine_deps(
+    replace_turn_controller_deps(
         bot,
         dispatch_planner=bot._dispatch_planner,
         **engine_changes,
@@ -171,12 +171,12 @@ def _replace_dispatch_planner_deps(bot: AgentBot, **changes: object) -> Dispatch
     return updated_planner
 
 
-def _replace_response_coordinator_runtime_deps(
+def _replace_response_runner_runtime_deps(
     bot: AgentBot,
     **changes: object,
-) -> ResponseCoordinator:
+) -> ResponseRunner:
     """Rebuild the response coordinator with updated runtime-captured deps."""
-    return replace_response_coordinator_deps(bot, **changes)
+    return replace_response_runner_deps(bot, **changes)
 
 
 def _set_knowledge_for_agent(bot: AgentBot, knowledge_for_agent: MagicMock) -> MagicMock:
@@ -1149,10 +1149,10 @@ class TestAgentBot:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed")
-    @patch("mindroom.response_coordinator.ai_response")
-    @patch("mindroom.response_coordinator.stream_agent_response")
+    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
-    @patch("mindroom.response_coordinator.should_use_streaming")
+    @patch("mindroom.response_runner.should_use_streaming")
     async def test_agent_bot_on_message_mentioned(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
@@ -1317,11 +1317,11 @@ class TestAgentBot:
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
-        with patch_response_coordinator_module(
+        with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_coordinator.process_and_respond(
+            delivery = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1363,11 +1363,11 @@ class TestAgentBot:
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
-        with patch_response_coordinator_module(
+        with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_coordinator.process_and_respond(
+            delivery = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1419,11 +1419,11 @@ class TestAgentBot:
         ) as mock_send_streaming_response:
             mock_stream_agent_response.return_value = mock_streaming_response()
             mock_send_streaming_response.return_value = ("$response", "chunk")
-            with patch_response_coordinator_module(
+            with patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._response_coordinator.process_and_respond_streaming(
+                delivery = await bot._response_runner.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -1472,11 +1472,11 @@ class TestAgentBot:
             new_callable=AsyncMock,
         ) as mock_send_streaming_response:
             mock_send_streaming_response.return_value = ("$response", "chunk")
-            with patch_response_coordinator_module(
+            with patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._response_coordinator.process_and_respond_streaming(
+                delivery = await bot._response_runner.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Hello",
@@ -1512,11 +1512,11 @@ class TestAgentBot:
 
         mock_ai = AsyncMock(side_effect=fake_ai_response)
         attachment_ids = ["att_image", "att_zip"]
-        with patch_response_coordinator_module(
+        with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._response_coordinator.process_and_respond(
+            await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -1570,12 +1570,12 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 side_effect=_consuming_send_streaming,
             ) as mock_send_streaming_response,
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_coordinator.process_and_respond_streaming(
+            await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -1655,12 +1655,12 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 side_effect=_consuming_send_streaming,
             ) as mock_send_streaming_response,
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_coordinator.process_and_respond_streaming(
+            await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Hello",
@@ -1719,12 +1719,12 @@ class TestAgentBot:
                 side_effect=_consuming_send_streaming,
             ),
             pytest.raises(asyncio.CancelledError),
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_coordinator.process_and_respond_streaming(
+            await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Cancel me",
@@ -1768,12 +1768,12 @@ class TestAgentBot:
                     tool_trace=[],
                 ),
             ),
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ),
         ):
-            delivery = await bot._response_coordinator.process_and_respond_streaming(
+            delivery = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please continue",
@@ -1822,11 +1822,11 @@ class TestAgentBot:
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         mock_ai = AsyncMock(return_value="Handled")
-        with patch_response_coordinator_module(
+        with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_coordinator.process_and_respond(
+            delivery = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -1875,11 +1875,11 @@ class TestAgentBot:
 
         try:
             mock_ai_response = AsyncMock(return_value="Handled")
-            with patch_response_coordinator_module(
+            with patch_response_runner_module(
                 typing_indicator=noop_typing_indicator,
                 ai_response=mock_ai_response,
             ):
-                await bot._response_coordinator.process_and_respond(
+                await bot._response_runner.process_and_respond(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please continue",
@@ -1943,11 +1943,11 @@ class TestAgentBot:
             ) as mock_edit_message,
         ):
             mock_send_streaming_response.return_value = ("$response", "chunk")
-            with patch_response_coordinator_module(
+            with patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                delivery = await bot._response_coordinator.process_and_respond_streaming(
+                delivery = await bot._response_runner.process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -2004,11 +2004,11 @@ class TestAgentBot:
                 new_callable=AsyncMock,
             ) as mock_send_streaming_response:
                 mock_send_streaming_response.return_value = ("$response", "chunk")
-                with patch_response_coordinator_module(
+                with patch_response_runner_module(
                     typing_indicator=noop_typing_indicator,
                     stream_agent_response=mock_stream,
                 ):
-                    await bot._response_coordinator.process_and_respond_streaming(
+                    await bot._response_runner.process_and_respond_streaming(
                         _response_request(
                             room_id="!test:localhost",
                             prompt="Please continue",
@@ -2066,7 +2066,7 @@ class TestAgentBot:
                 "mindroom.delivery_gateway.edit_message",
                 new=AsyncMock(return_value=_room_send_response("$edit")),
             ) as mock_edit_message,
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value="Team reply"),
@@ -2117,7 +2117,7 @@ class TestAgentBot:
                 "mindroom.delivery_gateway.edit_message",
                 new=AsyncMock(return_value=_room_send_response("$edit")),
             ),
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value="Team reply"),
@@ -2200,7 +2200,7 @@ class TestAgentBot:
                 "mindroom.delivery_gateway.edit_message",
                 new=AsyncMock(return_value=_room_send_response("$edit")),
             ) as mock_edit_message,
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value="Team reply"),
@@ -2285,7 +2285,7 @@ class TestAgentBot:
             reason="Suppressed placeholder response",
         )
         assert (
-            unwrap_extracted_collaborator(bot._response_coordinator).resolve_response_event_id(
+            unwrap_extracted_collaborator(bot._response_runner).resolve_response_event_id(
                 delivery_result=delivery,
                 tracked_event_id="$placeholder",
                 existing_event_id="$placeholder",
@@ -2348,7 +2348,7 @@ class TestAgentBot:
         assert delivery.event_id is None
         redact_message_event.assert_not_awaited()
         assert (
-            unwrap_extracted_collaborator(bot._response_coordinator).resolve_response_event_id(
+            unwrap_extracted_collaborator(bot._response_runner).resolve_response_event_id(
                 delivery_result=delivery,
                 tracked_event_id="$existing",
                 existing_event_id="$existing",
@@ -2455,8 +2455,8 @@ class TestAgentBot:
         )
 
         with (
-            patch("mindroom.response_coordinator.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.response_coordinator.stream_agent_response") as mock_stream_agent_response,
+            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.stream_agent_response") as mock_stream_agent_response,
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
@@ -2464,7 +2464,7 @@ class TestAgentBot:
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
             mock_send_streaming_response.return_value = ("$streaming", "chunk")
-            delivery = await bot._response_coordinator.process_and_respond_streaming(
+            delivery = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please reply in thread",
@@ -2488,7 +2488,7 @@ class TestAgentBot:
             reason="Suppressed streamed response",
         )
         assert (
-            unwrap_extracted_collaborator(bot._response_coordinator).resolve_response_event_id(
+            unwrap_extracted_collaborator(bot._response_runner).resolve_response_event_id(
                 delivery_result=delivery,
                 tracked_event_id="$streaming",
                 existing_event_id=None,
@@ -2504,10 +2504,10 @@ class TestAgentBot:
             delivery_kind=None,
             suppressed=False,
         )
-        coordinator = MagicMock(spec=ResponseCoordinator)
+        coordinator = MagicMock(spec=ResponseRunner)
 
         assert (
-            ResponseCoordinator.resolve_response_event_id(
+            ResponseRunner.resolve_response_event_id(
                 coordinator,
                 delivery_result=delivery,
                 tracked_event_id="$placeholder",
@@ -2540,7 +2540,7 @@ class TestAgentBot:
 {"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
 ```"""
         with (
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value=interactive_response),
@@ -2728,11 +2728,11 @@ class TestAgentBot:
             return "Hidden tool call output"
 
         mock_ai = AsyncMock(side_effect=fake_ai_response)
-        with patch_response_coordinator_module(
+        with patch_response_runner_module(
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            delivery = await bot._response_coordinator.process_and_respond(
+            delivery = await bot._response_runner.process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Summarize README",
@@ -2787,12 +2787,12 @@ class TestAgentBot:
         bot._send_response = AsyncMock(return_value="$response")
         install_send_response_mock(bot, bot._send_response)
         mock_ai = AsyncMock(return_value="Skill response")
-        with patch_response_coordinator_module(
+        with patch_response_runner_module(
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
             create_background_task=MagicMock(side_effect=discard_background_task),
         ):
-            await bot._response_coordinator.send_skill_command_response(
+            await bot._response_runner.send_skill_command_response(
                 room_id="!test:localhost",
                 reply_to_event_id="$event",
                 thread_id=None,
@@ -2843,14 +2843,14 @@ class TestAgentBot:
         install_send_response_mock(bot, bot._send_response)
         mock_ai = AsyncMock(return_value="Skill response")
         mock_reprioritize = MagicMock()
-        with patch_response_coordinator_module(
+        with patch_response_runner_module(
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
             reprioritize_auto_flush_sessions=mock_reprioritize,
             mark_auto_flush_dirty_session=MagicMock(),
             create_background_task=MagicMock(),
         ):
-            await bot._response_coordinator.send_skill_command_response(
+            await bot._response_runner.send_skill_command_response(
                 room_id="!test:localhost",
                 reply_to_event_id="$event",
                 thread_id=None,
@@ -2918,7 +2918,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
                     return_value=DeliveryResult(
@@ -2929,17 +2929,17 @@ class TestAgentBot:
                 ),
             ) as mock_process,
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.response_coordinator.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch(
-                "mindroom.response_coordinator.store_conversation_memory",
+                "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
-            patch("mindroom.response_coordinator.datetime") as mock_datetime,
+            patch("mindroom.response_runner.datetime") as mock_datetime,
             patch.object(
                 bot._conversation_resolver,
                 "fetch_thread_history",
@@ -3030,7 +3030,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
                     return_value=DeliveryResult(
@@ -3041,12 +3041,12 @@ class TestAgentBot:
                 ),
             ) as mock_process,
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch("mindroom.response_coordinator.datetime") as mock_datetime,
-            patch_response_coordinator_module(
+            patch("mindroom.response_runner.datetime") as mock_datetime,
+            patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 create_background_task=schedule_background_task,
                 store_conversation_memory=fake_store_conversation_memory,
@@ -3121,7 +3121,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "process_and_respond_streaming",
                 new=AsyncMock(
                     return_value=DeliveryResult(
@@ -3132,11 +3132,11 @@ class TestAgentBot:
                 ),
             ) as mock_process,
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
                 create_background_task=schedule_background_task,
                 store_conversation_memory=fake_store_conversation_memory,
@@ -3213,7 +3213,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
                     return_value=DeliveryResult(
@@ -3224,7 +3224,7 @@ class TestAgentBot:
                 ),
             ) as mock_process,
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
@@ -3233,7 +3233,7 @@ class TestAgentBot:
                 "get_thread_history",
                 new=AsyncMock(side_effect=cached_history_refresh),
             ) as mock_get_thread_history,
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 prepare_memory_and_model_context=passthrough_prepare_context,
                 reprioritize_auto_flush_sessions=MagicMock(),
@@ -3313,7 +3313,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
                     return_value=DeliveryResult(
@@ -3323,10 +3323,10 @@ class TestAgentBot:
                     ),
                 ),
             ),
-            patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.response_coordinator.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch(
-                "mindroom.response_coordinator.store_conversation_memory",
+                "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
             patch(
@@ -3387,14 +3387,14 @@ class TestAgentBot:
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
 
         with (
-            patch("mindroom.response_coordinator.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.response_coordinator.ai_response", new_callable=AsyncMock, return_value="ok"),
+            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, return_value="ok"),
             patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")),
-            patch("mindroom.response_coordinator.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch(
-                "mindroom.response_coordinator.store_conversation_memory",
+                "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
             patch(
@@ -3451,7 +3451,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
                     return_value=DeliveryResult(
@@ -3462,13 +3462,13 @@ class TestAgentBot:
                 ),
             ),
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch("mindroom.response_coordinator.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch(
-                "mindroom.response_coordinator.apply_post_response_effects",
+                "mindroom.response_runner.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),
             ),
         ):
@@ -3641,7 +3641,7 @@ class TestAgentBot:
         )
 
         with (
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=_noop_typing_indicator,
                 team_response_stream=lambda *_args, **_kwargs: fake_team_response_stream(),
@@ -3652,7 +3652,7 @@ class TestAgentBot:
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(return_value=("$team-response", "Team reply")),
             ),
-            patch("mindroom.response_coordinator.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch(
@@ -3736,14 +3736,14 @@ class TestAgentBot:
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
         with (
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=noop_typing_indicator,
                 team_response_stream=fake_team_response_stream,
                 team_response=mock_team_response,
             ),
             patch.object(
-                ResponseCoordinator,
+                ResponseRunner,
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
@@ -3808,7 +3808,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._response_coordinator),
+                unwrap_extracted_collaborator(bot._response_runner),
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
@@ -3816,7 +3816,7 @@ class TestAgentBot:
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(return_value=("$placeholder", "stream chunk")),
             ),
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=noop_typing_indicator,
                 team_response_stream=fake_team_response_stream,
@@ -3865,7 +3865,7 @@ class TestAgentBot:
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
 
         with (
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 typing_indicator=_noop_typing_indicator,
                 team_response=AsyncMock(return_value="Team handled"),
@@ -4060,7 +4060,7 @@ class TestAgentBot:
             reply_to_event_id="$root_b",
         )
 
-        coordinator = unwrap_extracted_collaborator(bot._response_coordinator)
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
         assert coordinator._response_lifecycle_lock(first) is coordinator._response_lifecycle_lock(first)
         assert coordinator._response_lifecycle_lock(first) is not coordinator._response_lifecycle_lock(second)
 
@@ -4106,7 +4106,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=False),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=False),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=False),
         ):
             await self._invoke_handler(bot, handler_name, room, event)
 
@@ -4172,7 +4172,7 @@ class TestAgentBot:
         wrap_extracted_collaborators(bot, "_dispatch_planner")
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch.object(bot._dispatch_planner, "can_reply_to_sender", return_value=False),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
@@ -4233,7 +4233,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4341,7 +4341,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4471,7 +4471,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4544,7 +4544,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4626,7 +4626,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -4705,7 +4705,7 @@ class TestAgentBot:
             patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
             patch("mindroom.dispatch_planner.has_multiple_non_agent_users_in_thread", return_value=False),
             patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
@@ -4800,7 +4800,7 @@ class TestAgentBot:
             patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
             patch("mindroom.dispatch_planner.has_multiple_non_agent_users_in_thread", return_value=False),
             patch("mindroom.dispatch_planner.get_available_agents_for_sender") as mock_get_available,
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
                 new_callable=AsyncMock,
@@ -5098,7 +5098,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -5191,7 +5191,7 @@ class TestAgentBot:
                     config.get_ids(runtime_paths_for(config))["general"],
                 ],
             ),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
@@ -5262,7 +5262,7 @@ class TestAgentBot:
                 "mindroom.dispatch_planner.get_available_agents_for_sender",
                 return_value=[config.get_ids(runtime_paths_for(config))["calculator"]],
             ),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
@@ -5321,7 +5321,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.extract_agent_name", return_value="router"),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_planner.get_agents_in_thread", return_value=[]),
@@ -6036,7 +6036,7 @@ class TestAgentBot:
             ),
             patch("mindroom.dispatch_planner.should_agent_respond", return_value=False) as mock_should_respond,
             patch.object(
-                bot._response_coordinator,
+                bot._response_runner,
                 "has_active_response_for_target",
                 return_value=True,
             ) as mock_has_active_response,
@@ -6350,7 +6350,7 @@ class TestAgentBot:
         install_generate_response_mock(bot, generate_response)
         _replace_dispatch_planner_deps(
             bot,
-            response_coordinator=bot._response_coordinator,
+            response_runner=bot._response_runner,
             handled_turn_ledger=bot.handled_turn_ledger,
         )
 
@@ -6369,7 +6369,7 @@ class TestAgentBot:
             ),
             patch.object(bot._dispatch_planner, "log_dispatch_latency"),
         ):
-            await bot._turn_engine._dispatch_text_message(
+            await bot._turn_controller._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -6433,7 +6433,7 @@ class TestAgentBot:
             ) as mock_build_payload,
             patch.object(bot._dispatch_planner, "execute_response_action", new=AsyncMock()) as mock_execute,
         ):
-            await bot._turn_engine._dispatch_text_message(
+            await bot._turn_controller._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -6501,10 +6501,10 @@ class TestAgentBot:
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
             patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-            patch.object(bot._turn_engine, "_has_newer_unresponded_in_thread", return_value=False),
-            patch.object(bot._turn_engine, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
-            await bot._turn_engine._dispatch_text_message(
+            await bot._turn_controller._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 handled_turn=HandledTurnState.create(
@@ -6618,10 +6618,10 @@ class TestAgentBot:
                 "execute_router_relay",
                 new=AsyncMock(side_effect=fake_execute_router_relay),
             ),
-            patch.object(bot._turn_engine, "_has_newer_unresponded_in_thread", return_value=False),
-            patch.object(bot._turn_engine, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
-            await bot._turn_engine._dispatch_text_message(
+            await bot._turn_controller._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 handled_turn=coalesced_turn,
@@ -6668,10 +6668,10 @@ class TestAgentBot:
         )
 
         with (
-            patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
         ):
-            await bot._turn_engine._enqueue_for_dispatch(event, room, source_kind="message")
+            await bot._turn_controller._enqueue_for_dispatch(event, room, source_kind="message")
 
         mock_dispatch.assert_awaited_once_with(room, event, "@user:localhost")
         mock_enqueue.assert_not_awaited()
@@ -6730,7 +6730,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                bot._turn_engine,
+                bot._turn_controller,
                 "_precheck_dispatch_event",
                 return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             ),
@@ -6742,19 +6742,19 @@ class TestAgentBot:
                 "mindroom.conversation_resolver.ConversationResolver.build_ingress_envelope",
                 return_value=envelope,
             ),
-            patch.object(bot._turn_engine, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_engine.should_handle_interactive_text_response", return_value=False),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
                 new=AsyncMock(return_value="$thread_root"),
             ),
             patch.object(
-                bot._response_coordinator,
+                bot._response_runner,
                 "has_active_response_for_target",
                 return_value=True,
             ) as mock_has_active_response,
-            patch.object(bot._turn_engine, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
         ):
             await bot._on_message(room, event)
@@ -6824,11 +6824,11 @@ class TestAgentBot:
         mock_send_response = AsyncMock()
         mock_generate_team_response = AsyncMock(return_value="$team-response")
         install_send_response_mock(bot, mock_send_response)
-        bot._response_coordinator.generate_team_response_helper = mock_generate_team_response
+        bot._response_runner.generate_team_response_helper = mock_generate_team_response
         _replace_dispatch_planner_deps(
             bot,
             delivery_gateway=bot._delivery_gateway,
-            response_coordinator=bot._response_coordinator,
+            response_runner=bot._response_runner,
             handled_turn_ledger=bot.handled_turn_ledger,
         )
 
@@ -6860,7 +6860,7 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_execute_dispatch_action_does_not_send_placeholder_before_response_coordinator(
+    async def test_execute_dispatch_action_does_not_send_placeholder_before_response_runner(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -6905,7 +6905,7 @@ class TestAgentBot:
         _replace_dispatch_planner_deps(
             bot,
             delivery_gateway=bot._delivery_gateway,
-            response_coordinator=bot._response_coordinator,
+            response_runner=bot._response_runner,
             handled_turn_ledger=bot.handled_turn_ledger,
         )
 
@@ -6989,7 +6989,7 @@ class TestAgentBot:
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_engine.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.dispatch_planner.decide_team_formation",
@@ -7230,7 +7230,7 @@ class TestAgentBot:
 
         with (
             patch.object(
-                bot._response_coordinator,
+                bot._response_runner,
                 "generate_response",
                 new=AsyncMock(side_effect=SuppressedPlaceholderCleanupError("failed cleanup")),
             ),
@@ -7292,7 +7292,7 @@ class TestAgentBot:
             return DispatchPayload(prompt="help me")
 
         with (
-            patch.object(bot._response_coordinator, "generate_response", new=AsyncMock(return_value=None)),
+            patch.object(bot._response_runner, "generate_response", new=AsyncMock(return_value=None)),
             patch.object(bot._dispatch_planner, "log_dispatch_latency", create=True),
         ):
             await bot._dispatch_planner.execute_response_action(
@@ -7352,7 +7352,7 @@ class TestAgentBot:
         _replace_dispatch_planner_deps(
             bot,
             logger=bot.logger,
-            response_coordinator=bot._response_coordinator,
+            response_runner=bot._response_runner,
             handled_turn_ledger=bot.handled_turn_ledger,
         )
 
@@ -7392,11 +7392,11 @@ class TestAgentBot:
     @patch("mindroom.teams.create_agent")
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.teams.Team.arun")
-    @patch("mindroom.response_coordinator.ai_response")
-    @patch("mindroom.response_coordinator.stream_agent_response")
+    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.matrix.conversation_access.MatrixConversationAccess.get_thread_snapshot")
     @patch("mindroom.matrix.conversation_access.MatrixConversationAccess.get_thread_history")
-    @patch("mindroom.response_coordinator.should_use_streaming")
+    @patch("mindroom.response_runner.should_use_streaming")
     @patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,

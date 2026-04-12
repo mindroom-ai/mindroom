@@ -20,7 +20,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
-from mindroom.response_coordinator import ResponseCoordinator
+from mindroom.response_runner import ResponseRunner
 from mindroom.streaming import build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import (
@@ -28,7 +28,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_edit_message_mock,
-    patch_response_coordinator_module,
+    patch_response_runner_module,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -128,12 +128,12 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     with (
         patch.object(
-            ResponseCoordinator,
+            ResponseRunner,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
-        patch_response_coordinator_module(
+        patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
+        patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
         ),
@@ -183,12 +183,12 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
 
     with (
         patch.object(
-            ResponseCoordinator,
+            ResponseRunner,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
-        patch_response_coordinator_module(
+        patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
+        patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
         ),
@@ -246,12 +246,12 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
 
     with (
         patch.object(
-            ResponseCoordinator,
+            ResponseRunner,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
-        patch_response_coordinator_module(
+        patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
+        patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
         ),
@@ -319,16 +319,16 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     with (
         patch.object(
-            ResponseCoordinator,
+            ResponseRunner,
             "run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch("mindroom.response_coordinator.typing_indicator", new=_noop_typing_indicator),
+        patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
         patch(
             "mindroom.delivery_gateway.send_streaming_response",
             new=AsyncMock(side_effect=fake_send_streaming_response),
         ),
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
             team_response_stream=fake_team_response_stream,
         ),

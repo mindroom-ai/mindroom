@@ -1,4 +1,4 @@
-"""Turn sequencing extracted from the Matrix bot runtime shell."""
+"""Control one inbound turn from ingress to recorded outcome."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_access import MatrixConversationAccess
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
-    from mindroom.response_coordinator import ResponseCoordinator
+    from mindroom.response_runner import ResponseRunner
 
 type _MediaDispatchEvent = (
     nio.RoomMessageImage
@@ -117,7 +117,7 @@ type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
 
 
 @dataclass(frozen=True)
-class TurnEngineDeps:
+class TurnControllerDeps:
     """Collaborators needed for Phase 1 turn sequencing."""
 
     runtime: BotRuntimeView
@@ -130,7 +130,7 @@ class TurnEngineDeps:
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
     dispatch_planner: DispatchPlanner
-    response_coordinator: ResponseCoordinator
+    response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
     state_writer: ConversationStateWriter
     coalescing_gate: CoalescingGate
@@ -138,10 +138,10 @@ class TurnEngineDeps:
 
 
 @dataclass
-class TurnEngine:
+class TurnController:
     """Own sequencing for one inbound text or media turn."""
 
-    deps: TurnEngineDeps
+    deps: TurnControllerDeps
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -334,7 +334,7 @@ class TurnEngine:
             return False
         if is_agent_id(sender_id, self.deps.runtime.config, self.deps.runtime_paths):
             return False
-        return self.deps.response_coordinator.has_active_response_for_target(target)
+        return self.deps.response_runner.has_active_response_for_target(target)
 
     async def _coalescing_key_for_event(
         self,

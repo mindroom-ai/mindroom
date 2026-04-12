@@ -195,7 +195,7 @@ class TestTeamCollaboration:
     """Test team collaboration behaviors."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.stream_agent_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     async def test_team_coordinate_mode(
         self,
         mock_stream_agent_response: AsyncMock,  # noqa: ARG002

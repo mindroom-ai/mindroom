@@ -1133,7 +1133,7 @@ class TestThreadingBehavior:
         # Mock interactive.handle_text_response and make AI fast
         with (
             patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
-            patch("mindroom.response_coordinator.ai_response", AsyncMock(return_value="OK")),
+            patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
             patch(
                 "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
                 AsyncMock(return_value="latest_thread_event"),

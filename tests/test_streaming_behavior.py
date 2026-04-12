@@ -23,7 +23,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
-from mindroom.response_coordinator import ResponseRequest
+from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
@@ -38,8 +38,8 @@ from mindroom.streaming import (
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    patch_response_coordinator_module,
-    replace_response_coordinator_deps,
+    patch_response_runner_module,
+    replace_response_runner_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -107,9 +107,9 @@ class TestStreamingBehavior:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.ai_response")
-    @patch("mindroom.response_coordinator.stream_agent_response")
-    @patch("mindroom.response_coordinator.should_use_streaming")
+    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
+    @patch("mindroom.response_runner.should_use_streaming")
     async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
@@ -269,7 +269,7 @@ class TestStreamingBehavior:
         assert mock_ai_response.call_count == 1
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_runner.ai_response")
     async def test_agent_responds_only_to_final_message(
         self,
         mock_ai_response: AsyncMock,
@@ -817,7 +817,7 @@ class TestStreamingBehavior:
         )
         bot.client = MagicMock(rooms={})
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
-        replace_response_coordinator_deps(
+        replace_response_runner_deps(
             bot,
             knowledge_access=bot._knowledge_access_support,
         )
@@ -856,13 +856,13 @@ class TestStreamingBehavior:
             patch("mindroom.streaming.get_latest_thread_event_id_if_needed", new=no_latest_thread_event),
             patch("mindroom.streaming.send_message", new=record_send),
             patch("mindroom.streaming.edit_message", new=record_edit),
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 ensure_request_knowledge_managers=empty_request_knowledge_managers,
                 stream_agent_response=MagicMock(return_value=response_stream()),
                 typing_indicator=noop_typing,
             ),
         ):
-            delivery = await bot._response_coordinator.process_and_respond_streaming(
+            delivery = await bot._response_runner.process_and_respond_streaming(
                 ResponseRequest(
                     room_id="!test:localhost",
                     reply_to_event_id="$reply_plain:localhost",
