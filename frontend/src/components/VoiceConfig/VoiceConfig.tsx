@@ -48,7 +48,6 @@ function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
     stt: {
       ...DEFAULT_VOICE_CONFIG.stt,
       ...(config?.stt || {}),
-      provider: "openai",
     },
     intelligence: {
       ...DEFAULT_VOICE_CONFIG.intelligence,
@@ -96,7 +95,6 @@ export function VoiceConfig() {
       stt: {
         ...voiceConfig.stt,
         ...updates,
-        provider: 'openai',
         connection: nextConnection,
       },
     });
@@ -117,7 +115,7 @@ export function VoiceConfig() {
     ? `${normalizedHost}/v1/audio/transcriptions`
     : OPENAI_TRANSCRIPTION_ENDPOINT;
   const effectiveMode = normalizedHost ? 'OpenAI-compatible API' : 'OpenAI API';
-  const providerLabel = 'OpenAI';
+  const providerLabel = voiceConfig.stt.provider || DEFAULT_VOICE_CONFIG.stt.provider;
   const defaultSttConnection = defaultConnectionIdForPurpose(
     voiceConfig.stt.provider,
     'voice_stt',
@@ -131,7 +129,6 @@ export function VoiceConfig() {
       ...voiceConfig,
       stt: {
         ...voiceConfig.stt,
-        provider: "openai",
         host: normalizeHost(voiceConfig.stt.host),
         connection: normalizeOptionalConnection(voiceConfig.stt.connection),
       },

@@ -37,6 +37,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     RuntimePaths,
 )
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
@@ -459,19 +460,25 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         msg = f"Unsupported AI provider: {provider}"
         raise ValueError(msg)
 
-    resolved_connection = resolve_connection(
-        config,
-        provider=provider,
-        purpose="chat_model",
-        connection_name=model_config.connection,
-        runtime_paths=runtime_paths,
-    )
-    api_key = connection_api_key(resolved_connection)
-
-    if canonical_provider not in {"ollama", "vertexai_claude"} and api_key:
-        extra_kwargs["api_key"] = api_key
+    configured_api_key = extra_kwargs.get("api_key")
+    has_explicit_api_key = isinstance(configured_api_key, str) and bool(configured_api_key.strip())
+    api_key = configured_api_key.strip() if has_explicit_api_key else None
+    resolved_connection = None
+    if model_config.connection is not None or canonical_provider == "vertexai_claude" or not has_explicit_api_key:
+        resolved_connection = resolve_connection(
+            config,
+            provider=provider,
+            purpose="chat_model",
+            connection_name=model_config.connection,
+            runtime_paths=runtime_paths,
+        )
+        if canonical_provider not in {"ollama", "vertexai_claude"} and not has_explicit_api_key:
+            api_key = connection_api_key(resolved_connection)
+            if api_key:
+                extra_kwargs["api_key"] = api_key
 
     if canonical_provider == "vertexai_claude":
+        assert resolved_connection is not None
         if "project_id" not in extra_kwargs:
             project_id = runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
             if project_id:
@@ -562,6 +569,10 @@ def get_model_instance(
 
     # Get extra kwargs if specified
     extra_kwargs = dict(model_config.extra_kwargs or {})
+    model_credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
+    model_api_key = model_credentials.get("api_key") if isinstance(model_credentials, dict) else None
+    if isinstance(model_api_key, str) and model_api_key.strip():
+        extra_kwargs["api_key"] = model_api_key.strip()
 
     model = _create_model_for_provider(
         config,

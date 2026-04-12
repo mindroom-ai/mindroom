@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
+from mindroom.connections import canonical_connection_provider
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
@@ -25,6 +26,7 @@ from mindroom.config.main import (
     iter_config_validation_messages,
 )
 from mindroom.config.main import load_config as load_runtime_config_model
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
 
@@ -245,14 +247,43 @@ def _validated_config_payload(
     return validated_config, validated_config.authored_model_dump()
 
 
-def validate_and_persist_config_payload(
-    raw_config: dict[str, Any],
+def _google_oauth_client_services(config: Config | None) -> set[str]:
+    """Return configured Google OAuth client backing services from one config snapshot."""
+    if config is None:
+        return set()
+    return {
+        connection.service
+        for connection in config.connections.values()
+        if connection.service is not None
+        and connection.auth_kind == "oauth_client"
+        and canonical_connection_provider(connection.provider) == "google"
+    }
+
+
+def _cleanup_removed_google_oauth_client_services(
+    previous_config: Config | None,
+    next_config: Config,
     runtime_paths: constants.RuntimePaths,
-) -> Config:
-    """Validate and persist one authored config payload against the active runtime."""
-    validated_config, _ = _validated_config_payload(raw_config, runtime_paths)
-    _persist_runtime_validated_config(validated_config, runtime_paths)
-    return validated_config
+) -> None:
+    """Delete shared Google OAuth client credentials for services removed from config."""
+    removed_services = _google_oauth_client_services(previous_config) - _google_oauth_client_services(next_config)
+    if not removed_services:
+        return
+    shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
+    for service in sorted(removed_services):
+        shared_manager.delete_credentials(service)
+
+
+def _app_config_state(api_app: FastAPI) -> ApiState:
+    """Return the app-bound API config state."""
+    try:
+        state = api_app.state.api_state
+    except AttributeError:
+        state = None
+    if not isinstance(state, ApiState):
+        msg = "API context is not initialized"
+        raise TypeError(msg)
+    return state
 
 
 def register_api_app(api_app: FastAPI) -> None:
@@ -396,6 +427,7 @@ def _commit_mutated_snapshot[T](
             _raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(current.runtime_config, validated_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
@@ -455,6 +487,7 @@ def _commit_replaced_snapshot(
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(current.runtime_config, validated_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
@@ -481,6 +514,7 @@ def _commit_raw_replaced_snapshot(
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
         _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(current.runtime_config, validated_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,

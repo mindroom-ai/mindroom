@@ -709,3 +709,13 @@ def test_config_rejects_inline_voice_api_key_bypass() -> None:
                 },
             },
         )
+
+
+def test_connection_config_rejects_reserved_google_token_bucket_service() -> None:
+    """User-authored connections must not reuse the reserved Google token bucket service name."""
+    with pytest.raises(ValidationError, match="reserved for backend-managed Google token storage"):
+        ConnectionConfig(
+            provider="google",
+            service="google",
+            auth_kind="api_key",
+        )
