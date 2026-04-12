@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import _format_file_for_message, _format_image_for_message
@@ -159,9 +159,9 @@ def install_vertex_claude_prompt_cache_hook(model: object) -> None:
     def _invoke_with_prompt_cache(
         messages: list[Message],
         assistant_message: Message,
-        response_format: dict[str, object] | type[BaseModel] | None = None,
-        tools: list[dict[str, object]] | None = None,
-        tool_choice: str | dict[str, object] | None = None,
+        response_format: dict[str, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> ModelResponse:
@@ -178,9 +178,9 @@ def install_vertex_claude_prompt_cache_hook(model: object) -> None:
     async def _ainvoke_with_prompt_cache(
         messages: list[Message],
         assistant_message: Message,
-        response_format: dict[str, object] | type[BaseModel] | None = None,
-        tools: list[dict[str, object]] | None = None,
-        tool_choice: str | dict[str, object] | None = None,
+        response_format: dict[str, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> ModelResponse:
@@ -197,9 +197,9 @@ def install_vertex_claude_prompt_cache_hook(model: object) -> None:
     def _invoke_stream_with_prompt_cache(
         messages: list[Message],
         assistant_message: Message,
-        response_format: dict[str, object] | type[BaseModel] | None = None,
-        tools: list[dict[str, object]] | None = None,
-        tool_choice: str | dict[str, object] | None = None,
+        response_format: dict[str, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> Iterator[ModelResponse]:
@@ -216,9 +216,9 @@ def install_vertex_claude_prompt_cache_hook(model: object) -> None:
     async def _ainvoke_stream_with_prompt_cache(
         messages: list[Message],
         assistant_message: Message,
-        response_format: dict[str, object] | type[BaseModel] | None = None,
-        tools: list[dict[str, object]] | None = None,
-        tool_choice: str | dict[str, object] | None = None,
+        response_format: dict[str, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> AsyncIterator[ModelResponse]:
