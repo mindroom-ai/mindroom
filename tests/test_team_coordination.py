@@ -96,7 +96,7 @@ We have different recommendations:
         assert "Recommended approach" in expected_resolution
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.ai_response")
+    @patch("mindroom.response_runner.ai_response")
     async def test_team_handoff_mechanism(
         self,
         mock_ai_response: AsyncMock,  # noqa: ARG002

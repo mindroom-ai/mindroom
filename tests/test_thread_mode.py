@@ -1420,7 +1420,7 @@ class TestConversationAccessArchitecture:
             "src/mindroom/conversation_resolver.py",
             "src/mindroom/dispatch_planner.py",
             "src/mindroom/matrix/reply_chain.py",
-            "src/mindroom/response_coordinator.py",
+            "src/mindroom/response_runner.py",
         ):
             file_text = (repo_root / relative_path).read_text()
             for banned_call in banned_calls:
@@ -1437,7 +1437,7 @@ class TestConversationAccessArchitecture:
             "src/mindroom/conversation_resolver.py",
             "src/mindroom/dispatch_planner.py",
             "src/mindroom/matrix/reply_chain.py",
-            "src/mindroom/response_coordinator.py",
+            "src/mindroom/response_runner.py",
         ):
             file_text = (repo_root / relative_path).read_text()
             for banned_token in banned_tokens:

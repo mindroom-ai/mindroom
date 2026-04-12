@@ -1,4 +1,4 @@
-"""Edit-triggered response regeneration for previously handled turns."""
+"""Own the edited-message regeneration workflow for previously handled turns."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.dispatch_planner import DispatchHookService
+    from mindroom.dispatch_planner import IngressHookRunner
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
@@ -73,13 +73,13 @@ class EditRegeneratorDeps:
     resolver: ConversationResolver
     state_writer: ConversationStateWriter
     tool_runtime: ToolRuntimeSupport
-    dispatch_hook_service: DispatchHookService
+    dispatch_hook_service: IngressHookRunner
     generate_response: _GenerateResponse
 
 
 @dataclass
 class EditRegenerator:
-    """Own edit-triggered response regeneration for previously handled turns."""
+    """Re-run the owned response for one edited user turn."""
 
     deps: EditRegeneratorDeps
 

@@ -23,7 +23,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
-    patch_response_coordinator_module,
+    patch_response_runner_module,
     runtime_paths_for,
 )
 
@@ -150,7 +150,7 @@ async def test_agent_processes_direct_mention(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
             ) as mock_send_streaming_response,
-            patch_response_coordinator_module(
+            patch_response_runner_module(
                 stream_agent_response=mock_ai,
                 should_use_streaming=AsyncMock(return_value=True),
             ),
@@ -223,7 +223,7 @@ async def test_agent_ignores_other_agents(
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
         mock_ai = AsyncMock()
-        with patch("mindroom.response_coordinator.stream_agent_response", new=mock_ai):
+        with patch("mindroom.response_runner.stream_agent_response", new=mock_ai):
             await bot._on_message(room, message_event)
 
             # Should not process the message
@@ -344,7 +344,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             mock_fetch_snapshot.return_value = thread_history
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
-            with patch_response_coordinator_module(
+            with patch_response_runner_module(
                 ai_response=mock_ai,
                 should_use_streaming=AsyncMock(return_value=False),
             ):
@@ -412,7 +412,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
             mock_ai = AsyncMock()
             mock_team_response = AsyncMock(return_value="Team response")
-            with patch_response_coordinator_module(
+            with patch_response_runner_module(
                 ai_response=mock_ai,
                 team_response=mock_team_response,
                 should_use_streaming=AsyncMock(return_value=False),
@@ -484,7 +484,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             mock_fetch_snapshot.return_value = thread_history
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
-            with patch_response_coordinator_module(
+            with patch_response_runner_module(
                 ai_response=mock_ai,
                 should_use_streaming=AsyncMock(return_value=False),
             ):

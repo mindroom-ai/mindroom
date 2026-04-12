@@ -48,7 +48,7 @@ from mindroom.hooks.registry import HookRegistryState
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
-from mindroom.response_coordinator import ResponseCoordinator, ResponseCoordinatorDeps, ResponseRequest
+from mindroom.response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
@@ -100,14 +100,14 @@ def _prepared_prompt_result(
     return agent, prompt, [], PreparedHistoryState()
 
 
-def _build_response_coordinator(
+def _build_response_runner(
     bot: MagicMock,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     storage_path: Path,
     requester_id: str,  # noqa: ARG001
-) -> ResponseCoordinator:
+) -> ResponseRunner:
     """Build a real response coordinator for one bot-shaped test double."""
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
     bot.enable_streaming = True
@@ -170,8 +170,8 @@ def _build_response_coordinator(
     )
     bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
 
-    return ResponseCoordinator(
-        ResponseCoordinatorDeps(
+    return ResponseRunner(
+        ResponseRunnerDeps(
             runtime=runtime,
             logger=bot.logger,
             stop_manager=bot.stop_manager,
@@ -229,10 +229,10 @@ class TestUserIdPassthrough:
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
         with (
-            patch("mindroom.response_coordinator.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
-            patch("mindroom.response_coordinator.ai_response") as mock_ai,
+            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+            patch("mindroom.response_runner.ai_response") as mock_ai,
         ):
-            coordinator = _build_response_coordinator(
+            coordinator = _build_response_runner(
                 bot,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -278,10 +278,10 @@ class TestUserIdPassthrough:
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
         with (
-            patch("mindroom.response_coordinator.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
-            patch("mindroom.response_coordinator.stream_agent_response") as mock_stream,
+            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+            patch("mindroom.response_runner.stream_agent_response") as mock_stream,
         ):
-            coordinator = _build_response_coordinator(
+            coordinator = _build_response_runner(
                 bot,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -332,7 +332,7 @@ class TestUserIdPassthrough:
         bot.config = config
         bot.runtime_paths = runtime_paths
 
-        coordinator = _build_response_coordinator(
+        coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
@@ -418,7 +418,7 @@ class TestUserIdPassthrough:
         bot.config = config
         bot.runtime_paths = runtime_paths
 
-        coordinator = _build_response_coordinator(
+        coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,

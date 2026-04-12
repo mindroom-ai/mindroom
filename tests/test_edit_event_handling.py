@@ -11,8 +11,8 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.turn_engine import _PrecheckedEvent
-from tests.conftest import replace_turn_engine_deps, wrap_extracted_collaborators
+from mindroom.turn_controller import _PrecheckedEvent
+from tests.conftest import replace_turn_controller_deps, wrap_extracted_collaborators
 
 
 @pytest.mark.asyncio
@@ -53,7 +53,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
@@ -100,11 +100,11 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     # Mock the routing method that would be called for the router
     with (
         patch.object(
-            bot._turn_engine,
+            bot._turn_controller,
             "_precheck_dispatch_event",
             return_value=_PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com"),
         ),
-        patch.object(bot._turn_engine, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
         patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
     ):
@@ -147,7 +147,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
 
@@ -196,13 +196,13 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     # Mock the routing method
     with (
         patch.object(
-            bot._turn_engine,
+            bot._turn_controller,
             "_precheck_dispatch_event",
             side_effect=[
                 _PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com") for edit_event in edit_events
             ],
         ),
-        patch.object(bot._turn_engine, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
         patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
     ):
@@ -246,7 +246,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     bot.handled_turn_ledger.has_responded.return_value = False
     bot.handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_engine_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 

@@ -241,8 +241,8 @@ class TestBotIntegration:
     """Test bot integration with presence-based streaming."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.ai_response")
-    @patch("mindroom.response_coordinator.stream_agent_response")
+    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_streaming_when_user_online(
         self,
@@ -310,8 +310,8 @@ class TestBotIntegration:
         mock_ai_response.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_coordinator.ai_response")
-    @patch("mindroom.response_coordinator.stream_agent_response")
+    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_non_streaming_when_user_offline(
         self,

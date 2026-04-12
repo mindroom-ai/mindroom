@@ -18,7 +18,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PRE
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-from mindroom.turn_engine import _PrecheckedEvent
+from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -28,7 +28,7 @@ from tests.conftest import (
     install_send_response_mock,
     install_send_skill_command_response_mock,
     replace_dispatch_planner_deps,
-    replace_turn_engine_deps,
+    replace_turn_controller_deps,
     runtime_paths_for,
     sync_bot_runtime_state,
     test_runtime_paths,
@@ -71,7 +71,7 @@ def _sync_dispatch_planner_runtime(bot: AgentBot) -> None:
         logger=bot.logger,
         handled_turn_ledger=bot.handled_turn_ledger,
     )
-    replace_turn_engine_deps(
+    replace_turn_controller_deps(
         bot,
         logger=bot.logger,
         handled_turn_ledger=bot.handled_turn_ledger,
@@ -1144,7 +1144,7 @@ class TestCommandHandling:
         with (
             patch("mindroom.bot.interactive") as mock_interactive,
             patch("mindroom.dispatch_planner.extract_agent_name") as mock_extract,
-            patch("mindroom.response_coordinator.team_response") as mock_team,
+            patch("mindroom.response_runner.team_response") as mock_team,
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
@@ -1629,7 +1629,7 @@ class TestRouterSkipsSingleAgent:
                 config.get_ids(runtime_paths_for(config))["general"],
                 config.get_ids(runtime_paths_for(config))["calculator"],
             ]
-            await bot._turn_engine._dispatch_text_message(
+            await bot._turn_controller._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@alice:localhost"),
             )

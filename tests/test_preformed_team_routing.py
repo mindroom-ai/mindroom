@@ -26,7 +26,7 @@ from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.conftest import (
     bind_runtime_paths,
     make_visible_message,
-    patch_response_coordinator_module,
+    patch_response_runner_module,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -180,7 +180,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, room.room_id),
         nio.RoomSendResponse.from_dict({"event_id": "$edit"}, room.room_id),
     ]
-    with patch_response_coordinator_module(
+    with patch_response_runner_module(
         team_response=fake_team_response,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,
@@ -256,7 +256,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         return task
 
     with (
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing_indicator,
             team_response=AsyncMock(return_value="team response"),
@@ -405,7 +405,7 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
     with (
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             team_response=fake_team_response,
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing_indicator,
@@ -468,7 +468,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     room = _mock_room("!room:localhost", [team_user.user_id, "@user:localhost"])
     event = _mock_event_with_team_mention(mentioned_id, body=f"{mentioned_id} ping")
 
-    with patch_response_coordinator_module(
+    with patch_response_runner_module(
         team_response=fake_team_response,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,

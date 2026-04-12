@@ -1,4 +1,4 @@
-"""Multi-agent bot implementation where each agent has its own Matrix user account."""
+"""Matrix runtime shell for agents, teams, and the router."""
 
 from __future__ import annotations
 
@@ -103,9 +103,9 @@ from .delivery_gateway import (
     SuppressedPlaceholderCleanupError as _SuppressedPlaceholderCleanupError,
 )
 from .dispatch_planner import (
-    DispatchHookService,
     DispatchPlanner,
     DispatchPlannerDeps,
+    IngressHookRunner,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .handled_turns import HandledTurnLedger, HandledTurnState
@@ -124,10 +124,10 @@ from .matrix.client import (
     join_room,
 )
 from .media_inputs import MediaInputs
-from .response_coordinator import (
-    ResponseCoordinator,
-    ResponseCoordinatorDeps,
+from .response_runner import (
     ResponseRequest,
+    ResponseRunner,
+    ResponseRunnerDeps,
     prepare_memory_and_model_context,
 )
 from .runtime_support import (
@@ -142,7 +142,7 @@ from .scheduling import (
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
-from .turn_engine import TurnEngine, TurnEngineDeps
+from .turn_controller import TurnController, TurnControllerDeps
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -303,7 +303,7 @@ type _MessageContext = MessageContext
 
 
 class AgentBot:
-    """Represents a single agent bot with its own Matrix account."""
+    """Matrix lifecycle shell for one configured agent or router entity."""
 
     # Construction inputs
     agent_user: AgentMatrixUser
@@ -329,15 +329,15 @@ class AgentBot:
     _conversation_state_writer: ConversationStateWriter
     _conversation_access: MatrixConversationAccess
     _delivery_gateway: DeliveryGateway
-    _response_coordinator: ResponseCoordinator
+    _response_runner: ResponseRunner
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
-    _dispatch_hook_service: DispatchHookService
+    _ingress_hook_runner: IngressHookRunner
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _standalone_runtime_support: StandaloneRuntimeSupport | None
-    _turn_engine: TurnEngine
+    _turn_controller: TurnController
 
     def __init__(
         self,
@@ -464,8 +464,8 @@ class AgentBot:
             delivery_gateway=self._delivery_gateway,
             conversation_access=self._conversation_access,
         )
-        self._response_coordinator = ResponseCoordinator(
-            ResponseCoordinatorDeps(
+        self._response_runner = ResponseRunner(
+            ResponseRunnerDeps(
                 runtime=self._runtime_view,
                 logger=self.logger,
                 stop_manager=self.stop_manager,
@@ -481,7 +481,7 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
             ),
         )
-        self._dispatch_hook_service = DispatchHookService(
+        self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,
         )
         self._edit_regenerator = EditRegenerator(
@@ -494,7 +494,7 @@ class AgentBot:
                 resolver=self._conversation_resolver,
                 state_writer=self._conversation_state_writer,
                 tool_runtime=self._tool_runtime_support,
-                dispatch_hook_service=self._dispatch_hook_service,
+                dispatch_hook_service=self._ingress_hook_runner,
                 generate_response=lambda **kwargs: self._generate_response(**kwargs),
             ),
         )
@@ -510,13 +510,13 @@ class AgentBot:
                 normalizer=self._inbound_turn_normalizer,
                 resolver=self._conversation_resolver,
                 delivery_gateway=self._delivery_gateway,
-                response_coordinator=self._response_coordinator,
-                hook_service=self._dispatch_hook_service,
+                response_runner=self._response_runner,
+                hook_service=self._ingress_hook_runner,
                 tool_runtime=self._tool_runtime_support,
             ),
         )
-        self._turn_engine = TurnEngine(
-            TurnEngineDeps(
+        self._turn_controller = TurnController(
+            TurnControllerDeps(
                 runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
@@ -527,7 +527,7 @@ class AgentBot:
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 dispatch_planner=self._dispatch_planner,
-                response_coordinator=self._response_coordinator,
+                response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
                 state_writer=self._conversation_state_writer,
                 coalescing_gate=self._coalescing_gate,
@@ -608,12 +608,12 @@ class AgentBot:
     @property
     def in_flight_response_count(self) -> int:
         """Return the number of active response lifecycles."""
-        return self._response_coordinator.in_flight_response_count
+        return self._response_runner.in_flight_response_count
 
     @in_flight_response_count.setter
     def in_flight_response_count(self, value: int) -> None:
         """Update the number of active response lifecycles."""
-        self._response_coordinator.in_flight_response_count = value
+        self._response_runner.in_flight_response_count = value
 
     @property
     def agent_name(self) -> str:
@@ -640,7 +640,7 @@ class AgentBot:
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
-        return self._response_coordinator.has_active_response_for_target(target)
+        return self._response_runner.has_active_response_for_target(target)
 
     def _coalescing_enabled(self) -> bool:
         """Return whether live coalescing is enabled for this bot."""
@@ -1284,11 +1284,11 @@ class AgentBot:
 
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Delegate one flushed coalesced batch to the turn engine."""
-        await self._turn_engine.handle_coalesced_batch(batch)
+        await self._turn_controller.handle_coalesced_batch(batch)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
-        await self._turn_engine.handle_text_event(room, event)
+        await self._turn_controller.handle_text_event(room, event)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
@@ -1412,7 +1412,7 @@ class AgentBot:
         event: _MediaDispatchEvent,
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
-        await self._turn_engine.handle_media_event(room, event)
+        await self._turn_controller.handle_media_event(room, event)
 
     def _should_queue_follow_up_in_active_response_thread(
         self,
@@ -1465,7 +1465,7 @@ class AgentBot:
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot)."""
-        return await self._response_coordinator.generate_team_response_helper(
+        return await self._response_runner.generate_team_response_helper(
             ResponseRequest(
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
@@ -1544,7 +1544,7 @@ class AgentBot:
             Event ID of the response message, or None if failed
 
         """
-        return await self._response_coordinator.generate_response(
+        return await self._response_runner.generate_response(
             ResponseRequest(
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,

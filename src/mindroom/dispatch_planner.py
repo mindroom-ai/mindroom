@@ -66,7 +66,7 @@ from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import record_handled_turn
-from mindroom.response_coordinator import ResponseCoordinator, ResponseRequest
+from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.routing import suggest_agent_for_message
 from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
 from mindroom.teams import (
@@ -120,7 +120,7 @@ class _ResolvedPreparedHookedPayload:
 
 
 @dataclass
-class DispatchHookService:
+class IngressHookRunner:
     """Own planner-facing hook ingress and enrichment behavior."""
 
     hook_context: HookContextSupport
@@ -268,8 +268,8 @@ class DispatchPlannerDeps:
     normalizer: InboundTurnNormalizer
     resolver: ConversationResolver
     delivery_gateway: DeliveryGateway
-    response_coordinator: ResponseCoordinator
-    hook_service: DispatchHookService
+    response_runner: ResponseRunner
+    hook_service: IngressHookRunner
     tool_runtime: ToolRuntimeSupport
 
 
@@ -722,7 +722,7 @@ class DispatchPlanner:
             return False
         if is_agent_id(source_envelope.sender_id, self.deps.runtime.config, self.deps.runtime_paths):
             return False
-        return self.deps.response_coordinator.has_active_response_for_target(target)
+        return self.deps.response_runner.has_active_response_for_target(target)
 
     async def execute_command(
         self,
@@ -747,7 +747,7 @@ class DispatchPlanner:
             user_id: str | None,
             reply_to_event: nio.RoomMessageText | None = None,
         ) -> str | None:
-            return await self.deps.response_coordinator.send_skill_command_response(
+            return await self.deps.response_runner.send_skill_command_response(
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
@@ -1087,7 +1087,7 @@ class DispatchPlanner:
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
-                response_event_id = await self.deps.response_coordinator.generate_team_response_helper(
+                response_event_id = await self.deps.response_runner.generate_team_response_helper(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
@@ -1110,7 +1110,7 @@ class DispatchPlanner:
                     team_mode=action.form_team.mode.value,
                 )
             else:
-                response_event_id = await self.deps.response_coordinator.generate_response(
+                response_event_id = await self.deps.response_runner.generate_response(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,

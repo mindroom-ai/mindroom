@@ -45,13 +45,13 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_coordinator import ResponseRequest
+from mindroom.response_runner import ResponseRequest
 from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    patch_response_coordinator_module,
+    patch_response_runner_module,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -545,13 +545,13 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
                 ),
             ),
         ),
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             ensure_request_knowledge_managers=AsyncMock(return_value={}),
             typing_indicator=_noop_typing_indicator,
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),
     ):
-        delivery = await bot._response_coordinator.process_and_respond(
+        delivery = await bot._response_runner.process_and_respond(
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",
@@ -590,12 +590,12 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
             "mindroom.delivery_gateway.send_streaming_response",
             new=AsyncMock(side_effect=fake_send_streaming_response),
         ),
-        patch_response_coordinator_module(
+        patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             stream_agent_response=fake_stream_agent_response,
         ),
     ):
-        delivery = await bot._response_coordinator.process_and_respond_streaming(
+        delivery = await bot._response_runner.process_and_respond_streaming(
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",

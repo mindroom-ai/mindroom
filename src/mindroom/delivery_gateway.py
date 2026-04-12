@@ -1,4 +1,4 @@
-"""Matrix delivery transport for bot responses."""
+"""Own visible Matrix delivery for already-generated responses."""
 
 from __future__ import annotations
 
@@ -251,7 +251,7 @@ class FinalizeStreamedResponseRequest:
 
 @dataclass(frozen=True)
 class DeliveryGateway:
-    """Own the visible Matrix send/edit transport for responses."""
+    """Send, edit, redact, and finalize visible Matrix responses."""
 
     deps: DeliveryGatewayDeps
 
