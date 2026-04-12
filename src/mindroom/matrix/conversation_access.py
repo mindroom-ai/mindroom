@@ -316,7 +316,7 @@ class MatrixConversationAccess(ConversationReadAccess):
         try:
             await self._queue_room_cache_update(
                 room_id,
-                lambda: event_cache.redact_event(room_id, event.redacts, thread_id=thread_id),
+                lambda: event_cache.redact_event(room_id, event.redacts),
                 name="matrix_cache_apply_redaction",
             )
         except Exception as exc:
