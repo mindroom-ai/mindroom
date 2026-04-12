@@ -221,6 +221,7 @@ def _published_snapshot(
     runtime_config: Config | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
     auth_state: _ApiAuthState | None | object = _UNSET,
+    backend_managed_services: frozenset[str] | object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
     updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
@@ -232,6 +233,11 @@ def _published_snapshot(
         else cast("ConfigLoadResult | None", config_load_result)
     )
     updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
+    updated_backend_managed_services = (
+        snapshot.backend_managed_services
+        if backend_managed_services is _UNSET
+        else cast("frozenset[str]", backend_managed_services)
+    )
     return ApiSnapshot(
         generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
         runtime_paths=updated_runtime_paths,
@@ -239,6 +245,7 @@ def _published_snapshot(
         runtime_config=cast("Config | None", updated_runtime_config),
         config_load_result=updated_config_load_result,
         auth_state=updated_auth_state,
+        backend_managed_services=updated_backend_managed_services,
     )
 
 
@@ -298,6 +305,9 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
+        backend_managed_services = (
+            current_snapshot.backend_managed_services if current_snapshot.runtime_paths == runtime_paths else frozenset()
+        )
         current_state.snapshot = _published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -305,6 +315,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             runtime_config=runtime_config,
             auth_state=auth_state,
             config_load_result=config_load_result,
+            backend_managed_services=backend_managed_services,
         )
         api_app.state.api_state = current_state
     config_lifecycle.register_api_app(api_app)

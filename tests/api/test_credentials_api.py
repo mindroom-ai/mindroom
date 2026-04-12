@@ -9,6 +9,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants
+from mindroom.api import config_lifecycle
 from mindroom.api import credentials as credentials_api
 from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
@@ -52,6 +53,7 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
+    context.backend_managed_services = config_lifecycle._backend_managed_services_for_config(config)
 
 
 @pytest.fixture
@@ -774,6 +776,55 @@ class TestCredentialsAPI:
         assert vertex_response.status_code == 200
         assert oauth_response.status_code == 403
         assert "not available through the generic credentials API" in oauth_response.json()["detail"]
+
+    def test_generic_credentials_api_fails_closed_when_config_is_unavailable(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Generic credential reads should fail closed before config has been loaded."""
+        runtime_credentials = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        runtime_credentials.shared_manager().save_credentials(
+            "google_oauth_custom",
+            {
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "_source": "ui",
+            },
+        )
+
+        response = client.get("/api/credentials/google_oauth_custom")
+
+        assert response.status_code == 503
+        assert "Configuration is unavailable" in response.json()["detail"]
+
+    def test_cached_backend_managed_services_hide_custom_google_oauth_when_config_snapshot_is_missing(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Cached protected-service sets should keep custom Google OAuth buckets hidden across snapshot gaps."""
+        config = Config.model_validate(
+            {
+                "connections": {
+                    **_openai_test_connections(),
+                    "google/oauth": {
+                        "provider": "google",
+                        "service": "google_oauth_custom",
+                        "auth_kind": "oauth_client",
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+                "agents": {},
+            },
+        )
+        _publish_committed_runtime_config(client.app, config)
+        context = main._app_context(client.app)
+        context.config_data = {}
+        context.runtime_config = None
+
+        response = client.get("/api/credentials/google_oauth_custom")
+
+        assert response.status_code == 403
+        assert "not available through the generic credentials API" in response.json()["detail"]
 
     def test_get_api_key_returns_source_env(
         self,

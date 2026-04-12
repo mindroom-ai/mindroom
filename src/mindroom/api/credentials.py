@@ -17,7 +17,6 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
 )
 from mindroom.api import config_lifecycle
-from mindroom.connections import canonical_connection_provider
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
@@ -38,7 +37,6 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
-_BACKEND_MANAGED_GOOGLE_SERVICES = frozenset({"google", "google_oauth_client"})
 _pending_oauth_state_lock = threading.Lock()
 
 
@@ -70,35 +68,50 @@ def _validated_service(service: str) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _configured_backend_managed_services(request: Request) -> frozenset[str]:
+def _configured_backend_managed_services(
+    request: Request,
+    *,
+    fail_closed: bool,
+) -> frozenset[str]:
     """Return credential services reserved for backend-managed Google auth flows."""
-    reserved_services = _BACKEND_MANAGED_GOOGLE_SERVICES
     snapshot = config_lifecycle.request_snapshot(request)
     if snapshot is None:
         snapshot = config_lifecycle.bind_current_request_snapshot(request)
 
     runtime_config = snapshot.runtime_config
-    if runtime_config is None:
-        if not snapshot.config_data:
-            return reserved_services
-        runtime_config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    if runtime_config is not None:
+        return config_lifecycle._backend_managed_services_for_config(runtime_config)
 
-    if not runtime_config.connections:
-        return reserved_services
+    if snapshot.config_data:
+        try:
+            runtime_config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+        except HTTPException:
+            if snapshot.backend_managed_services:
+                return snapshot.backend_managed_services
+        else:
+            return config_lifecycle._backend_managed_services_for_config(runtime_config)
 
-    services = {
-        service
-        for connection_data in runtime_config.connections.values()
-        if isinstance(service := connection_data.service, str)
-        and connection_data.auth_kind == "oauth_client"
-        and canonical_connection_provider(connection_data.provider) == "google"
-    }
-    return reserved_services | frozenset(services)
+    if snapshot.backend_managed_services:
+        return snapshot.backend_managed_services
+    if fail_closed:
+        raise HTTPException(
+            status_code=503,
+            detail="Configuration is unavailable; generic credentials access is blocked.",
+        )
+    return frozenset()
+
+
+def _service_requires_loaded_config_for_raw_access(service: str) -> bool:
+    """Return whether one generic credential request must fail closed without config."""
+    return service == "google" or service.startswith("google_oauth")
 
 
 def _reject_backend_managed_raw_access(service: str, request: Request) -> None:
     """Block raw generic credential API access for backend-managed services."""
-    if service in _configured_backend_managed_services(request):
+    if service in _configured_backend_managed_services(
+        request,
+        fail_closed=_service_requires_loaded_config_for_raw_access(service),
+    ):
         raise HTTPException(
             status_code=403,
             detail=f"Service '{service}' is not available through the generic credentials API",
@@ -496,7 +509,7 @@ async def list_services(
 ) -> list[str]:
     """List all services with stored credentials."""
     target = resolve_request_credentials_target(request, agent_name=agent_name)
-    backend_managed_services = _configured_backend_managed_services(request)
+    backend_managed_services = _configured_backend_managed_services(request, fail_closed=False)
     if target.worker_scope is None:
         return sorted(
             service for service in target.target_manager.list_services() if service not in backend_managed_services

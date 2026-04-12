@@ -124,6 +124,7 @@ def _publish_committed_runtime_config(
     context.runtime_config = runtime_config
     context.config_load_result = main.ConfigLoadResult(success=True)
     context.auth_state = None
+    context.backend_managed_services = config_lifecycle._backend_managed_services_for_config(runtime_config)
 
 
 class _ContextSwapLock:
@@ -1670,6 +1671,39 @@ def test_google_connect_accepts_legacy_env_seeded_oauth_client_without_connectio
     assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
 
 
+def test_google_connect_rejects_broken_configured_oauth_connection_even_with_legacy_fallback_present(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Configured google/oauth connections must not silently fall back to the legacy shared bucket."""
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    config = _config_with_worker_scope("shared").model_dump()
+    config["connections"]["google/oauth"]["service"] = "google_oauth_custom"
+    temp_config_file.write_text(yaml.dump(config), encoding="utf-8")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    runtime_credentials = get_runtime_credentials_manager(runtime_paths)
+    runtime_credentials.shared_manager().save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "legacy-client-id",
+            "client_secret": "legacy-client-secret",
+            "_source": "env",
+        },
+    )
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        runtime_paths,
+        config,
+    )
+
+    response = api_key_client.post("/api/google/connect")
+
+    assert response.status_code == 500
+    assert "google/oauth" in response.json()["detail"]
+
+
 def test_google_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
     """Google connect must reject draft-only execution-scope overrides."""
     config = _config_with_worker_scope("user")
@@ -2056,6 +2090,67 @@ def test_config_save_deletes_removed_google_oauth_service_credentials(
     )
 
     assert response.status_code == 200
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_custom") is None
+
+
+def test_persist_runtime_validated_config_deletes_removed_google_oauth_service_credentials(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Shared config persistence helpers should clean up removed Google OAuth client buckets."""
+    initial_config = _config_with_worker_scope("shared").model_dump()
+    initial_config["connections"]["google/oauth"]["service"] = "google_oauth_custom"
+    temp_config_file.write_text(yaml.dump(initial_config), encoding="utf-8")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        runtime_paths,
+        initial_config,
+    )
+    runtime_credentials = get_runtime_credentials_manager(runtime_paths)
+    runtime_credentials.shared_manager().save_credentials(
+        "google_oauth_custom",
+        {
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+            "_source": "ui",
+        },
+    )
+
+    config_lifecycle.persist_runtime_validated_config(
+        Config.validate_with_runtime(_authored_config_payload("general"), runtime_paths),
+        runtime_paths,
+    )
+
+    assert runtime_credentials.shared_manager().load_credentials("google_oauth_custom") is None
+
+
+def test_load_config_into_app_deletes_removed_google_oauth_service_credentials(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Watcher-driven config reloads should clean up removed Google OAuth client buckets."""
+    initial_config = _config_with_worker_scope("shared").model_dump()
+    initial_config["connections"]["google/oauth"]["service"] = "google_oauth_custom"
+    temp_config_file.write_text(yaml.dump(initial_config), encoding="utf-8")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        runtime_paths,
+        initial_config,
+    )
+    runtime_credentials = get_runtime_credentials_manager(runtime_paths)
+    runtime_credentials.shared_manager().save_credentials(
+        "google_oauth_custom",
+        {
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+            "_source": "ui",
+        },
+    )
+    temp_config_file.write_text(yaml.dump(_authored_config_payload("general")), encoding="utf-8")
+
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_key_client.app) is True
     assert runtime_credentials.shared_manager().load_credentials("google_oauth_custom") is None
 
 

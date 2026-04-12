@@ -1970,48 +1970,41 @@ class TestDoctor:
         assert "reachable LAN" in output
         assert "instead of .local" in output
 
-    def test_doctor_reports_auth_free_openai_connections_as_valid(
+    def test_doctor_reports_auth_free_openai_voice_stt_connection_as_valid(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor should treat auth-free OpenAI-compatible connections as valid instead of missing-key failures."""
+        """Doctor should treat auth-free OpenAI-compatible STT connections as valid."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             _with_connections(
-                "models:\n"
-                "  default:\n"
-                "    provider: openai\n"
-                "    id: local-model\n"
-                "    extra_kwargs:\n"
-                "      base_url: http://localhost:9292/v1\n"
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
                 "agents:\n  a:\n    display_name: A\n    model: default\n"
                 "router:\n  model: default\n"
                 "memory:\n"
-                "  llm:\n"
-                "    provider: openai\n"
+                "  embedder:\n"
+                "    provider: sentence_transformers\n"
                 "    config:\n"
-                "      model: gpt-oss-low\n"
-                "      openai_base_url: http://localhost:9292/v1\n"
+                "      model: sentence-transformers/all-MiniLM-L6-v2\n"
                 "voice:\n"
                 "  enabled: true\n"
                 "  stt:\n"
                 "    provider: openai\n"
                 "    model: whisper-1\n"
                 "    host: http://localhost:9292\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
                 "  openai/default:\n    provider: openai\n    auth_kind: none\n",
             ),
         )
         storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         output = normalize_console_output(result.output)
 
         assert result.exit_code == 0
-        assert "openai connection 'openai/default' auth-free (no key required)" in output
-        assert "Memory LLM (openai) connection 'openai/default' auth-free (no key required)" in output
-        assert "Memory embedder (openai) connection 'openai/embeddings' auth-free (no key required)" in output
         assert "Voice STT (openai) connection 'openai/stt' auth-free (no key required)" in output
 
     def test_memory_sentence_transformers_embedder_runs_local_smoke_test(

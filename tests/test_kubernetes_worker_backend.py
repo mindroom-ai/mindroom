@@ -491,7 +491,7 @@ def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
     state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
-    local_adc_copy = local_storage_root / state_subpath / ".runtime" / credentials_path.name
+    local_adc_copy = local_storage_root / state_subpath / ".runtime" / f"google_vertex_adc-{credentials_path.name}"
     worker_runtime_paths = _worker_connection_runtime_paths(
         config_path=config_path,
         storage_root=local_storage_root,
@@ -503,7 +503,7 @@ def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_
         purpose="chat_model",
         runtime_paths=worker_runtime_paths,
     )
-    expected_worker_adc_path = f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
+    expected_worker_adc_path = f"/app/worker/{state_subpath}/.runtime/google_vertex_adc-{credentials_path.name}"
 
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == expected_worker_adc_path
     assert connection_google_application_credentials_path(resolved_connection) == expected_worker_adc_path
@@ -578,10 +578,128 @@ def test_kubernetes_backend_mirrors_custom_google_adc_services(tmp_path: Path) -
         purpose="chat_model",
         runtime_paths=worker_runtime_paths,
     )
-    expected_worker_adc_path = f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
+    expected_worker_adc_path = (
+        f"/app/worker/{state_subpath}/.runtime/google_vertex_adc_custom-{credentials_path.name}"
+    )
 
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == expected_worker_adc_path
     assert connection_google_application_credentials_path(resolved_connection) == expected_worker_adc_path
+
+
+def test_kubernetes_backend_disambiguates_same_named_google_adc_files_by_service(tmp_path: Path) -> None:
+    """Dedicated workers should not overwrite mirrored ADC copies when services share a basename."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        (
+            "connections:\n"
+            "  vertexai_claude/default:\n"
+            "    provider: vertexai_claude\n"
+            "    service: google_vertex_adc_primary\n"
+            "    auth_kind: google_adc\n"
+            "  vertexai_claude/backup:\n"
+            "    provider: vertexai_claude\n"
+            "    service: google_vertex_adc_secondary\n"
+            "    auth_kind: google_adc\n"
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+        ),
+        encoding="utf-8",
+    )
+    primary_dir = tmp_path / "adc-a"
+    secondary_dir = tmp_path / "adc-b"
+    primary_dir.mkdir()
+    secondary_dir.mkdir()
+    primary_credentials_path = primary_dir / "adc.json"
+    secondary_credentials_path = secondary_dir / "adc.json"
+    primary_credentials_path.write_text('{"project":"primary"}\n', encoding="utf-8")
+    secondary_credentials_path.write_text('{"project":"secondary"}\n', encoding="utf-8")
+    local_storage_root = tmp_path / "local-shared-storage"
+    local_storage_root.mkdir()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=local_storage_root,
+        process_env={SHARED_CREDENTIALS_PATH_ENV: str(local_storage_root / "credentials")},
+    )
+    shared_credentials = get_runtime_shared_credentials_manager(runtime_paths)
+    shared_credentials.save_credentials(
+        "google_vertex_adc_primary",
+        {
+            "application_credentials_path": str(primary_credentials_path),
+            "_source": "env",
+        },
+    )
+    shared_credentials.save_credentials(
+        "google_vertex_adc_secondary",
+        {
+            "application_credentials_path": str(secondary_credentials_path),
+            "_source": "env",
+        },
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/app/worker",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    worker_runtime_paths = _worker_connection_runtime_paths(
+        config_path=config_path,
+        storage_root=local_storage_root,
+        worker_key=_TEST_SCOPED_WORKER_KEY_A,
+    )
+    config = Config(
+        connections={
+            "vertexai_claude/default": {
+                "provider": "vertexai_claude",
+                "service": "google_vertex_adc_primary",
+                "auth_kind": "google_adc",
+            },
+            "vertexai_claude/backup": {
+                "provider": "vertexai_claude",
+                "service": "google_vertex_adc_secondary",
+                "auth_kind": "google_adc",
+            },
+        },
+    )
+    primary_connection = resolve_connection(
+        config,
+        provider="vertexai_claude",
+        purpose="chat_model",
+        runtime_paths=worker_runtime_paths,
+    )
+    secondary_connection = resolve_connection(
+        config,
+        provider="vertexai_claude",
+        purpose="chat_model",
+        connection_name="vertexai_claude/backup",
+        runtime_paths=worker_runtime_paths,
+    )
+    primary_worker_adc_path = connection_google_application_credentials_path(primary_connection)
+    secondary_worker_adc_path = connection_google_application_credentials_path(secondary_connection)
+
+    assert primary_worker_adc_path is not None
+    assert secondary_worker_adc_path is not None
+    assert primary_worker_adc_path != secondary_worker_adc_path
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == primary_worker_adc_path
+    assert Path(primary_worker_adc_path).name == "google_vertex_adc_primary-adc.json"
+    assert Path(secondary_worker_adc_path).name == "google_vertex_adc_secondary-adc.json"
+    assert (
+        local_storage_root / state_subpath / ".runtime" / Path(primary_worker_adc_path).name
+    ).read_text(encoding="utf-8") == '{"project":"primary"}\n'
+    assert (
+        local_storage_root / state_subpath / ".runtime" / Path(secondary_worker_adc_path).name
+    ).read_text(encoding="utf-8") == '{"project":"secondary"}\n'
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

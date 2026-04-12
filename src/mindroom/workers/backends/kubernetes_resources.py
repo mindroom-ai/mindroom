@@ -64,6 +64,11 @@ _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
+def _worker_runtime_google_adc_filename(service: str, source_path: Path) -> str:
+    """Return a collision-resistant mirrored ADC filename for one worker."""
+    return f"{service.replace(':', '_')}-{source_path.name}"
+
+
 class _ApiStatusError(Exception):
     status: int
 
@@ -671,11 +676,12 @@ class KubernetesResourceManager:
 
             runtime_dir = local_dedicated_root / ".runtime"
             runtime_dir.mkdir(parents=True, exist_ok=True)
-            target_path = runtime_dir / source_path.name
+            target_name = _worker_runtime_google_adc_filename(service, source_path)
+            target_path = runtime_dir / target_name
             if source_path.resolve() != target_path.resolve():
                 shutil.copyfile(source_path, target_path)
                 target_path.chmod(0o600)
-            worker_visible_path = str(dedicated_root / ".runtime" / source_path.name)
+            worker_visible_path = str(dedicated_root / ".runtime" / target_name)
             worker_credentials = dict(cast("dict[str, object]", credentials))
             worker_credentials["application_credentials_path"] = worker_visible_path
             worker_shared_manager.save_credentials(service, worker_credentials)

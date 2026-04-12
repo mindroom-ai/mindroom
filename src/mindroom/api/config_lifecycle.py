@@ -36,6 +36,7 @@ _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
 _REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
 _REGISTERED_API_APPS_LOCK = threading.Lock()
+_BACKEND_MANAGED_GOOGLE_SERVICES = frozenset({"google", "google_oauth_client"})
 
 type WatchFileFn = Callable[
     [Path | str, Callable[[], Awaitable[None]], asyncio.Event | None],
@@ -62,6 +63,7 @@ class ApiSnapshot:
     runtime_config: Config | None = None
     config_load_result: ConfigLoadResult | None = None
     auth_state: Any | None = None
+    backend_managed_services: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -183,8 +185,11 @@ def persist_runtime_validated_config(
     """Persist one validated config and immediately publish matching committed API snapshots."""
     validated_payload = runtime_config.authored_model_dump()
     matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
+    backend_managed_services = _backend_managed_services_for_config(runtime_config)
     if not matching_states:
+        previous_config = _load_existing_runtime_config_if_available(runtime_paths)
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(previous_config, runtime_config, runtime_paths)
         return
 
     with ExitStack() as stack:
@@ -198,11 +203,13 @@ def persist_runtime_validated_config(
 
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
         for state, snapshot in locked_snapshots:
+            _cleanup_removed_google_oauth_client_services(snapshot.runtime_config, runtime_config, runtime_paths)
             state.snapshot = _published_snapshot(
                 snapshot,
                 config_data=deepcopy(validated_payload),
                 runtime_config=runtime_config,
                 config_load_result=ConfigLoadResult(success=True),
+                backend_managed_services=backend_managed_services,
             )
 
 
@@ -220,6 +227,17 @@ def _validated_config_payload(
     return validated_config, validated_config.authored_model_dump()
 
 
+def _load_existing_runtime_config_if_available(runtime_paths: constants.RuntimePaths) -> Config | None:
+    """Return the current on-disk config when it can be loaded before an overwrite."""
+    try:
+        return load_runtime_config_model(
+            runtime_paths,
+            tolerate_plugin_load_errors=True,
+        )
+    except Exception:
+        return None
+
+
 def _google_oauth_client_services(config: Config | None) -> set[str]:
     """Return configured Google OAuth client backing services from one config snapshot."""
     if config is None:
@@ -231,6 +249,13 @@ def _google_oauth_client_services(config: Config | None) -> set[str]:
         and connection.auth_kind == "oauth_client"
         and canonical_connection_provider(connection.provider) == "google"
     }
+
+
+def _backend_managed_services_for_config(config: Config | None) -> frozenset[str]:
+    """Return the cached generic-API denylist for one validated config snapshot."""
+    if config is None:
+        return frozenset()
+    return _BACKEND_MANAGED_GOOGLE_SERVICES | frozenset(_google_oauth_client_services(config))
 
 
 def _cleanup_removed_google_oauth_client_services(
@@ -314,6 +339,7 @@ def _published_snapshot(
     config_data: dict[str, Any] | None = None,
     runtime_config: Config | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
+    backend_managed_services: frozenset[str] | object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
     updated_config_data = snapshot.config_data if config_data is None else config_data
@@ -325,12 +351,18 @@ def _published_snapshot(
         if config_load_result is _UNSET
         else cast("ConfigLoadResult | None", config_load_result)
     )
+    updated_backend_managed_services = (
+        snapshot.backend_managed_services
+        if backend_managed_services is _UNSET
+        else cast("frozenset[str]", backend_managed_services)
+    )
     return replace(
         snapshot,
         generation=snapshot.generation + 1,
         config_data=updated_config_data,
         runtime_config=updated_runtime_config,
         config_load_result=updated_load_result,
+        backend_managed_services=updated_backend_managed_services,
     )
 
 
@@ -399,6 +431,7 @@ def _commit_mutated_snapshot[T](
             config_data=validated_payload,
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
+            backend_managed_services=_backend_managed_services_for_config(validated_config),
         )
         return result
 
@@ -459,6 +492,7 @@ def _commit_replaced_snapshot(
             config_data=validated_payload,
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
+            backend_managed_services=_backend_managed_services_for_config(validated_config),
         )
         return current_state.snapshot.generation
 
@@ -486,6 +520,7 @@ def _commit_raw_replaced_snapshot(
             config_data=validated_payload,
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
+            backend_managed_services=_backend_managed_services_for_config(validated_config),
         )
         return current_state.snapshot.generation
 
@@ -630,11 +665,18 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
+        if runtime_config is not None:
+            _cleanup_removed_google_oauth_client_services(current.runtime_config, runtime_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload if validated_payload is not None else current.config_data,
             runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
             config_load_result=result,
+            backend_managed_services=(
+                _backend_managed_services_for_config(runtime_config)
+                if runtime_config is not None
+                else current.backend_managed_services
+            ),
         )
     return result.success
 

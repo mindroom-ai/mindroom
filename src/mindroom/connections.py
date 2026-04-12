@@ -145,7 +145,11 @@ def allowed_connection_auth_kinds(
     expected_auth_kind = required_connection_auth_kind(provider=provider, purpose=purpose)
     if expected_auth_kind is None:
         return ()
-    if expected_auth_kind == "api_key" and canonical_connection_provider(provider) == "openai":
+    if (
+        expected_auth_kind == "api_key"
+        and canonical_connection_provider(provider) == "openai"
+        and purpose == "voice_stt"
+    ):
         return ("api_key", "none")
     return (expected_auth_kind,)
 
