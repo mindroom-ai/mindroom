@@ -21,7 +21,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -97,7 +97,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         )
 
         # Mock client
-        client = AsyncMock()
+        client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$agent_message_id")
         bot.client = client
@@ -191,7 +191,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
             rooms=["!test:localhost"],
         )
 
-        client = AsyncMock()
+        client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$agent_response_id")
         bot.client = client

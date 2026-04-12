@@ -109,9 +109,13 @@ from tests.conftest import (
     replace_response_runner_deps,
     replace_turn_controller_deps,
     runtime_paths_for,
+    sync_bot_runtime_state,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
+)
+from tests.conftest import (
+    make_matrix_client_mock as _base_make_matrix_client_mock,
 )
 from tests.conftest import (
     replace_turn_policy_deps as shared_replace_turn_policy_deps,
@@ -126,10 +130,7 @@ if TYPE_CHECKING:
 
 def _make_matrix_client_mock() -> AsyncMock:
     """Return a minimal Matrix client mock for bot tests."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
-    client.user_id = "@mindroom_test:example.com"
-    return client
+    return _base_make_matrix_client_mock()
 
 
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
@@ -967,6 +968,7 @@ class TestAgentBot:
         mock_client = AsyncMock()
         # add_event_callback is a sync method, not async
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_response_callback = MagicMock()
         mock_login.return_value = mock_client
 
         # Mock ensure_user_account to not change the agent_user
@@ -1004,6 +1006,7 @@ class TestAgentBot:
         call_order: list[str] = []
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_response_callback = MagicMock()
 
         async def _sync_forever(*_args: object, **_kwargs: object) -> None:
             call_order.append("sync")
@@ -1152,7 +1155,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.running = True
 
         await bot.stop()
@@ -1166,7 +1169,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -1184,7 +1187,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         mock_room = MagicMock()
         mock_event = MagicMock()
@@ -1205,7 +1208,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         mock_room = MagicMock()
         mock_event = MagicMock()
@@ -1266,7 +1269,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         # Mock presence check to return user online when streaming is enabled
         # We need to create a proper mock response that will be returned by get_presence
@@ -1383,7 +1386,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
@@ -1429,7 +1432,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
@@ -1478,7 +1481,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
         mock_stream_agent_response = AsyncMock()
@@ -1531,7 +1534,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
@@ -1584,7 +1587,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
         mock_stream_agent_response = AsyncMock(return_value=mock_streaming_response())
@@ -1623,7 +1626,8 @@ class TestAgentBot:
         """Non-streaming responses should persist attachment IDs in message metadata."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
+        sync_bot_runtime_state(bot)
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
@@ -1661,7 +1665,7 @@ class TestAgentBot:
         """Streaming responses should persist attachment IDs in message metadata."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
 
@@ -1748,7 +1752,7 @@ class TestAgentBot:
         """Metadata populated during generator iteration must appear in extra_content via mutable reference."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
 
@@ -1807,7 +1811,7 @@ class TestAgentBot:
         """CancelledError during streaming must still carry io.mindroom.ai_run in extra_content."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
 
@@ -1874,7 +1878,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
         mock_stream_agent_response = AsyncMock(return_value=mock_streaming_response())
@@ -2154,6 +2158,17 @@ class TestAgentBot:
         """Team final output should use the same before/after hook flow."""
         after_results: list[tuple[str, str, str, str]] = []
 
+        def discard_background_task(
+            coro: object,
+            *,
+            name: str,  # noqa: ARG001
+            error_handler: object | None = None,  # noqa: ARG001
+            owner: object | None = None,  # noqa: ARG001
+        ) -> None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def before_hook(ctx: BeforeResponseContext) -> None:
             ctx.draft.response_text = f"{ctx.draft.response_text} [hooked]"
@@ -2172,7 +2187,8 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
+        sync_bot_runtime_state(bot)
         bot._send_response = AsyncMock(return_value="$team")
         install_send_response_mock(bot, bot._send_response)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
@@ -2187,10 +2203,15 @@ class TestAgentBot:
                 "mindroom.delivery_gateway.edit_message",
                 new=AsyncMock(return_value=_room_send_response("$edit")),
             ) as mock_edit_message,
+            patch(
+                "mindroom.delivery_gateway.build_threaded_edit_content",
+                new=AsyncMock(return_value={"msgtype": "m.text", "body": "Team reply [hooked]"}),
+            ),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value="Team reply"),
+                create_background_task=MagicMock(side_effect=discard_background_task),
             ),
         ):
             event_id = await bot._generate_team_response_helper(
@@ -2630,10 +2651,23 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Team interactive questions should be owned by the real bot agent name."""
+
+        def discard_background_task(
+            coro: object,
+            *,
+            name: str,  # noqa: ARG001
+            error_handler: object | None = None,  # noqa: ARG001
+            owner: object | None = None,  # noqa: ARG001
+        ) -> None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
+        sync_bot_runtime_state(bot)
         bot._send_response = AsyncMock(return_value="$team")
         install_send_response_mock(bot, bot._send_response)
         bot.orchestrator = MagicMock(
@@ -2650,6 +2684,11 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value=interactive_response),
+                create_background_task=MagicMock(side_effect=discard_background_task),
+            ),
+            patch(
+                "mindroom.delivery_gateway.build_threaded_edit_content",
+                new=AsyncMock(return_value={"msgtype": "m.text", "body": "Interactive team reply"}),
             ),
             patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
             patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
@@ -2899,7 +2938,8 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
+        sync_bot_runtime_state(bot)
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
         install_send_response_mock(bot, bot._send_response)
@@ -3500,7 +3540,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
 
         with (
@@ -3511,6 +3551,7 @@ class TestAgentBot:
             patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
@@ -7656,6 +7697,10 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
         # Use the helper method to create mock config
         config = self._config_for_storage(tmp_path)
         mock_load_config.return_value = config
@@ -7680,7 +7725,7 @@ class TestAgentBot:
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
         )
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator with agent_bots
         mock_orchestrator = MagicMock()
@@ -7778,111 +7823,119 @@ class TestAgentBot:
             },
         }
 
-        await bot._on_message(mock_room, mock_event)
-
-        # Should respond as only agent in thread
-        if enable_streaming:
-            mock_stream_agent_response.assert_called_once()
-            mock_ai_response.assert_not_called()
-            # With streaming and stop button support
-            assert bot.client.room_send.call_count >= 2
-        else:
-            mock_ai_response.assert_called_once()
-            mock_stream_agent_response.assert_not_called()
-            # With stop button support: initial + reaction + final
-            assert bot.client.room_send.call_count >= 2
-
-        # Reset mocks
-        mock_stream_agent_response.reset_mock()
-        mock_ai_response.reset_mock()
-        mock_team_arun.reset_mock()
-        bot.client.room_send.reset_mock()
-        mock_fetch_history.reset_mock()
-
-        # Test 2: Thread with multiple agents - should NOT respond without mention
-        test2_history = [
-            _visible_message(sender="@user:localhost", body="Previous message", timestamp=123, event_id="prev1"),
-            _visible_message(sender=mock_agent_user.user_id, body="My response", timestamp=124, event_id="prev2"),
-            _visible_message(
-                sender=config.get_ids(runtime_paths_for(config))["general"].full_id
-                if "general" in config.get_ids(runtime_paths_for(config))
-                else "@mindroom_general:localhost",
-                body="Another agent response",
-                timestamp=125,
-                event_id="prev3",
+        with (
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+            patch(
+                "mindroom.response_runner.store_conversation_memory",
+                side_effect=fake_store_conversation_memory,
             ),
-        ]
-        mock_fetch_history.return_value = test2_history
-        mock_fetch_snapshot.return_value = test2_history
+            patch("mindroom.post_response_effects.maybe_generate_thread_summary", new=AsyncMock()),
+        ):
+            await bot._on_message(mock_room, mock_event)
 
-        # Create a new event with a different ID for Test 2
-        mock_event_2 = MagicMock()
-        mock_event_2.sender = "@user:localhost"
-        mock_event_2.body = "Thread message without mention"
-        mock_event_2.event_id = "event456"  # Different event ID
-        mock_event_2.server_timestamp = 127
-        mock_event_2.source = {
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "thread_root",
+            # Should respond as only agent in thread
+            if enable_streaming:
+                mock_stream_agent_response.assert_called_once()
+                mock_ai_response.assert_not_called()
+                # With streaming and stop button support
+                assert bot.client.room_send.call_count >= 2
+            else:
+                mock_ai_response.assert_called_once()
+                mock_stream_agent_response.assert_not_called()
+                # With stop button support: initial + reaction + final
+                assert bot.client.room_send.call_count >= 2
+
+            # Reset mocks
+            mock_stream_agent_response.reset_mock()
+            mock_ai_response.reset_mock()
+            mock_team_arun.reset_mock()
+            bot.client.room_send.reset_mock()
+            mock_fetch_history.reset_mock()
+
+            # Test 2: Thread with multiple agents - should NOT respond without mention
+            test2_history = [
+                _visible_message(sender="@user:localhost", body="Previous message", timestamp=123, event_id="prev1"),
+                _visible_message(sender=mock_agent_user.user_id, body="My response", timestamp=124, event_id="prev2"),
+                _visible_message(
+                    sender=config.get_ids(runtime_paths_for(config))["general"].full_id
+                    if "general" in config.get_ids(runtime_paths_for(config))
+                    else "@mindroom_general:localhost",
+                    body="Another agent response",
+                    timestamp=125,
+                    event_id="prev3",
+                ),
+            ]
+            mock_fetch_history.return_value = test2_history
+            mock_fetch_snapshot.return_value = test2_history
+
+            # Create a new event with a different ID for Test 2
+            mock_event_2 = MagicMock()
+            mock_event_2.sender = "@user:localhost"
+            mock_event_2.body = "Thread message without mention"
+            mock_event_2.event_id = "event456"  # Different event ID
+            mock_event_2.server_timestamp = 127
+            mock_event_2.source = {
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "thread_root",
+                    },
                 },
-            },
-        }
+            }
 
-        await bot._on_message(mock_room, mock_event_2)
+            await bot._on_message(mock_room, mock_event_2)
 
-        # Should form team and send a structured streaming team response
-        mock_stream_agent_response.assert_not_called()
-        mock_ai_response.assert_not_called()
-        mock_team_arun.assert_called_once()
-        # Structured streaming sends an initial message and one or more edits
-        assert bot.client.room_send.call_count >= 1
-
-        # Reset mocks
-        mock_stream_agent_response.reset_mock()
-        mock_ai_response.reset_mock()
-        mock_team_arun.reset_mock()
-        bot.client.room_send.reset_mock()
-
-        # Test 3: Thread with multiple agents WITH mention - should respond
-        mock_event_with_mention = MagicMock()
-        mock_event_with_mention.sender = "@user:localhost"
-        mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
-        mock_event_with_mention.event_id = "event789"  # Unique event ID for Test 3
-        mock_event_with_mention.server_timestamp = 128
-        mock_event_with_mention.source = {
-            "content": {
-                "body": "@mindroom_calculator:localhost What's 2+2?",
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "thread_root",
-                },
-                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            },
-        }
-
-        # Set up fresh async generator for the second call
-        async def mock_streaming_response2() -> AsyncGenerator[str, None]:
-            yield "Mentioned"
-            yield " response"
-
-        mock_stream_agent_response.return_value = mock_streaming_response2()
-        mock_ai_response.return_value = "Mentioned response"
-
-        await bot._on_message(mock_room, mock_event_with_mention)
-
-        # Should respond when explicitly mentioned
-        if enable_streaming:
-            mock_stream_agent_response.assert_called_once()
-            mock_ai_response.assert_not_called()
-            # With streaming and stop button support
-            assert bot.client.room_send.call_count >= 2
-        else:
-            mock_ai_response.assert_called_once()
+            # Should form team and send a structured streaming team response
             mock_stream_agent_response.assert_not_called()
-            # With stop button support: initial + reaction + final
-            assert bot.client.room_send.call_count >= 2
+            mock_ai_response.assert_not_called()
+            mock_team_arun.assert_called_once()
+            # Structured streaming sends an initial message and one or more edits
+            assert bot.client.room_send.call_count >= 1
+
+            # Reset mocks
+            mock_stream_agent_response.reset_mock()
+            mock_ai_response.reset_mock()
+            mock_team_arun.reset_mock()
+            bot.client.room_send.reset_mock()
+
+            # Test 3: Thread with multiple agents WITH mention - should respond
+            mock_event_with_mention = MagicMock()
+            mock_event_with_mention.sender = "@user:localhost"
+            mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
+            mock_event_with_mention.event_id = "event789"  # Unique event ID for Test 3
+            mock_event_with_mention.server_timestamp = 128
+            mock_event_with_mention.source = {
+                "content": {
+                    "body": "@mindroom_calculator:localhost What's 2+2?",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "thread_root",
+                    },
+                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                },
+            }
+
+            # Set up fresh async generator for the second call
+            async def mock_streaming_response2() -> AsyncGenerator[str, None]:
+                yield "Mentioned"
+                yield " response"
+
+            mock_stream_agent_response.return_value = mock_streaming_response2()
+            mock_ai_response.return_value = "Mentioned response"
+
+            await bot._on_message(mock_room, mock_event_with_mention)
+
+            # Should respond when explicitly mentioned
+            if enable_streaming:
+                mock_stream_agent_response.assert_called_once()
+                mock_ai_response.assert_not_called()
+                # With streaming and stop button support
+                assert bot.client.room_send.call_count >= 2
+            else:
+                mock_ai_response.assert_called_once()
+                mock_stream_agent_response.assert_not_called()
+                # With stop button support: initial + reaction + final
+                assert bot.client.room_send.call_count >= 2
 
     @pytest.mark.asyncio
     async def test_agent_bot_skips_already_responded_messages(

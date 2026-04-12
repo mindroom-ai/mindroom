@@ -25,6 +25,7 @@ from mindroom.matrix.client import (
     get_room_threads_page,
 )
 from mindroom.matrix.event_cache import EventCache
+from tests.conftest import make_matrix_client_mock
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -808,7 +809,7 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_returns_thread_root_on_history_failure(self) -> None:
         """The helper should degrade to the thread root when visible-history lookup fails."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
 
         with patch(
             "mindroom.matrix.client.fetch_thread_history",

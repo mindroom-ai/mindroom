@@ -23,6 +23,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    make_matrix_client_mock,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -75,7 +76,7 @@ def setup_test_bot(
         rooms=[room_id],
         enable_streaming=enable_streaming,
     )
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=agent.user_id)
     return bot
 
 

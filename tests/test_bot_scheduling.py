@@ -363,6 +363,8 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
+                mock_client.add_event_callback = MagicMock()
+                mock_client.add_response_callback = MagicMock()
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
@@ -409,6 +411,8 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
+                mock_client.add_event_callback = MagicMock()
+                mock_client.add_response_callback = MagicMock()
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse

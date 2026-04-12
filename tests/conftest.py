@@ -9,6 +9,7 @@ from itertools import count
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 import pytest_asyncio
 from aioresponses import aioresponses
@@ -38,6 +39,7 @@ __all__ = [
     "install_generate_response_mock",
     "install_send_response_mock",
     "install_send_skill_command_response_mock",
+    "make_matrix_client_mock",
     "make_visible_message",
     "normalize_console_output",
     "orchestrator_runtime_paths",
@@ -61,6 +63,49 @@ _VISIBLE_MESSAGE_IDS = count(1)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 RuntimeBot = AgentBot | TeamBot
+
+
+async def _empty_async_iterator() -> AsyncGenerator[object, None]:
+    """Yield nothing while preserving async-iterator semantics for nio relations APIs."""
+    if False:
+        yield None
+
+
+def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
+    """Return a minimal RoomGetEventResponse containing one visible text event."""
+    event = MagicMock(spec=nio.RoomMessageText)
+    event.event_id = event_id
+    event.sender = "@user:localhost"
+    event.body = event_id
+    event.server_timestamp = 0
+    event.source = {
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.text",
+            "body": event_id,
+        },
+    }
+    response = nio.RoomGetEventResponse()
+    response.event = event
+    return response
+
+
+def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
+    """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    client.user_id = user_id
+    presence_response = MagicMock()
+    presence_response.presence = "offline"
+    presence_response.last_active_ago = 3_600_000
+    room_messages_response = nio.RoomMessagesResponse(room_id="!test:localhost", chunk=[], start="", end=None)
+    client.add_event_callback = MagicMock()
+    client.add_response_callback = MagicMock()
+    client.get_presence = AsyncMock(return_value=presence_response)
+    client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
+    client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
+    client.room_messages = AsyncMock(return_value=room_messages_response)
+    return client
 
 
 def normalize_console_output(text: str) -> str:
