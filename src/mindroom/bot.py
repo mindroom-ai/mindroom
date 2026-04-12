@@ -307,6 +307,8 @@ class AgentBot:
     runtime_paths: RuntimePaths
     rooms: list[str]
     config_path: Path | None
+    logger: structlog.stdlib.BoundLogger
+    stop_manager: StopManager
 
     # Mutable lifecycle state
     running: bool
@@ -353,6 +355,8 @@ class AgentBot:
         self.runtime_paths = runtime_paths
         self.rooms = [] if rooms is None else rooms
         self.config_path = config_path
+        self.logger = logger.bind(agent=self.agent_name)
+        self.stop_manager = StopManager()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -625,11 +629,6 @@ class AgentBot:
         return self.agent_user.agent_name
 
     @cached_property
-    def logger(self) -> structlog.stdlib.BoundLogger:
-        """Get a logger with agent context bound."""
-        return logger.bind(agent=self.agent_name)
-
-    @cached_property
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
@@ -782,11 +781,6 @@ class AgentBot:
             execution_identity=execution_identity,
             hook_registry=self.hook_registry,
         )
-
-    @cached_property
-    def stop_manager(self) -> StopManager:
-        """Get or create the StopManager for this agent."""
-        return StopManager()
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
