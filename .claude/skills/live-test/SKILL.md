@@ -1,53 +1,35 @@
----
-name: live-test
-description: Run live end-to-end checks for this repository. Use when booting the local MindRoom stack or SaaS sandbox, starting an isolated local Matrix/backend instance, creating disposable Matrix accounts, sending or reading messages with Matty, hitting live API endpoints, taking frontend screenshots, or verifying behavior through the real UI instead of tests alone. Also use when a live-test workflow struggled and the skill itself should be improved.
----
+Live-test skill for MindRoom repository — runs real product and collects runtime evidence.
 
-# Live Test
+## ⛔ CRITICAL SAFETY
+- **NEVER touch `mindroom-chat.service` (port 8766)** — that is PRODUCTION
+- **USE `mindroom-lab.service` (port 8765)** — that is the dev/test instance, safe to restart
+- **Matrix homeserver (port 8008)** is always running — NEVER start another
 
-Run the real product and collect runtime evidence.
+## Quick Start
 
-## ⚠️ NixOS Environment
+**For most live tests, use the lab service.** Read `references/core-mindroom.md` for the full recipe.
 
-On NixOS hosts, run commands inside the repo dev shell so `libstdc++.so.6` is available.
-Without it, numpy fails to import and you get `AttributeError: module 'mindroom' has no attribute 'bot'`.
+1. If your code is on `main`: `sudo systemctl restart mindroom-lab.service`
+2. If your code is on a worktree branch: stop the lab, run from your worktree with lab config, test, restart lab
+3. Create a disposable Matrix user (two-step UIAA with registration token — see reference)
+4. Find a bot that's in a room (scan all bots — see reference)
+5. Invite your test user, join room, send message mentioning the bot
+6. Verify bot responds, capture evidence
+7. Evidence = exact commands + observed output (HARD GATE for merge)
 
-```bash
-nix-shell shell.nix
-# then run normally inside the shell:
-uv run pytest ...
-uv run mindroom run
-```
+## References
 
-If `nix-shell shell.nix` cannot resolve `<nixpkgs>`, use:
+- **`references/core-mindroom.md`** — Backend / Matrix live testing (lab service, isolated instance, user creation, room joining, messaging, troubleshooting)
+- **`references/frontend-and-platform.md`** — Frontend / dashboard / SaaS screenshot workflows
 
-```bash
-nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix
-```
+## NixOS Requirement
 
-See `references/core-mindroom.md` for details.
+**Must use `nix-shell shell.nix`** before running `uv run` commands (provides `libstdc++.so.6`).
+Fallback: `nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix`
 
-## Workflow
+## Key Principles
 
-1. Choose the surface you need to test.
-- For the core MindRoom runtime, local Matrix, Matty, and bundled dashboard, read [references/core-mindroom.md](references/core-mindroom.md).
-- For the core frontend screenshot flow, frontend-only dev server, SaaS sandbox, and platform frontend screenshots, read [references/frontend-and-platform.md](references/frontend-and-platform.md).
-
-2. Prefer isolated local runs when the worktree or machine is already busy.
-- Existing local instances often collide on ports, Matrix usernames, room aliases, and dashboard API ports.
-- If you see conflicts, create a temporary config, set a unique `MINDROOM_NAMESPACE`, use a unique `mindroom_user.username`, isolate `MINDROOM_STORAGE_PATH`, and choose a non-default `--api-port`.
-- If the isolated run writes a temporary `.env`, inspect it before hitting authenticated `/api/*` routes because it may contain the instance-specific `MINDROOM_API_KEY`.
-
-3. Verify behavior, not just startup.
-- For chat flows, send a real message and inspect the actual reply thread.
-- For backend changes, hit the live endpoint on the same instance you started.
-- For frontend changes, capture screenshots and inspect the generated PNGs.
-
-4. Preserve evidence.
-- Record the exact command, port, room name, room ID, thread ID, and returned payload or screenshot path.
-- Prefer Matty `--format json` when you need stable confirmation.
-- If room aliases or thread listings are flaky, fall back to the concrete room ID from backend logs and direct `matty thread` reads.
-
-5. Improve this skill when it struggles.
-- If a live run exposes missing instructions, stale ports, missing workarounds, or a better repo-specific path, update this skill or its references in the same task when reasonable.
-- Keep `SKILL.md` concise and move detailed command sequences into the reference files.
+1. **Verify behavior, not just startup** — send real messages, get real bot responses
+2. **Isolate** — use unique namespace, port, and user to avoid collision with production
+3. **Preserve evidence** — record commands, ports, room IDs, payloads, screenshot paths
+4. **Update this skill** when live runs expose gaps in the instructions
