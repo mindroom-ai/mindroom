@@ -123,7 +123,7 @@ class ConversationStateWriter:
         if normalized_scope == self.history_scope():
             return self.create_history_scope_storage(execution_identity)
         return create_scope_session_storage(
-            agent_name=self.deps.agent_name,
+            agent_name=normalized_scope.scope_id if normalized_scope.kind == "agent" else self.deps.agent_name,
             scope=normalized_scope,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,

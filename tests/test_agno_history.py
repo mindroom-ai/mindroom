@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,11 +35,13 @@ from mindroom.ai import _prepare_agent_and_prompt, build_prompt_with_thread_hist
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
     _build_summary_input,
+    _emit_compaction_hook,
     estimate_agent_static_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
@@ -71,9 +75,20 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+from mindroom.hooks import (
+    BUILTIN_EVENT_NAMES,
+    EVENT_COMPACTION_AFTER,
+    EVENT_COMPACTION_BEFORE,
+    CompactionHookContext,
+    HookRegistry,
+    hook,
+)
+from mindroom.hooks.execution import reset_hook_execution_state
+from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_visible_message
 
 
@@ -269,6 +284,13 @@ def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         storage.close()
 
 
+@pytest.fixture(autouse=True)
+def _reset_execution_state() -> Iterator[None]:
+    reset_hook_execution_state()
+    yield
+    reset_hook_execution_state()
+
+
 def _team_session(
     session_id: str,
     *,
@@ -307,6 +329,63 @@ def _agent(
         num_history_messages=num_history_messages,
         store_history_messages=False,
     )
+
+
+def _hook_runtime_context(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    registry: HookRegistry,
+    session_id: str,
+    thread_id: str | None = "$thread",
+) -> ToolRuntimeContext:
+    return ToolRuntimeContext(
+        agent_name="test_agent",
+        room_id="!room:localhost",
+        thread_id=thread_id,
+        resolved_thread_id=thread_id,
+        requester_id="@user:localhost",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        session_id=session_id,
+        hook_registry=registry,
+        correlation_id="corr-compaction",
+    )
+
+
+def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        discovered_hooks=tuple(callbacks),
+        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
+        plugin_order=0,
+    )
+
+
+def _forced_compaction_context(
+    tmp_path: Path,
+    *,
+    session: AgentSession,
+    registry: HookRegistry | None = None,
+    context_window: int = 64_000,
+) -> tuple[Config, RuntimePaths, object, HistoryScope, ToolRuntimeContext]:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=context_window,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    runtime_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=registry or HookRegistry.empty(),
+        session_id=session.session_id,
+    )
+    return config, runtime_paths, storage, scope, runtime_context
 
 
 def test_estimate_static_tokens_includes_tool_definitions() -> None:
@@ -601,6 +680,487 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert prepared.replays_persisted_history is False
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
+
+
+def test_compaction_hook_events_are_registered() -> None:
+    assert EVENT_COMPACTION_BEFORE in BUILTIN_EVENT_NAMES
+    assert EVENT_COMPACTION_AFTER in BUILTIN_EVENT_NAMES
+    assert validate_event_name(EVENT_COMPACTION_BEFORE) == EVENT_COMPACTION_BEFORE
+    assert validate_event_name(EVENT_COMPACTION_AFTER) == EVENT_COMPACTION_AFTER
+    assert "compaction" in RESERVED_EVENT_NAMESPACES
+    assert default_timeout_ms_for_event(EVENT_COMPACTION_BEFORE) == 15000
+    assert default_timeout_ms_for_event(EVENT_COMPACTION_AFTER) == 5000
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    observed: list[tuple[str, list[str], int, int | None, str | None]] = []
+
+    @hook(EVENT_COMPACTION_BEFORE, priority=10)
+    async def before_first(ctx: CompactionHookContext) -> None:
+        observed.append(
+            (
+                ctx.event_name,
+                ctx.scope.key,
+                [str(message.content) for message in ctx.messages],
+                ctx.token_count_before,
+                ctx.token_count_after,
+                ctx.compaction_summary,
+            ),
+        )
+
+    @hook(EVENT_COMPACTION_BEFORE, priority=20)
+    async def before_second(ctx: CompactionHookContext) -> None:
+        observed.append((f"{ctx.event_name}:second", [], 0, None, None))
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(ctx: CompactionHookContext) -> None:
+        observed.append(
+            (
+                ctx.event_name,
+                ctx.scope.key,
+                [str(message.content) for message in ctx.messages],
+                ctx.token_count_before,
+                ctx.token_count_after,
+                ctx.compaction_summary,
+            ),
+        )
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before_first, before_second, after])])
+    agent = _agent(db=storage)
+    runtime_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=registry,
+        session_id="session-1",
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="summary-model", provider="fake")),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=agent,
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+    assert observed[0] == (
+        "compaction:before",
+        "agent:test_agent",
+        ["run-1 question", "run-1 answer", "run-2 question", "run-2 answer"],
+        observed[0][3],
+        None,
+        None,
+    )
+    assert observed[1] == ("compaction:before:second", [], 0, None, None)
+    assert observed[2] == (
+        "compaction:after",
+        "agent:test_agent",
+        ["run-1 question", "run-1 answer", "run-2 question", "run-2 answer"],
+        observed[2][3],
+        prepared.compaction_outcomes[0].after_tokens,
+        "merged summary",
+    )
+    assert observed[0][3] == prepared.compaction_outcomes[0].before_tokens
+    assert observed[2][3] == prepared.compaction_outcomes[0].before_tokens
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_branch(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    storage.upsert_session(session)
+
+    observed: list[str] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def before(_ctx: CompactionHookContext) -> None:
+        observed.append("before")
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(_ctx: CompactionHookContext) -> None:
+        observed.append("after")
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
+    runtime_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=registry,
+        session_id="session-1",
+    )
+
+    with tool_runtime_context(runtime_context):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert prepared.compaction_outcomes == []
+    assert observed == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_does_not_collect_compaction_messages_without_hooks(tmp_path: Path) -> None:
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(
+        tmp_path,
+        session=session,
+        registry=HookRegistry.empty(),
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="summary-model", provider="fake")),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+        patch(
+            "mindroom.history.compaction._messages_for_runs",
+            side_effect=AssertionError("compaction messages should not be collected without hooks"),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewrite_returns_none(
+    tmp_path: Path,
+) -> None:
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+
+    observed: list[str] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def before(_ctx: CompactionHookContext) -> None:
+        observed.append("before")
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(_ctx: CompactionHookContext) -> None:
+        observed.append("after")
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
+    config, runtime_paths, storage, scope, runtime_context = _forced_compaction_context(
+        tmp_path,
+        session=session,
+        registry=registry,
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="summary-model", provider="fake")),
+        patch(
+            "mindroom.history.compaction._rewrite_working_session_for_compaction",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert len(persisted.runs or []) == 2
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert prepared.compaction_outcomes == []
+    assert observed == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_scopes(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    observed: list[str] = []
+
+    @hook(EVENT_COMPACTION_BEFORE, agents=["test_agent"], rooms=["!room:localhost"])
+    async def matching(ctx: CompactionHookContext) -> None:
+        observed.append(f"{ctx.scope.key}:{ctx.agent_name}:{ctx.room_id}:{ctx.thread_id}")
+
+    @hook(EVENT_COMPACTION_BEFORE, agents=["other_agent"], rooms=["!room:localhost"])
+    async def wrong_agent(ctx: CompactionHookContext) -> None:
+        observed.append(f"wrong-agent:{ctx.agent_name}")
+
+    @hook(EVENT_COMPACTION_BEFORE, agents=["test_agent"], rooms=["!elsewhere:localhost"])
+    async def wrong_room(ctx: CompactionHookContext) -> None:
+        observed.append(f"wrong-room:{ctx.room_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching, wrong_agent, wrong_room])])
+    runtime_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=registry,
+        session_id="session-1",
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="summary-model", provider="fake")),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+    assert observed == ["agent:test_agent:test_agent:!room:localhost:$thread"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    observed: list[str] = []
+
+    @hook(EVENT_COMPACTION_BEFORE, agents=["team_general"], rooms=["!room:localhost"])
+    async def matching(ctx: CompactionHookContext) -> None:
+        observed.append(f"{ctx.scope.key}:{ctx.agent_name}:{ctx.room_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching])])
+    runtime_context = ToolRuntimeContext(
+        agent_name="router",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="@user:localhost",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        session_id="session-1",
+        hook_registry=registry,
+        correlation_id="corr-compaction",
+    )
+
+    with tool_runtime_context(runtime_context):
+        await _emit_compaction_hook(
+            event_name=EVENT_COMPACTION_BEFORE,
+            scope=HistoryScope(kind="team", scope_id="team_general"),
+            messages=[Message(role="user", content="hello")],
+            session_id="session-1",
+            token_count_before=10,
+            token_count_after=None,
+            compaction_summary=None,
+        )
+
+    assert observed == ["team:team_general:team_general:!room:localhost:$thread"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    observed: list[str] = []
+
+    @hook(EVENT_COMPACTION_BEFORE, priority=10, timeout_ms=10)
+    async def slow_before(_ctx: CompactionHookContext) -> None:
+        observed.append("slow")
+        await asyncio.sleep(0.05)
+
+    @hook(EVENT_COMPACTION_BEFORE, priority=20)
+    async def fast_before(ctx: CompactionHookContext) -> None:
+        observed.append(f"fast:{ctx.session_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [slow_before, fast_before])])
+    runtime_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=registry,
+        session_id="session-1",
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="summary-model", provider="fake")),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+    assert observed == ["slow", "fast:session-1"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> None:
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+
+    observed: list[str] = []
+
+    @hook(EVENT_COMPACTION_BEFORE, priority=10)
+    async def failing(_ctx: CompactionHookContext) -> None:
+        observed.append("failed")
+        msg = "hook failed"
+        raise RuntimeError(msg)
+
+    @hook(EVENT_COMPACTION_BEFORE, priority=20)
+    async def fast(ctx: CompactionHookContext) -> None:
+        observed.append(f"fast:{ctx.session_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [failing, fast])])
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(
+        tmp_path,
+        session=session,
+        registry=registry,
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch("mindroom.ai.get_model_instance", return_value=FakeModel(id="summary-model", provider="fake")),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+    assert observed == ["failed", "fast:session-1"]
 
 
 @pytest.mark.asyncio

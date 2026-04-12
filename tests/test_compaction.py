@@ -181,9 +181,10 @@ class TestCompactionOutcome:
     def test_to_notice_metadata_basic(self) -> None:
         outcome = _make_outcome()
         meta = outcome.to_notice_metadata()
-        assert meta["version"] == 1
+        assert meta["version"] == 2
         assert meta["before_tokens"] == 30_000
         assert meta["after_tokens"] == 12_000
+        assert meta["history_budget_tokens"] == 100_000
         assert meta["compacted_run_count"] == 12
         assert "role_instructions_tokens" not in meta
         assert "tool_definition_tokens" not in meta
@@ -202,6 +203,8 @@ class TestCompactionOutcome:
             current_prompt_tokens=100,
         )
         meta = outcome.to_notice_metadata()
+        assert meta["version"] == 2
+        assert meta["history_budget_tokens"] == 100_000
         assert meta["role_instructions_tokens"] == 2_000
         assert meta["tool_definition_tokens"] == 1_500
         assert meta["current_prompt_tokens"] == 100

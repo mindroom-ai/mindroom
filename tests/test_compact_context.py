@@ -483,6 +483,8 @@ async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(t
     assert event_id == "$notice"
     assert mock_send.await_args is not None
     sent_content = mock_send.await_args.args[2]
+    assert sent_content["io.mindroom.compaction"]["version"] == 2
+    assert sent_content["io.mindroom.compaction"]["history_budget_tokens"] == 100_000
     assert sent_content["body"] == outcome.format_notice()
     assert sent_content["body"] == (
         "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"

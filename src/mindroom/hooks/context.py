@@ -33,10 +33,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import structlog
+    from agno.models.message import Message
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.types import HistoryScope
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
@@ -383,6 +385,7 @@ class CancelledResponseInfo:
     envelope: MessageEnvelope
     visible_response_event_id: str | None = None
     response_kind: str = "ai"
+    failure_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -402,6 +405,21 @@ class AgentLifecycleContext(HookContext):
     matrix_user_id: str
     joined_room_ids: tuple[str, ...] = ()
     stop_reason: str | None = None
+
+
+@dataclass(slots=True)
+class CompactionHookContext(HookContext):
+    """Context for compaction lifecycle observer hooks."""
+
+    agent_name: str
+    scope: HistoryScope
+    room_id: str
+    thread_id: str | None
+    messages: list[Message]
+    session_id: str
+    token_count_before: int
+    token_count_after: int | None
+    compaction_summary: str | None
 
 
 @dataclass(slots=True)
@@ -462,6 +480,17 @@ class ConfigReloadedContext(HookContext):
     added_entities: tuple[str, ...]
     removed_entities: tuple[str, ...]
     plugin_changes: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class SessionHookContext(HookContext):
+    """Context for session lifecycle observer hooks."""
+
+    agent_name: str
+    scope: HistoryScope
+    session_id: str
+    room_id: str
+    thread_id: str | None
 
 
 @dataclass(slots=True)

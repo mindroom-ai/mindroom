@@ -3382,6 +3382,7 @@ class TestAgentBot:
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, return_value="ok"),
             patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")),
+            patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch(
