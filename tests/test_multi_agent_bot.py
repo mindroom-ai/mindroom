@@ -239,8 +239,13 @@ def _response_request(
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for bot tests."""
+    authored = config.authored_model_dump()
+    authored_defaults = authored.setdefault("defaults", {})
+    authored_coalescing = authored_defaults.setdefault("coalescing", {})
+    authored_coalescing.setdefault("debounce_ms", 0)
+    authored_coalescing.setdefault("upload_grace_ms", 0)
     return bind_runtime_paths(
-        config,
+        Config.model_validate(authored),
         test_runtime_paths(runtime_root),
     )
 

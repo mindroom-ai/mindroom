@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
@@ -54,9 +55,8 @@ def _make_config(
     *,
     debounce_ms: int = 10,
     upload_grace_ms: int = 0,
-    enabled: bool = True,
 ) -> Config:
-    """Build a config with configurable live coalescing enabled or disabled."""
+    """Build a config with configurable live coalescing timings."""
     return bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="TestAgent", rooms=["!room:localhost"])},
@@ -64,7 +64,6 @@ def _make_config(
             models={"default": ModelConfig(provider="test", id="test-model")},
             defaults=DefaultsConfig(
                 coalescing={
-                    "enabled": enabled,
                     "debounce_ms": debounce_ms,
                     "upload_grace_ms": upload_grace_ms,
                 },
@@ -80,11 +79,10 @@ def _make_bot(
     *,
     debounce_ms: int = 10,
     upload_grace_ms: int = 0,
-    enabled: bool = True,
     agent_name: str = "test_agent",
 ) -> AgentBot:
     """Create a bot instance wired to a temporary runtime root."""
-    config = _make_config(tmp_path, debounce_ms=debounce_ms, upload_grace_ms=upload_grace_ms, enabled=enabled)
+    config = _make_config(tmp_path, debounce_ms=debounce_ms, upload_grace_ms=upload_grace_ms)
     agent_user = AgentMatrixUser(
         agent_name=agent_name,
         password=TEST_PASSWORD,
@@ -106,6 +104,19 @@ def _make_bot(
         state_writer=bot._conversation_state_writer,
     )
     return bot
+
+
+def test_coalescing_config_rejects_removed_enabled_flag(tmp_path: Path) -> None:
+    """Reject the removed defaults.coalescing.enabled toggle."""
+    with pytest.raises(ValidationError, match="enabled"):
+        Config.validate_with_runtime(
+            {
+                "agents": {"test_agent": {"display_name": "TestAgent"}},
+                "models": {"default": {"provider": "test", "id": "test-model"}},
+                "defaults": {"coalescing": {"enabled": True}},
+            },
+            test_runtime_paths(tmp_path),
+        )
 
 
 def _respond_dispatch_plan(action: object | None = None) -> DispatchPlan:

@@ -362,13 +362,11 @@ class CoalescingGate:
         self,
         *,
         dispatch_batch: Callable[[CoalescedBatch], Awaitable[None]],
-        enabled: Callable[[], bool],
         debounce_seconds: Callable[[], float],
         upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
     ) -> None:
         self._dispatch_batch = dispatch_batch
-        self._enabled = enabled
         self._debounce_seconds = debounce_seconds
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
@@ -403,8 +401,8 @@ class CoalescingGate:
 
     async def enqueue(self, key: CoalescingKey, pending_event: PendingEvent) -> None:
         """Queue one pending event and schedule its eventual flush."""
-        # Path 1: bypass — disabled or automation
-        if not self._enabled() or is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
+        # Path 1: bypass — explicitly exempt automation
+        if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
             await self._dispatch_batch(build_coalesced_batch(key, [pending_event]))
             return
 

@@ -41,10 +41,8 @@ class StreamingConfig(BaseModel):
 class CoalescingConfig(BaseModel):
     """Live dispatch coalescing configuration."""
 
-    enabled: bool = Field(
-        default=True,
-        description="Whether to debounce rapid inbound messages into one dispatch per sender/thread scope",
-    )
+    model_config = ConfigDict(extra="forbid")
+
     debounce_ms: int = Field(
         default=300,
         ge=0,
