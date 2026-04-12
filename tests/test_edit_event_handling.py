@@ -49,11 +49,11 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     bot.client.user_id = "@router:example.com"
 
     # Mock other dependencies
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
-    bot.handled_turn_ledger.get_turn_record.return_value = None
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
@@ -106,7 +106,6 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
         ),
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
-        patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
     ):
         # Process the edit event - this should not re-enter normal dispatch.
         await bot._on_message(room, edit_event)
@@ -143,11 +142,11 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@router:example.com"
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
-    bot.handled_turn_ledger.get_turn_record.return_value = None
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
 
@@ -204,7 +203,6 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
         ),
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
-        patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
     ):
         # Process all edit events
         for edit_event in edit_events:
@@ -242,11 +240,11 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
-    bot.handled_turn_ledger.get_turn_record.return_value = None
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 
@@ -292,7 +290,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Mock the generate_response method
     with (
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
-        patch.object(bot._edit_regenerator, "load_persisted_turn_metadata", return_value=None),
+        patch.object(bot._turn_store, "load_turn_record", return_value=None),
     ):
         # Process the edit event
         await bot._on_message(room, edit_event)

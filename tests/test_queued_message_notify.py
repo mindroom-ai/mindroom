@@ -34,7 +34,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryResult
-from mindroom.dispatch_planner import DispatchPlan, PreparedDispatch
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.users import AgentMatrixUser
@@ -43,6 +42,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -667,12 +667,12 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
 
     with (
         patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(
-            bot._dispatch_planner,
-            "plan_dispatch",
+            bot._turn_policy,
+            "plan_turn",
             new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
         ) as mock_plan,
     ):
@@ -681,7 +681,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )
 
-    assert bot.handled_turn_ledger.has_responded("$older")
+    assert bot._handled_turn_ledger.has_responded("$older")
     mock_plan.assert_not_awaited()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert coordinator._thread_queued_signals == {}

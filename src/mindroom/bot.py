@@ -74,7 +74,6 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import (
     CoalescedBatch,
     CoalescingGate,
-    PreparedTextEvent,  # noqa: F401
 )
 from .commands import config_confirmation
 from .commands.handler import _generate_welcome_message
@@ -101,11 +100,6 @@ from .delivery_gateway import (
 )
 from .delivery_gateway import (
     SuppressedPlaceholderCleanupError as _SuppressedPlaceholderCleanupError,
-)
-from .dispatch_planner import (
-    DispatchPlanner,
-    DispatchPlannerDeps,
-    IngressHookRunner,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .handled_turns import HandledTurnLedger, HandledTurnState
@@ -143,6 +137,12 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .turn_controller import TurnController, TurnControllerDeps
+from .turn_policy import (
+    IngressHookRunner,
+    TurnPolicy,
+    TurnPolicyDeps,
+)
+from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -324,12 +324,13 @@ class AgentBot:
     _runtime_view: BotRuntimeState
     _coalescing_gate: CoalescingGate
     _inbound_turn_normalizer: InboundTurnNormalizer
-    _dispatch_planner: DispatchPlanner
+    _turn_policy: TurnPolicy
     _conversation_resolver: ConversationResolver
     _conversation_state_writer: ConversationStateWriter
     _conversation_access: MatrixConversationAccess
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
+    _turn_store: TurnStore
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
@@ -338,6 +339,7 @@ class AgentBot:
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _standalone_runtime_support: StandaloneRuntimeSupport | None
     _turn_controller: TurnController
+    _handled_turn_ledger: HandledTurnLedger
 
     def __init__(
         self,
@@ -368,6 +370,10 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
+        )
+        self._handled_turn_ledger = HandledTurnLedger(
+            self.agent_name,
+            base_path=self.storage_path / "tracking",
         )
         self._standalone_runtime_support = None
         self._deferred_overdue_task_drain_task = None
@@ -457,6 +463,15 @@ class AgentBot:
             resolver=self._conversation_resolver,
             hook_context=self._hook_context_support,
         )
+        self._turn_store = TurnStore(
+            TurnStoreDeps(
+                agent_name=self.agent_name,
+                handled_turn_ledger=self._handled_turn_ledger,
+                state_writer=self._conversation_state_writer,
+                resolver=self._conversation_resolver,
+                tool_runtime=self._tool_runtime_support,
+            ),
+        )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
             logger=self.logger,
@@ -490,29 +505,19 @@ class AgentBot:
                 get_logger=lambda: self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
-                get_handled_turn_ledger=lambda: self.handled_turn_ledger,
                 resolver=self._conversation_resolver,
-                state_writer=self._conversation_state_writer,
-                tool_runtime=self._tool_runtime_support,
-                dispatch_hook_service=self._ingress_hook_runner,
+                turn_store=self._turn_store,
+                ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda **kwargs: self._generate_response(**kwargs),
             ),
         )
-        self._dispatch_planner = DispatchPlanner(
-            DispatchPlannerDeps(
+        self._turn_policy = TurnPolicy(
+            TurnPolicyDeps(
                 runtime=self._runtime_view,
                 logger=self.logger,
-                handled_turn_ledger=self.handled_turn_ledger,
                 runtime_paths=self.runtime_paths,
-                storage_path=self.storage_path,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                normalizer=self._inbound_turn_normalizer,
-                resolver=self._conversation_resolver,
-                delivery_gateway=self._delivery_gateway,
-                response_runner=self._response_runner,
-                hook_service=self._ingress_hook_runner,
-                tool_runtime=self._tool_runtime_support,
             ),
         )
         self._turn_controller = TurnController(
@@ -520,16 +525,19 @@ class AgentBot:
                 runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
+                storage_path=self.storage_path,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                handled_turn_ledger=self.handled_turn_ledger,
                 conversation_access=self._conversation_access,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
-                dispatch_planner=self._dispatch_planner,
+                turn_policy=self._turn_policy,
+                ingress_hook_runner=self._ingress_hook_runner,
                 response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
                 state_writer=self._conversation_state_writer,
+                tool_runtime=self._tool_runtime_support,
+                turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
             ),
@@ -669,7 +677,7 @@ class AgentBot:
         handled_turn: HandledTurnState,
     ) -> None:
         """Mark one or more source events as handled by the same response."""
-        record_handled_turn(self.handled_turn_ledger, handled_turn)
+        record_handled_turn(self._handled_turn_ledger, handled_turn)
 
     async def _emit_reaction_received_hooks(
         self,
@@ -785,13 +793,6 @@ class AgentBot:
             execution_identity=execution_identity,
             hook_registry=self.hook_registry,
         )
-
-    @cached_property
-    def handled_turn_ledger(self) -> HandledTurnLedger:
-        """Get or create the handled-turn ledger for this agent."""
-        # Use the tracking subdirectory, not the root storage path
-        tracking_dir = self.storage_path / "tracking"
-        return HandledTurnLedger(self.agent_name, base_path=tracking_dir)
 
     @cached_property
     def stop_manager(self) -> StopManager:
@@ -1313,7 +1314,7 @@ class AgentBot:
             self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return
 
-        if not self._dispatch_planner.can_reply_to_sender(event.sender):
+        if not self._turn_policy.can_reply_to_sender(event.sender):
             self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
             return
 
@@ -1755,7 +1756,7 @@ class TeamBot(AgentBot):
         )
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-        materializable_agent_names = self._dispatch_planner.materializable_agent_names()
+        materializable_agent_names = self._turn_policy.materializable_agent_names()
         team_resolution = resolve_configured_team(
             self.agent_name,
             self.team_agents,

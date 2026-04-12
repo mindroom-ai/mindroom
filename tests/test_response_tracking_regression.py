@@ -116,7 +116,7 @@ class TestResponseTrackingRegression:
         mock_room.room_id = test_room_id
 
         # Process command first time
-        await bot._dispatch_planner.execute_command(
+        await bot._turn_controller._execute_command(
             mock_room,
             command_event,
             "@user:localhost",
@@ -128,7 +128,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot.handled_turn_ledger.has_responded(command_event.event_id), (
+        assert bot._handled_turn_ledger.has_responded(command_event.event_id), (
             "Command event should be marked as responded to prevent re-processing"
         )
 
@@ -136,7 +136,7 @@ class TestResponseTrackingRegression:
         bot.client.room_send.reset_mock()
 
         # Process same command again (simulating restart)
-        await bot._dispatch_planner.execute_command(
+        await bot._turn_controller._execute_command(
             mock_room,
             command_event,
             "@user:localhost",
@@ -221,12 +221,12 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371
-        assert bot.handled_turn_ledger.has_responded(unknown_command_event.event_id), (
+        assert bot._handled_turn_ledger.has_responded(unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_agent: AsyncMock,
@@ -290,7 +290,7 @@ class TestResponseTrackingRegression:
         }
 
         # Process routing
-        await bot._dispatch_planner.execute_router_relay(
+        await bot._turn_controller._execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -306,10 +306,10 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot.handled_turn_ledger.has_responded(message_event.event_id), (
+        assert bot._handled_turn_ledger.has_responded(message_event.event_id), (
             "Router event should be marked as responded to prevent re-routing"
         )
-        turn_record = bot.handled_turn_ledger.get_turn_record(message_event.event_id)
+        turn_record = bot._handled_turn_ledger.get_turn_record(message_event.event_id)
         assert turn_record is not None
         assert turn_record.response_event_id == "$router_response_123"
         assert turn_record.source_event_ids == tuple(source_event_ids)
@@ -320,7 +320,7 @@ class TestResponseTrackingRegression:
         mock_suggest_agent.reset_mock()
 
         # Process same message again (simulating restart)
-        await bot._dispatch_planner.execute_router_relay(
+        await bot._turn_controller._execute_router_relay(
             mock_room,
             message_event,
             [],

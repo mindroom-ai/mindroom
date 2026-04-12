@@ -19,8 +19,8 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_generate_response_mock,
-    replace_dispatch_planner_deps,
     replace_turn_controller_deps,
+    replace_turn_policy_deps,
     runtime_paths_for,
     sync_bot_runtime_state,
     test_runtime_paths,
@@ -63,10 +63,10 @@ def mock_home_bot() -> AgentBot:
     bot.client.user_id = "@mindroom_home:localhost"
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
-    replace_dispatch_planner_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
+    replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot._generate_response = AsyncMock(return_value="$response")
     install_generate_response_mock(bot, bot._generate_response)
     return bot
@@ -109,7 +109,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 what is the weather"),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -150,7 +150,7 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 show me the forecast"),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -206,7 +206,7 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_home_bo
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 continue the same thread"),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)

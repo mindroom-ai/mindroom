@@ -376,9 +376,9 @@ class TestDMIntegration:
             if "researcher" in config.get_ids(runtime_paths_for(config))
             else "@mindroom_researcher:localhost"
         )
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
-        bot.handled_turn_ledger.has_responded = MagicMock(return_value=False)
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.orchestrator = orchestrator
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
@@ -392,8 +392,8 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
-            patch("mindroom.dispatch_planner.extract_agent_name", return_value=None),  # User is not an agent
-            patch("mindroom.dispatch_planner.is_dm_room", return_value=True),  # This is a DM room
+            patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User is not an agent
+            patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
@@ -474,9 +474,9 @@ class TestDMIntegration:
 
         bot.client = AsyncMock()
         bot.client.user_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
-        bot.handled_turn_ledger.has_responded = MagicMock(return_value=False)
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger.has_responded = MagicMock(return_value=False)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
@@ -489,8 +489,8 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
-            patch("mindroom.dispatch_planner.extract_agent_name", return_value=None),
-            patch("mindroom.dispatch_planner.is_dm_room", return_value=True),  # This is a DM room
+            patch("mindroom.turn_controller.extract_agent_name", return_value=None),
+            patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
