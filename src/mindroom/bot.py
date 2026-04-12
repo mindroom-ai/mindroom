@@ -381,12 +381,23 @@ class AgentBot:
 
     def _init_runtime_components(self) -> None:
         """Initialize runtime-only helpers that depend on bound instance methods."""
+        runtime_matrix_id = self._resolve_runtime_matrix_id()
+        self._init_shared_runtime_services(runtime_matrix_id)
+        self._init_response_runtime_services(runtime_matrix_id)
+        self._init_turn_runtime_services(runtime_matrix_id)
+
+    def _resolve_runtime_matrix_id(self) -> MatrixID:
+        """Resolve the Matrix identity used by runtime collaborators."""
         runtime_matrix_id = self.config.get_ids(self.runtime_paths).get(self.agent_name)
         if self.agent_user.user_id:
-            runtime_matrix_id = self.matrix_id
-        elif runtime_matrix_id is None:
+            return self.matrix_id
+        if runtime_matrix_id is None:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise KeyError(msg)
+        return runtime_matrix_id
+
+    def _init_shared_runtime_services(self, runtime_matrix_id: MatrixID) -> None:
+        """Initialize shared services used across lifecycle and turn handling."""
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             enabled=self._coalescing_enabled,
@@ -472,6 +483,9 @@ class AgentBot:
                 tool_runtime=self._tool_runtime_support,
             ),
         )
+
+    def _init_response_runtime_services(self, runtime_matrix_id: MatrixID) -> None:
+        """Initialize response execution and edit-regeneration services."""
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
             logger=self.logger,
@@ -511,6 +525,9 @@ class AgentBot:
                 generate_response=lambda **kwargs: self._generate_response(**kwargs),
             ),
         )
+
+    def _init_turn_runtime_services(self, runtime_matrix_id: MatrixID) -> None:
+        """Initialize turn policy and orchestration services."""
         self._turn_policy = TurnPolicy(
             TurnPolicyDeps(
                 runtime=self._runtime_view,
