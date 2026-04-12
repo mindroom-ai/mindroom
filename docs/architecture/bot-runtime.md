@@ -61,8 +61,9 @@ It sequences `precheck -> normalize -> resolve -> decide -> execute -> record`.
 `TurnPolicy` is now pure.
 It no longer sends messages, runs AI, or writes persistence state.
 
-`TurnStore` is now the runtime-facing durable turn boundary.
-`EditRegenerator` reads and writes through `TurnStore` instead of owning its own persistence helpers.
+`TurnStore` is now the main durable turn boundary for the extracted runtime flows.
+`TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
+Some legacy command and bot paths still write to `HandledTurnLedger` directly.
 
 `AgentBot` is closer to a runtime shell again.
 It still needs more cleanup, but normal turn control and edit regeneration no longer live in the bot class itself.
