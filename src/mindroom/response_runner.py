@@ -90,7 +90,6 @@ if TYPE_CHECKING:
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-_FinalizeEffectsResult = TypeVar("_FinalizeEffectsResult")
 
 
 def _merge_response_extra_content(
@@ -559,10 +558,10 @@ class ResponseRunner:
     async def _await_post_response_effects(
         self,
         *,
-        finalize_effects: Callable[[str | None], Coroutine[Any, Any, _FinalizeEffectsResult]],
+        finalize_effects: Callable[[str | None], Coroutine[Any, Any, str | None]],
         tracked_event_id: str | None,
         swallow_late_cancellation: bool = False,
-    ) -> _FinalizeEffectsResult:
+    ) -> str | None:
         """Finish post-response cleanup even when cancellation lands after delivery."""
         if not swallow_late_cancellation:
             return await finalize_effects(tracked_event_id)
