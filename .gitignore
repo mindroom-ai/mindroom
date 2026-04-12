@@ -253,3 +253,4 @@ mindroom-test-storage/
 .claude/
 mindroom-test-storage/
 REVIEW-*.md
+.codex-worktrees/
