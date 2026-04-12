@@ -313,24 +313,10 @@ class MatrixConversationAccess(ConversationReadAccess):
             )
             thread_id = None
 
-        server_timestamp = event.server_timestamp
-        redaction_source = normalize_event_source_for_cache(
-            event.source,
-            event_id=event.event_id,
-            sender=event.sender,
-            origin_server_ts=server_timestamp
-            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-            else None,
-        )
         try:
             await self._queue_room_cache_update(
                 room_id,
-                lambda: event_cache.redact_event(
-                    room_id,
-                    event.redacts,
-                    thread_id=thread_id,
-                    redaction_event=redaction_source,
-                ),
+                lambda: event_cache.redact_event(room_id, event.redacts),
                 name="matrix_cache_apply_redaction",
             )
         except Exception as exc:

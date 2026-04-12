@@ -1165,15 +1165,7 @@ class ResponseCoordinator:
         existing_event_uses_thread_id: bool,
         room_mode: bool,
     ) -> _PreparedResponseRuntime:
-        resolved_target = request.target or (
-            request.response_envelope.target
-            if request.response_envelope is not None
-            else self.deps.resolver.build_message_target(
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-            )
-        )
+        resolved_target = self._resolve_request_target(request)
         response_thread_id = (
             resolved_target.resolved_thread_id
             if request.target is not None

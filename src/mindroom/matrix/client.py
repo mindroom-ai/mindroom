@@ -1392,13 +1392,8 @@ async def _refresh_cached_thread_event_sources(
         )
         if new_event_sources:
             await event_cache.store_thread_events(room_id, thread_id, new_event_sources)
-        for redacted_event_id, redaction_event in redactions:
-            await event_cache.redact_event(
-                room_id,
-                redacted_event_id,
-                thread_id=thread_id,
-                redaction_event=redaction_event,
-            )
+        for redacted_event_id, _ in redactions:
+            await event_cache.redact_event(room_id, redacted_event_id)
         if not new_event_sources and not redactions:
             return cached_event_sources
 

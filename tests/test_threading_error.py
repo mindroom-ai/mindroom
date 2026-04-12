@@ -750,8 +750,7 @@ class TestThreadingBehavior:
         await bot._conversation_access.apply_redaction("!test:localhost", redaction_event)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
-        event_cache.redact_event.assert_awaited_once()
-        assert event_cache.redact_event.await_args.kwargs["thread_id"] is None
+        event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
 
     @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:

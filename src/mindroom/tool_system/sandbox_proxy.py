@@ -656,7 +656,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     shared_storage_root_path: Path | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
-    runtime_overrides: dict[str, object] | None = None,
     extra_env_passthrough: str | None = None,
     worker_tools_override: list[str] | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
@@ -666,8 +665,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
-    del runtime_overrides
-
     if not _sandbox_proxy_enabled_for_tool(
         tool_name,
         runtime_paths=runtime_paths,

@@ -575,7 +575,6 @@ def _build_tool_instance(
         credentials_manager=resolved_credentials_manager,
         tool_init_overrides=proxy_tool_init_overrides or None,
         tool_config_overrides=validated_tool_config_overrides,
-        runtime_overrides=runtime_overrides,
         extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
         worker_tools_override=worker_tools_override,
         shared_storage_root_path=shared_storage_root_path,

@@ -84,9 +84,6 @@ class ConversationEventCache(Protocol):
         self,
         room_id: str,
         event_id: str,
-        *,
-        thread_id: str | None = None,
-        redaction_event: dict[str, Any] | None = None,
     ) -> bool:
         """Delete one cached event after a redaction."""
 
@@ -537,13 +534,8 @@ class EventCache:
         self,
         room_id: str,
         event_id: str,
-        *,
-        thread_id: str | None = None,
-        redaction_event: dict[str, Any] | None = None,
     ) -> bool:
         """Delete one cached event after a redaction."""
-        del redaction_event, thread_id
-
         async with self._acquire_db_operation(room_id, operation="redact_event") as db:
             dependent_edit_ids = await _dependent_edit_event_ids(db, room_id, original_event_id=event_id)
             removed_event_ids = list(dict.fromkeys([event_id, *dependent_edit_ids]))
