@@ -29,6 +29,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
+_DEFAULT_RESOLVED_THREAD_ID = object()
+
+
 @pytest.fixture(autouse=True)
 def _reset_matrix_message_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
@@ -52,13 +55,22 @@ def _make_context(
     *,
     room_id: str = "!room:localhost",
     thread_id: str | None = "$thread:localhost",
+    resolved_thread_id: object = _DEFAULT_RESOLVED_THREAD_ID,
     reply_to_event_id: str | None = "$reply:localhost",
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
+    agent_thread_mode: str = "thread",
 ) -> ToolRuntimeContext:
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General Agent")}),
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    thread_mode=agent_thread_mode,
+                ),
+            },
+        ),
         test_runtime_paths(runtime_root),
     )
     client = AsyncMock()
@@ -71,7 +83,7 @@ def _make_context(
         agent_name="general",
         room_id=room_id,
         thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        resolved_thread_id=thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
         requester_id="@user:localhost",
         client=client,
         config=config,
@@ -190,6 +202,7 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
     assert payload["status"] == "ok"
     assert payload["action"] == "send"
     assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] is None
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
@@ -345,6 +358,8 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
 
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$evt"
+    assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] == "$evt"
     assert payload["attachment_event_ids"] == ["$file_evt"]
     assert payload["resolved_attachment_ids"] == ["att_upload"]
     mock_send.assert_awaited_once()
@@ -352,7 +367,162 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         ctx.client,
         ctx.room_id,
         attachment.local_path,
+        thread_id="$evt",
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level(tmp_path: Path) -> None:
+    """Room-mode sends should not auto-thread attachments under the new text event."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_room_mode",
+    )
+    assert attachment is not None
+    ctx = _make_context(
+        storage_path=tmp_path,
+        attachment_ids=("att_room_mode",),
+        thread_id="$ctx-thread:localhost",
+        resolved_thread_id=None,
+        agent_thread_mode="room",
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="hello",
+                attachment_ids=["att_room_mode"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$evt"
+    assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] is None
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    mock_send.assert_awaited_once()
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        attachment.local_path,
         thread_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_path: Path) -> None:
+    """Reply attachments should stay in the existing thread instead of using the text event as a new root."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_reply",
+    )
+    assert attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_reply",))
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message",
+            new=AsyncMock(return_value="$reply_evt"),
+        ) as mock_send,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="reply",
+                message="hello",
+                attachment_ids=["att_reply"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$reply_evt"
+    assert payload["thread_id"] == ctx.thread_id
+    assert payload["attachment_thread_id"] == ctx.thread_id
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    mock_send.assert_awaited_once()
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        attachment.local_path,
+        thread_id=ctx.thread_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_existing_thread(
+    tmp_path: Path,
+) -> None:
+    """Send attachments should stay in the explicit thread instead of auto-threading under the new text event."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_explicit_thread",
+    )
+    assert attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_explicit_thread",), thread_id=None)
+    explicit_thread_id = "$explicit-thread:localhost"
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message",
+            new=AsyncMock(return_value="$send_evt"),
+        ) as mock_send,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="hello",
+                thread_id=explicit_thread_id,
+                attachment_ids=["att_explicit_thread"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$send_evt"
+    assert payload["thread_id"] == explicit_thread_id
+    assert payload["attachment_thread_id"] == explicit_thread_id
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    assert payload["resolved_attachment_ids"] == ["att_explicit_thread"]
+    mock_send.assert_awaited_once()
+    sent_content = mock_send.await_args.args[2]
+    relates_to = sent_content.get("m.relates_to", {})
+    assert relates_to.get("event_id") == explicit_thread_id
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        attachment.local_path,
+        thread_id=explicit_thread_id,
     )
 
 
@@ -388,10 +558,148 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
 
     assert payload["status"] == "ok"
     assert payload["event_id"] is None
+    assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] is None
     assert payload["attachment_event_ids"] == ["$file_evt"]
     assert payload["resolved_attachment_ids"] == ["att_only"]
     mock_send.assert_not_awaited()
-    mock_send_file.assert_awaited_once()
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        attachment.local_path,
+        thread_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_first_attachment(
+    tmp_path: Path,
+) -> None:
+    """Attachment-only sends should use the first room-level attachment as the thread root for the rest."""
+    tool = MatrixMessageTools()
+    first_file = tmp_path / "first.txt"
+    second_file = tmp_path / "second.txt"
+    first_file.write_text("first", encoding="utf-8")
+    second_file.write_text("second", encoding="utf-8")
+    first_attachment = register_local_attachment(
+        tmp_path,
+        first_file,
+        kind="file",
+        attachment_id="att_first",
+    )
+    second_attachment = register_local_attachment(
+        tmp_path,
+        second_file,
+        kind="file",
+        attachment_id="att_second",
+    )
+    assert first_attachment is not None
+    assert second_attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_first", "att_second"), thread_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.send_file_message",
+            new=AsyncMock(return_value="$file_root"),
+        ) as mock_send_file,
+        patch(
+            "mindroom.custom_tools.matrix_message._send_attachment_paths",
+            new=AsyncMock(return_value=(["$file_child"], None)),
+        ) as mock_send_attachment_paths,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                attachment_ids=["att_first", "att_second"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] is None
+    assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] == "$file_root"
+    assert payload["attachment_event_ids"] == ["$file_root", "$file_child"]
+    assert payload["resolved_attachment_ids"] == ["att_first", "att_second"]
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        first_attachment.local_path,
+        thread_id=None,
+    )
+    mock_send_attachment_paths.assert_awaited_once()
+    assert mock_send_attachment_paths.await_args.args == (ctx,)
+    assert mock_send_attachment_paths.await_args.kwargs == {
+        "room_id": ctx.room_id,
+        "thread_id": "$file_root",
+        "attachment_paths": [second_attachment.local_path],
+    }
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_room_level(
+    tmp_path: Path,
+) -> None:
+    """Room-mode sends should not create an attachment thread when sending multiple files."""
+    tool = MatrixMessageTools()
+    first_file = tmp_path / "first.txt"
+    second_file = tmp_path / "second.txt"
+    first_file.write_text("first", encoding="utf-8")
+    second_file.write_text("second", encoding="utf-8")
+    first_attachment = register_local_attachment(
+        tmp_path,
+        first_file,
+        kind="file",
+        attachment_id="att_room_first",
+    )
+    second_attachment = register_local_attachment(
+        tmp_path,
+        second_file,
+        kind="file",
+        attachment_id="att_room_second",
+    )
+    assert first_attachment is not None
+    assert second_attachment is not None
+    ctx = _make_context(
+        storage_path=tmp_path,
+        attachment_ids=("att_room_first", "att_room_second"),
+        thread_id="$ctx-thread:localhost",
+        resolved_thread_id=None,
+        agent_thread_mode="room",
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.send_file_message",
+            new=AsyncMock(return_value="$unexpected_root"),
+        ) as mock_matrix_send_file,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(side_effect=["$file_one", "$file_two"]),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                attachment_ids=["att_room_first", "att_room_second"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] is None
+    assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] is None
+    assert payload["attachment_event_ids"] == ["$file_one", "$file_two"]
+    assert payload["resolved_attachment_ids"] == ["att_room_first", "att_room_second"]
+    mock_matrix_send_file.assert_not_awaited()
+    assert len(mock_send_file.await_args_list) == 2
+    first_call = mock_send_file.await_args_list[0]
+    second_call = mock_send_file.await_args_list[1]
+    assert first_call.args == (ctx.client, ctx.room_id, first_attachment.local_path)
+    assert first_call.kwargs == {"thread_id": None}
+    assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
+    assert second_call.kwargs == {"thread_id": None}
 
 
 @pytest.mark.asyncio
@@ -420,11 +728,121 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
 
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$evt"
+    assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] == "$evt"
     assert payload["attachment_event_ids"] == ["$file_evt"]
     assert payload["resolved_attachment_ids"][0].startswith("att_")
     assert payload["newly_registered_attachment_ids"] == payload["resolved_attachment_ids"]
     mock_send.assert_awaited_once()
-    mock_send_file.assert_awaited_once()
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        generated_file,
+        thread_id="$evt",
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_text_failure_does_not_attempt_attachments(tmp_path: Path) -> None:
+    """Attachment sends should not start when the text send fails."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_text_fail",
+    )
+    assert attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_text_fail",))
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value=None)) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_context_attachments",
+            new=AsyncMock(),
+        ) as mock_send_context_attachments,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="hello",
+                attachment_ids=["att_text_fail"],
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "send"
+    assert payload["message"] == "Failed to send message to Matrix."
+    mock_send.assert_awaited_once()
+    mock_send_context_attachments.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_multiple_attachments_only_returns_error_when_first_send_fails(
+    tmp_path: Path,
+) -> None:
+    """Attachment-only auto-threading should stop immediately if the root attachment fails to send."""
+    tool = MatrixMessageTools()
+    first_file = tmp_path / "first.txt"
+    second_file = tmp_path / "second.txt"
+    first_file.write_text("first", encoding="utf-8")
+    second_file.write_text("second", encoding="utf-8")
+    first_attachment = register_local_attachment(
+        tmp_path,
+        first_file,
+        kind="file",
+        attachment_id="att_first_fail",
+    )
+    second_attachment = register_local_attachment(
+        tmp_path,
+        second_file,
+        kind="file",
+        attachment_id="att_second_fail",
+    )
+    assert first_attachment is not None
+    assert second_attachment is not None
+    ctx = _make_context(
+        storage_path=tmp_path,
+        attachment_ids=("att_first_fail", "att_second_fail"),
+        thread_id=None,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.send_file_message",
+            new=AsyncMock(return_value=None),
+        ) as mock_send_file,
+        patch(
+            "mindroom.custom_tools.matrix_message._send_attachment_paths",
+            new=AsyncMock(return_value=([], None)),
+        ) as mock_send_attachment_paths,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                attachment_ids=["att_first_fail", "att_second_fail"],
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["event_id"] is None
+    assert payload["thread_id"] is None
+    assert payload["attachment_thread_id"] is None
+    assert payload["attachment_event_ids"] == []
+    assert payload["resolved_attachment_ids"] == ["att_first_fail", "att_second_fail"]
+    assert payload["newly_registered_attachment_ids"] == []
+    assert "Failed to send attachment" in payload["message"]
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        first_attachment.local_path,
+        thread_id=None,
+    )
+    mock_send_attachment_paths.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,10 @@ The issue references `thread_tags.py` and `matrix_api.py`, but those files are n
 
 `matrix_message` supports `send`, `reply`, `thread-reply`, `react`, `read`, `thread-list`, `edit`, and `context`.
 `send` targets the room timeline by default, even when the current conversation is inside a thread.
+When a room-level `send` includes both text and attachments, the text is posted to the room timeline and the attachments are threaded under that new text event.
+When a room-level `send` includes multiple attachments and no text, the first attachment is posted to the room timeline and the remaining attachments are threaded under it.
+When `send` uses an explicit `thread_id`, both text and attachments stay in that existing thread instead of creating a new attachment thread.
+In `thread_mode: room`, room-level `send` stays plain room messaging and does not auto-thread attachments unless you pass an explicit `thread_id`.
 `reply` and `thread-reply` inherit the current thread when one can be resolved, and they return an error when no thread target is available.
 `read`, `edit`, and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
 `thread-list` uses the current thread when one is active, and it requires an explicit `thread_id` when there is no active thread context.
@@ -72,6 +76,7 @@ matrix_message(action="react", target="$event123", message="✅")
 - `ignore_mentions` defaults to `True`, which writes `com.mindroom.skip_mentions=True` so visible mentions do not wake other agents accidentally.
 - Set `ignore_mentions=False` only for deliberate self-handoffs or cross-agent dispatch, because the tool will preserve normal mention handling and record `com.mindroom.original_sender` for human requesters.
 - Use `action="context"` before a follow-up write when you want to inspect the resolved `room_id`, `thread_id`, and `reply_to_event_id`.
+- Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
 - If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
 
 ## [`thread_resolution`]
