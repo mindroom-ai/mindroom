@@ -134,47 +134,21 @@ def _get_oauth_credentials(
     }
 
 
-def _legacy_google_oauth_client_pair(runtime_paths: RuntimePaths) -> tuple[str, str] | None:
-    """Return the legacy shared Google OAuth client payload when present."""
-    credentials = get_runtime_credentials_manager(runtime_paths).shared_manager().load_credentials("google_oauth_client")
-    if not isinstance(credentials, dict):
-        return None
-    client_id = credentials.get("client_id")
-    client_secret = credentials.get("client_secret")
-    if not isinstance(client_id, str) or not isinstance(client_secret, str):
-        return None
-    normalized_client_id = client_id.strip()
-    normalized_client_secret = client_secret.strip()
-    if not normalized_client_id or not normalized_client_secret:
-        return None
-    return normalized_client_id, normalized_client_secret
-
-
 def _google_oauth_client_pair(
     runtime_paths: RuntimePaths,
     *,
     config: Config,
 ) -> tuple[str, str] | None:
-    """Resolve the active Google OAuth client, keeping env-seeded legacy fallbacks working."""
+    """Resolve the active Google OAuth client from the configured google/oauth connection."""
     connection_id = default_connection_id(provider="google", purpose="google_oauth_client")
     if connection_id is None or connection_id not in config.connections:
-        return _legacy_google_oauth_client_pair(runtime_paths)
-    try:
-        resolved_connection = resolve_connection(
-            config,
-            provider="google",
-            purpose="google_oauth_client",
-            runtime_paths=runtime_paths,
-        )
-    except ValueError as exc:
-        connection_config = config.connections[connection_id]
-        missing_default_credentials_errors = {
-            f"Connection '{connection_id}' is missing credentials",
-            f"Connection '{connection_id}' is missing client_id/client_secret",
-        }
-        if connection_config.service == "google_oauth_client" and str(exc) in missing_default_credentials_errors:
-            return None
-        raise
+        return None
+    resolved_connection = resolve_connection(
+        config,
+        provider="google",
+        purpose="google_oauth_client",
+        runtime_paths=runtime_paths,
+    )
     oauth_client = connection_oauth_client(resolved_connection)
     if oauth_client is None:
         msg = f"Connection '{resolved_connection.connection_id}' is missing client_id/client_secret"
@@ -227,12 +201,14 @@ def _get_google_credentials(
     try:
         google_request_cls, credentials_cls, _ = _ensure_google_packages(runtime_paths)
         oauth_client = _google_oauth_client_pair(runtime_paths, config=config)
+        if oauth_client is None:
+            return None
         creds = credentials_cls(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri"),
-            client_id=oauth_client[0] if oauth_client is not None else token_data.get("client_id"),
-            client_secret=oauth_client[1] if oauth_client is not None else token_data.get("client_secret"),
+            client_id=oauth_client[0],
+            client_secret=oauth_client[1],
             scopes=token_data.get("scopes", _SCOPES),
         )
 
