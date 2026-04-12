@@ -1318,8 +1318,8 @@ class TestAgentBot:
             stream_kwargs = mock_stream_agent_response.call_args.kwargs
             assert stream_kwargs["agent_name"] == "calculator"
             assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert stream_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert stream_kwargs["model_prompt"].startswith("[")
+            assert stream_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
@@ -1343,8 +1343,8 @@ class TestAgentBot:
             ai_kwargs = mock_ai_response.call_args.kwargs
             assert ai_kwargs["agent_name"] == "calculator"
             assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert ai_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert ai_kwargs["model_prompt"].startswith("[")
+            assert ai_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
@@ -1515,6 +1515,57 @@ class TestAgentBot:
         assert "room_id: !test:localhost" in model_prompt
         assert "thread_id: none" in model_prompt
         assert "reply_to_event_id: $event456" in model_prompt
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_uses_safe_thread_root_for_prompt_metadata(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Prompt metadata should prefer the stable thread root over plain reply event IDs."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot.client.room_send.return_value = _room_send_response("$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_ai = AsyncMock(return_value="Handled")
+        target = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id="$reply_plain:localhost",
+            thread_start_root_event_id="$thread_root:localhost",
+        )
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            ai_response=mock_ai,
+        ):
+            await bot._response_runner.process_and_respond(
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Continue",
+                    reply_to_event_id="$reply_plain:localhost",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    target=target,
+                ),
+            )
+
+        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
+        assert "thread_id: $thread_root:localhost" in model_prompt
+        assert "reply_to_event_id: $reply_plain:localhost" in model_prompt
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_resolves_knowledge_once(
@@ -4889,8 +4940,10 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         assert generate_kwargs["room_id"] == "!test:localhost"
-        assert "Available attachment IDs" in generate_kwargs["prompt"]
-        assert attachment_id in generate_kwargs["prompt"]
+        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is not None
+        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert attachment_id in generate_kwargs["model_prompt"]
         assert generate_kwargs["reply_to_event_id"] == "$img_event"
         assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
@@ -5078,8 +5131,11 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         assert generate_kwargs["attachment_ids"] == [current_attachment_id, history_attachment_id]
-        assert current_attachment_id in generate_kwargs["prompt"]
-        assert history_attachment_id in generate_kwargs["prompt"]
+        assert current_attachment_id not in generate_kwargs["prompt"]
+        assert history_attachment_id not in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is not None
+        assert current_attachment_id in generate_kwargs["model_prompt"]
+        assert history_attachment_id in generate_kwargs["model_prompt"]
         tracker.record_handled_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
@@ -5128,7 +5184,102 @@ class TestAgentBot:
             )
 
         assert payload.attachment_ids == ["att_image"]
+        assert payload.prompt == "describe this"
+        assert payload.model_prompt is not None
+        assert "Available attachment IDs" in payload.model_prompt
+        assert "att_image" in payload.model_prompt
         assert list(payload.media.images) == [stored_image, fallback_image]
+
+    @pytest.mark.asyncio
+    async def test_build_dispatch_payload_with_attachments_keeps_raw_prompt_clean(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Attachment IDs should be isolated to model_prompt instead of mutating the raw user prompt."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        stored_image = MagicMock(spec=Image)
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
+                return_value=(["att_image"], [], [stored_image], [], []),
+            ),
+        ):
+            payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id="!test:localhost",
+                    prompt="describe this",
+                    current_attachment_ids=["att_image"],
+                    thread_id=None,
+                    media_thread_id=None,
+                    thread_history=[],
+                ),
+            )
+
+        assert payload.prompt == "describe this"
+        assert payload.model_prompt is not None
+        assert "Available attachment IDs" in payload.model_prompt
+        assert "att_image" in payload.model_prompt
+
+    @pytest.mark.asyncio
+    async def test_message_enrichment_appends_to_existing_model_prompt(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Message enrichment should extend an existing model prompt rather than replacing it."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+                requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve("!test:localhost", None, "$event"),
+            correlation_id="corr-1",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+        registry_stub = MagicMock()
+        registry_stub.has_hooks.return_value = True
+        bot._ingress_hook_runner.hook_context.hook_registry_state.registry = registry_stub
+
+        with (
+            patch(
+                "mindroom.turn_policy.emit_collect",
+                new=AsyncMock(
+                    return_value=[EnrichmentItem(key="extra", text="hook enrichment", cache_policy="volatile")],
+                ),
+            ),
+        ):
+            prepared = await bot._ingress_hook_runner.apply_message_enrichment(
+                dispatch,
+                DispatchPayload(
+                    prompt="hello",
+                    model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+                    attachment_ids=["att_1"],
+                ),
+                target_entity_name=mock_agent_user.agent_name,
+                target_member_names=None,
+            )
+
+        assert prepared.payload.prompt == "hello"
+        assert prepared.payload.model_prompt is not None
+        assert prepared.payload.model_prompt.startswith("Available attachment IDs: att_1")
+        assert "hook enrichment" in prepared.payload.model_prompt
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_leaves_event_retryable_when_terminal_error_cannot_be_sent(
@@ -5268,8 +5419,10 @@ class TestAgentBot:
         assert generate_kwargs["thread_history"] == []
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
-        assert "Available attachment IDs" in generate_kwargs["prompt"]
-        assert attachment_id in generate_kwargs["prompt"]
+        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is not None
+        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert attachment_id in generate_kwargs["model_prompt"]
         media = generate_kwargs["media"]
         assert len(media.files) == 1
         assert str(media.files[0].filepath) == str(local_media_path)

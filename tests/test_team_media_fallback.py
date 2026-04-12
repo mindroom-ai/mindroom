@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.models.message import Message
 from agno.run.base import RunStatus
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
@@ -79,9 +80,10 @@ def _prepared_team_execution_context(
     final_prompt: str,
     replays_persisted_history: bool = False,
     unseen_event_ids: list[str] | None = None,
+    context_messages: tuple[Message, ...] = (),
 ) -> PreparedExecutionContext:
     return PreparedExecutionContext(
-        final_prompt=final_prompt,
+        messages=(*context_messages, Message(role="user", content=final_prompt)),
         replay_plan=None,
         unseen_event_ids=unseen_event_ids or [],
         replays_persisted_history=replays_persisted_history,
@@ -178,9 +180,13 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     assert mock_team.arun.await_count == 2
     first_call = mock_team.arun.await_args_list[0]
     second_call = mock_team.arun.await_args_list[1]
-    assert list(first_call.kwargs["audio"]) == [audio_input]
-    assert list(second_call.kwargs["audio"]) == []
-    assert "Inline media unavailable for this model" in second_call.args[0]
+    first_prompt = first_call.args[0]
+    second_prompt = second_call.args[0]
+    assert isinstance(first_prompt, list)
+    assert isinstance(second_prompt, list)
+    assert first_prompt[-1].audio == [audio_input]
+    assert not second_prompt[-1].audio
+    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
 
 @pytest.mark.asyncio
@@ -262,11 +268,13 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
     assert "Recovered team response" in response
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
-    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_prompt"]
+    assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == [
+        "Old thread context",
+    ]
     prompt = mock_team.arun.await_args.args[0]
-    assert prompt == "Analyze this."
-    assert "Thread Context:" not in prompt
-    assert "Old thread context" not in prompt
+    assert isinstance(prompt, list)
+    assert len(prompt) == 1
+    assert prompt[0].content == "Analyze this."
 
 
 @pytest.mark.asyncio
@@ -309,11 +317,10 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
         patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
-            final_prompt=(
-                "Messages from other participants since your last response:\nuser: Fresh follow-up\n\nAnalyze this."
-            ),
+            final_prompt="Analyze this.",
             replays_persisted_history=True,
             unseen_event_ids=["event-2"],
+            context_messages=(Message(role="user", content="user: Fresh follow-up"),),
         )
         response = await team_response(
             agent_names=["general"],
@@ -330,10 +337,10 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     assert "Recovered team response" in response
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_team.arun.await_args.args[0]
-    assert "Analyze this." in prompt
-    assert "Fresh follow-up" in prompt
-    assert "Already seen" not in prompt
-    assert "Thread Context:" not in prompt
+    assert isinstance(prompt, list)
+    assert [message.role for message in prompt] == ["user", "user"]
+    assert prompt[0].content == "user: Fresh follow-up"
+    assert prompt[1].content == "Analyze this."
 
 
 @pytest.mark.asyncio
@@ -1003,8 +1010,12 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
     assert "Streamed team response" in str(chunks[0])
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     assert mock_prepare.await_args.kwargs["prompt"] == "Analyze this."
-    assert "Old thread context" in mock_prepare.await_args.kwargs["fallback_prompt"]
-    assert mock_raw.await_args.kwargs["prompt"] == "Analyze this."
+    assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == [
+        "Old thread context",
+    ]
+    prepared_prompt = mock_raw.await_args.kwargs["prompt"]
+    assert isinstance(prepared_prompt, list)
+    assert [message.content for message in prepared_prompt] == ["Analyze this."]
 
 
 @pytest.mark.asyncio
@@ -1048,11 +1059,10 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         ) as mock_raw,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
-            final_prompt=(
-                "Messages from other participants since your last response:\nuser: Fresh follow-up\n\nAnalyze this."
-            ),
+            final_prompt="Analyze this.",
             replays_persisted_history=True,
             unseen_event_ids=["event-2"],
+            context_messages=(Message(role="user", content="user: Fresh follow-up"),),
         )
         chunks = [
             chunk
@@ -1075,9 +1085,10 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     assert len(chunks) == 1
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_raw.await_args.kwargs["prompt"]
-    assert "Analyze this." in prompt
-    assert "Fresh follow-up" in prompt
-    assert "Already seen" not in prompt
+    assert isinstance(prompt, list)
+    assert [message.role for message in prompt] == ["user", "user"]
+    assert prompt[0].content == "user: Fresh follow-up"
+    assert prompt[1].content == "Analyze this."
 
 
 @pytest.mark.asyncio
@@ -1279,9 +1290,13 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     assert mock_team.arun.call_count == 2
     first_call = mock_team.arun.call_args_list[0]
     second_call = mock_team.arun.call_args_list[1]
-    assert list(first_call.kwargs["audio"]) == [audio_input]
-    assert list(second_call.kwargs["audio"]) == []
-    assert "Inline media unavailable for this model" in second_call.args[0]
+    first_prompt = first_call.args[0]
+    second_prompt = second_call.args[0]
+    assert isinstance(first_prompt, list)
+    assert isinstance(second_prompt, list)
+    assert first_prompt[-1].audio == [audio_input]
+    assert not second_prompt[-1].audio
+    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered setup stream" in rendered_output
@@ -1330,9 +1345,13 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     assert mock_team.arun.call_count == 2
     first_call = mock_team.arun.call_args_list[0]
     second_call = mock_team.arun.call_args_list[1]
-    assert list(first_call.kwargs["audio"]) == [audio_input]
-    assert list(second_call.kwargs["audio"]) == []
-    assert "Inline media unavailable for this model" in second_call.args[0]
+    first_prompt = first_call.args[0]
+    second_prompt = second_call.args[0]
+    assert isinstance(first_prompt, list)
+    assert isinstance(second_prompt, list)
+    assert first_prompt[-1].audio == [audio_input]
+    assert not second_prompt[-1].audio
+    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered stream" in rendered_output

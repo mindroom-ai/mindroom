@@ -33,6 +33,36 @@ def strip_user_turn_time_prefix(text: str) -> str:
     return _USER_TURN_TIME_PREFIX_RE.sub("", text, count=1)
 
 
+def compose_current_turn_text(
+    raw_prompt: str,
+    tail_text: str | None = None,
+) -> str:
+    """Append one model-only tail block without duplicating the raw user prompt."""
+    prompt_chunks: list[str] = []
+    normalized_raw_prompt = raw_prompt.strip()
+    normalized_tail_text = tail_text.strip() if tail_text else ""
+    normalized_tail_without_time = strip_user_turn_time_prefix(normalized_tail_text) if normalized_tail_text else ""
+
+    if normalized_raw_prompt:
+        prompt_chunks.append(raw_prompt)
+        if normalized_tail_text == normalized_raw_prompt:
+            normalized_tail_text = ""
+        elif normalized_tail_text.startswith(f"{normalized_raw_prompt}\n\n"):
+            normalized_tail_text = normalized_tail_text[len(normalized_raw_prompt) + 2 :].lstrip()
+        elif normalized_tail_without_time == normalized_raw_prompt:
+            normalized_tail_text = ""
+        elif normalized_tail_without_time.startswith(f"{normalized_raw_prompt}\n\n"):
+            normalized_tail_text = normalized_tail_without_time[len(normalized_raw_prompt) + 2 :].lstrip()
+    elif normalized_tail_text:
+        prompt_chunks.append(normalized_tail_text)
+        normalized_tail_text = ""
+
+    if normalized_tail_text:
+        prompt_chunks.append(normalized_tail_text)
+
+    return "\n\n".join(chunk for chunk in prompt_chunks if chunk)
+
+
 def _build_conversation_messages(
     thread_history: Sequence[ResolvedVisibleMessage],
     current_prompt: str,

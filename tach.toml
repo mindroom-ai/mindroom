@@ -786,6 +786,7 @@ expose = [
     "auto_flush_enabled",
     "build_memory_enhanced_prompt",
     "build_memory_prompt_parts",
+    "compose_current_turn_text",
     "delete_agent_memory",
     "get_agent_memory",
     "list_all_agent_memories",

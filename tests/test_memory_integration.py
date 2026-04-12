@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.memory import MemoryPromptParts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,11 +39,15 @@ class TestMemoryIntegration:
 
     @pytest.fixture
     def mock_memory_functions(self) -> Generator[AsyncMock, None, None]:
-        """Mock memory enhancement function."""
-        with patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock) as mock_build:
+        """Mock memory prompt splitting."""
+        with patch("mindroom.ai.build_memory_prompt_parts", new_callable=AsyncMock) as mock_build:
             # Set up async side effects
-            async def build_side_effect(prompt: str, *_args: object, **_kwargs: dict[str, object]) -> str:
-                return f"[Enhanced] {prompt}"
+            async def build_side_effect(
+                prompt: str,
+                *_args: object,
+                **_kwargs: dict[str, object],
+            ) -> MemoryPromptParts:
+                return MemoryPromptParts(turn_context=f"[Enhanced memory] {prompt}")
 
             mock_build.side_effect = build_side_effect
             yield mock_build
@@ -98,7 +103,9 @@ class TestMemoryIntegration:
             # Verify enhanced prompt was used
             mock_agent_run.assert_called_once()
             call_args = mock_agent_run.call_args[0]
-            assert call_args[1] == "[Enhanced] What is 2+2?"  # Enhanced prompt
+            assert len(call_args[1]) == 1
+            assert call_args[1][0].role == "user"
+            assert call_args[1][0].content == "What is 2+2?\n\n[Enhanced memory] What is 2+2?"
 
             # Note: Memory storage now happens at the bot level, not in ai_response
 

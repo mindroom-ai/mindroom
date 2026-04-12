@@ -36,6 +36,7 @@ def _make_config(
     models: dict[str, ModelConfig] | None = None,
 ) -> tuple[Config, Path]:
     """Create a Config, write it to a temp file, and return both."""
+    temp_dir = Path(tempfile.mkdtemp())
     config = Config(
         agents=agents or {},
         knowledge_bases=knowledge_bases or {},
@@ -43,9 +44,8 @@ def _make_config(
         connections=_DEFAULT_CONNECTIONS,
         models=models if models is not None else _DEFAULT_MODELS,
     )
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
-        config_path = Path(tmp.name)
-    runtime_paths = resolve_runtime_paths(config_path=config_path)
+    config_path = temp_dir / "config.yaml"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=temp_dir / "mindroom_data")
     get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
         "openai",
         {"api_key": "sk-test-self-config", "_source": "test"},

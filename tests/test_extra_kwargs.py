@@ -1,10 +1,13 @@
 """Test extra_kwargs functionality in model configuration."""
 
+import base64
 import tempfile
 from pathlib import Path
 
 import pytest
 import yaml
+from agno.media import File, Image
+from agno.models.message import Message
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import ValidationError
 
@@ -13,6 +16,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.vertex_claude_prompt_cache import (
+    copy_messages_with_vertex_prompt_cache_breakpoint,
+    install_vertex_claude_prompt_cache_hook,
+)
 
 
 def _config_with_runtime_paths(config_data: dict[str, object]) -> tuple[Config, RuntimePaths]:
@@ -236,6 +243,8 @@ def test_different_providers_with_extra_kwargs() -> None:
     anthropic_model = get_model_instance(config, runtime_paths, "anthropic_model")
     assert anthropic_model.temperature == 0.2
     assert anthropic_model.max_tokens == 2048
+    assert anthropic_model.cache_system_prompt is True
+    assert anthropic_model.extended_cache_time is True
 
 
 def test_model_without_extra_kwargs() -> None:
@@ -337,6 +346,133 @@ def test_vertexai_claude_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(model, VertexAIClaude)
     assert model.id == "claude-sonnet-4@20250514"
     assert model.provider == "VertexAI"
+    assert model.cache_system_prompt is True
+    assert model.extended_cache_time is True
+
+
+def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:
+    """Vertex Claude requests should cache through the latest user text block."""
+    model = VertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+        extended_cache_time=True,
+    )
+    messages = [
+        Message(role="system", content="System prompt"),
+        Message(role="assistant", content="Earlier reply"),
+        Message(role="user", content=[{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]),
+    ]
+
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+
+    assert messages[-1].content == [{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]
+    assert prepared[-1].content == [
+        {"type": "text", "text": "Current turn"},
+        {"type": "image", "source": "x", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    ]
+
+
+def test_vertexai_prompt_cache_breakpoint_marks_media_added_from_message_images() -> None:
+    """Vertex Claude requests should cache through image blocks appended during Claude formatting."""
+    model = VertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+        extended_cache_time=True,
+    )
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO0pQe8AAAAASUVORK5CYII=",
+    )
+    messages = [
+        Message(role="system", content="System prompt"),
+        Message(role="user", content="Current turn", images=[Image(content=png_bytes)]),
+    ]
+
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+
+    assert messages[-1].images is not None
+    assert prepared[-1].images is None
+    assert prepared[-1].content == [
+        {"type": "text", "text": "Current turn"},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.b64encode(png_bytes).decode("utf-8"),
+            },
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
+    ]
+
+
+def test_vertexai_prompt_cache_breakpoint_handles_file_only_turns() -> None:
+    """Vertex Claude requests should still set a cache breakpoint when a user turn is file-only."""
+    model = VertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+    )
+    messages = [
+        Message(role="system", content="System prompt"),
+        Message(
+            role="user",
+            files=[File(content=b"hello", mime_type="text/plain", filename="note.txt")],
+        ),
+    ]
+
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+
+    assert messages[-1].files is not None
+    assert prepared[-1].files is None
+    assert prepared[-1].content == [
+        {
+            "type": "document",
+            "source": {
+                "type": "text",
+                "media_type": "text/plain",
+                "data": "hello",
+            },
+            "citations": {"enabled": True},
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vertexai_prompt_cache_hook_rewrites_messages_before_invoke() -> None:
+    """The Vertex Claude hook should pass cache-marked messages to Agno."""
+    model = VertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+    )
+    captured_messages: list[Message] = []
+
+    async def fake_ainvoke(*args: object, **kwargs: object) -> object:
+        del args
+        captured_messages.extend(kwargs["messages"])
+        return object()
+
+    vars(model)["ainvoke"] = fake_ainvoke
+    install_vertex_claude_prompt_cache_hook(model)
+
+    await model.ainvoke(
+        messages=[
+            Message(role="system", content="System prompt"),
+            Message(role="user", content="Current turn"),
+        ],
+        assistant_message=Message(role="assistant"),
+    )
+
+    assert captured_messages[-1].content == [
+        {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral"}},
+    ]
 
 
 def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:

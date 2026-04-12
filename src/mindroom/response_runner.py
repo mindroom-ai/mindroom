@@ -41,6 +41,7 @@ from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
+    compose_current_turn_text,
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
     store_conversation_memory,
@@ -151,17 +152,44 @@ def _append_matrix_prompt_context(
         return prompt
     if "[Matrix metadata for tool calls]" in prompt:
         return prompt
+    prompt_thread_root = (
+        target.source_thread_id
+        if target.source_thread_id is not None
+        else target.resolved_thread_id
+        if target.resolved_thread_id is not None and target.resolved_thread_id != target.reply_to_event_id
+        else None
+    )
 
     metadata_block = "\n".join(
         (
             "[Matrix metadata for tool calls]",
             f"room_id: {target.room_id}",
-            f"thread_id: {target.resolved_thread_id or 'none'}",
+            f"thread_id: {prompt_thread_root or 'none'}",
             f"reply_to_event_id: {target.reply_to_event_id or 'none'}",
             "Use these IDs when calling matrix_message.",
         ),
     )
     return f"{prompt.rstrip()}\n\n{metadata_block}"
+
+
+def _should_strip_transient_model_prompt(
+    prompt: str,
+    model_prompt: str | None,
+    *,
+    target: MessageTarget,
+    include_matrix_context: bool,
+    system_enrichment_items: Sequence[EnrichmentItem] = (),
+) -> bool:
+    """Return whether the model-facing prompt adds transient current-turn-only context."""
+    if system_enrichment_items:
+        return True
+    resolved_prompt = compose_current_turn_text(prompt, model_prompt)
+    resolved_prompt = _append_matrix_prompt_context(
+        resolved_prompt,
+        target=target,
+        include_context=include_matrix_context,
+    )
+    return resolved_prompt != prompt
 
 
 def _prefix_user_turn_time(
@@ -215,8 +243,9 @@ def prepare_memory_and_model_context(
     model_prompt: str | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
     """Return raw memory inputs alongside timestamped model-facing context."""
+    model_prompt_content = compose_current_turn_text(prompt, model_prompt)
     model_prompt_text = _prefix_user_turn_time(
-        model_prompt or prompt,
+        model_prompt_content,
         timezone=config.timezone,
     )
     model_thread_history = _timestamp_thread_history_user_turns(
@@ -915,14 +944,12 @@ class ResponseRunner:
             request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
-        prepared_prompt = _prefix_user_turn_time(
-            request.model_prompt or request.prompt,
-            timezone=self.deps.runtime.config.timezone,
-        )
-        model_thread_history = _timestamp_thread_history_user_turns(
+        _, _, prepared_prompt, model_thread_history = prepare_memory_and_model_context(
+            request.prompt,
             request.thread_history,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
+            model_prompt=request.model_prompt,
         )
         model_name = select_model_for_team(
             self.deps.agent_name,
@@ -951,6 +978,19 @@ class ResponseRunner:
         )
         response_thread_id = resolved_target.resolved_thread_id
         resolved_target = resolved_target.with_thread_root(response_thread_id)
+        request = replace(
+            request,
+            strip_transient_enrichment_after_run=(
+                request.strip_transient_enrichment_after_run
+                or _should_strip_transient_model_prompt(
+                    request.prompt,
+                    prepared_prompt,
+                    target=resolved_target,
+                    include_matrix_context=include_matrix_prompt_context,
+                    system_enrichment_items=request.system_enrichment_items,
+                )
+            ),
+        )
         model_message = _append_matrix_prompt_context(
             prepared_prompt,
             target=resolved_target,
@@ -1935,6 +1975,12 @@ class ResponseRunner:
             event_source=reply_to_event.source if reply_to_event is not None else None,
         )
         session_id = resolved_target.session_id
+        should_strip_transient_enrichment = _should_strip_transient_model_prompt(
+            memory_prompt,
+            model_prompt,
+            target=resolved_target,
+            include_matrix_context=_agent_has_matrix_messaging_tool(self.deps.runtime.config, agent_name),
+        )
         model_prompt = _append_matrix_prompt_context(
             model_prompt,
             target=resolved_target,
@@ -1967,6 +2013,12 @@ class ResponseRunner:
 
         def history_storage_factory() -> SqliteDb:
             return self.deps.state_writer.create_storage(tool_dispatch.execution_identity, scope=session_scope)
+
+        strip_transient_enrichment, _ = self._build_session_storage_effects(
+            session_id=session_id,
+            session_type=SessionType.AGENT,
+            create_storage=history_storage_factory,
+        )
 
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(tool_dispatch),
@@ -2083,12 +2135,14 @@ class ResponseRunner:
                 interactive_target=resolved_target,
                 memory_prompt=memory_prompt,
                 memory_thread_history=memory_thread_history,
+                strip_transient_enrichment_after_run=should_strip_transient_enrichment,
             ),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
                 interactive_agent_name=agent_name,
+                strip_transient_enrichment=strip_transient_enrichment,
                 queue_memory_persistence=queue_memory_persistence,
             ),
         )
@@ -2143,6 +2197,22 @@ class ResponseRunner:
                 runtime_paths=self.deps.runtime_paths,
                 model_prompt=request.model_prompt,
             )
+        )
+        request = replace(
+            request,
+            strip_transient_enrichment_after_run=(
+                request.strip_transient_enrichment_after_run
+                or _should_strip_transient_model_prompt(
+                    memory_prompt,
+                    model_prompt_text,
+                    target=resolved_target,
+                    include_matrix_context=_agent_has_matrix_messaging_tool(
+                        self.deps.runtime.config,
+                        self.deps.agent_name,
+                    ),
+                    system_enrichment_items=request.system_enrichment_items,
+                )
+            ),
         )
         normalized_request = replace(
             request,

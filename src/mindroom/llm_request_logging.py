@@ -15,10 +15,8 @@ from typing import TYPE_CHECKING, cast
 from agno.models.message import Message
 from pydantic import BaseModel
 
-from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
-
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from agno.models.base import Model
     from agno.models.response import ModelResponse
@@ -144,71 +142,6 @@ def _request_tools(value: object) -> list[dict[str, JSONValue]] | None:
     return None
 
 
-def _normalized_string_list(values: object) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    normalized: list[str] = []
-    for value in values:
-        if isinstance(value, str) and value and value not in normalized:
-            normalized.append(value)
-    return normalized
-
-
-def _snapshot_request_log_context() -> dict[str, JSONValue]:
-    """Return one detached copy of the currently bound request log context."""
-    return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
-
-
-def build_llm_request_log_context(
-    *,
-    session_id: str,
-    room_id: str | None,
-    thread_id: str | None,
-    reply_to_event_id: str | None,
-    prompt: str,
-    model_prompt: str | None,
-    full_prompt: str,
-    metadata: dict[str, object] | None,
-) -> dict[str, object]:
-    """Build explicit per-request log context for one provider call."""
-    context: dict[str, object] = {
-        "session_id": session_id,
-        "current_turn_prompt": prompt,
-        "full_prompt": full_prompt,
-    }
-    if room_id:
-        context["room_id"] = room_id
-    if thread_id:
-        context["thread_id"] = thread_id
-    if reply_to_event_id:
-        context["reply_to_event_id"] = reply_to_event_id
-    if model_prompt is not None:
-        context["model_prompt"] = model_prompt
-    if not metadata:
-        return context
-
-    source_event_ids = _normalized_string_list(
-        [
-            reply_to_event_id,
-            *_normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)),
-        ],
-    )
-    if source_event_ids:
-        context["source_event_ids"] = source_event_ids
-
-    raw_prompt_map = metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
-    if isinstance(raw_prompt_map, dict):
-        source_event_prompts = {
-            event_id: event_prompt
-            for event_id, event_prompt in raw_prompt_map.items()
-            if isinstance(event_id, str) and event_id and isinstance(event_prompt, str)
-        }
-        if source_event_prompts:
-            context["source_event_prompts"] = source_event_prompts
-
-    return context
-
-
 @contextmanager
 def bind_llm_request_log_context(**context: object) -> Iterator[None]:
     """Bind per-run request metadata so log entries can be attributed later."""
@@ -223,6 +156,11 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
         yield
     finally:
         _REQUEST_CONTEXT.reset(token)
+
+
+def _snapshot_request_log_context() -> dict[str, JSONValue]:
+    """Return a detached copy of the currently bound request-log context."""
+    return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
 
 
 async def write_llm_request_log(
@@ -256,30 +194,6 @@ async def write_llm_request_log(
     )
 
 
-async def _write_llm_request_log_if_present(
-    *,
-    model: Model,
-    agent_name: str,
-    kwargs: dict[str, object],
-    log_dir: str | None,
-    default_log_dir: Path,
-    request_context: dict[str, JSONValue],
-) -> None:
-    """Write one request log entry when provider kwargs include API request messages."""
-    messages = _request_messages(kwargs.get("messages"))
-    if messages is None:
-        return
-    await write_llm_request_log(
-        model=model,
-        agent_name=agent_name,
-        messages=messages,
-        tools=_request_tools(kwargs.get("tools")),
-        log_dir=log_dir,
-        default_log_dir=default_log_dir,
-        request_context=request_context,
-    )
-
-
 def install_llm_request_logging(
     model: Model,
     *,
@@ -297,34 +211,36 @@ def install_llm_request_logging(
     original_ainvoke = model.ainvoke
     original_ainvoke_stream = model.ainvoke_stream
 
-    def _logged_ainvoke(*args: object, **kwargs: object) -> Coroutine[object, object, ModelResponse]:
+    async def _logged_ainvoke(*args: object, **kwargs: object) -> ModelResponse:
         request_context = _snapshot_request_log_context()
-
-        async def _invoke() -> ModelResponse:
-            await _write_llm_request_log_if_present(
+        messages = _request_messages(kwargs.get("messages"))
+        if messages is not None:
+            await write_llm_request_log(
                 model=model,
                 agent_name=agent_name,
-                kwargs=kwargs,
+                messages=messages,
+                tools=_request_tools(kwargs.get("tools")),
                 log_dir=debug_config.llm_request_log_dir,
                 default_log_dir=default_log_dir,
                 request_context=request_context,
             )
-            return await original_ainvoke(*args, **kwargs)
-
-        return _invoke()
+        return await original_ainvoke(*args, **kwargs)
 
     def _logged_ainvoke_stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
         request_context = _snapshot_request_log_context()
 
         async def _stream() -> AsyncIterator[ModelResponse]:
-            await _write_llm_request_log_if_present(
-                model=model,
-                agent_name=agent_name,
-                kwargs=kwargs,
-                log_dir=debug_config.llm_request_log_dir,
-                default_log_dir=default_log_dir,
-                request_context=request_context,
-            )
+            messages = _request_messages(kwargs.get("messages"))
+            if messages is not None:
+                await write_llm_request_log(
+                    model=model,
+                    agent_name=agent_name,
+                    messages=messages,
+                    tools=_request_tools(kwargs.get("tools")),
+                    log_dir=debug_config.llm_request_log_dir,
+                    default_log_dir=default_log_dir,
+                    request_context=request_context,
+                )
             async for chunk in original_ainvoke_stream(*args, **kwargs):
                 yield chunk
 

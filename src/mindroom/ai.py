@@ -56,14 +56,18 @@ from mindroom.constants import (
 from mindroom.credentials_sync import get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
-    build_prompt_with_thread_history,
     prepare_agent_execution_context,
+    render_prepared_messages_text,
 )
 from mindroom.history import (
     CompactionOutcome,
     PreparedHistoryState,
 )
-from mindroom.history.compaction import compute_prompt_token_breakdown
+from mindroom.history.compaction import (
+    _prepare_agent_prompt_inputs_for_estimation,
+    _prepared_tool_definition_payloads,
+    compute_prompt_token_breakdown,
+)
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
@@ -72,15 +76,11 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.llm_request_logging import (
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-    install_llm_request_logging,
-)
+from mindroom.llm_request_logging import bind_llm_request_log_context, install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import build_memory_enhanced_prompt
+from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, compose_current_turn_text
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
@@ -88,6 +88,7 @@ from mindroom.tool_system.events import (
     format_tool_combined,
     format_tool_started_event,
 )
+from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Generator, Sequence
@@ -108,7 +109,6 @@ logger = get_logger(__name__)
 __all__ = [
     "AIStreamChunk",
     "ai_response",
-    "build_prompt_with_thread_history",
     "cleanup_queued_notice_state",
     "get_model_instance",
     "install_queued_message_notice_hook",
@@ -118,6 +118,7 @@ __all__ = [
 ]
 
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+type ModelRunInput = str | Sequence[Message]
 _AI_RUN_METADATA_VERSION = 1
 _QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
@@ -127,6 +128,96 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
     "Avoid further tool calls unless strictly necessary. "
     "The new message will be handled in your next turn."
 )
+
+
+def _append_additional_context(agent: Agent, context_chunk: str) -> None:
+    """Append one transient context block without discarding existing system context."""
+    if not context_chunk:
+        return
+    existing_context = agent.additional_context.strip() if agent.additional_context else ""
+    agent.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
+
+
+def _compose_current_turn_prompt(
+    *,
+    raw_prompt: str,
+    model_prompt: str | None,
+    prompt_parts: MemoryPromptParts,
+) -> str:
+    """Build the current-turn user message without rewriting persisted history."""
+    prompt_chunks: list[str] = []
+    if raw_prompt:
+        prompt_chunks.append(raw_prompt)
+    if prompt_parts.turn_context:
+        prompt_chunks.append(prompt_parts.turn_context)
+    model_tail = compose_current_turn_text(raw_prompt, model_prompt)
+    if raw_prompt and model_tail == raw_prompt:
+        model_tail = ""
+    elif raw_prompt and model_tail.startswith(f"{raw_prompt}\n\n"):
+        model_tail = model_tail[len(raw_prompt) + 2 :].lstrip()
+    if model_tail:
+        prompt_chunks.append(model_tail)
+
+    return "\n\n".join(prompt_chunks)
+
+
+@dataclass(frozen=True)
+class PreparedAgentRun:
+    """Prepared agent invocation state after history planning."""
+
+    agent: Agent
+    messages: tuple[Message, ...]
+    unseen_event_ids: list[str]
+    prepared_history: PreparedHistoryState
+
+    @property
+    def prompt_text(self) -> str:
+        """Return the prompt-visible text derived from canonical live messages."""
+        return render_prepared_messages_text(self.messages)
+
+    @property
+    def run_input(self) -> list[Message]:
+        """Return a deep-copied mutable message list for one provider call."""
+        return _copy_run_input(self.messages)
+
+
+def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
+    """Coerce legacy string input into canonical provider messages."""
+    if isinstance(run_input, str):
+        return [Message(role="user", content=run_input)]
+    return [message.model_copy(deep=True) for message in run_input]
+
+
+def _copy_run_input(run_input: ModelRunInput) -> list[Message]:
+    """Deep-copy canonical run input so retries can mutate safely."""
+    return _normalize_run_input(run_input)
+
+
+def _attach_media_to_run_input(
+    run_input: ModelRunInput,
+    media_inputs: MediaInputs,
+) -> list[Message]:
+    """Attach media to the current user message."""
+    run_messages = _copy_run_input(run_input)
+    current_message = run_messages[-1]
+    current_message.audio = media_inputs.audio
+    current_message.images = media_inputs.images
+    current_message.files = media_inputs.files
+    current_message.videos = media_inputs.videos
+    return run_messages
+
+
+def _append_inline_media_fallback_to_run_input(run_input: ModelRunInput) -> list[Message]:
+    """Append the inline-media fallback note to the current user turn."""
+    run_messages = _copy_run_input(run_input)
+    current_message = run_messages[-1]
+    current_text = current_message.content if isinstance(current_message.content, str) else ""
+    current_message.content = append_inline_media_fallback_prompt(current_text)
+    current_message.audio = None
+    current_message.images = None
+    current_message.files = None
+    current_message.videos = None
+    return run_messages
 
 
 class _SupportsQueuedMessageState(Protocol):
@@ -695,6 +786,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         if client_params:
             extra_kwargs["client_params"] = client_params
 
+    if canonical_provider in {"anthropic", "vertexai_claude"}:
+        extra_kwargs.setdefault("cache_system_prompt", True)
+        extra_kwargs.setdefault("extended_cache_time", True)
+
     # Handle Ollama separately due to special host configuration
     if canonical_provider == "ollama":
         # Priority: model config > env/CredentialsManager > default
@@ -776,6 +871,7 @@ def get_model_instance(
             debug_config=config.debug,
             default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         )
+    install_vertex_claude_prompt_cache_hook(model)
     return model
 
 
@@ -816,6 +912,92 @@ def build_matrix_run_metadata(
     ):
         metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
     return metadata or None
+
+
+def _resolved_requester_id(user_id: str | None) -> str | None:
+    return user_id
+
+
+def _resolved_correlation_id(reply_to_event_id: str | None) -> str:
+    if reply_to_event_id:
+        return reply_to_event_id
+    return uuid4().hex
+
+
+def build_llm_request_log_context(
+    *,
+    session_id: str,
+    room_id: str | None,
+    thread_id: str | None,
+    reply_to_event_id: str | None,
+    prompt: str,
+    model_prompt: str | None,
+    full_prompt: str,
+    metadata: dict[str, object] | None,
+) -> dict[str, object]:
+    """Build per-attempt LLM request-log context for one provider call."""
+    context: dict[str, object] = {
+        "session_id": session_id,
+        "current_turn_prompt": prompt,
+        "full_prompt": full_prompt,
+    }
+    if room_id:
+        context["room_id"] = room_id
+    if thread_id:
+        context["thread_id"] = thread_id
+    if reply_to_event_id:
+        context["reply_to_event_id"] = reply_to_event_id
+    if model_prompt is not None:
+        context["model_prompt"] = model_prompt
+    if not metadata:
+        return context
+
+    source_event_ids = _normalized_string_list(
+        [
+            reply_to_event_id,
+            *_normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)),
+        ],
+    )
+    if source_event_ids:
+        context["source_event_ids"] = source_event_ids
+
+    raw_prompt_map = metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
+    if isinstance(raw_prompt_map, dict):
+        source_event_prompts = {
+            event_id: event_prompt
+            for event_id, event_prompt in raw_prompt_map.items()
+            if isinstance(event_id, str) and event_id and isinstance(event_prompt, str)
+        }
+        if source_event_prompts:
+            context["source_event_prompts"] = source_event_prompts
+
+    return context
+
+
+async def _stream_with_request_log_context[StreamEventT](
+    stream_generator: AsyncIterator[StreamEventT],
+    *,
+    request_context: dict[str, object],
+) -> AsyncIterator[StreamEventT]:
+    """Advance one async stream with request-log context rebound per item pull."""
+    with bind_llm_request_log_context(**request_context):
+        stream_iterator = stream_generator.__aiter__()
+    while True:
+        try:
+            with bind_llm_request_log_context(**request_context):
+                event = await stream_iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        yield event
+
+
+def _agent_tools_schema(agent: Agent) -> list[dict[str, object]]:
+    previous_tool_instructions = agent._tool_instructions
+    try:
+        _session, _run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
+    finally:
+        agent._tool_instructions = previous_tool_instructions
+    return _prepared_tool_definition_payloads(prepared_tools)
 
 
 def _request_stream_retry(
@@ -922,50 +1104,9 @@ def _track_model_request_metrics(
         state.first_token_latency = float(event.time_to_first_token)
 
 
-def _attempt_request_log_context(
-    *,
-    session_id: str,
-    room_id: str | None,
-    thread_id: str | None,
-    reply_to_event_id: str | None,
-    prompt: str,
-    model_prompt: str | None,
-    attempt_prompt: str,
-    metadata: dict[str, object] | None,
-) -> dict[str, object]:
-    """Build request-log context for the exact prompt used by one provider attempt."""
-    return build_llm_request_log_context(
-        session_id=session_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        reply_to_event_id=reply_to_event_id,
-        prompt=prompt,
-        model_prompt=model_prompt,
-        full_prompt=attempt_prompt,
-        metadata=metadata,
-    )
-
-
-async def _stream_with_request_log_context[StreamEventT](
-    stream_generator: AsyncIterator[StreamEventT],
-    *,
-    request_context: dict[str, object],
-) -> AsyncIterator[StreamEventT]:
-    """Advance one async stream with request-log context bound per item pull."""
-    with bind_llm_request_log_context(**request_context):
-        stream_iterator = stream_generator.__aiter__()
-    while True:
-        try:
-            with bind_llm_request_log_context(**request_context):
-                event = await stream_iterator.__anext__()
-        except StopAsyncIteration:
-            return
-        yield event
-
-
 async def cached_agent_run(
     agent: Agent,
-    full_prompt: str,
+    run_input: ModelRunInput,
     session_id: str,
     *,
     user_id: str | None = None,
@@ -977,15 +1118,12 @@ async def cached_agent_run(
     """Shared wrapper for one `agent.arun()` call."""
     media_inputs = media or MediaInputs()
     _note_attempt_run_id(run_id_callback, run_id)
+    prepared_input = _attach_media_to_run_input(run_input, media_inputs)
     return await agent.arun(
-        full_prompt,
+        prepared_input,
         session_id=session_id,
         user_id=user_id,
         run_id=run_id,
-        audio=media_inputs.audio,
-        images=media_inputs.images,
-        files=media_inputs.files,
-        videos=media_inputs.videos,
         metadata=metadata,
     )
 
@@ -993,7 +1131,7 @@ async def cached_agent_run(
 @timed("model_request_to_completion")
 async def _run_cached_agent_attempt(
     agent: Agent,
-    full_prompt: str,
+    run_input: ModelRunInput,
     session_id: str,
     *,
     user_id: str | None = None,
@@ -1007,7 +1145,7 @@ async def _run_cached_agent_attempt(
     del timing_scope
     return await cached_agent_run(
         agent,
-        full_prompt,
+        run_input,
         session_id,
         user_id=user_id,
         run_id=run_id,
@@ -1028,17 +1166,6 @@ def _assert_agent_target(agent_name: str, config: Config) -> None:
         raise ValueError(msg)
 
 
-def _prompt_current_sender_id(
-    user_id: str | None,
-    *,
-    include_openai_compat_guidance: bool,
-) -> str | None:
-    """Return the sender label to embed in prompt history, if any."""
-    if include_openai_compat_guidance:
-        return None
-    return user_id
-
-
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     agent_name: str,
@@ -1057,21 +1184,17 @@ async def _prepare_agent_and_prompt(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
-    current_sender_id: str | None = None,
     include_openai_compat_guidance: bool = False,
     timing_scope: str | None = None,
-) -> tuple[Agent, str, list[str], PreparedHistoryState]:
+    model_prompt: str | None = None,
+) -> PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
-    Returns:
-        Tuple of (agent, full_prompt, unseen_event_ids, prepared_history).
-        unseen_event_ids is the list of event_ids injected as unseen context
-        (empty when using the fallback path).
-
+    Returns the prepared run input plus history bookkeeping for one agent turn.
     """
     _assert_agent_target(agent_name, config)
     storage_path = runtime_paths.storage_root
-    enhanced_prompt = await build_memory_enhanced_prompt(
+    prompt_parts = await build_memory_prompt_parts(
         prompt,
         agent_name,
         storage_path,
@@ -1079,6 +1202,11 @@ async def _prepare_agent_and_prompt(
         runtime_paths,
         execution_identity=execution_identity,
         timing_scope=timing_scope,
+    )
+    current_turn_prompt = _compose_current_turn_prompt(
+        raw_prompt=prompt,
+        model_prompt=model_prompt,
+        prompt_parts=prompt_parts,
     )
 
     runtime_model = config.resolve_runtime_model(
@@ -1104,17 +1232,21 @@ async def _prepare_agent_and_prompt(
         delegation_depth=delegation_depth,
         timing_scope=timing_scope,
     )
+    _append_additional_context(agent, prompt_parts.session_preamble)
     if system_enrichment_items:
-        agent.additional_context = _render_system_enrichment_context(
-            system_enrichment_items,
-            timing_scope=timing_scope,
+        _append_additional_context(
+            agent,
+            _render_system_enrichment_context(
+                system_enrichment_items,
+                timing_scope=timing_scope,
+            ),
         )
 
     prepared_execution = await prepare_agent_execution_context(
         scope_context=scope_context,
         agent=agent,
         agent_name=agent_name,
-        prompt=enhanced_prompt,
+        prompt=current_turn_prompt,
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
@@ -1122,7 +1254,6 @@ async def _prepare_agent_and_prompt(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
-        current_sender_id=current_sender_id,
         timing_scope=timing_scope,
     )
     prepared_history = PreparedHistoryState(
@@ -1132,13 +1263,13 @@ async def _prepare_agent_and_prompt(
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
-    full_prompt = prepared_execution.final_prompt
     unseen_event_ids = prepared_execution.unseen_event_ids
+    run_messages = prepared_execution.messages
 
     if prepared_history.compaction_outcomes:
         breakdown = _compute_compaction_token_breakdown(
             agent,
-            full_prompt,
+            render_prepared_messages_text(run_messages),
             timing_scope=timing_scope,
         )
         enriched_outcomes = [replace(o, **breakdown) for o in prepared_history.compaction_outcomes]
@@ -1151,8 +1282,17 @@ async def _prepare_agent_and_prompt(
             compaction_outcomes_collector.clear()
             compaction_outcomes_collector.extend(enriched_outcomes)
 
-    logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    return agent, full_prompt, unseen_event_ids, prepared_history
+    logger.info(
+        "Preparing agent and prompt",
+        agent=agent_name,
+        full_prompt=render_prepared_messages_text(run_messages),
+    )
+    return PreparedAgentRun(
+        agent=agent,
+        messages=run_messages,
+        unseen_event_ids=unseen_event_ids,
+        prepared_history=prepared_history,
+    )
 
 
 async def ai_response(  # noqa: C901, PLR0912, PLR0915
@@ -1193,8 +1333,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
-        model_prompt: Optional model-facing prompt after caller-side prompt shaping
-        thread_id: Optional resolved Matrix thread target for the request
+        model_prompt: Optional model-facing current-turn prompt additions.
+        thread_id: Optional resolved Matrix thread target retained for call compatibility.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
@@ -1204,8 +1344,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether to include OpenAI-compatible
-            history-format guidance in the shared identity prompt.
+        include_openai_compat_guidance: Whether to omit Matrix-style sender
+            attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
@@ -1262,7 +1402,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             try:
                 if pipeline_timing is not None:
                     pipeline_timing.mark("ai_prepare_start")
-                agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
+                prepared_run = await _prepare_agent_and_prompt(
                     agent_name,
                     model_prompt or prompt,
                     runtime_paths,
@@ -1279,18 +1419,18 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=_prompt_current_sender_id(
-                        user_id,
-                        include_openai_compat_guidance=include_openai_compat_guidance,
-                    ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
+                    model_prompt=model_prompt,
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")
             except Exception as e:
                 logger.exception("Error preparing agent", agent=agent_name)
                 return get_user_friendly_error_message(e, agent_name)
+            agent = prepared_run.agent
+            run_input = prepared_run.run_input
+            unseen_event_ids = prepared_run.unseen_event_ids
             if agent.model is not None:
                 install_queued_message_notice_hook(agent.model)
 
@@ -1301,7 +1441,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             )
 
             response: RunOutput | None = None
-            attempt_prompt = full_prompt
+            attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
 
@@ -1311,18 +1451,17 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     try:
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
-                        with bind_llm_request_log_context(
-                            **_attempt_request_log_context(
-                                session_id=session_id,
-                                room_id=room_id,
-                                thread_id=thread_id,
-                                reply_to_event_id=reply_to_event_id,
-                                prompt=prompt,
-                                model_prompt=model_prompt,
-                                attempt_prompt=attempt_prompt,
-                                metadata=metadata,
-                            ),
-                        ):
+                        request_context = build_llm_request_log_context(
+                            session_id=session_id,
+                            room_id=room_id,
+                            thread_id=thread_id,
+                            reply_to_event_id=reply_to_event_id,
+                            prompt=prompt,
+                            model_prompt=model_prompt,
+                            full_prompt=render_prepared_messages_text(_copy_run_input(attempt_prompt)),
+                            metadata=metadata,
+                        )
+                        with bind_llm_request_log_context(**request_context):
                             response = await _run_cached_agent_attempt(
                                 agent,
                                 attempt_prompt,
@@ -1344,7 +1483,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=str(e),
                             )
-                            attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1363,7 +1502,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=error_text,
                             )
-                            attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1542,8 +1681,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
-        model_prompt: Optional model-facing prompt after caller-side prompt shaping
-        thread_id: Optional resolved Matrix thread target for the request
+        model_prompt: Optional model-facing current-turn prompt additions.
+        thread_id: Optional resolved Matrix thread target retained for call compatibility.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
@@ -1553,8 +1692,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether to include OpenAI-compatible
-            history-format guidance in the shared identity prompt.
+        include_openai_compat_guidance: Whether to omit Matrix-style sender
+            attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
@@ -1611,7 +1750,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             try:
                 if pipeline_timing is not None:
                     pipeline_timing.mark("ai_prepare_start")
-                agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
+                prepared_run = await _prepare_agent_and_prompt(
                     agent_name,
                     model_prompt or prompt,
                     runtime_paths,
@@ -1628,12 +1767,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=_prompt_current_sender_id(
-                        user_id,
-                        include_openai_compat_guidance=include_openai_compat_guidance,
-                    ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
+                    model_prompt=model_prompt,
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")
@@ -1641,6 +1777,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 logger.exception("Error preparing agent for streaming", agent=agent_name)
                 yield get_user_friendly_error_message(e, agent_name)
                 return
+            agent = prepared_run.agent
+            run_input = prepared_run.run_input
+            unseen_event_ids = prepared_run.unseen_event_ids
             if agent.model is not None:
                 install_queued_message_notice_hook(agent.model)
 
@@ -1650,7 +1789,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 extra_metadata=matrix_run_metadata,
             )
 
-            attempt_prompt = full_prompt
+            attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
             state = _StreamingAttemptState()
@@ -1663,26 +1802,26 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
-                        request_context = _attempt_request_log_context(
+                        request_context = build_llm_request_log_context(
                             session_id=session_id,
                             room_id=room_id,
                             thread_id=thread_id,
                             reply_to_event_id=reply_to_event_id,
                             prompt=prompt,
                             model_prompt=model_prompt,
-                            attempt_prompt=attempt_prompt,
+                            full_prompt=render_prepared_messages_text(_copy_run_input(attempt_prompt)),
                             metadata=metadata,
                         )
                         with bind_llm_request_log_context(**request_context):
-                            stream_generator = agent.arun(
+                            prepared_input = _attach_media_to_run_input(
                                 attempt_prompt,
+                                attempt_media_inputs,
+                            )
+                            stream_generator = agent.arun(
+                                prepared_input,
                                 session_id=session_id,
                                 user_id=user_id,
                                 run_id=attempt_run_id,
-                                audio=attempt_media_inputs.audio,
-                                images=attempt_media_inputs.images,
-                                files=attempt_media_inputs.files,
-                                videos=attempt_media_inputs.videos,
                                 stream=True,
                                 stream_events=True,
                                 metadata=metadata,
@@ -1711,7 +1850,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             log_message="Retrying streaming AI response without inline media after validation error",
                             agent_name=agent_name,
                         ):
-                            attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1720,7 +1859,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         return
 
                     if state.retry_requested:
-                        attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                        attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                         attempt_media_inputs = MediaInputs()
                         attempt_run_id = _next_retry_run_id(run_id)
                         continue

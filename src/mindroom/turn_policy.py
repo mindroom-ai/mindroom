@@ -27,7 +27,7 @@ from mindroom.hooks import (
 from mindroom.hooks.ingress import HookIngressPolicy, is_automation_source_kind
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID, is_agent_id
-from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
 from mindroom.teams import (
     TeamIntent,
@@ -158,7 +158,7 @@ class IngressHookRunner:
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
         )
-        model_prompt: str | None = None
+        model_prompt = payload.model_prompt
         strip_transient_enrichment_after_run = False
         if self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH):
             context = MessageEnrichContext(
@@ -210,7 +210,7 @@ class IngressHookRunner:
 class TurnPolicyDeps:
     """Explicit collaborators needed by pure turn policy decisions."""
 
-    runtime: SupportsConfigOrchestrator
+    runtime: SupportsClientConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

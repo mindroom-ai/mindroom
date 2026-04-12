@@ -31,6 +31,7 @@ from agno.session.team import TeamSession
 
 from mindroom.agents import create_session_storage
 from mindroom.ai import (
+    PreparedAgentRun,
     _prepare_agent_and_prompt,
     ai_response,
     append_inline_media_fallback_prompt,
@@ -59,6 +60,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SESSION_STARTED,
+    EnrichmentItem,
     HookContextSupport,
     HookRegistry,
     SessionHookContext,
@@ -70,6 +72,7 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
+from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
@@ -130,8 +133,13 @@ def _prepared_prompt_result(
     agent: object,
     *,
     prompt: str = "test prompt",
-) -> tuple[object, str, list[str], PreparedHistoryState]:
-    return agent, prompt, [], PreparedHistoryState()
+) -> PreparedAgentRun:
+    return PreparedAgentRun(
+        agent=agent,
+        messages=(Message(role="user", content=prompt),),
+        unseen_event_ids=[],
+        prepared_history=PreparedHistoryState(),
+    )
 
 
 class _SessionStorage:
@@ -670,6 +678,53 @@ async def test_send_skill_command_response_emits_session_started_after_first_per
         "started:agent:general:!test:localhost:$thread-root:$thread-root",
         "send:Skill response",
     ]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_marks_matrix_prompt_context_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should scrub Matrix-only prompt metadata after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["matrix_message"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    outcome = mock_post.await_args.args[0]
+    assert outcome.strip_transient_enrichment_after_run is True
 
 
 @pytest.mark.asyncio
@@ -1518,6 +1573,188 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
 
 
 @pytest.mark.asyncio
+async def test_generate_team_response_helper_preserves_raw_prompt_when_model_prompt_supplies_tail(
+    tmp_path: Path,
+) -> None:
+    """Team responses should keep the raw user text when model_prompt only adds transient tails."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.response_runner.team_response",
+            new=AsyncMock(return_value="Team answer"),
+        ) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    message = mock_team_response.await_args.kwargs["message"]
+    assert "Describe this image" in message
+    assert "Available attachment IDs: att_1" in message
+
+
+@pytest.mark.asyncio
+async def test_generate_response_marks_transient_model_prompt_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Agent responses should scrub transient per-turn model tails after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+        )
+
+    outcome = mock_post.await_args.args[0]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Team responses should scrub transient per-turn model tails after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    outcome = mock_post.await_args.args[0]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_response_marks_system_enrichment_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Agent responses should scrub transient system enrichment after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+            ),
+        )
+
+    outcome = mock_post.await_args.args[0]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_system_enrichment_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Team responses should scrub transient system enrichment after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    outcome = mock_post.await_args.args[0]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_delivery_error(
     tmp_path: Path,
 ) -> None:
@@ -2306,25 +2543,88 @@ class TestUserIdPassthrough:
         mock_agent = MagicMock()
 
         with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.build_prompt_with_thread_history", return_value="enhanced"),
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(),
+            ),
             patch("mindroom.ai.create_agent", return_value=mock_agent) as mock_create_agent,
         ):
-            agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
+            prepared_run = await _prepare_agent_and_prompt(
                 agent_name="general",
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                 config=config,
             )
 
+        agent = prepared_run.agent
+        full_prompt = prepared_run.prompt_text
+        unseen_event_ids = prepared_run.unseen_event_ids
+        prepared_history = prepared_run.prepared_history
         assert agent is mock_agent
-        assert full_prompt == "enhanced"
+        assert full_prompt == "test"
         assert unseen_event_ids == []
         assert prepared_history.compaction_outcomes == []
         assert prepared_history.replays_persisted_history is False
         assert prepared_history.replay_plan is not None
         assert prepared_history.replay_plan.mode == "configured"
         assert "runtime_paths" not in mock_create_agent.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Raw prompt should drive memory lookup while session context appends to the system prompt."""
+        config = _config()
+        mock_agent = MagicMock()
+        mock_agent.additional_context = "existing context"
+        prepared_execution = SimpleNamespace(
+            messages=(Message(role="user", content="prepared prompt"),),
+            replay_plan=None,
+            unseen_event_ids=[],
+            replays_persisted_history=False,
+            compaction_outcomes=[],
+        )
+
+        with (
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(
+                    session_preamble="session preamble",
+                    turn_context="turn context",
+                ),
+            ) as mock_build_prompt_parts,
+            patch("mindroom.ai.create_agent", return_value=mock_agent),
+            patch("mindroom.ai._render_system_enrichment_context", return_value="system enrichment"),
+            patch(
+                "mindroom.ai.prepare_agent_execution_context",
+                new=AsyncMock(return_value=prepared_execution),
+            ) as mock_prepare_execution,
+        ):
+            prepared_run = await _prepare_agent_and_prompt(
+                agent_name="general",
+                prompt="raw prompt",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                model_prompt="model metadata",
+                system_enrichment_items=(EnrichmentItem(key="k", text="v", cache_policy="stable"),),
+            )
+
+        agent = prepared_run.agent
+        full_prompt = prepared_run.prompt_text
+        unseen_event_ids = prepared_run.unseen_event_ids
+        prepared_history = prepared_run.prepared_history
+        assert agent is mock_agent
+        assert full_prompt == "prepared prompt"
+        assert unseen_event_ids == []
+        assert prepared_history.compaction_outcomes == []
+        assert mock_build_prompt_parts.await_args is not None
+        assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
+        assert mock_prepare_execution.await_args is not None
+        assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt\n\nturn context\n\nmodel metadata"
+        assert mock_agent.additional_context == "existing context\n\nsession preamble\n\nsystem enrichment"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -2377,7 +2677,7 @@ class TestUserIdPassthrough:
                 include_openai_compat_guidance=True,
             )
 
-        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
+        assert "current_sender_id" not in mock_prepare.await_args.kwargs
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
@@ -2439,7 +2739,7 @@ class TestUserIdPassthrough:
                 )
             ]
 
-        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
+        assert "current_sender_id" not in mock_prepare.await_args.kwargs
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
@@ -2636,8 +2936,9 @@ class TestUserIdPassthrough:
             )
 
         mock_agent.arun.assert_called_once()
-        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
-        assert sent_files == [pdf_file, zip_file]
+        run_input = mock_agent.arun.call_args.args[0]
+        assert isinstance(run_input, list)
+        assert run_input[-1].files == [pdf_file, zip_file]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
@@ -2672,8 +2973,9 @@ class TestUserIdPassthrough:
             ]
 
         mock_agent.arun.assert_called_once()
-        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
-        assert sent_files == [pdf_file, zip_file]
+        run_input = mock_agent.arun.call_args.args[0]
+        assert isinstance(run_input, list)
+        assert run_input[-1].files == [pdf_file, zip_file]
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
@@ -2721,9 +3023,13 @@ class TestUserIdPassthrough:
         assert mock_agent.arun.await_count == 2
         first_call = mock_agent.arun.await_args_list[0]
         second_call = mock_agent.arun.await_args_list[1]
-        assert list(first_call.kwargs["files"]) == [document_file]
-        assert list(second_call.kwargs["files"]) == []
-        assert "Inline media unavailable for this model" in second_call.args[0]
+        first_prompt = first_call.args[0]
+        second_prompt = second_call.args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(second_prompt, list)
+        assert first_prompt[-1].files == [document_file]
+        assert not second_prompt[-1].files
+        assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     @pytest.mark.asyncio
     async def test_ai_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
@@ -2896,9 +3202,13 @@ class TestUserIdPassthrough:
         assert mock_agent.arun.call_count == 2
         first_call = mock_agent.arun.call_args_list[0]
         second_call = mock_agent.arun.call_args_list[1]
-        assert list(first_call.kwargs["files"]) == [document_file]
-        assert list(second_call.kwargs["files"]) == []
-        assert "Inline media unavailable for this model" in second_call.args[0]
+        first_prompt = first_call.args[0]
+        second_prompt = second_call.args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(second_prompt, list)
+        assert first_prompt[-1].files == [document_file]
+        assert not second_prompt[-1].files
+        assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
 
     @pytest.mark.asyncio
@@ -3068,7 +3378,12 @@ class TestUserIdPassthrough:
         assert entries[0]["model_prompt"] == "expanded prompt"
         assert entries[0]["full_prompt"] == prepared_prompt
         assert entries[0]["messages"][0]["role"] == "user"
-        assert entries[0]["messages"][0]["content"] == prepared_prompt
+        logged_content = entries[0]["messages"][0]["content"]
+        if isinstance(logged_content, list):
+            assert len(logged_content) == 1
+            assert logged_content[0]["content"] == prepared_prompt
+        else:
+            assert logged_content == prepared_prompt
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -3228,9 +3543,13 @@ class TestUserIdPassthrough:
         assert mock_agent.arun.call_count == 2
         first_call = mock_agent.arun.call_args_list[0]
         second_call = mock_agent.arun.call_args_list[1]
-        assert list(first_call.kwargs["files"]) == [document_file]
-        assert list(second_call.kwargs["files"]) == []
-        assert second_call.args[0].count("Inline media unavailable for this model") == 1
+        first_prompt = first_call.args[0]
+        second_prompt = second_call.args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(second_prompt, list)
+        assert first_prompt[-1].files == [document_file]
+        assert not second_prompt[-1].files
+        assert str(second_prompt[-1].content).count("Inline media unavailable for this model") == 1
         assert chunks == ["friendly-error"]
         mock_friendly_error.assert_called_once()
 

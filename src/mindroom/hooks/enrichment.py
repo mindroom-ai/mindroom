@@ -25,6 +25,17 @@ _ENRICHMENT_BLOCK_PATTERN = re.compile(
     r"\n*<mindroom_message_context>.*?</mindroom_message_context>\n*",
     re.DOTALL,
 )
+_ATTACHMENT_GUIDANCE_PATTERN = re.compile(
+    r"\n*Available attachment IDs: [A-Za-z0-9_-]+(?:, [A-Za-z0-9_-]+)*\. "
+    r"Use tool calls to inspect or process them\.\n*",
+)
+_MATRIX_PROMPT_CONTEXT_PATTERN = re.compile(
+    r"\n*\[Matrix metadata for tool calls\]\n"
+    r"room_id: [^\n]+\n"
+    r"thread_id: [^\n]+\n"
+    r"reply_to_event_id: [^\n]+\n"
+    r"Use these IDs when calling matrix_message\.\n*",
+)
 _SYSTEM_ENRICHMENT_BLOCK_PATTERN = re.compile(
     r"\n*<mindroom_system_context>.*?</mindroom_system_context>\n*",
     re.DOTALL,
@@ -56,8 +67,11 @@ def render_enrichment_block(items: list[EnrichmentItem]) -> str:
 
 
 def strip_enrichment_block(text: str) -> str:
-    """Remove rendered enrichment blocks from persisted text."""
-    return _ENRICHMENT_BLOCK_PATTERN.sub("\n", text).strip()
+    """Remove transient message-level model context from persisted text."""
+    stripped = _ENRICHMENT_BLOCK_PATTERN.sub("\n", text)
+    stripped = _ATTACHMENT_GUIDANCE_PATTERN.sub("\n", stripped)
+    stripped = _MATRIX_PROMPT_CONTEXT_PATTERN.sub("\n", stripped)
+    return stripped.strip()
 
 
 def render_system_enrichment_block(items: Sequence[EnrichmentItem]) -> str:
