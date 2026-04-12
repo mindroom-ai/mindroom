@@ -389,9 +389,8 @@ class AgentBot:
             raise KeyError(msg)
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
-            enabled=self._coalescing_enabled,
-            debounce_seconds=self._coalescing_debounce_seconds,
-            upload_grace_seconds=self._coalescing_upload_grace_seconds,
+            debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
+            upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
         )
         self._hook_context_support = HookContextSupport(
@@ -644,28 +643,6 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
-
-    def _coalescing_enabled(self) -> bool:
-        """Return whether live coalescing is enabled for this bot."""
-        coalescing = self.config.defaults.coalescing
-        enabled = coalescing.enabled
-        return enabled if isinstance(enabled, bool) else False
-
-    def _coalescing_debounce_seconds(self) -> float:
-        """Return the configured live coalescing debounce window in seconds."""
-        coalescing = self.config.defaults.coalescing
-        debounce_ms = coalescing.debounce_ms
-        if not isinstance(debounce_ms, int | float):
-            return 0.0
-        return max(float(debounce_ms), 0.0) / 1000
-
-    def _coalescing_upload_grace_seconds(self) -> float:
-        """Return the configured upload-grace window in seconds."""
-        coalescing = self.config.defaults.coalescing
-        upload_grace_ms = coalescing.upload_grace_ms
-        if not isinstance(upload_grace_ms, int | float):
-            return 0.0
-        return max(float(upload_grace_ms), 0.0) / 1000
 
     async def _emit_reaction_received_hooks(
         self,
