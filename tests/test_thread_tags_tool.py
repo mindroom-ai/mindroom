@@ -616,6 +616,253 @@ async def test_list_thread_tags_lists_room_wide_when_no_thread_is_available() ->
 
 
 @pytest.mark.asyncio
+async def test_list_thread_tags_room_wide_filters_by_include_tag_only() -> None:
+    """Room-wide listing should keep only threads that carry the included tag."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value={
+                    "$thread-one:localhost": _state(
+                        "$thread-one:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                    ),
+                    "$thread-two:localhost": _state(
+                        "$thread-two:localhost",
+                        resolved=_record(note="done"),
+                    ),
+                    "$thread-three:localhost": _state(
+                        "$thread-three:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        resolved=_record(note="done"),
+                    ),
+                },
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(include_tag="blocked"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert payload["include_tag"] == "blocked"
+    assert payload["exclude_tag"] is None
+    assert list(payload["threads"]) == ["$thread-one:localhost", "$thread-three:localhost"]
+    assert set(payload["threads"]["$thread-one:localhost"]) == {"blocked"}
+    assert set(payload["threads"]["$thread-three:localhost"]) == {"blocked", "resolved"}
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_room_wide_requires_tag_and_include_tag_together() -> None:
+    """Room-wide listing should require both tag filters when tag and include_tag are combined."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value={
+                    "$thread-one:localhost": _state(
+                        "$thread-one:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                    ),
+                    "$thread-two:localhost": _state(
+                        "$thread-two:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        waiting=_record(data={"waiting_on": ["@owner:localhost"]}),
+                    ),
+                    "$thread-three:localhost": _state(
+                        "$thread-three:localhost",
+                        waiting=_record(data={"waiting_on": ["@owner:localhost"]}),
+                    ),
+                },
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(tag="blocked", include_tag="waiting"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert payload["tag"] == "blocked"
+    assert payload["include_tag"] == "waiting"
+    assert list(payload["threads"]) == ["$thread-two:localhost"]
+    assert list(payload["threads"]["$thread-two:localhost"]) == ["blocked"]
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_room_wide_requires_tag_without_excluded_tag() -> None:
+    """Room-wide listing should keep threads with the tag unless they also carry the excluded tag."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value={
+                    "$thread-one:localhost": _state(
+                        "$thread-one:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                    ),
+                    "$thread-two:localhost": _state(
+                        "$thread-two:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        resolved=_record(note="done"),
+                    ),
+                    "$thread-three:localhost": _state(
+                        "$thread-three:localhost",
+                        waiting=_record(data={"waiting_on": ["@owner:localhost"]}),
+                    ),
+                },
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(tag="blocked", exclude_tag="resolved"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert payload["tag"] == "blocked"
+    assert payload["exclude_tag"] == "resolved"
+    assert list(payload["threads"]) == ["$thread-one:localhost"]
+    assert list(payload["threads"]["$thread-one:localhost"]) == ["blocked"]
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_room_wide_returns_empty_when_include_tag_matches_nothing() -> None:
+    """Room-wide listing should return an empty result when no thread has the included tag."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value={
+                    "$thread-one:localhost": _state(
+                        "$thread-one:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                    ),
+                    "$thread-two:localhost": _state(
+                        "$thread-two:localhost",
+                        resolved=_record(note="done"),
+                    ),
+                },
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(include_tag="nonexistent"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert payload["include_tag"] == "nonexistent"
+    assert payload["threads"] == {}
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_room_wide_returns_empty_when_exclude_tag_filters_all_threads() -> None:
+    """Room-wide listing should return an empty result when every thread has the excluded tag."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value={
+                    "$thread-one:localhost": _state(
+                        "$thread-one:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        resolved=_record(note="done"),
+                    ),
+                    "$thread-two:localhost": _state(
+                        "$thread-two:localhost",
+                        resolved=_record(note="done"),
+                    ),
+                },
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert payload["exclude_tag"] == "resolved"
+    assert payload["threads"] == {}
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_room_wide_normalizes_mixed_case_include_and_exclude_tags() -> None:
+    """Room-wide listing should normalize include and exclude tag inputs before filtering."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value={
+                    "$thread-one:localhost": _state(
+                        "$thread-one:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                    ),
+                    "$thread-two:localhost": _state(
+                        "$thread-two:localhost",
+                        blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        resolved=_record(note="done"),
+                    ),
+                },
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(include_tag="BloCked", exclude_tag="ReSoLved"))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert payload["include_tag"] == "blocked"
+    assert payload["exclude_tag"] == "resolved"
+    assert list(payload["threads"]) == ["$thread-one:localhost"]
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_from_thread_context() -> None:
     """An explicit same-room target should disable thread fallback and allow room-wide listing."""
     tool = ThreadTagsTools()
@@ -709,6 +956,53 @@ async def test_list_thread_tags_filters_thread_specific_payload() -> None:
     assert payload["tags"]["blocked"]["data"] == {"blocked_by": ["$other:localhost"]}
     assert payload["tags"]["blocked"]["set_by"] == "@user:localhost"
     assert datetime.fromisoformat(payload["tags"]["blocked"]["set_at"]).tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_thread_specific_include_exclude_filters() -> None:
+    """Thread-specific listing should respect include_tag and exclude_tag filters."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.normalize_thread_root_event_id",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.get_thread_tags",
+            new=AsyncMock(
+                return_value=_state(
+                    "$ctx-thread:localhost",
+                    resolved=_record(),
+                    blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                ),
+            ),
+        ),
+        tool_runtime_context(context),
+    ):
+        # include_tag matches → thread returned with all tags
+        payload = json.loads(await tool.list_thread_tags(include_tag="blocked"))
+        assert payload["status"] == "ok"
+        assert "blocked" in payload["tags"]
+        assert "resolved" in payload["tags"]
+
+        # exclude_tag matches → thread excluded (empty tags)
+        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved"))
+        assert payload["status"] == "ok"
+        assert payload["tags"] == {}
+
+        # include_tag matches but exclude_tag also matches → excluded
+        payload = json.loads(
+            await tool.list_thread_tags(include_tag="blocked", exclude_tag="resolved"),
+        )
+        assert payload["status"] == "ok"
+        assert payload["tags"] == {}
+
+        # include_tag doesn't match → excluded
+        payload = json.loads(await tool.list_thread_tags(include_tag="nonexistent"))
+        assert payload["status"] == "ok"
+        assert payload["tags"] == {}
 
 
 @pytest.mark.asyncio
