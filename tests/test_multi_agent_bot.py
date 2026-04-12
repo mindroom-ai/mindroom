@@ -354,6 +354,93 @@ def _visible_message(
     )
 
 
+def _room_image_event(
+    *,
+    sender: str,
+    event_id: str,
+    body: str = "image.jpg",
+    room_id: str = "!test:localhost",
+    server_timestamp: int = 1000,
+) -> nio.RoomMessageImage:
+    """Create a typed Matrix image event for media-dispatch tests."""
+    return cast(
+        "nio.RoomMessageImage",
+        nio.RoomMessageImage.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.image",
+                    "body": body,
+                    "url": "mxc://localhost/test-image",
+                    "info": {"mimetype": "image/jpeg"},
+                },
+            },
+        ),
+    )
+
+
+def _room_audio_event(
+    *,
+    sender: str,
+    event_id: str,
+    body: str = "voice.ogg",
+    room_id: str = "!test:localhost",
+    server_timestamp: int = 1000,
+) -> nio.RoomMessageAudio:
+    """Create a typed Matrix audio event for media-dispatch tests."""
+    return cast(
+        "nio.RoomMessageAudio",
+        nio.RoomMessageAudio.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.audio",
+                    "body": body,
+                    "url": "mxc://localhost/test-audio",
+                    "info": {"mimetype": "audio/ogg"},
+                },
+            },
+        ),
+    )
+
+
+def _room_file_event(
+    *,
+    sender: str,
+    event_id: str,
+    body: str = "report.pdf",
+    room_id: str = "!test:localhost",
+    server_timestamp: int = 1000,
+) -> nio.RoomMessageFile:
+    """Create a typed Matrix file event for media-dispatch tests."""
+    return cast(
+        "nio.RoomMessageFile",
+        nio.RoomMessageFile.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.file",
+                    "body": body,
+                    "url": "mxc://localhost/test-file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        ),
+    )
+
+
 def test_agent_bot_init_defers_matrix_id_access_until_after_user_id_is_populated(tmp_path: Path) -> None:
     """Bot init should not parse an empty Matrix user ID while wiring helper deps."""
     agent_user = AgentMatrixUser(
@@ -535,7 +622,7 @@ class TestAgentBot:
         return cls.create_mock_config(storage_path)
 
     @staticmethod
-    def _make_handler_event(handler_name: str, *, sender: str, event_id: str) -> MagicMock:
+    def _make_handler_event(handler_name: str, *, sender: str, event_id: str) -> object:
         """Create a minimal event object for a specific handler type."""
         if handler_name == "message":
             event = MagicMock(spec=nio.RoomMessageText)
@@ -543,21 +630,11 @@ class TestAgentBot:
             event.server_timestamp = 1234567890
             event.source = {"content": {"body": "hello"}}
         elif handler_name == "image":
-            event = MagicMock(spec=nio.RoomMessageImage)
-            event.body = "image.jpg"
-            event.server_timestamp = 1000
-            event.source = {"content": {"body": "image.jpg"}}
+            event = _room_image_event(sender=sender, event_id=event_id)
         elif handler_name == "voice":
-            event = MagicMock(spec=nio.RoomMessageAudio)
-            event.body = "voice"
-            event.server_timestamp = 1000
-            event.source = {"content": {"body": "voice"}}
+            event = _room_audio_event(sender=sender, event_id=event_id, body="voice")
         elif handler_name == "file":
-            event = MagicMock(spec=nio.RoomMessageFile)
-            event.body = "report.pdf"
-            event.url = "mxc://localhost/report"
-            event.server_timestamp = 1000
-            event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
+            event = _room_file_event(sender=sender, event_id=event_id)
         elif handler_name == "reaction":
             event = MagicMock(spec=nio.ReactionEvent)
             event.key = "👍"
@@ -1318,8 +1395,8 @@ class TestAgentBot:
             stream_kwargs = mock_stream_agent_response.call_args.kwargs
             assert stream_kwargs["agent_name"] == "calculator"
             assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert stream_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert stream_kwargs["model_prompt"].startswith("[")
+            assert stream_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
@@ -1343,8 +1420,8 @@ class TestAgentBot:
             ai_kwargs = mock_ai_response.call_args.kwargs
             assert ai_kwargs["agent_name"] == "calculator"
             assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert ai_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert ai_kwargs["model_prompt"].startswith("[")
+            assert ai_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
@@ -1515,6 +1592,57 @@ class TestAgentBot:
         assert "room_id: !test:localhost" in model_prompt
         assert "thread_id: none" in model_prompt
         assert "reply_to_event_id: $event456" in model_prompt
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_uses_safe_thread_root_for_prompt_metadata(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Prompt metadata should prefer the stable thread root over plain reply event IDs."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.client.room_send.return_value = _room_send_response("$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_ai = AsyncMock(return_value="Handled")
+        target = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id="$reply_plain:localhost",
+            thread_start_root_event_id="$thread_root:localhost",
+        )
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            ai_response=mock_ai,
+        ):
+            await bot._response_runner.process_and_respond(
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Continue",
+                    reply_to_event_id="$reply_plain:localhost",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    target=target,
+                ),
+            )
+
+        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
+        assert "thread_id: $thread_root:localhost" in model_prompt
+        assert "reply_to_event_id: $reply_plain:localhost" in model_prompt
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_resolves_knowledge_once(
@@ -2163,7 +2291,6 @@ class TestAgentBot:
                 requester_user_id="@user:localhost",
                 payload=DispatchPayload(prompt="team prompt"),
                 response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                strip_transient_enrichment_after_run=True,
                 correlation_id="corr-team",
             )
 
@@ -2172,12 +2299,12 @@ class TestAgentBot:
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_strips_enrichment_from_shared_team_session(
+    async def test_generate_team_response_helper_preserves_enrichment_in_shared_team_session(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Shared team responses should strip transient enrichment from persisted session history."""
+        """Shared team responses should preserve enriched history for exact replay."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -4849,11 +4976,7 @@ class TestAgentBot:
         room = MagicMock()
         room.room_id = "!test:localhost"
 
-        event = MagicMock(spec=nio.RoomMessageImage)
-        event.sender = "@user:localhost"
-        event.event_id = "$img_event"
-        event.body = "photo.jpg"
-        event.server_timestamp = 1000
+        event = _room_image_event(sender="@user:localhost", event_id="$img_event", body="photo.jpg")
         event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
 
         image = MagicMock()
@@ -4889,8 +5012,10 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         assert generate_kwargs["room_id"] == "!test:localhost"
-        assert "Available attachment IDs" in generate_kwargs["prompt"]
-        assert attachment_id in generate_kwargs["prompt"]
+        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is not None
+        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert attachment_id in generate_kwargs["model_prompt"]
         assert generate_kwargs["reply_to_event_id"] == "$img_event"
         assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
@@ -5020,11 +5145,7 @@ class TestAgentBot:
         room = MagicMock()
         room.room_id = "!test:localhost"
 
-        event = MagicMock(spec=nio.RoomMessageImage)
-        event.sender = "@user:localhost"
-        event.event_id = "$img_event_history"
-        event.body = "photo.png"
-        event.server_timestamp = 1000
+        event = _room_image_event(sender="@user:localhost", event_id="$img_event_history", body="photo.png")
         event.source = {
             "content": {
                 "body": "photo.png",
@@ -5078,8 +5199,11 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         assert generate_kwargs["attachment_ids"] == [current_attachment_id, history_attachment_id]
-        assert current_attachment_id in generate_kwargs["prompt"]
-        assert history_attachment_id in generate_kwargs["prompt"]
+        assert current_attachment_id not in generate_kwargs["prompt"]
+        assert history_attachment_id not in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is not None
+        assert current_attachment_id in generate_kwargs["model_prompt"]
+        assert history_attachment_id in generate_kwargs["model_prompt"]
         tracker.record_handled_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
@@ -5128,7 +5252,102 @@ class TestAgentBot:
             )
 
         assert payload.attachment_ids == ["att_image"]
+        assert payload.prompt == "describe this"
+        assert payload.model_prompt is not None
+        assert "Available attachment IDs" in payload.model_prompt
+        assert "att_image" in payload.model_prompt
         assert list(payload.media.images) == [stored_image, fallback_image]
+
+    @pytest.mark.asyncio
+    async def test_build_dispatch_payload_with_attachments_keeps_raw_prompt_clean(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Attachment IDs should be isolated to model_prompt instead of mutating the raw user prompt."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        stored_image = MagicMock(spec=Image)
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
+                return_value=(["att_image"], [], [stored_image], [], []),
+            ),
+        ):
+            payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id="!test:localhost",
+                    prompt="describe this",
+                    current_attachment_ids=["att_image"],
+                    thread_id=None,
+                    media_thread_id=None,
+                    thread_history=[],
+                ),
+            )
+
+        assert payload.prompt == "describe this"
+        assert payload.model_prompt is not None
+        assert "Available attachment IDs" in payload.model_prompt
+        assert "att_image" in payload.model_prompt
+
+    @pytest.mark.asyncio
+    async def test_message_enrichment_appends_to_existing_model_prompt(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Message enrichment should extend an existing model prompt rather than replacing it."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+                requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve("!test:localhost", None, "$event"),
+            correlation_id="corr-1",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+        registry_stub = MagicMock()
+        registry_stub.has_hooks.return_value = True
+        bot._ingress_hook_runner.hook_context.hook_registry_state.registry = registry_stub
+
+        with (
+            patch(
+                "mindroom.turn_policy.emit_collect",
+                new=AsyncMock(
+                    return_value=[EnrichmentItem(key="extra", text="hook enrichment", cache_policy="volatile")],
+                ),
+            ),
+        ):
+            prepared = await bot._ingress_hook_runner.apply_message_enrichment(
+                dispatch,
+                DispatchPayload(
+                    prompt="hello",
+                    model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+                    attachment_ids=["att_1"],
+                ),
+                target_entity_name=mock_agent_user.agent_name,
+                target_member_names=None,
+            )
+
+        assert prepared.payload.prompt == "hello"
+        assert prepared.payload.model_prompt is not None
+        assert prepared.payload.model_prompt.startswith("Available attachment IDs: att_1")
+        assert "hook enrichment" in prepared.payload.model_prompt
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_leaves_event_retryable_when_terminal_error_cannot_be_sent(
@@ -5161,11 +5380,7 @@ class TestAgentBot:
         room = MagicMock()
         room.room_id = "!test:localhost"
 
-        event = MagicMock(spec=nio.RoomMessageImage)
-        event.sender = "@user:localhost"
-        event.event_id = "$img_event_fail"
-        event.body = "please analyze"
-        event.server_timestamp = 1000
+        event = _room_image_event(sender="@user:localhost", event_id="$img_event_fail", body="please analyze")
         event.source = {"content": {"body": "please analyze"}}
 
         with (
@@ -5216,12 +5431,8 @@ class TestAgentBot:
         room = MagicMock()
         room.room_id = "!test:localhost"
 
-        event = MagicMock(spec=nio.RoomMessageFile)
-        event.sender = "@user:localhost"
-        event.event_id = "$file_event"
-        event.body = "report.pdf"
+        event = _room_file_event(sender="@user:localhost", event_id="$file_event", body="report.pdf")
         event.url = "mxc://localhost/report"
-        event.server_timestamp = 1000
         event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
 
         local_media_path = tmp_path / "incoming_media" / "file.pdf"
@@ -5268,8 +5479,10 @@ class TestAgentBot:
         assert generate_kwargs["thread_history"] == []
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
-        assert "Available attachment IDs" in generate_kwargs["prompt"]
-        assert attachment_id in generate_kwargs["prompt"]
+        assert "Available attachment IDs" not in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is not None
+        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
+        assert attachment_id in generate_kwargs["model_prompt"]
         media = generate_kwargs["media"]
         assert len(media.files) == 1
         assert str(media.files[0].filepath) == str(local_media_path)
@@ -5323,12 +5536,8 @@ class TestAgentBot:
         room = MagicMock()
         room.room_id = "!test:localhost"
 
-        event = MagicMock(spec=nio.RoomMessageFile)
-        event.sender = "@user:localhost"
-        event.event_id = "$file_event_fail"
-        event.body = "report.pdf"
+        event = _room_file_event(sender="@user:localhost", event_id="$file_event_fail", body="report.pdf")
         event.url = "mxc://localhost/report"
-        event.server_timestamp = 1000
         event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
 
         with (
@@ -7950,11 +8159,7 @@ class TestAgentBot:
         room.room_id = "!test:localhost"
         room.canonical_alias = None
         room.users = {"@mindroom_calculator:localhost": MagicMock(), "@user:localhost": MagicMock()}
-        event = MagicMock(spec=nio.RoomMessageImage)
-        event.sender = "@user:localhost"
-        event.event_id = "$img_event_fail"
-        event.body = "photo.jpg"
-        event.server_timestamp = 1000
+        event = _room_image_event(sender="@user:localhost", event_id="$img_event_fail", body="photo.jpg")
         event.source = {"content": {"body": "photo.jpg"}}
 
         bot._conversation_resolver.extract_message_context = AsyncMock(

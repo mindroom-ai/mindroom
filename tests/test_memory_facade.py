@@ -163,6 +163,21 @@ async def build_memory_prompt_parts(
     )
 
 
+async def build_memory_prompt_parts(
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> memory_functions.MemoryPromptParts:
+    return await memory_functions.build_memory_prompt_parts(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+    )
+
+
 async def store_conversation_memory(
     prompt: str,
     agent_name: str | list[str],
@@ -474,6 +489,30 @@ class TestMemoryFacade:
             prompt_parts = await build_memory_prompt_parts("Original prompt", "agent", storage_path, config)
 
         assert prompt_parts == MemoryPromptParts()
+
+    @pytest.mark.asyncio
+    async def test_build_memory_prompt_parts(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        agent_memories = [{"memory": "I previously calculated 2+2=4", "id": "1"}]
+        mock_memory.search.return_value = {"results": agent_memories}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            prompt_parts = await build_memory_prompt_parts(
+                "What is 3+3?",
+                "calculator",
+                storage_path,
+                config,
+            )
+
+        assert prompt_parts.session_preamble == ""
+        assert "[Automatically extracted agent memories - may not be relevant to current context]" in (
+            prompt_parts.turn_context
+        )
+        assert "I previously calculated 2+2=4" in prompt_parts.turn_context
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:

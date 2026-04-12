@@ -158,7 +158,7 @@ class IngressHookRunner:
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
         )
-        model_prompt: str | None = None
+        model_prompt = payload.model_prompt
         strip_transient_enrichment_after_run = False
         if self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH):
             context = MessageEnrichContext(
@@ -170,8 +170,11 @@ class IngressHookRunner:
             items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
             if items:
                 enrichment_block = render_enrichment_block(items)
-                base_model_prompt = payload.model_prompt if payload.model_prompt is not None else payload.prompt
-                model_prompt = f"{base_model_prompt.rstrip()}\n\n{enrichment_block}"
+                model_prompt = (
+                    f"{payload.model_prompt.rstrip()}\n\n{enrichment_block}"
+                    if payload.model_prompt
+                    else enrichment_block
+                )
                 strip_transient_enrichment_after_run = True
 
         return PreparedHookedPayload(

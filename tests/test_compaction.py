@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.models.message import Message
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
@@ -22,6 +23,7 @@ from mindroom.history.compaction import (
     estimate_tool_definition_tokens,
 )
 from mindroom.history.types import CompactionOutcome, _to_k
+from mindroom.memory import MemoryPromptParts
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -217,7 +219,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     live_agent = _make_agent(role="", instructions=[])
 
     prepared_execution = PreparedExecutionContext(
-        final_prompt="x" * 248,
+        messages=(Message(role="user", content="x" * 248),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
@@ -225,14 +227,14 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     )
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="x" * 248)),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
             "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
-        _prepared_agent, _full_prompt, _unseen_event_ids, prepared = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             "test_agent",
             "Current prompt",
             runtime_paths,
@@ -240,6 +242,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
             compaction_outcomes_collector=None,
         )
 
+    prepared = prepared_run.prepared_history
     outcome = prepared.compaction_outcomes[0]
     assert outcome.role_instructions_tokens == 0
     assert outcome.tool_definition_tokens == 0

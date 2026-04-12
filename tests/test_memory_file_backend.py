@@ -212,6 +212,22 @@ async def build_memory_prompt_parts(
     )
 
 
+async def build_memory_prompt_parts(
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> memory_functions.MemoryPromptParts:
+    return await memory_functions.build_memory_prompt_parts(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+        get_tool_execution_identity(),
+    )
+
+
 async def store_conversation_memory(
     prompt: str,
     agent_name: str | list[str],

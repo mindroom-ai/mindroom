@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent._tools import determine_tools_for_model
+from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
@@ -23,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.memory import MemoryPromptParts
 from mindroom.teams import materialize_exact_team_members
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
@@ -966,7 +968,7 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
     )
     model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
     prepared_execution = SimpleNamespace(
-        final_prompt="enhanced prompt",
+        messages=(Message(role="user", content="enhanced prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
@@ -978,7 +980,11 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
     run_output.status = RunStatus.completed
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced prompt"),
+        patch(
+            "mindroom.ai.build_memory_prompt_parts",
+            new_callable=AsyncMock,
+            return_value=MemoryPromptParts(),
+        ),
         patch("mindroom.ai.prepare_agent_execution_context", new_callable=AsyncMock, return_value=prepared_execution),
         patch("mindroom.ai.get_model_instance", return_value=model),
         patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,

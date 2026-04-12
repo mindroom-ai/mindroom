@@ -151,12 +151,17 @@ def _append_matrix_prompt_context(
         return prompt
     if "[Matrix metadata for tool calls]" in prompt:
         return prompt
+    prompt_thread_root = target.resolved_thread_id
+    if prompt_thread_root == target.reply_to_event_id:
+        prompt_thread_root = target.source_thread_id
+    if prompt_thread_root == target.reply_to_event_id:
+        prompt_thread_root = None
 
     metadata_block = "\n".join(
         (
             "[Matrix metadata for tool calls]",
             f"room_id: {target.room_id}",
-            f"thread_id: {target.resolved_thread_id or 'none'}",
+            f"thread_id: {prompt_thread_root or 'none'}",
             f"reply_to_event_id: {target.reply_to_event_id or 'none'}",
             "Use these IDs when calling matrix_message.",
         ),
@@ -215,8 +220,11 @@ def prepare_memory_and_model_context(
     model_prompt: str | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
     """Return raw memory inputs alongside timestamped model-facing context."""
+    model_prompt_content = model_prompt or prompt
+    if model_prompt is not None and prompt and prompt not in model_prompt:
+        model_prompt_content = f"{prompt}\n\n{model_prompt}"
     model_prompt_text = _prefix_user_turn_time(
-        model_prompt or prompt,
+        model_prompt_content,
         timezone=config.timezone,
     )
     model_thread_history = _timestamp_thread_history_user_turns(

@@ -13,13 +13,19 @@ from mindroom.agents import create_agent
 from mindroom.api import config_lifecycle, main
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.config.matrix import MatrixSpaceConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.custom_tools.self_config import SelfConfigTools
 
-_DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-4o")}
+_DEFAULT_CONNECTIONS = {
+    "openai/default": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+    "openai/embeddings": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+    "openai/stt": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+}
+_DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-4o", connection="openai/default")}
 _BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
 
 
@@ -30,15 +36,20 @@ def _make_config(
     models: dict[str, ModelConfig] | None = None,
 ) -> tuple[Config, Path]:
     """Create a Config, write it to a temp file, and return both."""
+    temp_dir = Path(tempfile.mkdtemp())
     config = Config(
         agents=agents or {},
         knowledge_bases=knowledge_bases or {},
         defaults=defaults or DefaultsConfig(),
+        connections=_DEFAULT_CONNECTIONS,
         models=models if models is not None else _DEFAULT_MODELS,
     )
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
-        config_path = Path(tmp.name)
-    runtime_paths = resolve_runtime_paths(config_path=config_path)
+    config_path = temp_dir / "config.yaml"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=temp_dir / "mindroom_data")
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "openai",
+        {"api_key": "sk-test-self-config", "_source": "test"},
+    )
     config.save_to_yaml(config_path)
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
@@ -75,6 +86,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
     )
     config_path = tmp_path / "config.yaml"
     Config(
+        connections=_DEFAULT_CONNECTIONS,
         agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
         models=_DEFAULT_MODELS,
         plugins=["./plugins/bad-name"],
@@ -110,6 +122,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_pl
     )
     config_path = tmp_path / "config.yaml"
     Config(
+        connections=_DEFAULT_CONNECTIONS,
         agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
         models=_DEFAULT_MODELS,
         plugins=["./plugins/demo"],
@@ -388,16 +401,17 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_update_own_config_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
-        """Write self-config should keep runtime plugin validation in the invalid-config channel."""
+    def test_update_own_config_tolerates_invalid_plugin_manifest(self, tmp_path: Path) -> None:
+        """Write self-config should keep working when an unrelated plugin is broken."""
         config_path = _invalid_plugin_config_path(tmp_path)
         tool = _self_config_tools(agent_name="writer", config_path=config_path)
 
         result = tool.update_own_config(role="Updated role")
 
-        assert "Invalid configuration" in result
-        assert "Invalid plugin name" in result
-        assert "Changes were NOT applied." in result
+        assert "Successfully updated own configuration" in result
+        config = load_config(resolve_runtime_paths(config_path=config_path), tolerate_plugin_load_errors=True)
+        assert config.agents["writer"].role == "Updated role"
+        assert config.plugins[0].path == "./plugins/bad-name"
 
     def test_update_own_config_returns_malformed_yaml_error(self, tmp_path: Path) -> None:
         """Malformed YAML should be reported through the invalid-config path on writes too."""
@@ -505,6 +519,7 @@ class TestUpdateOwnConfig:
     def test_update_rejects_runtime_invalid_rooms(self) -> None:
         """Runtime-sensitive validation errors should block persistence."""
         config = Config(
+            connections=_DEFAULT_CONNECTIONS,
             agents={"coder": AgentConfig(display_name="Coder", role="Code", rooms=["lobby"])},
             matrix_space=MatrixSpaceConfig(enabled=True),
             models=_DEFAULT_MODELS,

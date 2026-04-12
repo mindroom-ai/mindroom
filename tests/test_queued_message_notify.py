@@ -21,6 +21,7 @@ from agno.session.team import TeamSession
 
 from mindroom.ai import (
     QUEUED_MESSAGE_NOTICE_TEXT,
+    PreparedAgentRun,
     ai_response,
     cleanup_queued_notice_state,
     install_queued_message_notice_hook,
@@ -122,6 +123,15 @@ def _prepared_text_event(*, event_id: str = "$event") -> PreparedTextEvent:
         body="hello",
         source={"content": {"body": "hello"}},
         server_timestamp=1234,
+    )
+
+
+def _prepared_run(agent: object, *, prompt: str = "prompt") -> PreparedAgentRun:
+    return PreparedAgentRun(
+        agent=agent,
+        messages=(Message(role="user", content=prompt),),
+        unseen_event_ids=[],
+        prepared_history=MagicMock(),
     )
 
 
@@ -968,8 +978,8 @@ def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) -> None:
-    """Loaded session history should be scrubbed before replay planning sees it."""
+async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path) -> None:
+    """Loaded session history should strip stale queued notices before replay."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     storage.session = AgentSession(
@@ -993,7 +1003,7 @@ async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) ->
         scope_context: object | None = None,
         *_args: object,
         **_kwargs: object,
-    ) -> tuple[object, str, list[str], object]:
+    ) -> PreparedAgentRun:
         assert scope_context is not None
         session = scope_context.session
         assert session is not None
@@ -1012,7 +1022,7 @@ async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) ->
                 tools=[],
             ),
         )
-        return agent, "prompt", [], MagicMock()
+        return _prepared_run(agent)
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
@@ -1035,8 +1045,8 @@ async def test_ai_response_scrubs_stale_notice_before_prepare(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_ai_response_strips_notice_from_run_output_and_session(tmp_path: Path) -> None:
-    """Non-streaming runs should scrub the hidden notice from both return state and persisted history."""
+async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: Path) -> None:
+    """Non-streaming runs should strip the hidden notice from returned and persisted history."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -1077,7 +1087,7 @@ async def test_ai_response_strips_notice_from_run_output_and_session(tmp_path: P
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt", [], MagicMock()))),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
@@ -1097,8 +1107,8 @@ async def test_ai_response_strips_notice_from_run_output_and_session(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_ai_response_strips_notice_from_session_after_exception(tmp_path: Path) -> None:
-    """Non-streaming cleanup should still scrub persisted notices after an exception."""
+async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path: Path) -> None:
+    """Non-streaming failures should still scrub persisted notices."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -1127,7 +1137,7 @@ async def test_ai_response_strips_notice_from_session_after_exception(tmp_path: 
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt", [], MagicMock()))),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
@@ -1146,7 +1156,7 @@ async def test_ai_response_strips_notice_from_session_after_exception(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_response_strips_notice_from_session(tmp_path: Path) -> None:
+async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path) -> None:
     """Streaming runs should also scrub the hidden notice from persisted history."""
     config = _config(tmp_path)
     storage = _FakeStorage()
@@ -1177,7 +1187,7 @@ async def test_stream_agent_response_strips_notice_from_session(tmp_path: Path) 
 
     with (
         patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt", [], MagicMock()))),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):

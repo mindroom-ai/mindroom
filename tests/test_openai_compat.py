@@ -3035,11 +3035,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         prompt = mock_team.arun.call_args.args[0]
-        assert "Previous conversation in this thread:" in prompt
-        assert "user: Start" in prompt
-        assert "assistant: Ack" in prompt
-        assert "<msg from=" not in prompt
-        assert "Current message:\nFollow-up" in prompt
+        assert prompt == "user: Start\n\nassistant: Ack\n\nFollow-up"
 
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(
         self,
@@ -3092,8 +3088,7 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert "Start" in mock_prepare.await_args.kwargs["fallback_prompt"]
-        assert "Ack" in mock_prepare.await_args.kwargs["fallback_prompt"]
+        assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
         prompt = mock_team.arun.call_args.args[0]
         assert prompt == "Follow-up"
         assert "Previous conversation in this thread:" not in prompt
@@ -3144,8 +3139,7 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert "Start" in mock_prepare.await_args.kwargs["fallback_prompt"]
-        assert "Ack" in mock_prepare.await_args.kwargs["fallback_prompt"]
+        assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
         prompt = mock_team.arun.call_args.args[0]
         assert prompt == "Follow-up"
         assert "Previous conversation in this thread:" not in prompt
