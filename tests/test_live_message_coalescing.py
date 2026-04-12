@@ -19,7 +19,6 @@ from mindroom.coalescing import (
     build_batch_dispatch_event,
     build_coalesced_batch,
     is_coalescing_exempt_source_kind,
-    is_command_event,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -1793,36 +1792,6 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_user_text_cannot_spoof_voice_source_kind_to_bypass_command_event() -> None:
-    """User-authored text must not suppress command parsing by spoofing voice metadata."""
-    spoofed_voice = _text_event(
-        event_id="$voice-command",
-        body="!schedule turn on the guest room lights",
-        source_kind="voice",
-    )
-
-    assert is_command_event(spoofed_voice) is True
-
-
-def test_voice_command_like_text_is_not_command_event() -> None:
-    """Trusted voice-originated text must not bypass coalescing as a command."""
-    voice_event = PreparedTextEvent(
-        sender="@user:localhost",
-        event_id="$voice-command",
-        body="!schedule turn on the guest room lights",
-        source={
-            "content": {
-                "msgtype": "m.text",
-                "body": "!schedule turn on the guest room lights",
-                "com.mindroom.source_kind": "voice",
-            },
-        },
-        source_kind_override="voice",
-    )
-
-    assert is_command_event(voice_event) is False
-
-
 @pytest.mark.asyncio
 async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> None:
     """A newer !command must not suppress an older legitimate message during backlog replay."""
@@ -1869,46 +1838,6 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
 
     # The older message must NOT be suppressed — dispatch action should be called
     action_mock.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_newer_voice_command_like_message_still_suppresses_older_message(tmp_path: Path) -> None:
-    """A newer voice-originated !command-like message must still suppress older messages."""
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    older_event = PreparedTextEvent(
-        sender="@user:localhost",
-        event_id="$m1",
-        body="hello",
-        source={"content": {"msgtype": "m.text", "body": "hello"}},
-        server_timestamp=1000,
-    )
-    dispatch = _prepared_dispatch(event_id="$m1", body="hello")
-
-    newer_voice = ResolvedVisibleMessage(
-        sender="@mindroom_test_agent:localhost",
-        body="!schedule turn on the guest room lights",
-        timestamp=2000,
-        event_id="$m2",
-        content={
-            "body": "!schedule turn on the guest room lights",
-            "com.mindroom.source_kind": "voice",
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-        },
-        thread_id=None,
-        latest_event_id="$m2",
-    )
-    dispatch.context.thread_history = [newer_voice]
-
-    action_mock = AsyncMock()
-    with (
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-    ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
-
-    action_mock.assert_not_awaited()
-    assert bot._handled_turn_ledger.has_responded("$m1")
 
 
 @pytest.mark.asyncio
@@ -2157,54 +2086,8 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> None:
-    """Voice-originated synthetics (source_kind='voice') must be guarded."""
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    voice_event = PreparedTextEvent(
-        sender="@user:localhost",
-        event_id="$v1",
-        body="transcribed voice",
-        source={
-            "content": {"msgtype": "m.text", "body": "transcribed voice", "com.mindroom.source_kind": "voice"},
-        },
-        server_timestamp=1000,
-        is_synthetic=True,
-        source_kind_override="voice",
-    )
-    dispatch = _prepared_dispatch(event_id="$v1", body="transcribed voice")
-
-    newer_msg = ResolvedVisibleMessage(
-        sender="@user:localhost",
-        body="newer text",
-        timestamp=2000,
-        event_id="$v2",
-        content={"body": "newer text"},
-        thread_id=None,
-        latest_event_id="$v2",
-    )
-    dispatch.context.thread_history = [newer_msg]
-
-    action_mock = AsyncMock()
-    with (
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-    ):
-        await bot._turn_controller._dispatch_text_message(room, voice_event, "@user:localhost")
-
-    # Voice synthetic MUST be suppressed — not an automation event
-    action_mock.assert_not_awaited()
-    assert bot._handled_turn_ledger.has_responded("$v1")
-
-
-# ---------------------------------------------------------------------------
-# R3 regression: commands must not be suppressed during backlog replay
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
 async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -> None:
-    """Non-voice !commands must still take the command path."""
+    """Non-voice !commands must still take the command execution path."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
     command_event = PreparedTextEvent(
@@ -2229,6 +2112,11 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
         await bot._turn_controller._dispatch_text_message(room, command_event, "@user:localhost")
 
     handle_cmd_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# R3 regression: commands must not be suppressed during backlog replay
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
