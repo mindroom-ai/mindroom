@@ -54,6 +54,16 @@ class _InteractiveResponse(NamedTuple):
     options_list: list[dict[str, str]] | None
 
 
+@dataclass(frozen=True, slots=True)
+class InteractiveSelection:
+    """One validated interactive question selection ready for execution."""
+
+    question_event_id: str
+    selection_key: str
+    selected_value: str
+    thread_id: str | None
+
+
 # Track active interactive questions by event_id
 _active_questions: dict[str, _InteractiveQuestion] = {}
 _persistence_file: Path | None = None
@@ -384,7 +394,7 @@ async def handle_reaction(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> tuple[str, str | None] | None:
+) -> InteractiveSelection | None:
     """Handle a reaction event that might be an answer to a question.
 
     Args:
@@ -395,7 +405,7 @@ async def handle_reaction(
         runtime_paths: Explicit runtime context for agent detection
 
     Returns:
-        Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
+        Interactive selection details if this was a valid response, None otherwise
 
     """
     with _thread_lock:
@@ -444,7 +454,12 @@ async def handle_reaction(
         if _remove_active_question_locked(event.reacts_to):
             _save_active_questions_locked()
 
-        return (selected_value, question.thread_id)
+        return InteractiveSelection(
+            question_event_id=event.reacts_to,
+            selection_key=reaction_key,
+            selected_value=selected_value,
+            thread_id=question.thread_id,
+        )
 
 
 async def handle_text_response(
@@ -452,7 +467,7 @@ async def handle_text_response(
     room: nio.MatrixRoom,
     event: TextResponseEvent,
     agent_name: str,
-) -> tuple[str, str | None] | None:
+) -> InteractiveSelection | None:
     """Handle text responses to interactive questions (e.g., "1", "2", "3").
 
     Args:
@@ -462,7 +477,7 @@ async def handle_text_response(
         agent_name: The name of the agent handling this
 
     Returns:
-        Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
+        Interactive selection details if this was a valid response, None otherwise
 
     """
     message_text = event.body.strip()
@@ -497,7 +512,7 @@ def _handle_text_response_locked(
     sender: str,
     client_user_id: str | None,
     agent_name: str,
-) -> tuple[str, str | None] | None:
+) -> InteractiveSelection | None:
     """Handle a numeric reply while holding ``_thread_lock``."""
     for question_event_id, question in list(_active_questions.items()):
         if question.room_id != room_id or question.thread_id != thread_id:
@@ -517,7 +532,12 @@ def _handle_text_response_locked(
             )
         if _remove_active_question_locked(question_event_id):
             _save_active_questions_locked()
-        return (selected_value, question.thread_id)
+        return InteractiveSelection(
+            question_event_id=question_event_id,
+            selection_key=message_text,
+            selected_value=selected_value,
+            thread_id=question.thread_id,
+        )
     return None
 
 

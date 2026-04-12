@@ -191,7 +191,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
 
     with (
         patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
-        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.turn_controller.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
@@ -231,7 +231,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
 
     with (
         patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
-        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.turn_controller.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
@@ -306,7 +306,11 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     )
 
     with (
-        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock) as mock_interactive,
+        patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_interactive,
         patch(
             "mindroom.commands.handler.schedule_task",
             new_callable=AsyncMock,
@@ -385,7 +389,11 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     )
 
     with (
-        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock) as mock_interactive,
+        patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_interactive,
         patch(
             "mindroom.commands.handler.schedule_task",
             new_callable=AsyncMock,
@@ -478,7 +486,11 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
     )
 
     with (
-        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock) as mock_interactive,
+        patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_interactive,
         patch(
             "mindroom.commands.handler.resolve_skill_command_spec",
             return_value=SimpleNamespace(
@@ -542,7 +554,11 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     )
 
     with (
-        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock) as mock_interactive,
+        patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_interactive,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=False),
         patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule,
     ):

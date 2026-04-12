@@ -26,6 +26,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+from mindroom import interactive
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import (
@@ -2630,15 +2631,26 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot._send_response = AsyncMock(return_value="$ack")
-        bot._generate_response = AsyncMock(return_value="$reply")
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=("Selected", None))):
+        with (
+            patch(
+                "mindroom.bot.interactive.handle_reaction",
+                new=AsyncMock(
+                    return_value=interactive.InteractiveSelection(
+                        question_event_id="$question",
+                        selection_key="1",
+                        selected_value="Selected",
+                        thread_id=None,
+                    ),
+                ),
+            ),
+            patch.object(bot._turn_controller, "handle_interactive_selection", new=AsyncMock()),
+        ):
             await bot._on_reaction(room, event)
 
         assert seen == []
@@ -5173,7 +5185,11 @@ class TestAgentBot:
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
-            patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             await bot._on_message(room, text_event)
             await bot._on_media_message(room, image_event)
@@ -5244,7 +5260,11 @@ class TestAgentBot:
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
-            patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             await bot._on_message(room, text_event)
             await bot._on_media_message(room, image_event)
@@ -5301,7 +5321,11 @@ class TestAgentBot:
             patch("mindroom.bot.extract_agent_name", return_value="router"),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.get_available_agents_for_sender", return_value=[]),
@@ -6640,7 +6664,7 @@ class TestAgentBot:
             assert media_events is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
-            bot._mark_source_events_responded(handled_turn.with_response_event_id("$route"))
+            bot._turn_controller._mark_source_events_responded(handled_turn.with_response_event_id("$route"))
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
@@ -7242,6 +7266,13 @@ class TestAgentBot:
         bot._handled_turn_ledger = MagicMock()
         _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
         bot.logger = MagicMock()
+        wrap_extracted_collaborators(bot, "_response_runner")
+        replace_turn_controller_deps(
+            bot,
+            handled_turn_ledger=bot._handled_turn_ledger,
+            logger=bot.logger,
+            response_runner=bot._response_runner,
+        )
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"

@@ -5,13 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from mindroom import constants
 from mindroom.agents import remove_run_by_event_id
 from mindroom.conversation_state_writer import (
     LoadPersistedTurnMetadataRequest,
     RemoveStaleRunsRequest,
 )
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
-from mindroom.post_response_effects import matrix_run_metadata_for_handled_turn, record_handled_turn
+from mindroom.post_response_effects import matrix_run_metadata_for_handled_turn
 
 if TYPE_CHECKING:
     import nio
@@ -51,7 +52,15 @@ class TurnStore:
 
     def mark_handled(self, handled_turn: HandledTurnState) -> None:
         """Persist one terminal handled-turn outcome."""
-        record_handled_turn(self.deps.handled_turn_ledger, handled_turn)
+        visible_echo_event_id = (
+            handled_turn.visible_echo_event_id
+            or self.deps.handled_turn_ledger.visible_echo_event_id_for_sources(
+                handled_turn.source_event_ids,
+            )
+        )
+        self.deps.handled_turn_ledger.record_handled_turn(
+            handled_turn.with_visible_echo_event_id(visible_echo_event_id),
+        )
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
@@ -77,9 +86,32 @@ class TurnStore:
         """Return the default persisted history scope for this runtime entity."""
         return self.deps.state_writer.history_scope()
 
-    def matrix_run_metadata(self, handled_turn: HandledTurnState) -> dict[str, Any] | None:
-        """Return run metadata for one handled turn when regeneration needs it."""
-        return matrix_run_metadata_for_handled_turn(handled_turn)
+    def matrix_run_metadata(
+        self,
+        handled_turn: HandledTurnState,
+        *,
+        additional_source_event_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any] | None:
+        """Return persisted run metadata for one handled turn.
+
+        ``additional_source_event_ids`` lets one anchored run stay discoverable by
+        extra triggering events, such as a numeric interactive reply whose response
+        still anchors to the original question event.
+        """
+        metadata = matrix_run_metadata_for_handled_turn(handled_turn) or {}
+        if additional_source_event_ids:
+            source_event_ids = [
+                event_id
+                for event_id in metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, [])
+                if isinstance(event_id, str) and event_id
+            ]
+            for event_id in additional_source_event_ids:
+                if not event_id or event_id in source_event_ids:
+                    continue
+                source_event_ids.append(event_id)
+            if source_event_ids:
+                metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = source_event_ids
+        return metadata or None
 
     def load_turn_record(
         self,
@@ -128,6 +160,7 @@ class TurnStore:
             merged_prompt_map = persisted_turn_metadata.source_event_prompts
         merged_turn_record = replace(
             turn_record,
+            anchor_event_id=persisted_turn_metadata.anchor_event_id,
             response_event_id=persisted_turn_metadata.response_event_id or turn_record.response_event_id,
             source_event_prompts=merged_prompt_map,
         )

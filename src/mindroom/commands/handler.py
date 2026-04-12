@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
-    from mindroom.handled_turns import HandledTurnLedger
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_access import ConversationReadAccess
     from mindroom.matrix.identity import MatrixID
@@ -69,7 +68,6 @@ class CommandHandlerContext:
     runtime_paths: RuntimePaths
     storage_path: Path
     logger: structlog.stdlib.BoundLogger
-    handled_turn_ledger: HandledTurnLedger
     derive_conversation_context: Callable[
         [str, EventInfo],
         Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
@@ -77,6 +75,7 @@ class CommandHandlerContext:
     conversation_access: ConversationReadAccess
     requester_user_id_for_event: Callable[[CommandEvent], str]
     build_message_target: Callable[..., MessageTarget]
+    record_handled_turn: Callable[[HandledTurnState], None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
     run_skill_command_tool: Callable[..., Awaitable[str]]
@@ -595,7 +594,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             )
 
             if response_event_id:
-                context.handled_turn_ledger.record_handled_turn(handled_turn)
+                context.record_handled_turn(handled_turn)
                 # Register the pending change
                 config_confirmation.register_pending_change(
                     event_id=response_event_id,
@@ -626,7 +625,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 )
 
             if response_event_id is None:
-                context.handled_turn_ledger.record_handled_turn(handled_turn)
+                context.record_handled_turn(handled_turn)
             return  # Exit early since we've handled the response
 
     elif command.type == CommandType.SKILL:
@@ -689,7 +688,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         response_event_id=_normalized_response_event_id(raw_event_id),
                     )
                     if handled_turn.response_event_id is not None:
-                        context.handled_turn_ledger.record_handled_turn(handled_turn)
+                        context.record_handled_turn(handled_turn)
                     return
 
     elif command.type == CommandType.UNKNOWN:
@@ -705,7 +704,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             reply_to_event=event,
             skip_mentions=True,
         )
-        context.handled_turn_ledger.record_handled_turn(
+        context.record_handled_turn(
             HandledTurnState.from_source_event_id(
                 event.event_id,
                 response_event_id=_normalized_response_event_id(raw_response_event_id),

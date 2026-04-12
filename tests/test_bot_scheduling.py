@@ -752,7 +752,11 @@ class TestCommandHandling:
             )
 
             with (
-                patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+                patch(
+                    "mindroom.turn_controller.interactive.handle_text_response",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                ),
                 patch("mindroom.turn_controller.is_dm_room", return_value=False),
                 patch("mindroom.commands.handler.resolve_skill_command_spec") as mock_resolve_spec,
             ):
@@ -899,7 +903,7 @@ class TestCommandHandling:
 
             # Mock interactive.handle_text_response and extract_agent_name
             with (
-                patch("mindroom.bot.interactive.handle_text_response"),
+                patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
                 patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
             ):
                 # Make extract_agent_name return "router" for the router agent sender
@@ -1033,7 +1037,7 @@ class TestCommandHandling:
         )
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name", return_value="router"),
         ):
             await bot._on_message(room, event)
@@ -1146,7 +1150,7 @@ class TestCommandHandling:
             patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
             patch("mindroom.response_runner.team_response") as mock_team,
         ):
-            mock_interactive.handle_text_response = AsyncMock()
+            mock_interactive.handle_text_response = AsyncMock(return_value=None)
             mock_extract.side_effect = (
                 lambda x, config, runtime_paths: "router"  # noqa: ARG005
                 if "router" in x
@@ -1274,7 +1278,7 @@ class TestCommandHandling:
             patch("mindroom.bot.interactive") as mock_interactive,
             patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
         ):
-            mock_interactive.handle_text_response = AsyncMock()
+            mock_interactive.handle_text_response = AsyncMock(return_value=None)
             mock_extract.side_effect = (
                 lambda x, config, runtime_paths: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
             )
@@ -1343,7 +1347,7 @@ class TestCommandHandling:
 
         # Mock interactive.handle_text_response and extract_agent_name
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
         ):
             # Make extract_agent_name return "router" for the router agent sender
@@ -1429,7 +1433,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
@@ -1517,7 +1521,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
@@ -1620,7 +1624,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
@@ -1698,7 +1702,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
@@ -1770,7 +1774,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
@@ -1853,7 +1857,7 @@ class TestRouterSkipsSingleAgent:
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.turn_policy.get_agents_in_thread") as mock_agents_in_thread,
         ):
@@ -1929,7 +1933,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
         ):
             mock_get_available.return_value = [

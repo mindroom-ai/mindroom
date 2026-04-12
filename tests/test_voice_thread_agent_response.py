@@ -295,7 +295,7 @@ async def test_agent_ignores_visible_router_voice_echo(mock_home_bot: AgentBot) 
 
     with (
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
-        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
         await bot._on_message(room, router_voice_echo)

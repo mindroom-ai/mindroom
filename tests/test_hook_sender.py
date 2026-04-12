@@ -1511,7 +1511,11 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
     )
 
     try:
-        with patch.object(interactive, "handle_text_response", new=AsyncMock()) as mock_handle_text_response:
+        with patch.object(
+            interactive,
+            "handle_text_response",
+            new=AsyncMock(return_value=None),
+        ) as mock_handle_text_response:
             assert isinstance(sidecar_event, nio.RoomMessageFile)
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
@@ -1571,7 +1575,11 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._turn_controller._dispatch_text_message = AsyncMock()
 
-    with patch.object(interactive, "handle_text_response", new=AsyncMock()) as mock_handle_text_response:
+    with patch.object(
+        interactive,
+        "handle_text_response",
+        new=AsyncMock(return_value=None),
+    ) as mock_handle_text_response:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,

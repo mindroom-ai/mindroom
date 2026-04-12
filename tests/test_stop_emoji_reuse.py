@@ -84,9 +84,9 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         },
     )
 
-    # Mock interactive.handle_reaction to simulate it being an interactive question
+    # Mock interactive.handle_reaction so the test only exercises stop-vs-fallthrough behavior.
     with patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction:
-        mock_handle_reaction.return_value = ("stop_option", None)  # Simulate selecting a stop option
+        mock_handle_reaction.return_value = None
 
         # Case 1: Message is NOT being generated - should handle as interactive
         await bot._on_reaction(room, reaction_event)
