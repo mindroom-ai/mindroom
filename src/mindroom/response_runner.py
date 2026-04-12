@@ -90,6 +90,7 @@ if TYPE_CHECKING:
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
+_FinalizeEffectsResult = TypeVar("_FinalizeEffectsResult")
 
 
 def _merge_response_extra_content(
@@ -558,18 +559,17 @@ class ResponseRunner:
     async def _await_post_response_effects(
         self,
         *,
-        finalize_effects: Callable[[str | None], Coroutine[Any, Any, None]],
+        finalize_effects: Callable[[str | None], Coroutine[Any, Any, _FinalizeEffectsResult]],
         tracked_event_id: str | None,
         swallow_late_cancellation: bool = False,
-    ) -> None:
+    ) -> _FinalizeEffectsResult:
         """Finish post-response cleanup even when cancellation lands after delivery."""
         if not swallow_late_cancellation:
-            await finalize_effects(tracked_event_id)
-            return
+            return await finalize_effects(tracked_event_id)
 
         finalize_task = asyncio.ensure_future(finalize_effects(tracked_event_id))
         try:
-            await asyncio.shield(finalize_task)
+            return await asyncio.shield(finalize_task)
         except asyncio.CancelledError:
             self.deps.logger.warning(
                 "Late cancellation arrived during post-response cleanup; finishing cleanup",
@@ -579,7 +579,7 @@ class ResponseRunner:
             if current_task is not None:
                 while current_task.cancelling():
                     current_task.uncancel()
-            await finalize_task
+            return await finalize_task
 
     async def _refresh_thread_history_after_lock(
         self,
@@ -799,7 +799,6 @@ class ResponseRunner:
         response_run_id = str(uuid4())
         delivery_result: DeliveryResult | None = None
         compaction_outcomes: list[CompactionOutcome] = []
-        resolved_event_id: str | None = None
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
 
         strip_transient_enrichment, persist_response_event_id = self._build_session_storage_effects(
@@ -811,8 +810,7 @@ class ResponseRunner:
             ),
         )
 
-        async def finalize_post_response_effects(message_id: str | None) -> None:
-            nonlocal resolved_event_id
+        async def finalize_post_response_effects(message_id: str | None) -> str | None:
             resolved_event_id = self.resolve_response_event_id(
                 delivery_result=delivery_result,
                 tracked_event_id=message_id,
@@ -842,6 +840,7 @@ class ResponseRunner:
                     persist_response_event_id=persist_response_event_id,
                 ),
             )
+            return resolved_event_id
 
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901
             nonlocal delivery_result
@@ -1028,29 +1027,16 @@ class ResponseRunner:
             run_id=response_run_id,
             pipeline_timing=request.pipeline_timing,
         )
-        if delivery_result is None:
-            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=resolved_correlation_id,
-                envelope=resolved_response_envelope,
-                visible_response_event_id=tracked_event_id,
-                response_kind="team",
-            )
-        if resolved_event_id is None:
-            resolved_event_id = self.resolve_response_event_id(
-                delivery_result=delivery_result,
-                tracked_event_id=tracked_event_id,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-            )
-        with bound_log_context(**delivery_target.log_context):
-            await finalize_post_response_effects(tracked_event_id)
-        outcome = "no_visible_response"
-        if delivery_result is not None and delivery_result.suppressed:
-            outcome = "suppressed"
-        elif delivery_result is not None and delivery_result.delivery_kind is not None:
-            outcome = delivery_result.delivery_kind
-        self._emit_pipeline_timing_summary(request, outcome=outcome)
-        return resolved_event_id
+        return await self._finalize_locked_response(
+            request=request,
+            delivery_target=delivery_target,
+            delivery_result=delivery_result,
+            tracked_event_id=tracked_event_id,
+            correlation_id=resolved_correlation_id,
+            response_envelope=resolved_response_envelope,
+            response_kind="team",
+            finalize_effects=finalize_post_response_effects,
+        )
 
     async def run_cancellable_response(
         self,
@@ -1791,6 +1777,57 @@ class ResponseRunner:
             return None
         return existing_event_id or tracked_event_id
 
+    def _locked_response_outcome(
+        self,
+        delivery_result: DeliveryResult | None,
+    ) -> str:
+        """Return the pipeline outcome label for one locked response lifecycle."""
+        if delivery_result is not None and delivery_result.suppressed:
+            return "suppressed"
+        if delivery_result is not None and delivery_result.delivery_kind is not None:
+            return delivery_result.delivery_kind
+        return "no_visible_response"
+
+    async def _finalize_locked_response(
+        self,
+        *,
+        request: ResponseRequest,
+        delivery_target: MessageTarget,
+        delivery_result: DeliveryResult | None,
+        tracked_event_id: str | None,
+        correlation_id: str,
+        response_envelope: MessageEnvelope,
+        response_kind: str,
+        finalize_effects: Callable[[str | None], Coroutine[Any, Any, str | None]],
+        swallow_late_cancellation: bool = False,
+    ) -> str | None:
+        """Finish the shared cancelled-hook, post-effects, and timing tail for one locked response."""
+        if delivery_result is None:
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=correlation_id,
+                envelope=response_envelope,
+                visible_response_event_id=tracked_event_id,
+                response_kind=response_kind,
+            )
+        with bound_log_context(**delivery_target.log_context):
+            resolved_event_id = await self._await_post_response_effects(
+                finalize_effects=finalize_effects,
+                tracked_event_id=tracked_event_id,
+                swallow_late_cancellation=swallow_late_cancellation,
+            )
+        if resolved_event_id is None:
+            resolved_event_id = self.resolve_response_event_id(
+                delivery_result=delivery_result,
+                tracked_event_id=tracked_event_id,
+                existing_event_id=request.existing_event_id,
+                existing_event_is_placeholder=request.existing_event_is_placeholder,
+            )
+        self._emit_pipeline_timing_summary(
+            request,
+            outcome=self._locked_response_outcome(delivery_result),
+        )
+        return resolved_event_id
+
     async def generate_response(self, request: ResponseRequest) -> str | None:
         """Generate and send/edit an agent response with lifecycle locking."""
         return await self._run_locked_response_lifecycle(
@@ -1801,7 +1838,7 @@ class ResponseRunner:
             ),
         )
 
-    async def generate_response_locked(  # noqa: C901, PLR0915
+    async def generate_response_locked(
         self,
         request: ResponseRequest,
         *,
@@ -1858,7 +1895,6 @@ class ResponseRunner:
         delivery_result: DeliveryResult | None = None
         compaction_outcomes: list[CompactionOutcome] = []
         response_run_id = str(uuid4())
-        resolved_event_id: str | None = None
 
         def queue_memory_persistence() -> None:
             mark_auto_flush_dirty_session(
@@ -1892,8 +1928,7 @@ class ResponseRunner:
             create_storage=lambda: self.deps.state_writer.create_history_scope_storage(execution_identity),
         )
 
-        async def finalize_post_response_effects(message_id: str | None) -> None:
-            nonlocal resolved_event_id
+        async def finalize_post_response_effects(message_id: str | None) -> str | None:
             resolved_event_id = self.resolve_response_event_id(
                 delivery_result=delivery_result,
                 tracked_event_id=message_id,
@@ -1927,6 +1962,7 @@ class ResponseRunner:
                     persist_response_event_id=persist_response_event_id,
                 ),
             )
+            return resolved_event_id
 
         async def generate(message_id: str | None) -> None:
             nonlocal delivery_result
@@ -1960,30 +1996,14 @@ class ResponseRunner:
             run_id=response_run_id,
             pipeline_timing=request.pipeline_timing,
         )
-        if delivery_result is None:
-            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=self._correlation_id_for_request(request),
-                envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
-                visible_response_event_id=tracked_event_id,
-                response_kind="ai",
-            )
-        if resolved_event_id is None:
-            resolved_event_id = self.resolve_response_event_id(
-                delivery_result=delivery_result,
-                tracked_event_id=tracked_event_id,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-            )
-        with bound_log_context(**resolved_target.log_context):
-            await self._await_post_response_effects(
-                finalize_effects=finalize_post_response_effects,
-                tracked_event_id=tracked_event_id,
-                swallow_late_cancellation=True,
-            )
-        outcome = "no_visible_response"
-        if delivery_result is not None and delivery_result.suppressed:
-            outcome = "suppressed"
-        elif delivery_result is not None and delivery_result.delivery_kind is not None:
-            outcome = delivery_result.delivery_kind
-        self._emit_pipeline_timing_summary(request, outcome=outcome)
-        return resolved_event_id
+        return await self._finalize_locked_response(
+            request=request,
+            delivery_target=resolved_target,
+            delivery_result=delivery_result,
+            tracked_event_id=tracked_event_id,
+            correlation_id=self._correlation_id_for_request(request),
+            response_envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
+            response_kind="ai",
+            finalize_effects=finalize_post_response_effects,
+            swallow_late_cancellation=True,
+        )
