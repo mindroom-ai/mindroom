@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -24,6 +25,16 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_access import ConversationReadAccess
 
 logger = get_logger(__name__)
+THREAD_SUMMARY_MAX_LENGTH = 300
+_MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
+_MARKDOWN_CODE_BLOCK_RE = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
+_MARKDOWN_DOUBLE_EMPHASIS_RE = re.compile(r"(\*\*|__)(.*?)\1", re.DOTALL)
+_MARKDOWN_SINGLE_ASTERISK_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", re.DOTALL)
+_MARKDOWN_STRIKETHROUGH_RE = re.compile(r"~~(.*?)~~", re.DOTALL)
+_MARKDOWN_INLINE_CODE_RE = re.compile(r"`([^`]*)`")
+_MARKDOWN_HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
+_MARKDOWN_BLOCKQUOTE_RE = re.compile(r"(?m)^\s{0,3}>\s?")
+_MARKDOWN_LIST_ITEM_RE = re.compile(r"(?m)^\s*(?:[-+*]|\d+\.)\s+")
 
 # In-memory tracking of last summarized message count per thread.
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
@@ -34,7 +45,28 @@ _thread_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
-    summary: str = Field(description="One-line summary of the thread conversation")
+    summary: str = Field(
+        max_length=THREAD_SUMMARY_MAX_LENGTH,
+        description="One-line summary of the thread conversation",
+    )
+
+
+def normalize_thread_summary_text(raw_text: str) -> str:
+    """Strip common markdown formatting and collapse the result to one plain-text line."""
+    normalized = raw_text.strip()
+    if not normalized:
+        return ""
+
+    normalized = _MARKDOWN_CODE_BLOCK_RE.sub(r"\1", normalized)
+    normalized = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1) or match.group(2) or "", normalized)
+    normalized = _MARKDOWN_HEADING_RE.sub("", normalized)
+    normalized = _MARKDOWN_BLOCKQUOTE_RE.sub("", normalized)
+    normalized = _MARKDOWN_LIST_ITEM_RE.sub("", normalized)
+    normalized = _MARKDOWN_DOUBLE_EMPHASIS_RE.sub(r"\2", normalized)
+    normalized = _MARKDOWN_SINGLE_ASTERISK_RE.sub(r"\1", normalized)
+    normalized = _MARKDOWN_STRIKETHROUGH_RE.sub(r"\1", normalized)
+    normalized = _MARKDOWN_INLINE_CODE_RE.sub(r"\1", normalized)
+    return " ".join(normalized.split())
 
 
 def thread_summary_cache_key(room_id: str, thread_id: str) -> str:
@@ -125,6 +157,72 @@ async def _recover_last_summary_count(
     return best_count
 
 
+_SUMMARY_INSTRUCTIONS = [
+    "You are a thread summary writer. Produce a single concise summary line for a chat thread conversation.",
+    "",
+    "RULES:",
+    "- One line only, under 120 characters",
+    "- Start with 1-2 emojis that meaningfully represent the topic — the emoji should "
+    "help a reader scanning a list of threads instantly understand what the thread is about",
+    "- Capture the main topic AND the current status or outcome",
+    "- Plain text only — no markdown formatting (no bold, headers, bullets, links)",
+    "- If the conversation references a ticket, issue number, or any identifier "
+    "(e.g. PROJ-123, #42, BUG-7), include it near the start after the emoji",
+    "- Be consistent: similar threads should produce similar-style summaries",
+    "- No quotes, no prefixes like 'Summary:', no trailing punctuation",
+    "- Write a NOVEL summary in your own words. Do NOT copy, quote, or truncate any "
+    "message from the thread. Synthesize the key topic and outcome.",
+    "",
+    "GOOD EXAMPLES:",
+    "- \U0001f41b PROJ-42: fix login crash on expired tokens — merged",
+    "- \u2705 Database migration to v3 completed successfully",
+    "- \U0001f4ac Discussing vacation schedule for July",
+    "- \U0001f527 Nginx config updated for new subdomain",
+    "- \U0001f6a8 Production outage — root cause identified, fix deployed",
+    "- \U0001f4e6 #127: add CSV export to reports — in progress",
+    "- \U0001f3a8 Redesigning sidebar navigation — wireframes shared",
+    "- \U0001f4b0 Q2 budget review — approved with minor adjustments",
+    "",
+    "BAD EXAMPLES (do NOT produce these):",
+    "- 'Thread about fixing a bug' (too vague, no emoji, quoted)",
+    "- 'Summary: The team discussed the login issue' (has prefix, no emoji, no outcome)",
+    "- '\U0001f4ac Discussion' (way too vague, no topic)",
+    "- '\U0001f41b\U0001f527\u2705\U0001f680\U0001f525 Fixed the thing' (too many emojis, vague)",
+    "- 'The conversation was about updating the configuration files for nginx' (too long, no emoji, no outcome)",
+    "- 'I wanted to discuss the implementation plan for the new auth system' "
+    "(verbatim copy of a message — summarize the topic, don't quote it)",
+]
+
+_MAX_MESSAGES_BEFORE_TRUNCATION = 50
+_TRUNCATION_SAMPLE_SIZE = 3
+
+
+def _build_conversation_text(thread_history: Sequence[ResolvedVisibleMessage]) -> str:
+    """Build conversation text from thread history.
+
+    Prior thread summary notices (``io.mindroom.thread_summary``) are excluded
+    so they don't pollute the conversation.
+
+    For threads exceeding ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages, samples
+    the first and last few messages with an omission note in between.
+    """
+    lines: list[str] = []
+    for msg in thread_history:
+        if _is_thread_summary_message(msg):
+            continue
+        sender = msg.sender or "unknown"
+        body = msg.body or ""
+        if body:
+            lines.append(f"{sender}: {body}")
+
+    if len(lines) > _MAX_MESSAGES_BEFORE_TRUNCATION:
+        n = _TRUNCATION_SAMPLE_SIZE
+        omitted = len(lines) - 2 * n
+        lines = [*lines[:n], f"[... {omitted} messages omitted ...]", *lines[-n:]]
+
+    return "\n".join(lines)
+
+
 async def _generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
@@ -133,56 +231,17 @@ async def _generate_summary(
     """Generate a one-line summary of a thread conversation via LLM."""
     model_name = config.defaults.thread_summary_model or "default"
     model = get_model_instance(config, runtime_paths, model_name)
+
+    conversation = _build_conversation_text(thread_history)
+    session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
+
+    prompt = f"<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
     agent = Agent(
         name="ThreadSummarizer",
-        role="Generate one-line thread summaries",
+        instructions=list(_SUMMARY_INSTRUCTIONS),
         model=model,
         output_schema=_ThreadSummary,
     )
-
-    lines = []
-    for msg in thread_history:
-        sender = msg.sender or "unknown"
-        body = msg.body or ""
-        if body:
-            lines.append(f"{sender}: {body}")
-    conversation = "\n".join(lines)
-
-    prompt = (
-        "You are a thread summary writer. Your job is to produce a single concise summary "
-        "line for a chat thread conversation.\n"
-        "\n"
-        "RULES:\n"
-        "- One line only, under 120 characters\n"
-        "- Start with 1-2 emojis that meaningfully represent the topic — the emoji should "
-        "help a reader scanning a list of threads instantly understand what the thread is about\n"
-        "- Capture the main topic AND the current status or outcome\n"
-        "- If the conversation references a ticket, issue number, or any identifier "
-        "(e.g. PROJ-123, #42, BUG-7), include it near the start after the emoji\n"
-        "- Be consistent: similar threads should produce similar-style summaries\n"
-        "- No quotes, no prefixes like 'Summary:', no trailing punctuation\n"
-        "\n"
-        "GOOD EXAMPLES:\n"
-        "- \U0001f41b PROJ-42: fix login crash on expired tokens — merged\n"
-        "- \u2705 Database migration to v3 completed successfully\n"
-        "- \U0001f4ac Discussing vacation schedule for July\n"
-        "- \U0001f527 Nginx config updated for new subdomain\n"
-        "- \U0001f6a8 Production outage — root cause identified, fix deployed\n"
-        "- \U0001f4e6 #127: add CSV export to reports — in progress\n"
-        "- \U0001f3a8 Redesigning sidebar navigation — wireframes shared\n"
-        "- \U0001f4b0 Q2 budget review — approved with minor adjustments\n"
-        "\n"
-        "BAD EXAMPLES (do NOT produce these):\n"
-        "- 'Thread about fixing a bug' (too vague, no emoji, quoted)\n"
-        "- 'Summary: The team discussed the login issue' (has prefix, no emoji, no outcome)\n"
-        "- '\U0001f4ac Discussion' (way too vague, no topic)\n"
-        "- '\U0001f41b\U0001f527\u2705\U0001f680\U0001f525 Fixed the thing' (too many emojis, vague)\n"
-        "- 'The conversation was about updating the configuration files for nginx' (too long, no emoji, no outcome)\n"
-        "\n"
-        "Now summarize this thread:\n\n"
-        f"{conversation}"
-    )
-    session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
     response = await cached_agent_run(
         agent=agent,
         full_prompt=prompt,
@@ -203,9 +262,24 @@ async def send_thread_summary_event(
     model_name: str,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event."""
+    normalized_summary = normalize_thread_summary_text(summary)
+    if not normalized_summary:
+        logger.warning(
+            "Refusing to send empty normalized thread summary",
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+        )
+        return None
+
+    truncated_summary = (
+        normalized_summary[: THREAD_SUMMARY_MAX_LENGTH - 3] + "..."
+        if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
+        else normalized_summary
+    )
     content: dict[str, Any] = {
         "msgtype": "m.notice",
-        "body": summary,
+        "body": truncated_summary,
         "m.relates_to": {
             "rel_type": "m.thread",
             "event_id": thread_id,
@@ -214,7 +288,7 @@ async def send_thread_summary_event(
         },
         "io.mindroom.thread_summary": {
             "version": 1,
-            "summary": summary,
+            "summary": truncated_summary,
             "message_count": message_count,
             "generated_at": datetime.now(UTC).isoformat(),
             "model": model_name,
@@ -289,8 +363,18 @@ async def maybe_generate_thread_summary(
             update_last_summary_count(room_id, thread_id, message_count)
             return
 
+        normalized_summary = normalize_thread_summary_text(summary)
+        if not normalized_summary:
+            logger.warning(
+                "Thread summary generation returned no plain-text content",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            update_last_summary_count(room_id, thread_id, message_count)
+            return
+
         model_name = config.defaults.thread_summary_model or "default"
         # Record count before sending — the LLM cost is already incurred, so don't
         # retry on Matrix send failure (avoids cost amplification loop).
         update_last_summary_count(room_id, thread_id, message_count)
-        await send_thread_summary_event(client, room_id, thread_id, summary, message_count, model_name)
+        await send_thread_summary_event(client, room_id, thread_id, normalized_summary, message_count, model_name)

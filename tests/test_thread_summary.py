@@ -8,14 +8,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from pydantic import ValidationError
 
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
+    _MAX_MESSAGES_BEFORE_TRUNCATION,
+    _TRUNCATION_SAMPLE_SIZE,
+    THREAD_SUMMARY_MAX_LENGTH,
+    _build_conversation_text,
+    _generate_summary,
+    _is_thread_summary_message,
     _last_summary_counts,
     _next_threshold,
     _recover_last_summary_count,
     _thread_locks,
+    _ThreadSummary,
     maybe_generate_thread_summary,
+    normalize_thread_summary_text,
     send_thread_summary_event,
     thread_summary_cache_key,
     update_last_summary_count,
@@ -65,6 +74,22 @@ def _make_summary_notice_message(
         },
         thread_id=thread_id,
     )
+
+
+# -- model validation --
+
+
+def test_thread_summary_model_rejects_overlong_summary() -> None:
+    """Structured summary responses should reject content beyond the hard length limit."""
+    with pytest.raises(ValidationError):
+        _ThreadSummary(summary="x" * (THREAD_SUMMARY_MAX_LENGTH + 1))
+
+
+def test_normalize_thread_summary_text_strips_common_markdown_syntax() -> None:
+    """Thread summary normalization should remove markdown syntax while preserving readable text."""
+    raw_summary = "# **Fix** [ISSUE-116](http://example.com)\n> `deploy` ~~done~~"
+
+    assert normalize_thread_summary_text(raw_summary) == "Fix ISSUE-116 deploy done"
 
 
 # -- threshold arithmetic --
@@ -498,6 +523,42 @@ class TestMaybeGenerateThreadSummary:
             "!room:x",
             "$thread1",
             "Users discussed testing strategies",
+            5,
+            "default",
+        )
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+
+    async def test_auto_generated_summary_strips_markdown_before_send(self) -> None:
+        """Auto summaries should be converted to plain text before the Matrix event is sent."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                return_value=_make_thread_history(5),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="# **Fix** [ISSUE-116](http://example.com)",
+            ),
+            patch(
+                "mindroom.thread_summary.send_thread_summary_event",
+                new=AsyncMock(return_value="$summary1"),
+            ) as mock_send,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_send.assert_awaited_once_with(
+            client,
+            "!room:x",
+            "$thread1",
+            "Fix ISSUE-116",
             5,
             "default",
         )
@@ -950,6 +1011,28 @@ class TestSendSummaryEvent:
         assert meta["model"] == "haiku"
         assert "generated_at" in meta
 
+    async def test_event_content_truncates_overlong_summary(self) -> None:
+        """Overlong summaries should be truncated before sending to Matrix."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        summary = "x" * (THREAD_SUMMARY_MAX_LENGTH + 1)
+
+        result = await send_thread_summary_event(
+            client,
+            room_id="!room:x",
+            thread_id="$root1",
+            summary=summary,
+            message_count=15,
+            model_name="haiku",
+        )
+
+        assert result == "$s1"
+        content = client.room_send.call_args.kwargs["content"]
+        truncated_summary = ("x" * (THREAD_SUMMARY_MAX_LENGTH - 3)) + "..."
+        assert content["body"] == truncated_summary
+        assert len(content["body"]) == THREAD_SUMMARY_MAX_LENGTH
+        assert content["io.mindroom.thread_summary"]["summary"] == truncated_summary
+
     async def test_send_failure_returns_none(self) -> None:
         """Return None when room_send fails."""
         client = AsyncMock(spec=nio.AsyncClient)
@@ -965,3 +1048,120 @@ class TestSendSummaryEvent:
         )
 
         assert result is None
+
+
+class TestBuildConversationText:
+    """Tests for conversation text building and truncation."""
+
+    def test_short_thread_not_truncated(self) -> None:
+        """Threads below the truncation threshold are passed through intact."""
+        history = _make_thread_history(5)
+        text = _build_conversation_text(history)
+        assert "omitted" not in text
+        assert text.count("\n") == 4  # 5 messages, 4 newlines
+
+    def test_long_thread_truncated(self) -> None:
+        """Threads above the truncation threshold are sampled with an omission note."""
+        count = _MAX_MESSAGES_BEFORE_TRUNCATION + 10
+        history = _make_thread_history(count)
+        text = _build_conversation_text(history)
+        assert "omitted" in text
+        omitted = count - 2 * _TRUNCATION_SAMPLE_SIZE
+        assert f"{omitted} messages omitted" in text
+
+    def test_exactly_at_threshold_not_truncated(self) -> None:
+        """Exactly at the threshold boundary, no truncation occurs."""
+        history = _make_thread_history(_MAX_MESSAGES_BEFORE_TRUNCATION)
+        text = _build_conversation_text(history)
+        assert "omitted" not in text
+
+
+@pytest.mark.asyncio
+class TestGenerateSummary:
+    """Tests for basic summary generation flow."""
+
+    async def test_prompt_instructions_and_delimiters(self) -> None:
+        """The summarizer should keep the anti-echo instructions and wrap thread text explicitly."""
+        history = _make_thread_history(3)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        mock_model = object()
+        mock_response = MagicMock()
+        mock_response.content = _ThreadSummary(summary="🧵 ISSUE-133 prompt preserved")
+
+        with (
+            patch("mindroom.thread_summary.get_model_instance", return_value=mock_model),
+            patch("mindroom.thread_summary.Agent") as mock_agent_cls,
+            patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)) as mock_run,
+        ):
+            result = await _generate_summary(history, config, rp)
+
+        assert result == "🧵 ISSUE-133 prompt preserved"
+        instructions = "\n".join(mock_agent_cls.call_args.kwargs["instructions"])
+        assert "NOVEL summary" in instructions
+        assert "Do NOT copy" in instructions
+
+        conversation = _build_conversation_text(history)
+        prompt = mock_run.await_args.kwargs["full_prompt"]
+        assert prompt == f"<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
+
+    async def test_summary_returned(self) -> None:
+        """A valid summary is returned directly."""
+        history = _make_thread_history(5)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        mock_response = MagicMock()
+        mock_response.content = _ThreadSummary(summary="\U0001f527 Auth deployment discussed and approved")
+
+        with (
+            patch("mindroom.thread_summary.get_model_instance"),
+            patch("mindroom.thread_summary.Agent"),
+            patch("mindroom.thread_summary.cached_agent_run", return_value=mock_response),
+        ):
+            result = await _generate_summary(history, config, rp)
+
+        assert result == "\U0001f527 Auth deployment discussed and approved"
+
+    async def test_none_content_returns_none(self) -> None:
+        """When the agent returns None content, _generate_summary returns None."""
+        history = _make_thread_history(5)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        mock_response = MagicMock()
+        mock_response.content = None
+
+        with (
+            patch("mindroom.thread_summary.get_model_instance"),
+            patch("mindroom.thread_summary.Agent"),
+            patch("mindroom.thread_summary.cached_agent_run", return_value=mock_response),
+        ):
+            result = await _generate_summary(history, config, rp)
+
+        assert result is None
+
+
+# -- prior summary notice filtering --
+
+
+class TestSummaryNoticeFiltering:
+    """Prior io.mindroom.thread_summary events must be excluded from summaries."""
+
+    def test_build_conversation_excludes_summary_notices(self) -> None:
+        """Summary notices should not appear in conversation text."""
+        history = [
+            *_make_thread_history(3),
+            _make_summary_notice_message("$thread1", message_count=3, event_id="$summary1"),
+        ]
+        text = _build_conversation_text(history)
+
+        assert "Existing thread summary" not in text
+
+    def test_summary_notice_detected(self) -> None:
+        """_is_thread_summary_message correctly identifies summary notices."""
+        notice = _make_summary_notice_message("$thread1", message_count=5)
+        assert _is_thread_summary_message(notice)
+
+    def test_regular_message_not_detected_as_summary(self) -> None:
+        """Regular messages are not flagged as summary notices."""
+        regular = _make_thread_history(1)[0]
+        assert not _is_thread_summary_message(regular)
