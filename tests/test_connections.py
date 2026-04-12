@@ -250,8 +250,8 @@ def test_resolve_connection_supports_auth_kind_none_for_ollama(tmp_path: Path) -
     assert resolved.credentials is None
 
 
-def test_resolve_connection_allows_auth_kind_none_for_openai_compatible_endpoint(tmp_path: Path) -> None:
-    """Explicit OpenAI-compatible connections may intentionally disable auth."""
+def test_resolve_connection_allows_auth_kind_none_for_openai_voice_stt_endpoint(tmp_path: Path) -> None:
+    """Explicit OpenAI-compatible STT connections may intentionally disable auth."""
     resolved = resolve_connection(
         Config(
             connections={
@@ -260,16 +260,17 @@ def test_resolve_connection_allows_auth_kind_none_for_openai_compatible_endpoint
                     "auth_kind": "none",
                 },
             },
-            models={
-                "default": {
+            voice={
+                "enabled": True,
+                "stt": {
                     "provider": "openai",
-                    "id": "gpt-4.1-mini",
+                    "model": "whisper-1",
                     "connection": "openai/local",
                 },
             },
         ),
         provider="openai",
-        purpose="chat_model",
+        purpose="voice_stt",
         connection_name="openai/local",
         runtime_paths=_runtime_paths(tmp_path),
     )
@@ -467,14 +468,22 @@ def test_validate_with_runtime_synthesized_defaults_inherit_authored_service(tmp
     assert config.connections["openai/stt"].service == "tenant-openai"
 
 
-def test_validate_with_runtime_synthesized_defaults_inherit_auth_free_parent(tmp_path: Path) -> None:
-    """Synthesized OpenAI defaults should inherit auth_kind=none from an authored auth-free parent."""
+def test_validate_with_runtime_synthesized_voice_stt_inherits_auth_free_parent(tmp_path: Path) -> None:
+    """Synthesized OpenAI STT defaults should inherit auth_kind=none from an authored auth-free parent."""
     config = Config.validate_with_runtime(
         {
             "connections": {
                 "openai/default": {
                     "provider": "openai",
                     "auth_kind": "none",
+                },
+            },
+            "memory": {
+                "embedder": {
+                    "provider": "sentence_transformers",
+                    "config": {
+                        "model": "sentence-transformers/all-MiniLM-L6-v2",
+                    },
                 },
             },
             "voice": {
@@ -487,8 +496,6 @@ def test_validate_with_runtime_synthesized_defaults_inherit_auth_free_parent(tmp
         strict_connection_validation=True,
     )
 
-    assert config.connections["openai/embeddings"].service is None
-    assert config.connections["openai/embeddings"].auth_kind == "none"
     assert config.connections["openai/stt"].service is None
     assert config.connections["openai/stt"].auth_kind == "none"
 
@@ -570,8 +577,8 @@ def test_config_rejects_explicit_connection_auth_kind_mismatch() -> None:
         )
 
 
-def test_config_allows_explicit_openai_connection_with_auth_kind_none() -> None:
-    """OpenAI-compatible endpoints may opt out of auth with an explicit connection."""
+def test_config_allows_explicit_openai_voice_stt_connection_with_auth_kind_none() -> None:
+    """OpenAI-compatible STT endpoints may opt out of auth with an explicit connection."""
     config = Config(
         connections={
             "openai/local": {
@@ -579,17 +586,113 @@ def test_config_allows_explicit_openai_connection_with_auth_kind_none() -> None:
                 "auth_kind": "none",
             },
         },
-        models={
-            "default": {
+        voice={
+            "enabled": True,
+            "stt": {
                 "provider": "openai",
-                "id": "gpt-4.1-mini",
+                "model": "whisper-1",
                 "connection": "openai/local",
             },
         },
     )
 
     assert config.connections["openai/local"].auth_kind == "none"
-    assert config.models["default"].connection == "openai/local"
+    assert config.voice.stt.connection == "openai/local"
+
+
+def test_config_rejects_explicit_openai_model_connection_with_auth_kind_none() -> None:
+    """SDK-backed OpenAI model connections must not allow auth_kind=none."""
+    with pytest.raises(ValidationError, match="requires 'api_key'"):
+        Config(
+            connections={
+                "openai/local": {
+                    "provider": "openai",
+                    "auth_kind": "none",
+                },
+            },
+            models={
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-5.4",
+                    "connection": "openai/local",
+                },
+            },
+        )
+
+
+def test_validate_with_runtime_migrates_legacy_inline_api_keys(tmp_path: Path) -> None:
+    """Runtime validation should rewrite legacy inline API keys into named connections."""
+    runtime_paths = _runtime_paths(tmp_path)
+
+    config = Config.validate_with_runtime(
+        {
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-5.4",
+                    "api_key": "sk-chat",
+                },
+            },
+            "memory": {
+                "embedder": {
+                    "provider": "openai",
+                    "config": {
+                        "model": "text-embedding-3-small",
+                        "api_key": "sk-embed",
+                    },
+                },
+                "llm": {
+                    "provider": "anthropic",
+                    "config": {
+                        "model": "claude-sonnet-4-6",
+                        "api_key": "sk-memory-llm",
+                    },
+                },
+            },
+            "voice": {
+                "enabled": True,
+                "stt": {
+                    "provider": "openai",
+                    "model": "whisper-1",
+                    "api_key": "sk-stt",
+                },
+            },
+        },
+        runtime_paths,
+        strict_connection_validation=True,
+    )
+
+    shared_credentials = get_runtime_shared_credentials_manager(runtime_paths)
+
+    assert config.models["default"].connection == "openai/default"
+    assert shared_credentials.load_credentials("openai") == {"api_key": "sk-chat", "_source": "ui"}
+
+    embedder_connection_id = config.memory.embedder.config.connection
+    assert embedder_connection_id is not None
+    embedder_service = config.connections[embedder_connection_id].service
+    assert embedder_service is not None
+    assert embedder_service != "openai"
+    assert shared_credentials.load_credentials(embedder_service) == {
+        "api_key": "sk-embed",
+        "_source": "ui",
+    }
+
+    assert config.memory.llm is not None
+    assert config.memory.llm.connection == "anthropic/default"
+    assert shared_credentials.load_credentials("anthropic") == {
+        "api_key": "sk-memory-llm",
+        "_source": "ui",
+    }
+
+    voice_connection_id = config.voice.stt.connection
+    assert voice_connection_id is not None
+    voice_service = config.connections[voice_connection_id].service
+    assert voice_service is not None
+    assert voice_service != "openai"
+    assert shared_credentials.load_credentials(voice_service) == {
+        "api_key": "sk-stt",
+        "_source": "ui",
+    }
 
 
 def test_config_rejects_default_vertex_adc_auth_kind_mismatch() -> None:

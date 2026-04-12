@@ -156,6 +156,9 @@ def _google_oauth_client_pair(
     config: Config,
 ) -> tuple[str, str] | None:
     """Resolve the active Google OAuth client, keeping env-seeded legacy fallbacks working."""
+    connection_id = default_connection_id(provider="google", purpose="google_oauth_client")
+    if connection_id is None or connection_id not in config.connections:
+        return _legacy_google_oauth_client_pair(runtime_paths)
     try:
         resolved_connection = resolve_connection(
             config,
@@ -163,10 +166,20 @@ def _google_oauth_client_pair(
             purpose="google_oauth_client",
             runtime_paths=runtime_paths,
         )
-    except ValueError:
-        return _legacy_google_oauth_client_pair(runtime_paths)
+    except ValueError as exc:
+        connection_config = config.connections[connection_id]
+        missing_default_credentials_errors = {
+            f"Connection '{connection_id}' is missing credentials",
+            f"Connection '{connection_id}' is missing client_id/client_secret",
+        }
+        if connection_config.service == "google_oauth_client" and str(exc) in missing_default_credentials_errors:
+            return None
+        raise
     oauth_client = connection_oauth_client(resolved_connection)
-    return oauth_client or _legacy_google_oauth_client_pair(runtime_paths)
+    if oauth_client is None:
+        msg = f"Connection '{resolved_connection.connection_id}' is missing client_id/client_secret"
+        raise ValueError(msg)
+    return oauth_client
 
 
 def _require_oauth_credentials(
@@ -175,9 +188,12 @@ def _require_oauth_credentials(
     config: Config,
 ) -> dict[str, Any]:
     """Return Google OAuth credentials or raise one consistent API error."""
-    oauth_config = _get_oauth_credentials(runtime_paths, config=config)
+    try:
+        oauth_config = _get_oauth_credentials(runtime_paths, config=config)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if oauth_config is None:
-        raise HTTPException(status_code=503, detail="OAuth not configured")
+        raise HTTPException(status_code=503, detail=_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
     return oauth_config
 
 
@@ -335,7 +351,10 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
     runtime_paths = target.runtime_paths
     config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    has_credentials = _get_oauth_credentials(runtime_paths, config=config) is not None
+    try:
+        has_credentials = _get_oauth_credentials(runtime_paths, config=config) is not None
+    except ValueError as exc:
+        return GoogleStatus(connected=False, has_credentials=False, error=str(exc))
 
     creds = _get_google_credentials(target, runtime_paths, config=config)
 
@@ -387,12 +406,7 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
     runtime_paths = target.runtime_paths
     config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    oauth_config = _get_oauth_credentials(runtime_paths, config=config)
-    if not oauth_config:
-        raise HTTPException(
-            status_code=503,
-            detail="Google OAuth is not configured. Please configure a google/oauth client connection first.",
-        )
+    oauth_config = _require_oauth_credentials(runtime_paths, config=config)
 
     try:
         _, _, flow_cls = _ensure_google_packages(runtime_paths)
