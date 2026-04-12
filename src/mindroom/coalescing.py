@@ -505,13 +505,17 @@ class CoalescingGate:
                 await asyncio.sleep(max(delay, 0.0))
             except asyncio.CancelledError:
                 return
-            current_gate = self._gates.get(key)
-            if current_gate is None or current_gate.timer_task is not asyncio.current_task():
+            current_key, current_gate = self._resolve_gate_entry(key, gate)
+            if current_key is None or current_gate is None or current_gate.timer_task is not asyncio.current_task():
                 return
             # Keep timer_task alive through the flush so drain_all can await it.
-            await self._flush(key, bypass_grace=phase is GatePhase.GRACE)
-            current_gate = self._gates.get(key)
-            if current_gate is not None and current_gate.timer_task is asyncio.current_task():
+            await self._flush(current_key, bypass_grace=phase is GatePhase.GRACE)
+            current_key, current_gate = self._resolve_gate_entry(current_key, gate)
+            if (
+                current_key is not None
+                and current_gate is not None
+                and current_gate.timer_task is asyncio.current_task()
+            ):
                 current_gate.timer_task = None
 
         gate.timer_task = asyncio.create_task(_timer_callback())

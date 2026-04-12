@@ -1257,7 +1257,7 @@ class TurnController:
             if dispatch.context.requires_full_thread_history:
                 await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
 
-            if self._has_newer_unresponded_in_thread(
+            if media_events is None and self._has_newer_unresponded_in_thread(
                 event,
                 requester_user_id,
                 dispatch.context.thread_history,
