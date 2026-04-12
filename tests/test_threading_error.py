@@ -138,8 +138,8 @@ class TestThreadingBehavior:
         bot.client.homeserver = "http://localhost:8008"
 
         # Initialize components that depend on client
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -1063,7 +1063,7 @@ class TestThreadingBehavior:
         )
 
         # Initialize the bot (to set up components it needs)
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         # Mock interactive.handle_text_response to return None (not an interactive response)
         # Mock _generate_response to capture the call and send a test response
@@ -1128,7 +1128,7 @@ class TestThreadingBehavior:
         )
 
         # Initialize response tracking
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         # Mock interactive.handle_text_response and make AI fast
         with (
@@ -2359,8 +2359,8 @@ class TestThreadingBehavior:
         bot.client.homeserver = "http://localhost:8008"
 
         # Initialize components that depend on client
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -2463,8 +2463,8 @@ class TestThreadingBehavior:
         bot.client.homeserver = "http://localhost:8008"
 
         # Initialize components that depend on client
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -2568,8 +2568,8 @@ class TestThreadingBehavior:
         bot.client.user_id = "@mindroom_router:localhost"
         bot.client.homeserver = "http://localhost:8008"
 
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
@@ -2663,8 +2663,8 @@ class TestThreadingBehavior:
         bot.client.user_id = "@mindroom_router:localhost"
         bot.client.homeserver = "http://localhost:8008"
 
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -2769,7 +2769,7 @@ class TestThreadingBehavior:
         )
 
         # Initialize response tracking
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger.has_responded.return_value = False
 
         # Mock interactive.handle_text_response and generate_response
         bot._generate_response = AsyncMock()

@@ -101,7 +101,7 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
         test_runtime_paths(tmp_path),
     )
     bot = _context_bot(tmp_path, config)
-    bot.handled_turn_ledger = AsyncMock()
+    bot._handled_turn_ledger = AsyncMock()
 
     # Mock the format_message_with_mentions to return a dict we can check
     mock_content = {"body": "test", "msgtype": "m.text"}

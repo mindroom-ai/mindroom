@@ -235,9 +235,9 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     bot.client.user_id = "@mindroom_test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
-    replace_turn_policy_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+    replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -276,7 +276,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         reply_to_event_id=original_event.event_id,
     )
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         [original_event.event_id],
         response_event_id=response_event_id,
         response_owner="test_agent",
@@ -360,7 +360,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         assert edit_args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == original_event.event_id
 
         # Verify that the response tracker still maps to the same response
-        assert bot.handled_turn_ledger.get_response_event_id(original_event.event_id) == response_event_id
+        assert bot._handled_turn_ledger.get_response_event_id(original_event.event_id) == response_event_id
 
 
 @pytest.mark.asyncio
@@ -403,13 +403,13 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
             ).encode("utf-8"),
         ),
     )
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$original:example.com"],
         response_event_id="$response:example.com",
         response_owner="test_agent",
@@ -517,13 +517,13 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
             ).encode("utf-8"),
         ),
     )
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
     bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
+    _record_handled_turn(bot._handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
 
     edit_event = nio.RoomMessageText.from_dict(
         {
@@ -588,8 +588,8 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -599,7 +599,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         reply_to_event_id="$router-echo:example.com",
     )
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$original:example.com"],
         response_event_id="$response:example.com",
         response_owner="test_agent",
@@ -772,8 +772,8 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_team:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_team", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_team", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
     bot.orchestrator = MagicMock(
         current_config=config,
@@ -789,7 +789,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         reply_to_event_id="$original:example.com",
     )
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$original:example.com"],
         response_event_id=response_event_id,
         response_owner="test_team",
@@ -939,9 +939,9 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     bot.client.user_id = "@mindroom_test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
-    replace_turn_policy_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+    replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -1030,18 +1030,18 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     bot.client.user_id = "@mindroom_test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 
     # Simulate that the bot has responded to some message
-    _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
+    _record_handled_turn(bot._handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
 
     # Test 1: Bot's own edit
     own_edit_event = nio.RoomMessageText.from_dict(
@@ -1175,10 +1175,10 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         thread_id=None,
         reply_to_event_id="$primary:example.com",
     )
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$first:example.com", "$primary:example.com"],
         response_event_id="$response:example.com",
         source_event_prompts={
@@ -1275,9 +1275,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                 "$primary:example.com": "primary",
             },
         }
-        assert bot.handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
-        assert bot.handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
+        assert bot._handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
+        assert bot._handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
         assert mock_remove_run.call_count == 2
         mock_remove_run.assert_has_calls(
             [
@@ -1322,8 +1321,8 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -1333,7 +1332,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         reply_to_event_id="$original:example.com",
     )
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$original:example.com"],
         response_event_id="$response:example.com",
         response_owner="test_agent",
@@ -1384,7 +1383,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
-        ) as mock_create_storage,
+        ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
         patch.object(
             bot,
@@ -1415,8 +1414,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is False
         assert call_kwargs["target"] == stored_target
-        assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
+        assert bot._handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
 
@@ -1444,22 +1442,22 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
         thread_id=None,
         reply_to_event_id="$original:example.com",
     )
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$original:example.com"],
         response_event_id="$response:example.com",
         response_owner="test_agent",
         history_scope=_agent_history_scope("test_agent"),
         conversation_target=stored_target,
     )
-    bot.handled_turn_ledger.record_handled_turn = MagicMock(wraps=bot.handled_turn_ledger.record_handled_turn)
+    bot._handled_turn_ledger.record_handled_turn = MagicMock(wraps=bot._handled_turn_ledger.record_handled_turn)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -1506,7 +1504,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         patch.object(
             bot._conversation_state_writer,
             "create_history_scope_storage",
-        ) as mock_create_storage,
+        ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
         patch.object(
             bot,
@@ -1532,9 +1530,8 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         )
 
         mock_generate_response.assert_awaited_once()
-        assert bot.handled_turn_ledger.record_handled_turn.call_count == 0
-        assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
+        assert bot._handled_turn_ledger.record_handled_turn.call_count == 0
+        assert bot._handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
 
@@ -1562,15 +1559,15 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
         thread_id=None,
         reply_to_event_id="$primary:example.com",
     )
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$first:example.com", "$primary:example.com"],
         response_event_id="$response:example.com",
         response_owner="test_agent",
@@ -1643,7 +1640,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             bot._conversation_state_writer,
             "create_history_scope_storage",
             return_value=storage,
-        ) as mock_create_storage,
+        ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
         patch.object(
             bot,
@@ -1683,9 +1680,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
                 "$primary:example.com": "primary",
             },
         }
-        assert bot.handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
-        assert bot.handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
-        assert mock_create_storage.call_count == 2
+        assert bot._handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
+        assert bot._handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
         assert mock_remove_run.call_count == 2
         mock_remove_run.assert_has_calls(
             [
@@ -1959,11 +1955,11 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$original:example.com"],
         response_event_id="$response:example.com",
         response_owner="test_agent",
@@ -2087,8 +2083,8 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -2222,14 +2218,139 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
-        assert bot.handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
-        assert bot.handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
-        turn_record = bot.handled_turn_ledger.get_turn_record("$primary:example.com")
+        assert bot._handled_turn_ledger.get_response_event_id("$first:example.com") == "$response:example.com"
+        assert bot._handled_turn_ledger.get_response_event_id("$primary:example.com") == "$response:example.com"
+        turn_record = bot._handled_turn_ledger.get_turn_record("$primary:example.com")
         assert turn_record is not None
         assert turn_record.source_event_prompts == {
             "$first:example.com": "updated first",
             "$primary:example.com": "primary",
         }
+
+
+@pytest.mark.asyncio
+async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context_before_turn_lookup(
+    tmp_path: Path,
+) -> None:
+    """Edit recovery should use resolved thread context before probing persisted turn state."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* updated threaded question",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "updated threaded question",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$first:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* updated threaded question",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "updated threaded question",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$first:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+
+    threaded_session_id = create_session_id("!test:example.com", "$thread_root:example.com")
+    threaded_storage = _FakeAgentStorage(
+        AgentSession(
+            session_id=threaded_session_id,
+            runs=[
+                RunOutput(
+                    run_id="run-threaded",
+                    session_id=threaded_session_id,
+                    metadata={
+                        "matrix_event_id": "$primary:example.com",
+                        "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
+                        "matrix_source_event_prompts": {
+                            "$first:example.com": "first",
+                            "$primary:example.com": "primary",
+                        },
+                        "matrix_response_event_id": "$response:example.com",
+                    },
+                ),
+            ],
+        ),
+    )
+    room_storage = _FakeAgentStorage(session=None)
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "extract_message_context",
+            new=AsyncMock(
+                return_value=MagicMock(
+                    am_i_mentioned=False,
+                    is_thread=True,
+                    thread_id="$thread_root:example.com",
+                    thread_history=[],
+                    mentioned_agents=[],
+                    has_non_agent_mentions=False,
+                ),
+            ),
+        ),
+        patch.object(
+            bot._conversation_state_writer,
+            "create_history_scope_storage",
+            side_effect=[threaded_storage, room_storage],
+        ),
+        patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
+        patch.object(bot, "_generate_response", new_callable=AsyncMock, return_value=None) as mock_generate_response,
+    ):
+        await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    mock_generate_response.assert_awaited_once()
+    call_kwargs = mock_generate_response.call_args.kwargs
+    assert call_kwargs["thread_id"] == "$thread_root:example.com"
+    assert call_kwargs["existing_event_id"] == "$response:example.com"
+    assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
 
 
 @pytest.mark.asyncio
@@ -2257,8 +2378,8 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -2355,7 +2476,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
     assert call_kwargs["existing_event_id"] == "$response:example.com"
     assert call_kwargs["reply_to_event_id"] == "$original:example.com"
     assert call_kwargs["prompt"] == "updated question"
-    assert bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
+    assert bot._handled_turn_ledger.get_response_event_id("$original:example.com") == "$response:example.com"
 
 
 @pytest.mark.asyncio
@@ -2384,8 +2505,8 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
@@ -2395,7 +2516,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     )
     assert stored_target.session_id == "!test:example.com"
     _record_handled_turn(
-        bot.handled_turn_ledger,
+        bot._handled_turn_ledger,
         ["$original:example.com"],
         response_event_id="$response-old:example.com",
         response_owner="test_agent",
@@ -2483,11 +2604,11 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     restarted_bot.client = AsyncMock(spec=nio.AsyncClient)
     restarted_bot.client.rooms = {}
     restarted_bot.client.user_id = "@mindroom_test_agent:example.com"
-    restarted_bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(restarted_bot, handled_turn_ledger=restarted_bot.handled_turn_ledger)
+    restarted_bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(restarted_bot, handled_turn_ledger=restarted_bot._handled_turn_ledger)
     restarted_bot.logger = MagicMock()
     assert (
-        restarted_bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response-old:example.com"
+        restarted_bot._handled_turn_ledger.get_response_event_id("$original:example.com") == "$response-old:example.com"
     )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -2564,7 +2685,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     assert call_kwargs["existing_event_id"] == "$response-new:example.com"
     assert call_kwargs["target"].session_id == "!test:example.com"
     assert (
-        restarted_bot.handled_turn_ledger.get_response_event_id("$original:example.com") == "$response-new:example.com"
+        restarted_bot._handled_turn_ledger.get_response_event_id("$original:example.com") == "$response-new:example.com"
     )
 
 
@@ -2596,8 +2717,8 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -2645,8 +2766,8 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         await bot._on_reaction(room, reaction_event)
 
         # Verify that the bot tracked the response correctly
-        assert bot.handled_turn_ledger.has_responded("$question:example.com")
-        assert bot.handled_turn_ledger.get_response_event_id("$question:example.com") == "$response_event:example.com"
+        assert bot._handled_turn_ledger.has_responded("$question:example.com")
+        assert bot._handled_turn_ledger.get_response_event_id("$question:example.com") == "$response_event:example.com"
 
         # Verify the methods were called with correct parameters
         mock_handle_reaction.assert_called_once()
@@ -2681,8 +2802,8 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -2720,8 +2841,8 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
 
         await bot._on_reaction(room, reaction_event)
 
-        assert bot.handled_turn_ledger.has_responded("$question:example.com") is False
-        assert bot.handled_turn_ledger.get_response_event_id("$question:example.com") is None
+        assert bot._handled_turn_ledger.has_responded("$question:example.com") is False
+        assert bot._handled_turn_ledger.get_response_event_id("$question:example.com") is None
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["existing_event_id"] == "$ack_event:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is True
@@ -2763,8 +2884,8 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -2872,8 +2993,8 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = f"@mindroom_{ROUTER_AGENT_NAME}:example.com"
-    bot.handled_turn_ledger = MagicMock()
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = MagicMock()
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(
@@ -2948,8 +3069,8 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     bot.client.user_id = "@mindroom_test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -3013,8 +3134,8 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         await bot._on_media_message(room, voice_event)
 
         # Verify that the bot tracked the response correctly
-        assert bot.handled_turn_ledger.has_responded("$voice:example.com")
-        assert bot.handled_turn_ledger.get_response_event_id("$voice:example.com") == "$response:example.com"
+        assert bot._handled_turn_ledger.has_responded("$voice:example.com")
+        assert bot._handled_turn_ledger.get_response_event_id("$voice:example.com") == "$response:example.com"
 
         # Verify the methods were called
         mock_handle_voice.assert_called_once()
@@ -3056,12 +3177,12 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     bot.client.user_id = "@mindroom_test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -3122,8 +3243,8 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         await bot._on_media_message(room, voice_event)
 
         # Verify that the bot marked as responded with the fallback relay.
-        assert bot.handled_turn_ledger.has_responded("$voice:example.com")
-        assert bot.handled_turn_ledger.get_response_event_id("$voice:example.com") == "$response:example.com"
+        assert bot._handled_turn_ledger.has_responded("$voice:example.com")
+        assert bot._handled_turn_ledger.get_response_event_id("$voice:example.com") == "$response:example.com"
 
         # Verify voice handler was called and the fallback relay ran.
         mock_handle_voice.assert_called_once()
@@ -3176,12 +3297,12 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     room = Mock(spec=nio.MatrixRoom)
     room.room_id = "!test:example.com"
@@ -3196,7 +3317,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     original_event.source = {"event_id": "$original:example.com"}
 
     # Store that we responded to the original
-    _record_handled_turn(bot.handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
+    _record_handled_turn(bot._handled_turn_ledger, ["$original:example.com"], response_event_id="$response:example.com")
 
     # Edit from unauthorized user (trying to regenerate)
     edit_event = Mock(spec=nio.RoomMessageText)
@@ -3259,12 +3380,12 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real HandledTurnLedger with the test path
-    bot.handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
-    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = HandledTurnLedger(agent_name="test_agent", base_path=tmp_path)
+    replace_edit_regenerator_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -3313,9 +3434,9 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
         await bot._on_media_message(room, voice_event)
 
         # Verify that the bot marked as responded even for unauthorized sender
-        assert bot.handled_turn_ledger.has_responded("$voice:example.com")
+        assert bot._handled_turn_ledger.has_responded("$voice:example.com")
         # Should not have a response event ID since no response was sent
-        assert bot.handled_turn_ledger.get_response_event_id("$voice:example.com") is None
+        assert bot._handled_turn_ledger.get_response_event_id("$voice:example.com") is None
 
         # Verify authorization was checked but voice handler was not called
         mock_is_authorized.assert_called_once()

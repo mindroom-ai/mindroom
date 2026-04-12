@@ -69,12 +69,12 @@ def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     _replace_turn_policy_deps(
         bot,
         logger=bot.logger,
-        handled_turn_ledger=bot.handled_turn_ledger,
+        handled_turn_ledger=bot._handled_turn_ledger,
     )
     replace_turn_controller_deps(
         bot,
         logger=bot.logger,
-        handled_turn_ledger=bot.handled_turn_ledger,
+        handled_turn_ledger=bot._handled_turn_ledger,
     )
 
 
@@ -113,8 +113,8 @@ def mock_agent_bot() -> AgentBot:
     bot.client.user_id = bot.agent_user.user_id
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot._send_response = AsyncMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, bot._send_response)
@@ -147,8 +147,8 @@ class TestBotScheduleCommands:
             mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
 
             # Mock response tracker for the test
-            mock_agent_bot.handled_turn_ledger = MagicMock()
-            mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+            mock_agent_bot._handled_turn_ledger = MagicMock()
+            mock_agent_bot._handled_turn_ledger.has_responded.return_value = False
             _sync_turn_policy_runtime(mock_agent_bot)
 
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
@@ -173,8 +173,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_schedule_command_no_message(self, mock_agent_bot: AgentBot) -> None:
         """Test schedule command with no message uses default."""
-        mock_agent_bot.handled_turn_ledger = MagicMock()
-        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        mock_agent_bot._handled_turn_ledger = MagicMock()
+        mock_agent_bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
@@ -199,8 +199,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_list_schedules_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles list schedules command."""
-        mock_agent_bot.handled_turn_ledger = MagicMock()
-        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        mock_agent_bot._handled_turn_ledger = MagicMock()
+        mock_agent_bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
@@ -229,8 +229,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_cancel_schedule_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles cancel schedule command."""
-        mock_agent_bot.handled_turn_ledger = MagicMock()
-        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        mock_agent_bot._handled_turn_ledger = MagicMock()
+        mock_agent_bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
@@ -252,8 +252,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_cancel_all_scheduled_tasks(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles cancel all scheduled tasks command."""
-        mock_agent_bot.handled_turn_ledger = MagicMock()
-        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        mock_agent_bot._handled_turn_ledger = MagicMock()
+        mock_agent_bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
@@ -283,8 +283,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_edit_schedule_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles edit schedule command."""
-        mock_agent_bot.handled_turn_ledger = MagicMock()
-        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        mock_agent_bot._handled_turn_ledger = MagicMock()
+        mock_agent_bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
@@ -321,8 +321,8 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
         """Test that schedule commands auto-create threads when used in main room."""
-        mock_agent_bot.handled_turn_ledger = MagicMock()
-        mock_agent_bot.handled_turn_ledger.has_responded.return_value = False
+        mock_agent_bot._handled_turn_ledger = MagicMock()
+        mock_agent_bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
@@ -490,8 +490,8 @@ class TestCommandHandling:
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, bot._generate_response)
         bot._conversation_resolver.extract_dispatch_context = AsyncMock()
@@ -723,8 +723,8 @@ class TestCommandHandling:
             bot.client.user_id = bot.agent_user.user_id
             sync_bot_runtime_state(bot)
             bot.logger = MagicMock()
-            bot.handled_turn_ledger = MagicMock()
-            bot.handled_turn_ledger.has_responded.return_value = False
+            bot._handled_turn_ledger = MagicMock()
+            bot._handled_turn_ledger.has_responded.return_value = False
             bot._send_skill_command_response = AsyncMock()
             bot._send_response = AsyncMock(return_value="$router_reply")
             _sync_turn_policy_runtime(bot)
@@ -801,8 +801,8 @@ class TestCommandHandling:
         _sync_turn_policy_runtime(bot)
         install_send_response_mock(bot, bot._send_response)
         install_generate_response_mock(bot, bot._generate_response)
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
 
         # Mock context extraction to say agent is mentioned
@@ -867,8 +867,8 @@ class TestCommandHandling:
             sync_bot_runtime_state(bot)
             bot.logger = MagicMock()
             bot._generate_response = AsyncMock()
-            bot.handled_turn_ledger = MagicMock()
-            bot.handled_turn_ledger.has_responded.return_value = False
+            bot._handled_turn_ledger = MagicMock()
+            bot._handled_turn_ledger.has_responded.return_value = False
             _sync_turn_policy_runtime(bot)
             install_generate_response_mock(bot, bot._generate_response)
 
@@ -1002,8 +1002,8 @@ class TestCommandHandling:
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, bot._generate_response)
 
@@ -1076,8 +1076,8 @@ class TestCommandHandling:
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
         bot._send_response = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         install_send_response_mock(bot, bot._send_response)
         install_generate_response_mock(bot, bot._generate_response)
@@ -1192,8 +1192,8 @@ class TestCommandHandling:
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, bot._generate_response)
 
@@ -1314,8 +1314,8 @@ class TestCommandHandling:
         sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, bot._generate_response)
 
@@ -1393,8 +1393,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_router_relay = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_router_relay = AsyncMock()
@@ -1481,8 +1481,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_router_relay = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_router_relay = AsyncMock()
 
@@ -1583,8 +1583,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_router_relay = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_router_relay = AsyncMock()
 
@@ -1670,12 +1670,12 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_command = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._send_response = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_command = AsyncMock()
 
@@ -1742,12 +1742,12 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_command = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._send_response = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_command = AsyncMock()
 
@@ -1814,8 +1814,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_router_relay = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_router_relay = AsyncMock()
 
@@ -1904,8 +1904,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_command = AsyncMock()
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_command = AsyncMock()
 

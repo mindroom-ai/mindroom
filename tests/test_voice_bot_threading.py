@@ -63,10 +63,10 @@ def mock_home_bot() -> AgentBot:
     bot.client.user_id = "@mindroom_home:localhost"
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
-    replace_turn_policy_deps(bot, handled_turn_ledger=bot.handled_turn_ledger)
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
+    replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
     bot._generate_response = AsyncMock(return_value="$response")
     install_generate_response_mock(bot, bot._generate_response)
     return bot

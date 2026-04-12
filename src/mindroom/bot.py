@@ -339,7 +339,7 @@ class AgentBot:
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _standalone_runtime_support: StandaloneRuntimeSupport | None
     _turn_controller: TurnController
-    handled_turn_ledger: HandledTurnLedger
+    _handled_turn_ledger: HandledTurnLedger
 
     def __init__(
         self,
@@ -371,7 +371,7 @@ class AgentBot:
             event_cache=None,
             event_cache_write_coordinator=None,
         )
-        self.handled_turn_ledger = HandledTurnLedger(
+        self._handled_turn_ledger = HandledTurnLedger(
             self.agent_name,
             base_path=self.storage_path / "tracking",
         )
@@ -466,7 +466,7 @@ class AgentBot:
         self._turn_store = TurnStore(
             TurnStoreDeps(
                 agent_name=self.agent_name,
-                handled_turn_ledger=self.handled_turn_ledger,
+                handled_turn_ledger=self._handled_turn_ledger,
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
@@ -677,7 +677,7 @@ class AgentBot:
         handled_turn: HandledTurnState,
     ) -> None:
         """Mark one or more source events as handled by the same response."""
-        record_handled_turn(self.handled_turn_ledger, handled_turn)
+        record_handled_turn(self._handled_turn_ledger, handled_turn)
 
     async def _emit_reaction_received_hooks(
         self,

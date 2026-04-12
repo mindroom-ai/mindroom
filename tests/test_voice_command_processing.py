@@ -139,7 +139,7 @@ def _make_visible_router_echo_scenario(
         rooms=["!test:example.com"],
     )
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
@@ -176,10 +176,10 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
         config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     room = _make_room("@mindroom_router:example.com", "@alice:example.com")
     event = MagicMock(spec=nio.RoomMessageText)
@@ -216,10 +216,10 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
         config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
 
     room = _make_room("@mindroom_router:example.com", "@bob:example.com")
     event = MagicMock(spec=nio.RoomMessageText)
@@ -260,10 +260,10 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
         ),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
@@ -340,10 +340,10 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         ),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
@@ -426,10 +426,10 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
         ),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
@@ -512,10 +512,10 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
         config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = bot.matrix_id.full_id
@@ -552,7 +552,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     bot.client.download.assert_not_awaited()
     mock_interactive.assert_not_awaited()
     mock_schedule.assert_not_awaited()
-    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+    bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(event.event_id),
     )
 
@@ -661,10 +661,10 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
         config=config,
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = MagicMock()
     bot._send_response = AsyncMock()
     install_send_response_mock(bot, bot._send_response)
@@ -691,7 +691,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     mock_voice.assert_not_called()
     mock_download_audio.assert_not_called()
     bot._send_response.assert_not_called()
-    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+    bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id("$agent_audio_event"),
     )
 
@@ -716,10 +716,10 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         ),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
@@ -749,7 +749,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
     assert call_kwargs["attachment_ids"] == [expected_attachment_id]
     assert list(call_kwargs["media"].audio)
-    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+    bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$voice_event",
             response_event_id="$response",
@@ -786,10 +786,10 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         ),
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
@@ -840,10 +840,10 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
             config=config,
             rooms=["!test:example.com"],
         )
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+        replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = agent_user.user_id
@@ -916,8 +916,8 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
     bot._delivery_gateway.send_text.assert_called_once()
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    assert bot.handled_turn_ledger.has_responded(event.event_id)
-    assert bot.handled_turn_ledger.get_response_event_id(event.event_id) == "$voice_echo"
+    assert bot._handled_turn_ledger.has_responded(event.event_id)
+    assert bot._handled_turn_ledger.get_response_event_id(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -941,8 +941,8 @@ async def test_router_visible_voice_echo_respects_reply_permissions(tmp_path) ->
     bot._delivery_gateway.send_text.assert_not_called()
     mock_download_audio.assert_not_awaited()
     mock_voice.assert_not_awaited()
-    assert bot.handled_turn_ledger.has_responded(event.event_id)
-    assert bot.handled_turn_ledger.get_response_event_id(event.event_id) is None
+    assert bot._handled_turn_ledger.has_responded(event.event_id)
+    assert bot._handled_turn_ledger.get_response_event_id(event.event_id) is None
 
 
 @pytest.mark.asyncio
@@ -1004,8 +1004,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
 
-        assert not bot.handled_turn_ledger.has_responded(event.event_id)
-        assert bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+        assert not bot._handled_turn_ledger.has_responded(event.event_id)
+        assert bot._handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
 
         await bot._on_media_message(room, event)
 
@@ -1015,8 +1015,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         "@home could you help with this?",
         "@home could you help with this?",
     ]
-    assert bot.handled_turn_ledger.has_responded(event.event_id)
-    assert bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+    assert bot._handled_turn_ledger.has_responded(event.event_id)
+    assert bot._handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -1044,8 +1044,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
 
-    assert not bot.handled_turn_ledger.has_responded(event.event_id)
-    assert bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+    assert not bot._handled_turn_ledger.has_responded(event.event_id)
+    assert bot._handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
 
     restarted_bot, restarted_room, restarted_event = _make_visible_router_echo_scenario(
         tmp_path,
@@ -1065,8 +1065,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
 
     response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == ["@home could you help with this?"]
-    assert restarted_bot.handled_turn_ledger.has_responded(event.event_id)
-    assert restarted_bot.handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+    assert restarted_bot._handled_turn_ledger.has_responded(event.event_id)
+    assert restarted_bot._handled_turn_ledger.get_visible_echo_event_id(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -1095,10 +1095,10 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         config=config,
         rooms=["!test:example.com"],
     )
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock()
     bot._send_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
@@ -1132,7 +1132,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
-    bot.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+    bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$voice_event",
             response_event_id="$response",
@@ -1178,10 +1178,10 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
             config=config,
             rooms=["!test:example.com"],
         )
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+        replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
@@ -1253,10 +1253,10 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
             config=config,
             rooms=["!test:example.com"],
         )
-        bot.handled_turn_ledger = MagicMock()
-        bot.handled_turn_ledger.has_responded.return_value = False
+        bot._handled_turn_ledger = MagicMock()
+        bot._handled_turn_ledger.has_responded.return_value = False
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
+        replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"

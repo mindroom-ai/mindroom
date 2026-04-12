@@ -96,11 +96,11 @@ def mock_home_bot(tmp_path: Path) -> AgentBot:
     bot.logger = MagicMock()
     bot._generate_response = AsyncMock()
     install_generate_response_mock(bot, bot._generate_response)
-    bot.handled_turn_ledger = MagicMock()
-    bot.handled_turn_ledger.has_responded.return_value = False
+    bot._handled_turn_ledger = MagicMock()
+    bot._handled_turn_ledger.has_responded.return_value = False
     replace_turn_policy_deps(
         bot,
-        handled_turn_ledger=bot.handled_turn_ledger,
+        handled_turn_ledger=bot._handled_turn_ledger,
     )
     return bot
 

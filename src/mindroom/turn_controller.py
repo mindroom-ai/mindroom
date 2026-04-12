@@ -1136,9 +1136,6 @@ class TurnController:
                 dispatch_timing.mark("dispatch_prepare_ready")
             if dispatch is None:
                 return
-            if dispatch.context.requires_full_thread_history:
-                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
-
             command = command_parser.parse(event.body) if not media_events else None
             if command:
                 if self.deps.agent_name == ROUTER_AGENT_NAME:
@@ -1150,6 +1147,8 @@ class TurnController:
                         source_envelope=dispatch.envelope,
                     )
                 return
+            if dispatch.context.requires_full_thread_history:
+                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
 
             if self._has_newer_unresponded_in_thread(
                 event,

@@ -88,13 +88,12 @@ class EditRegenerator:
 
     async def edit_regeneration_context(
         self,
+        context: MessageContext,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
         *,
         conversation_target: MessageTarget | None,
     ) -> MessageContext:
         """Return edit context, reusing the recorded thread root when available."""
-        context = await self.deps.resolver.extract_message_context(room, event)
         if conversation_target is None or conversation_target.resolved_thread_id is None:
             return context
         if context.thread_id == conversation_target.resolved_thread_id:
@@ -131,9 +130,10 @@ class EditRegenerator:
             self._logger().debug("ignoring_edit_from_other_agent", agent=sender_agent_name)
             return
 
+        context = await self.deps.resolver.extract_message_context(room, event)
         loaded_turn = self.deps.turn_store.load_turn_record(
             room=room,
-            thread_id=event_info.thread_id or event_info.thread_id_from_edit,
+            thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
@@ -145,8 +145,8 @@ class EditRegenerator:
             return
         turn_record = loaded_turn.record
         context = await self.edit_regeneration_context(
+            context,
             room,
-            event,
             conversation_target=turn_record.conversation_target,
         )
         if loaded_turn.response_owner_missing:

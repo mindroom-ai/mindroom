@@ -1421,11 +1421,11 @@ async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> 
         )
         await asyncio.sleep(0.05)
 
-    assert bot.handled_turn_ledger.has_responded("$m1")
-    assert bot.handled_turn_ledger.has_responded("$m2")
-    assert bot.handled_turn_ledger.get_response_event_id("$m1") == "$response"
-    assert bot.handled_turn_ledger.get_response_event_id("$m2") == "$response"
-    turn_record = bot.handled_turn_ledger.get_turn_record("$m1")
+    assert bot._handled_turn_ledger.has_responded("$m1")
+    assert bot._handled_turn_ledger.has_responded("$m2")
+    assert bot._handled_turn_ledger.get_response_event_id("$m1") == "$response"
+    assert bot._handled_turn_ledger.get_response_event_id("$m2") == "$response"
+    turn_record = bot._handled_turn_ledger.get_turn_record("$m1")
     assert turn_record is not None
     assert turn_record.source_event_ids == ("$m1", "$m2")
     assert turn_record.anchor_event_id == "$m2"
@@ -1564,7 +1564,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
-    assert bot.handled_turn_ledger.has_responded("$m1")
+    assert bot._handled_turn_ledger.has_responded("$m1")
 
 
 @pytest.mark.asyncio
@@ -1600,7 +1600,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
 
     # Dispatch proceeded to completion
-    assert bot.handled_turn_ledger.has_responded("$m1")
+    assert bot._handled_turn_ledger.has_responded("$m1")
 
 
 # ---------------------------------------------------------------------------
@@ -2071,7 +2071,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert bot.handled_turn_ledger.has_responded("$m1")
+    assert bot._handled_turn_ledger.has_responded("$m1")
 
 
 @pytest.mark.asyncio
@@ -2112,7 +2112,7 @@ async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> Non
 
     # Voice synthetic MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert bot.handled_turn_ledger.has_responded("$v1")
+    assert bot._handled_turn_ledger.has_responded("$v1")
 
 
 # ---------------------------------------------------------------------------

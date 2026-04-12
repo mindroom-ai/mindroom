@@ -128,10 +128,10 @@ class TestTeamFormation:
         # Setup bots
         research_bot.client = AsyncMock()
         analyst_bot.client = AsyncMock()
-        research_bot.handled_turn_ledger = MagicMock()
-        research_bot.handled_turn_ledger.has_responded.return_value = False
-        analyst_bot.handled_turn_ledger = MagicMock()
-        analyst_bot.handled_turn_ledger.has_responded.return_value = False
+        research_bot._handled_turn_ledger = MagicMock()
+        research_bot._handled_turn_ledger.has_responded.return_value = False
+        analyst_bot._handled_turn_ledger = MagicMock()
+        analyst_bot._handled_turn_ledger.has_responded.return_value = False
 
         # Create message mentioning both agents
         message_event: dict[str, Any] = {
