@@ -1070,7 +1070,7 @@ class TestThreadingBehavior:
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
         with (
-            patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
         ):
             # Process the message
             await bot._on_message(room, event)
@@ -1132,7 +1132,7 @@ class TestThreadingBehavior:
 
         # Mock interactive.handle_text_response and make AI fast
         with (
-            patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
             patch(
                 "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
@@ -2774,7 +2774,7 @@ class TestThreadingBehavior:
         # Mock interactive.handle_text_response and generate_response
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
-        with patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)):
+        with patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)):
             # Process the message
             await bot._on_message(room, event)
 

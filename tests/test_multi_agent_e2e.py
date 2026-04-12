@@ -328,7 +328,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
             patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
-            patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Only this agent in the thread
             thread_history = [
@@ -385,7 +385,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
             patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
-            patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Multiple agents in the thread
             thread_history = [
@@ -463,7 +463,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
             patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
-            patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             thread_history = [
                 _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),

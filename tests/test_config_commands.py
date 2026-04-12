@@ -240,11 +240,11 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         storage_path=tmp_path,
         logger=MagicMock(),
-        handled_turn_ledger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_access=MagicMock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value=None),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),
@@ -281,11 +281,11 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         storage_path=tmp_path,
         logger=MagicMock(),
-        handled_turn_ledger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_access=MagicMock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),
@@ -306,7 +306,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         requester_user_id="@alice:example.org",
     )
 
-    context.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+    context.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$event",
             response_event_id="$reply",
@@ -323,11 +323,11 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         storage_path=tmp_path,
         logger=MagicMock(),
-        handled_turn_ledger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_access=MagicMock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),
@@ -389,7 +389,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     mock_get_pending.assert_called_once_with("$preview")
     mock_store_pending.assert_awaited_once_with(context.client, "$preview", pending_change)
     mock_add_reactions.assert_awaited_once_with(context.client, "!room:example.org", "$preview")
-    context.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+    context.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$event",
             response_event_id="$preview",
@@ -406,11 +406,11 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         storage_path=tmp_path,
         logger=MagicMock(),
-        handled_turn_ledger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_access=MagicMock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),
@@ -461,7 +461,7 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
             requester_user_id="@alice:example.org",
         )
 
-    context.handled_turn_ledger.record_handled_turn.assert_called_once_with(
+    context.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$event",
             response_event_id="$preview",

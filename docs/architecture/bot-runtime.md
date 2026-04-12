@@ -63,10 +63,13 @@ It no longer sends messages, runs AI, or writes persistence state.
 
 `TurnStore` is now the main durable turn boundary for the extracted runtime flows.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
-Some legacy command and bot paths still write to `HandledTurnLedger` directly.
+Command handling now records terminal outcomes through `TurnStore` as well.
 
 `AgentBot` is closer to a runtime shell again.
-It still needs more cleanup, but normal turn control and edit regeneration no longer live in the bot class itself.
+It still needs more cleanup, but normal turn control, edit regeneration, and interactive selection execution no longer live in the bot class itself.
+
+Interactive reactions and numeric text selections now share the same controller-owned execution path.
+That path sends the acknowledgment, runs response generation, and records the handled turn once.
 
 ## Next Simplification Work
 
@@ -75,9 +78,6 @@ It should keep placeholder, locking, streaming, cancellation, AI or team executi
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.
-
-Keep simplifying durable turn state.
-`TurnStore` is the right runtime boundary, but the backing storage model is still split between `HandledTurnLedger` and persisted run metadata.
 
 Only after those steps should we revisit `MessageTarget`.
 That follow-up can split conversation identity from delivery placement if the runtime still needs it.

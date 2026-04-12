@@ -394,7 +394,7 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User is not an agent
             patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
-            patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(
@@ -491,7 +491,7 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),
             patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
-            patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(

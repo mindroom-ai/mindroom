@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult
-    from mindroom.handled_turns import HandledTurnLedger, HandledTurnState
+    from mindroom.handled_turns import HandledTurnState
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_access import ConversationReadAccess
@@ -233,19 +233,6 @@ class PostResponseEffectsSupport:
             queue_thread_summary=self.queue_thread_summary,
             record_handled_turn=record_handled_turn,
         )
-
-
-def record_handled_turn(
-    handled_turn_ledger: HandledTurnLedger,
-    handled_turn: HandledTurnState,
-) -> None:
-    """Record a handled turn while preserving any prior visible echo linkage."""
-    visible_echo_event_id = handled_turn.visible_echo_event_id or handled_turn_ledger.visible_echo_event_id_for_sources(
-        handled_turn.source_event_ids,
-    )
-    handled_turn_ledger.record_handled_turn(
-        handled_turn.with_visible_echo_event_id(visible_echo_event_id),
-    )
 
 
 def matrix_run_metadata_for_handled_turn(

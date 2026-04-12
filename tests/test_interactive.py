@@ -392,8 +392,12 @@ Based on your choice, I'll proceed accordingly."""
             runtime_paths_for(self.config),
         )
 
-        # Should return the selected value and thread_id
-        assert result == ("fast", "$thread123")
+        assert result == interactive.InteractiveSelection(
+            question_event_id="$question123",
+            selection_key="🚀",
+            selected_value="fast",
+            thread_id="$thread123",
+        )
 
         # Should NOT send confirmation (user's reaction is the response)
         mock_client.room_send.assert_not_called()
@@ -426,7 +430,12 @@ Based on your choice, I'll proceed accordingly."""
             runtime_paths_for(self.config),
         )
 
-        assert result == ("fast", "$thread123")
+        assert result == interactive.InteractiveSelection(
+            question_event_id="$question123",
+            selection_key="🚀",
+            selected_value="fast",
+            thread_id="$thread123",
+        )
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
@@ -548,7 +557,12 @@ Based on your choice, I'll proceed accordingly."""
 
         result = await interactive.handle_text_response(mock_client, room, event, "test_agent")
 
-        assert result == ("first", "$thread123")
+        assert result == interactive.InteractiveSelection(
+            question_event_id="$question123",
+            selection_key="1",
+            selected_value="first",
+            thread_id="$thread123",
+        )
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
@@ -753,8 +767,12 @@ Just let me know your preference!"""
             runtime_paths_for(self.config),
         )
 
-        # Verify reaction was processed
-        assert result == ("detailed", "$thread123")  # Thread ID from the question
+        assert result == interactive.InteractiveSelection(
+            question_event_id=event_id,
+            selection_key="🔍",
+            selected_value="detailed",
+            thread_id="$thread123",
+        )
         assert event_id not in interactive._active_questions
 
     @pytest.mark.asyncio
@@ -857,7 +875,12 @@ Just let me know your preference!"""
             runtime_paths_for(self.config),
         )
 
-        assert result == ("yes", "$thread123")
+        assert result == interactive.InteractiveSelection(
+            question_event_id="$question123",
+            selection_key="✅",
+            selected_value="yes",
+            thread_id="$thread123",
+        )
         assert interactive._active_questions == {}
         assert json.loads(persistence_file.read_text()) == {}
 

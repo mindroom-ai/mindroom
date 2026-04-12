@@ -596,11 +596,11 @@ class TurnController:
             runtime_paths=self.deps.runtime_paths,
             storage_path=self.deps.storage_path,
             logger=self.deps.logger,
-            handled_turn_ledger=self.deps.turn_store.deps.handled_turn_ledger,
             derive_conversation_context=self.deps.resolver.derive_conversation_context,
             conversation_access=self.deps.resolver.deps.conversation_access,
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
+            record_handled_turn=self.deps.turn_store.mark_handled,
             send_response=send_response,
             send_skill_command_response=send_skill_command_response,
             run_skill_command_tool=run_skill_command_tool,
@@ -612,6 +612,76 @@ class TurnController:
             command=command,
             requester_user_id=requester_user_id,
         )
+
+    async def handle_interactive_selection(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        selection: interactive.InteractiveSelection,
+        user_id: str,
+        source_event_id: str | None = None,
+    ) -> None:
+        """Execute one validated interactive selection through the normal response path."""
+        thread_history = (
+            await self.deps.resolver.fetch_thread_history(self._client(), room.room_id, selection.thread_id)
+            if selection.thread_id
+            else []
+        )
+        ack_target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=selection.thread_id,
+            reply_to_event_id=None if selection.thread_id else selection.question_event_id,
+        )
+        ack_event_id = await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                target=ack_target,
+                response_text=(
+                    f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
+                ),
+            ),
+        )
+        if not ack_event_id:
+            self.deps.logger.error(
+                "Failed to send acknowledgment for interactive selection",
+                source_event_id=selection.question_event_id,
+            )
+            return
+
+        try:
+            response_event_id = await self.deps.response_runner.generate_response(
+                ResponseRequest(
+                    room_id=room.room_id,
+                    prompt=f"The user selected: {selection.selected_value}",
+                    reply_to_event_id=selection.question_event_id,
+                    thread_id=selection.thread_id,
+                    thread_history=thread_history,
+                    existing_event_id=ack_event_id,
+                    existing_event_is_placeholder=True,
+                    user_id=user_id,
+                    target=ack_target,
+                ),
+            )
+        except SuppressedPlaceholderCleanupError:
+            self.deps.logger.warning(
+                "Suppressed interactive acknowledgment cleanup failed",
+                source_event_id=selection.question_event_id,
+                acknowledgment_event_id=ack_event_id,
+            )
+            return
+        if response_event_id is not None:
+            self._mark_source_events_responded(
+                HandledTurnState.from_source_event_id(
+                    selection.question_event_id,
+                    response_event_id=response_event_id,
+                ),
+            )
+            if source_event_id is not None and source_event_id != selection.question_event_id:
+                self._mark_source_events_responded(
+                    HandledTurnState.from_source_event_id(
+                        source_event_id,
+                        response_event_id=response_event_id,
+                    ),
+                )
 
     async def _execute_router_relay(
         self,
@@ -1057,7 +1127,20 @@ class TurnController:
         ):
             return
         if should_handle_interactive_text_response(envelope):
-            await interactive.handle_text_response(self._client(), room, prepared_event, self.deps.agent_name)
+            selection = await interactive.handle_text_response(
+                self._client(),
+                room,
+                prepared_event,
+                self.deps.agent_name,
+            )
+            if selection is not None:
+                await self.handle_interactive_selection(
+                    room,
+                    selection=selection,
+                    user_id=prepared_event.sender,
+                    source_event_id=prepared_event.event_id,
+                )
+                return
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
@@ -1082,14 +1165,14 @@ class TurnController:
                 prepared_event,
                 prechecked_event.requester_user_id,
             )
-            return
-        await self._enqueue_for_dispatch(
-            prechecked_event.event,
-            room,
-            source_kind="message",
-            requester_user_id=prechecked_event.requester_user_id,
-            coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
-        )
+        else:
+            await self._enqueue_for_dispatch(
+                prechecked_event.event,
+                room,
+                source_kind="message",
+                requester_user_id=prechecked_event.requester_user_id,
+                coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
+            )
 
     async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -1420,7 +1503,20 @@ class TurnController:
         ):
             return True
         if should_handle_interactive_text_response(envelope):
-            await interactive.handle_text_response(self._client(), room, prepared_text_event, self.deps.agent_name)
+            selection = await interactive.handle_text_response(
+                self._client(),
+                room,
+                prepared_text_event,
+                self.deps.agent_name,
+            )
+            if selection is not None:
+                await self.handle_interactive_selection(
+                    room,
+                    selection=selection,
+                    user_id=prepared_text_event.sender,
+                    source_event_id=prepared_text_event.event_id,
+                )
+                return True
         await self._dispatch_text_message(
             room,
             _PrecheckedEvent(

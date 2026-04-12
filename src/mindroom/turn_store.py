@@ -11,7 +11,7 @@ from mindroom.conversation_state_writer import (
     RemoveStaleRunsRequest,
 )
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
-from mindroom.post_response_effects import matrix_run_metadata_for_handled_turn, record_handled_turn
+from mindroom.post_response_effects import matrix_run_metadata_for_handled_turn
 
 if TYPE_CHECKING:
     import nio
@@ -51,7 +51,15 @@ class TurnStore:
 
     def mark_handled(self, handled_turn: HandledTurnState) -> None:
         """Persist one terminal handled-turn outcome."""
-        record_handled_turn(self.deps.handled_turn_ledger, handled_turn)
+        visible_echo_event_id = (
+            handled_turn.visible_echo_event_id
+            or self.deps.handled_turn_ledger.visible_echo_event_id_for_sources(
+                handled_turn.source_event_ids,
+            )
+        )
+        self.deps.handled_turn_ledger.record_handled_turn(
+            handled_turn.with_visible_echo_event_id(visible_echo_event_id),
+        )
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
