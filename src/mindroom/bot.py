@@ -74,7 +74,6 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import (
     CoalescedBatch,
     CoalescingGate,
-    PreparedTextEvent,  # noqa: F401
 )
 from .commands import config_confirmation
 from .commands.handler import _generate_welcome_message

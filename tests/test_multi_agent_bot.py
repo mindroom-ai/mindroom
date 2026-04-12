@@ -31,10 +31,10 @@ from mindroom.authorization import is_authorized_sender as is_authorized_sender_
 from mindroom.bot import (
     AgentBot,
     MultiKnowledgeVectorDb,
-    PreparedTextEvent,
     TeamBot,
     _thread_summary_message_count_hint,
 )
+from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
