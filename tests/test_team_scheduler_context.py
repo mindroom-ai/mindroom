@@ -346,3 +346,65 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
             strip_transient_enrichment_after_run=False,
             correlation_id="corr-team-streaming",
         )
+
+
+@pytest.mark.asyncio
+async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: Path) -> None:
+    """Late cancellation should still cancel the team path while post-effects are running."""
+    bot = _make_bot(tmp_path)
+    team_agents = [
+        MatrixID.from_agent(
+            "general",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+        MatrixID.from_agent(
+            "research",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+    ]
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = kwargs["response_function"]
+        await response_function(None)
+        return "$team_response"
+
+    async def fake_post_effects(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        await release.wait()
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            team_response=AsyncMock(return_value="team non-streaming response"),
+            apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
+        ),
+    ):
+        task = asyncio.create_task(
+            bot._generate_team_response_helper(
+                room_id="!team:localhost",
+                reply_to_event_id="$user_event",
+                thread_id="$thread_root",
+                payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+                team_agents=team_agents,
+                team_mode="coordinate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                response_envelope=_response_envelope(),
+                correlation_id="corr-team-late-cancel",
+            ),
+        )
+        await started.wait()
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
