@@ -28,7 +28,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
     make_visible_message,
-    replace_dispatch_planner_deps,
+    replace_turn_policy_deps,
     runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
@@ -98,7 +98,7 @@ def mock_home_bot(tmp_path: Path) -> AgentBot:
     install_generate_response_mock(bot, bot._generate_response)
     bot.handled_turn_ledger = MagicMock()
     bot.handled_turn_ledger.has_responded.return_value = False
-    replace_dispatch_planner_deps(
+    replace_turn_policy_deps(
         bot,
         handled_turn_ledger=bot.handled_turn_ledger,
     )
@@ -156,12 +156,12 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
         ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
         patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
-        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
+        patch("mindroom.turn_controller.extract_agent_name") as mock_planner_extract_agent,
         patch(
-            "mindroom.dispatch_planner.get_agents_in_thread",
+            "mindroom.turn_policy.get_agents_in_thread",
             return_value=[MatrixID.parse("@mindroom_home:localhost")],
         ),
-        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
+        patch("mindroom.turn_policy.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
         mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
@@ -218,10 +218,10 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
             "fetch_thread_history",
             new=AsyncMock(return_value=thread_history),
         ),
-        patch("mindroom.dispatch_planner.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch("mindroom.turn_policy.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
         patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
-        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
+        patch("mindroom.turn_controller.extract_agent_name") as mock_planner_extract_agent,
     ):
         mock_decide_team.return_value = TeamResolution.none()
         mock_extract_agent.side_effect = _extract_agent_side_effect
@@ -340,7 +340,7 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
         ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
         patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
-        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
+        patch("mindroom.turn_controller.extract_agent_name") as mock_planner_extract_agent,
         patch(
             "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
             new_callable=AsyncMock,
@@ -356,7 +356,7 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
                 [],
             ),
         ),
-        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
+        patch("mindroom.turn_policy.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
         mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
@@ -410,7 +410,7 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
         ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
         patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
-        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
+        patch("mindroom.turn_controller.extract_agent_name") as mock_planner_extract_agent,
         patch(
             "mindroom.inbound_turn_normalizer.resolve_attachment_media",
             return_value=(["att_voice"], attachment_audio, [], [], []),
@@ -420,7 +420,7 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
             new_callable=AsyncMock,
             return_value=[],
         ),
-        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
+        patch("mindroom.turn_policy.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
         mock_resolver_extract_agent.side_effect = _extract_agent_side_effect
@@ -480,7 +480,7 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
         ),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
         patch("mindroom.conversation_resolver.extract_agent_name") as mock_resolver_extract_agent,
-        patch("mindroom.dispatch_planner.extract_agent_name") as mock_planner_extract_agent,
+        patch("mindroom.turn_controller.extract_agent_name") as mock_planner_extract_agent,
         patch(
             "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
             new_callable=AsyncMock,
@@ -490,7 +490,7 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
             "mindroom.inbound_turn_normalizer.resolve_attachment_media",
             return_value=(["att_voiceroot"], attachment_audio, [], [], []),
         ),
-        patch("mindroom.dispatch_planner.should_agent_respond", return_value=True),
+        patch("mindroom.turn_policy.should_agent_respond", return_value=True),
     ):
         mock_extract_agent.side_effect = _extract_agent_side_effect
         mock_resolver_extract_agent.side_effect = _extract_agent_side_effect

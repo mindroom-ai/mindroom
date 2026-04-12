@@ -25,12 +25,12 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_planner import DispatchPlan, PreparedDispatch
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -92,10 +92,13 @@ def _make_bot(
         user_id=f"@mindroom_{agent_name}:localhost",
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = agent_user.user_id
     wrap_extracted_collaborators(bot)
     replace_turn_controller_deps(
         bot,
-        dispatch_planner=bot._dispatch_planner,
+        turn_policy=bot._turn_policy,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
         resolver=bot._conversation_resolver,
@@ -1394,15 +1397,15 @@ async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> 
     install_generate_response_mock(bot, generate_response)
 
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="combined")),
         ),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._enqueue_for_dispatch(
             first,
@@ -1554,8 +1557,8 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
     action_mock = AsyncMock()
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -1584,15 +1587,15 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
     install_generate_response_mock(bot, bot._generate_response)
 
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
 
@@ -1810,15 +1813,15 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="What is the project structure?")),
         ),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -1857,15 +1860,15 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
@@ -1913,15 +1916,15 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="scheduled task output")),
         ),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
 
@@ -1961,15 +1964,15 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hook result")),
         ),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
 
@@ -2011,15 +2014,15 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="scheduled fire 1")),
         ),
         patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
-        patch.object(bot._dispatch_planner, "log_dispatch_latency"),
+        patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")
 
@@ -2061,8 +2064,8 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     action_mock = AsyncMock()
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, coalesced_event, "@user:localhost")
 
@@ -2102,8 +2105,8 @@ async def test_voice_synthetic_suppressed_by_thread_guard(tmp_path: Path) -> Non
 
     action_mock = AsyncMock()
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "plan_dispatch", new=action_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, voice_event, "@user:localhost")
 
@@ -2144,8 +2147,8 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
 
     handle_cmd_mock = AsyncMock()
     with (
-        patch.object(bot._dispatch_planner, "prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._dispatch_planner, "execute_command", new=handle_cmd_mock),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, cmd_event, "@user:localhost")
 

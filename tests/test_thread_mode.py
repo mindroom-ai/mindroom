@@ -438,14 +438,14 @@ class TestRouterHandoffThreadMode:
         assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
-            patch("mindroom.dispatch_planner.suggest_agent_for_message", AsyncMock(return_value="assistant")),
+            patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="assistant")),
             patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
             patch(
                 "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
-            await bot._dispatch_planner.execute_router_relay(
+            await bot._turn_controller._execute_router_relay(
                 room,
                 self._routing_event(),
                 [],
@@ -477,7 +477,7 @@ class TestRouterHandoffThreadMode:
         room.room_id = "!room:localhost"
 
         with (
-            patch("mindroom.dispatch_planner.suggest_agent_for_message", AsyncMock(return_value="coder")),
+            patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="coder")),
             patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
             patch(
                 "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
@@ -485,7 +485,7 @@ class TestRouterHandoffThreadMode:
                 return_value="$latest",
             ) as mock_get_latest,
         ):
-            await bot._dispatch_planner.execute_router_relay(
+            await bot._turn_controller._execute_router_relay(
                 room,
                 self._routing_event(),
                 [],
@@ -999,7 +999,7 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._dispatch_planner.execute_command(
+            await bot._turn_controller._execute_command(
                 room=room,
                 event=event,
                 requester_user_id="@user:localhost",
@@ -1418,7 +1418,7 @@ class TestConversationAccessArchitecture:
         )
         for relative_path in (
             "src/mindroom/conversation_resolver.py",
-            "src/mindroom/dispatch_planner.py",
+            "src/mindroom/turn_policy.py",
             "src/mindroom/matrix/reply_chain.py",
             "src/mindroom/response_runner.py",
         ):
@@ -1435,7 +1435,7 @@ class TestConversationAccessArchitecture:
         )
         for relative_path in (
             "src/mindroom/conversation_resolver.py",
-            "src/mindroom/dispatch_planner.py",
+            "src/mindroom/turn_policy.py",
             "src/mindroom/matrix/reply_chain.py",
             "src/mindroom/response_runner.py",
         ):

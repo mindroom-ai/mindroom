@@ -107,7 +107,7 @@ class TestRoutingRegression:
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.is_user_online")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_agent: AsyncMock,
@@ -178,7 +178,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
         mock_suggest_agent: AsyncMock,
@@ -277,7 +277,7 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_filters_by_agent_reply_permissions(
         self,
         mock_suggest_agent: AsyncMock,
@@ -346,7 +346,7 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._dispatch_planner.execute_router_relay(
+        await router_bot._turn_controller._execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -360,7 +360,7 @@ class TestRoutingRegression:
         assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["news"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
         self,
         mock_suggest_agent: AsyncMock,
@@ -443,7 +443,7 @@ class TestRoutingRegression:
         assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["facts", "news"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_reply_permissions_block_router_response(
         self,
         mock_suggest_agent: AsyncMock,
@@ -520,7 +520,7 @@ class TestRoutingRegression:
         router_bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_routes_when_thread_agents_are_disallowed_for_sender(
         self,
         mock_suggest_agent: AsyncMock,

@@ -116,7 +116,7 @@ class TestResponseTrackingRegression:
         mock_room.room_id = test_room_id
 
         # Process command first time
-        await bot._dispatch_planner.execute_command(
+        await bot._turn_controller._execute_command(
             mock_room,
             command_event,
             "@user:localhost",
@@ -136,7 +136,7 @@ class TestResponseTrackingRegression:
         bot.client.room_send.reset_mock()
 
         # Process same command again (simulating restart)
-        await bot._dispatch_planner.execute_command(
+        await bot._turn_controller._execute_command(
             mock_room,
             command_event,
             "@user:localhost",
@@ -226,7 +226,7 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_agent: AsyncMock,
@@ -290,7 +290,7 @@ class TestResponseTrackingRegression:
         }
 
         # Process routing
-        await bot._dispatch_planner.execute_router_relay(
+        await bot._turn_controller._execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -320,7 +320,7 @@ class TestResponseTrackingRegression:
         mock_suggest_agent.reset_mock()
 
         # Process same message again (simulating restart)
-        await bot._dispatch_planner.execute_router_relay(
+        await bot._turn_controller._execute_router_relay(
             mock_room,
             message_event,
             [],

@@ -29,7 +29,7 @@ class TestRoutingIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.dispatch_planner.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_real_scenario_research_channel(
         self,
         mock_suggest_agent: AsyncMock,

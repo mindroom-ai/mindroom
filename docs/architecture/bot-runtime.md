@@ -25,7 +25,7 @@ It is still coupled to the current persistence split, but its workflow boundary 
 ## Current Problems
 
 `TurnController` is the real turn owner now, but the name is vague.
-`DispatchPlanner` still mixes policy with command execution, router relay, and response execution.
+`TurnPolicy` still mixes policy with command execution, router relay, and response execution.
 `ResponseRunner` still mixes lifecycle mechanics with actual response running.
 `IngressHookRunner` is a thin hook adapter with a vague name.
 `HandledTurnLedger` and persisted run metadata still split durable turn truth.
@@ -65,7 +65,7 @@ Rename `TurnController` to `TurnController`.
 Rename `ResponseRunner` to `ResponseRunner`.
 Rename `IngressHookRunner` to `IngressHookRunner`.
 
-Do not rename `DispatchPlanner` in this PR.
+Do not rename `TurnPolicy` in this PR.
 Any better name for it depends on first making it pure.
 Renaming it early would either be dishonest or create churn.
 
@@ -90,7 +90,7 @@ It should reduce the number of orchestration objects and remove overlapping trut
 
 ### Scope
 
-Make `DispatchPlanner` pure.
+Make `TurnPolicy` pure.
 Rename the pure result to `TurnPolicy`.
 Move command execution, router relay, and response branching out of the planner.
 

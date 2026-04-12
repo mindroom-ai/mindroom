@@ -205,7 +205,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         return_value=mock_context,
     )
 
-    with patch("mindroom.dispatch_planner.decide_team_formation", return_value=TeamResolution.none()):
+    with patch("mindroom.turn_policy.decide_team_formation", return_value=TeamResolution.none()):
         await general_bot._on_message(room, event)
 
     # GeneralAgent SHOULD generate a response because it's mentioned

@@ -327,7 +327,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         with (
             patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
-            patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
         ):
             # Only this agent in the thread
@@ -384,7 +384,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         with (
             patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
-            patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
         ):
             # Multiple agents in the thread
@@ -462,7 +462,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         with (
             patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
-            patch("mindroom.dispatch_planner.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
         ):
             thread_history = [

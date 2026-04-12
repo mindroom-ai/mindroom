@@ -2703,7 +2703,7 @@ class TestThreadingBehavior:
         )
 
         with (
-            patch("mindroom.dispatch_planner.suggest_agent_for_message", AsyncMock(return_value="general")),
+            patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="general")),
             patch(
                 "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
                 AsyncMock(return_value="$latest:localhost"),
@@ -2713,7 +2713,7 @@ class TestThreadingBehavior:
                 AsyncMock(return_value="$router_response:localhost"),
             ) as mock_send,
         ):
-            await bot._dispatch_planner.execute_router_relay(
+            await bot._turn_controller._execute_router_relay(
                 room,
                 event,
                 thread_history=[],

@@ -18,11 +18,12 @@ import mindroom.bot  # noqa: F401
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
-from mindroom.dispatch_planner import DispatchPlanner
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.turn_controller import TurnController
+from mindroom.turn_policy import TurnPolicy
+from mindroom.turn_store import TurnStore
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
@@ -42,10 +43,11 @@ __all__ = [
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
     "replace_delivery_gateway_deps",
-    "replace_dispatch_planner_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
     "replace_turn_controller_deps",
+    "replace_turn_policy_deps",
+    "replace_turn_store_deps",
     "resolve_response_thread_root_for_test",
     "runtime_paths_for",
     "sync_bot_runtime_state",
@@ -280,9 +282,10 @@ def wrap_extracted_collaborators(bot: object, *names: str) -> object:
     """Wrap frozen extracted collaborators so tests can patch their methods."""
     sync_bot_runtime_state(bot)
     collaborator_names = names or (
-        "_dispatch_planner",
+        "_turn_policy",
         "_delivery_gateway",
         "_response_runner",
+        "_turn_store",
         "_edit_regenerator",
         "_inbound_turn_normalizer",
         "_conversation_resolver",
@@ -301,21 +304,61 @@ def sync_bot_runtime_state(bot: object) -> None:
     runtime = getattr(bot, "_runtime_view", None)
     if runtime is None:
         return
+    client = getattr(bot, "client", None)
+    if client is not None and getattr(client, "user_id", None) is None:
+        client.user_id = bot.matrix_id.full_id
     runtime.client = bot.client
     runtime.config = bot.config
     runtime.enable_streaming = bot.enable_streaming
     runtime.orchestrator = bot.orchestrator
 
 
-def replace_dispatch_planner_deps(bot: object, **changes: object) -> DispatchPlanner:
-    """Rebuild the planner after swapping collaborators captured at construction."""
+def _sync_turn_store_ledger(bot: object) -> None:
+    """Keep the extracted turn store aligned with direct test ledger swaps."""
+    if not hasattr(bot, "_turn_store") or not hasattr(bot, "handled_turn_ledger"):
+        return
+    store = unwrap_extracted_collaborator(cast("TurnStore", bot._turn_store))
+    if store.deps.handled_turn_ledger is bot.handled_turn_ledger:
+        return
+    rebuilt = TurnStore(replace(store.deps, handled_turn_ledger=bot.handled_turn_ledger))
+    bot._turn_store = rebuilt
+    wrap_extracted_collaborators(bot, "_turn_store")
+
+
+def replace_turn_policy_deps(bot: object, **changes: object) -> TurnPolicy:
+    """Rebuild the turn policy after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
-    planner = unwrap_extracted_collaborator(cast("DispatchPlanner", bot._dispatch_planner))
-    rebuilt = DispatchPlanner(replace(planner.deps, **changes))
-    bot._dispatch_planner = rebuilt
-    wrap_extracted_collaborators(bot, "_dispatch_planner")
+    _sync_turn_store_ledger(bot)
+    policy = unwrap_extracted_collaborator(cast("TurnPolicy", bot._turn_policy))
+    policy_field_names = set(policy.deps.__dataclass_fields__)
+    policy_changes = {name: value for name, value in changes.items() if name in policy_field_names}
+    rebuilt = TurnPolicy(replace(policy.deps, **policy_changes)) if policy_changes else policy
+    bot._turn_policy = rebuilt
+    wrap_extracted_collaborators(bot, "_turn_policy")
+    store_field_names = set(unwrap_extracted_collaborator(cast("TurnStore", bot._turn_store)).deps.__dataclass_fields__)
+    store_changes = {name: value for name, value in changes.items() if name in store_field_names}
+    if store_changes:
+        replace_turn_store_deps(bot, **store_changes)
     if hasattr(bot, "_turn_controller"):
-        replace_turn_controller_deps(bot, dispatch_planner=bot._dispatch_planner)
+        controller = unwrap_extracted_collaborator(cast("TurnController", bot._turn_controller))
+        controller_field_names = set(controller.deps.__dataclass_fields__)
+        controller_changes = {name: value for name, value in changes.items() if name in controller_field_names}
+        if policy_changes:
+            controller_changes["turn_policy"] = bot._turn_policy
+        if store_changes:
+            controller_changes["turn_store"] = bot._turn_store
+        if controller_changes:
+            replace_turn_controller_deps(bot, **controller_changes)
+    return rebuilt
+
+
+def replace_turn_store_deps(bot: object, **changes: object) -> TurnStore:
+    """Rebuild the turn store after swapping collaborators captured at construction."""
+    sync_bot_runtime_state(bot)
+    store = unwrap_extracted_collaborator(cast("TurnStore", bot._turn_store))
+    rebuilt = TurnStore(replace(store.deps, **changes))
+    bot._turn_store = rebuilt
+    wrap_extracted_collaborators(bot, "_turn_store")
     return rebuilt
 
 
@@ -330,13 +373,11 @@ def replace_delivery_gateway_deps(bot: object, **changes: object) -> DeliveryGat
         replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     if hasattr(bot, "_response_runner"):
         replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
-    elif hasattr(bot, "_dispatch_planner"):
-        replace_dispatch_planner_deps(bot, delivery_gateway=bot._delivery_gateway)
     return rebuilt
 
 
 def replace_response_runner_deps(bot: object, **changes: object) -> ResponseRunner:
-    """Rebuild the response coordinator after swapping captured collaborators."""
+    """Rebuild the response runner after swapping captured collaborators."""
     sync_bot_runtime_state(bot)
     coordinator = unwrap_extracted_collaborator(cast("ResponseRunner", bot._response_runner))
     rebuilt = ResponseRunner(replace(coordinator.deps, **changes))
@@ -344,25 +385,26 @@ def replace_response_runner_deps(bot: object, **changes: object) -> ResponseRunn
     wrap_extracted_collaborators(bot, "_response_runner")
     if hasattr(bot, "_turn_controller"):
         replace_turn_controller_deps(bot, response_runner=bot._response_runner)
-    if hasattr(bot, "_dispatch_planner"):
-        planner_changes: dict[str, object] = {"response_runner": bot._response_runner}
-        if "delivery_gateway" in changes:
-            planner_changes["delivery_gateway"] = changes["delivery_gateway"]
-        replace_dispatch_planner_deps(bot, **planner_changes)
     return rebuilt
 
 
 def replace_edit_regenerator_deps(bot: object, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
     sync_bot_runtime_state(bot)
+    _sync_turn_store_ledger(bot)
     regenerator = unwrap_extracted_collaborator(cast("EditRegenerator", bot._edit_regenerator))
-    rebuilt_changes = dict(changes)
+    regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
+    rebuilt_changes = {
+        name: value for name, value in changes.items() if name in regenerator_field_names or name == "logger"
+    }
     if "logger" in rebuilt_changes:
         logger = rebuilt_changes.pop("logger")
         rebuilt_changes["get_logger"] = lambda logger=logger: logger
-    if "handled_turn_ledger" in rebuilt_changes:
-        handled_turn_ledger = rebuilt_changes.pop("handled_turn_ledger")
-        rebuilt_changes["get_handled_turn_ledger"] = lambda handled_turn_ledger=handled_turn_ledger: handled_turn_ledger
+    store_field_names = set(unwrap_extracted_collaborator(cast("TurnStore", bot._turn_store)).deps.__dataclass_fields__)
+    store_changes = {name: value for name, value in changes.items() if name in store_field_names}
+    if store_changes:
+        replace_turn_store_deps(bot, **store_changes)
+        rebuilt_changes["turn_store"] = bot._turn_store
     rebuilt = EditRegenerator(replace(regenerator.deps, **rebuilt_changes))
     bot._edit_regenerator = rebuilt
     wrap_extracted_collaborators(bot, "_edit_regenerator")
@@ -372,13 +414,37 @@ def replace_edit_regenerator_deps(bot: object, **changes: object) -> EditRegener
 
 
 def replace_turn_controller_deps(bot: object, **changes: object) -> TurnController:
-    """Rebuild the turn engine after swapping collaborators captured at construction."""
+    """Rebuild the turn controller after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
-    engine = unwrap_extracted_collaborator(cast("TurnController", bot._turn_controller))
-    rebuilt_changes = dict(changes)
+    _sync_turn_store_ledger(bot)
+    controller = unwrap_extracted_collaborator(cast("TurnController", bot._turn_controller))
+    controller_field_names = set(controller.deps.__dataclass_fields__)
+    rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
+    default_collaborators = {
+        "conversation_access": "_conversation_access",
+        "resolver": "_conversation_resolver",
+        "normalizer": "_inbound_turn_normalizer",
+        "turn_policy": "_turn_policy",
+        "ingress_hook_runner": "_ingress_hook_runner",
+        "response_runner": "_response_runner",
+        "delivery_gateway": "_delivery_gateway",
+        "state_writer": "_conversation_state_writer",
+        "tool_runtime": "_tool_runtime_support",
+        "turn_store": "_turn_store",
+        "edit_regenerator": "_edit_regenerator",
+    }
+    for field_name, attr_name in default_collaborators.items():
+        if field_name in rebuilt_changes or not hasattr(bot, attr_name):
+            continue
+        rebuilt_changes[field_name] = getattr(bot, attr_name)
+    store_field_names = set(unwrap_extracted_collaborator(cast("TurnStore", bot._turn_store)).deps.__dataclass_fields__)
+    store_changes = {name: value for name, value in changes.items() if name in store_field_names}
+    if store_changes:
+        replace_turn_store_deps(bot, **store_changes)
+        rebuilt_changes["turn_store"] = bot._turn_store
     if hasattr(bot, "_edit_regenerator") and "edit_regenerator" not in rebuilt_changes:
         rebuilt_changes["edit_regenerator"] = bot._edit_regenerator
-    rebuilt = TurnController(replace(engine.deps, **rebuilt_changes))
+    rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
     if hasattr(bot, "_edit_regenerator"):
         edit_changes = {
@@ -424,12 +490,6 @@ def install_send_response_mock(bot: object, send_response: AsyncMock) -> None:
         replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     if hasattr(bot, "_response_runner"):
         replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
-    if hasattr(bot, "_dispatch_planner"):
-        replace_dispatch_planner_deps(
-            bot,
-            delivery_gateway=bot._delivery_gateway,
-            handled_turn_ledger=bot.handled_turn_ledger,
-        )
 
 
 def install_generate_response_mock(bot: object, generate_response: AsyncMock) -> None:
@@ -461,12 +521,6 @@ def install_generate_response_mock(bot: object, generate_response: AsyncMock) ->
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     if hasattr(bot, "_turn_controller"):
         replace_turn_controller_deps(bot, response_runner=bot._response_runner)
-    if hasattr(bot, "_dispatch_planner"):
-        replace_dispatch_planner_deps(
-            bot,
-            response_runner=bot._response_runner,
-            handled_turn_ledger=bot.handled_turn_ledger,
-        )
 
 
 def install_edit_message_mock(bot: object, edit_message: AsyncMock) -> None:
@@ -488,12 +542,6 @@ def install_edit_message_mock(bot: object, edit_message: AsyncMock) -> None:
         replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     if hasattr(bot, "_response_runner"):
         replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
-    if hasattr(bot, "_dispatch_planner"):
-        replace_dispatch_planner_deps(
-            bot,
-            delivery_gateway=bot._delivery_gateway,
-            handled_turn_ledger=bot.handled_turn_ledger,
-        )
 
 
 def install_send_skill_command_response_mock(bot: object, send_skill_command_response: AsyncMock) -> None:
@@ -502,12 +550,6 @@ def install_send_skill_command_response_mock(bot: object, send_skill_command_res
     bot._response_runner.send_skill_command_response = send_skill_command_response
     if hasattr(bot, "_turn_controller"):
         replace_turn_controller_deps(bot, response_runner=bot._response_runner)
-    if hasattr(bot, "_dispatch_planner"):
-        replace_dispatch_planner_deps(
-            bot,
-            response_runner=bot._response_runner,
-            handled_turn_ledger=bot.handled_turn_ledger,
-        )
 
 
 @pytest.fixture

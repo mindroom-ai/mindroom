@@ -190,9 +190,9 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     event.source = {"content": {"body": "🎤 !schedule daily", ORIGINAL_SENDER_KEY: "@alice:example.com"}}
 
     with (
-        patch("mindroom.dispatch_planner.DispatchPlanner.execute_command", new_callable=AsyncMock) as mock_handle,
+        patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
         patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
-        patch("mindroom.dispatch_planner.is_dm_room", return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
@@ -230,9 +230,9 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     event.source = {"content": {"body": "Regular message from router"}}
 
     with (
-        patch("mindroom.dispatch_planner.DispatchPlanner.execute_command", new_callable=AsyncMock) as mock_handle,
+        patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
         patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
-        patch("mindroom.dispatch_planner.is_dm_room", return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
@@ -517,6 +517,8 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, handled_turn_ledger=bot.handled_turn_ledger, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = bot.matrix_id.full_id
     bot.client.download = AsyncMock()
 
     room = _make_room("@mindroom_router:example.com", "@alice:example.com")
@@ -734,7 +736,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -804,7 +806,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -861,7 +863,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
@@ -959,7 +961,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.turn_controller.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -996,7 +998,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.turn_controller.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1036,7 +1038,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.turn_controller.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1055,7 +1057,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.turn_controller.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1116,7 +1118,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.turn_controller.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1194,7 +1196,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
@@ -1269,7 +1271,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.dispatch_planner.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
