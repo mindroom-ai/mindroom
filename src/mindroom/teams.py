@@ -1181,6 +1181,7 @@ def _create_team_instance(
         # Team-owned replay should come from the shared TeamSession, not from
         # each member independently replaying their own session state.
         agent.add_history_to_context = False
+        agent.add_session_summary_to_context = False
 
     team = Team(
         members=agents,  # type: ignore[arg-type]
@@ -1190,6 +1191,7 @@ def _create_team_instance(
         db=history_storage,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
+        add_session_summary_to_context=True,
         num_history_runs=history_settings.policy.limit if history_settings.policy.mode == "runs" else None,
         num_history_messages=history_settings.policy.limit if history_settings.policy.mode == "messages" else None,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,

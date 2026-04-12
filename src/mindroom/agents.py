@@ -1232,6 +1232,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,
         add_history_to_context=True,
+        add_session_summary_to_context=True,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
