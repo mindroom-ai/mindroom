@@ -41,6 +41,7 @@ from mindroom.matrix.presence import build_agent_status_message, set_presence_st
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.users import (
     AgentMatrixUser,
     create_agent_user,
@@ -161,6 +162,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
+_SYNC_TOKEN_PERSIST_INTERVAL_SECONDS = 45.0
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 
 
@@ -298,7 +300,9 @@ class AgentBot:
     running: bool
     last_sync_time: datetime | None
     _last_sync_monotonic: float | None
+    _last_sync_token_write_monotonic: float | None
     _first_sync_done: bool
+    _latest_sync_token: str | None
     _sync_shutting_down: bool
 
     # Shared runtime state and extracted collaborators
@@ -343,7 +347,9 @@ class AgentBot:
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
+        self._last_sync_token_write_monotonic = None
         self._first_sync_done = False
+        self._latest_sync_token = None
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._runtime_view = BotRuntimeState(
@@ -860,6 +866,52 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
+    def _restore_saved_sync_token(self) -> None:
+        """Restore the saved Matrix sync token onto the current client."""
+        assert self.client is not None
+        try:
+            token = load_sync_token(self.storage_path, self.agent_name)
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            return
+
+        if token is None:
+            return
+
+        self._latest_sync_token = token
+        self.client.next_batch = token
+        self.logger.info("matrix_sync_token_restored")
+
+    def _remember_sync_token(self, token: object) -> None:
+        """Cache the latest non-empty sync token in memory."""
+        if not isinstance(token, str) or not token:
+            return
+        self._latest_sync_token = token
+
+    def _persist_sync_token(self, *, force: bool = False) -> None:
+        """Persist the latest Matrix sync token when throttling allows it."""
+        if self.client is not None:
+            self._remember_sync_token(self.client.next_batch)
+        token = self._latest_sync_token
+        if token is None:
+            return
+
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_sync_token_write_monotonic is not None
+            and now - self._last_sync_token_write_monotonic < _SYNC_TOKEN_PERSIST_INTERVAL_SECONDS
+        ):
+            return
+
+        try:
+            save_sync_token(self.storage_path, self.agent_name, token)
+        except OSError as exc:
+            self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
+            return
+
+        self._last_sync_token_write_monotonic = now
+
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last successful sync or loop start."""
         if self._last_sync_monotonic is None:
@@ -871,13 +923,18 @@ class AgentBot:
         first_sync_response = not self._first_sync_done
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
+        self._runtime_view.last_sync_activity_monotonic = self._last_sync_monotonic
+        self._remember_sync_token(_response.next_batch)
 
         if self._sync_shutting_down:
             return
 
         if isinstance(_response, nio.SyncResponse):
+            # Cache before persisting so a crash prefers replaying one batch over
+            # skipping events whose timeline metadata never reached local state.
             self._conversation_access.cache_sync_timeline(_response)
 
+        self._persist_sync_token()
         self._first_sync_done = True
 
         if first_sync_response:
@@ -963,6 +1020,7 @@ class AgentBot:
             self.agent_user,
             runtime_paths=self.runtime_paths,
         )
+        self._restore_saved_sync_token()
         await self._initialize_runtime_support_services()
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
@@ -1200,6 +1258,7 @@ class AgentBot:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._coalescing_gate.drain_all()
+        self._persist_sync_token(force=True)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 

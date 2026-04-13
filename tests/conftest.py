@@ -95,6 +95,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client = AsyncMock(spec=nio.AsyncClient)
     client.rooms = {}
     client.user_id = user_id
+    client.next_batch = "s_test_token"
     presence_response = MagicMock()
     presence_response.presence = "offline"
     presence_response.last_active_ago = 3_600_000

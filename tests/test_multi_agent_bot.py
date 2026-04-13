@@ -76,6 +76,7 @@ from mindroom.matrix.client import (
     _ThreadHistoryFastPathUnavailableError,
 )
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_cache import resolved_thread_cache_entry
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
@@ -1156,6 +1157,7 @@ class TestAgentBot:
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        bot.client.next_batch = "s_test_token"
         bot.running = True
 
         await bot.stop()
@@ -3806,10 +3808,19 @@ class TestAgentBot:
             runtime_paths=runtime_paths,
         )
 
-        async def cached_history_refresh(room_id: str, thread_id: str) -> list[ResolvedVisibleMessage]:
-            cache = bot._conversation_access._turn_history_cache.get()
-            assert cache is not None
-            cache[(room_id, thread_id)] = fresh_history
+        def store_resolved_thread_history(history: list[ResolvedVisibleMessage]) -> None:
+            bot._conversation_access._resolved_thread_cache.store(
+                "!test:localhost",
+                "$thread",
+                resolved_thread_cache_entry(
+                    history=history,
+                    source_event_ids=frozenset(message.event_id for message in history),
+                    thread_version=bot._conversation_access.thread_version("!test:localhost", "$thread"),
+                ),
+            )
+
+        async def cached_history_refresh(_room_id: str, _thread_id: str) -> list[ResolvedVisibleMessage]:
+            store_resolved_thread_history(fresh_history)
             return fresh_history
 
         resolution = TeamResolution(
@@ -3862,9 +3873,7 @@ class TestAgentBot:
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
             async with bot._conversation_resolver.turn_thread_cache_scope():
-                cache = bot._conversation_access._turn_history_cache.get()
-                assert cache is not None
-                cache[("!test:localhost", "$thread")] = stale_history
+                store_resolved_thread_history(stale_history)
 
                 await bot._generate_response(
                     room_id="!test:localhost",
@@ -3875,7 +3884,9 @@ class TestAgentBot:
                     user_id="@alice:localhost",
                 )
 
-                assert cache[("!test:localhost", "$thread")] == fresh_history
+                cache_entry = bot._conversation_access._resolved_thread_cache.lookup("!test:localhost", "$thread").entry
+                assert cache_entry is not None
+                assert cache_entry.clone_history() == fresh_history
 
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
