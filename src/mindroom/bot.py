@@ -356,6 +356,7 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
+            last_sync_activity_monotonic=None,
         )
         self._standalone_runtime_support = None
         self._deferred_overdue_task_drain_task = None
@@ -862,6 +863,7 @@ class AgentBot:
     def reset_watchdog_clock(self) -> None:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
+        self._runtime_view.last_sync_activity_monotonic = None
 
     def _restore_saved_sync_token(self) -> None:
         """Restore the saved Matrix sync token onto the current client."""
@@ -902,6 +904,7 @@ class AgentBot:
         first_sync_response = not self._first_sync_done
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
+        self._runtime_view.last_sync_activity_monotonic = self._last_sync_monotonic
 
         if self._sync_shutting_down:
             return
@@ -928,6 +931,7 @@ class AgentBot:
         """Update the watchdog clock on sync errors so it knows the loop is alive."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
+        self._runtime_view.last_sync_activity_monotonic = self._last_sync_monotonic
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -1122,6 +1126,7 @@ class AgentBot:
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
+        self._runtime_view.last_sync_activity_monotonic = None
         self._first_sync_done = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
@@ -1570,6 +1575,7 @@ class AgentBot:
             extra_content,
             trigger_dispatch=trigger_dispatch,
             sender_domain=self.matrix_id.domain,
+            event_cache=self.event_cache,
         )
         if event_id:
             self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)

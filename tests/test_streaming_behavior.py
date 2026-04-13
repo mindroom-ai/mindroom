@@ -802,8 +802,9 @@ class TestStreamingBehavior:
             _thread_id: str | None,
             _reply_to_event_id: str | None,
             _existing_event_id: str | None = None,
+            event_cache: object | None = None,
         ) -> None:
-            return None
+            _ = event_cache
 
         sent_contents: list[dict[str, object]] = []
         config = self.config

@@ -261,6 +261,7 @@ async def _send_matrix_text(
             context.client,
             room_id,
             thread_id,
+            event_cache=context.event_cache,
         )
     content = format_message_with_mentions(
         context.config,

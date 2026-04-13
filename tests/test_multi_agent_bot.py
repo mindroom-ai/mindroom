@@ -3364,9 +3364,6 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         async def cached_history_refresh(room_id: str, thread_id: str) -> list[ResolvedVisibleMessage]:
-            cache = bot._conversation_access._turn_history_cache.get()
-            assert cache is not None
-            cache[(room_id, thread_id)] = fresh_history
             return fresh_history
 
         with (
@@ -3399,10 +3396,6 @@ class TestAgentBot:
             ),
         ):
             async with bot._conversation_resolver.turn_thread_cache_scope():
-                cache = bot._conversation_access._turn_history_cache.get()
-                assert cache is not None
-                cache[("!test:localhost", "$thread")] = stale_history
-
                 event_id = await bot._generate_response(
                     room_id="!test:localhost",
                     prompt="Continue",
@@ -3411,8 +3404,6 @@ class TestAgentBot:
                     thread_history=stale_history,
                     user_id="@alice:localhost",
                 )
-
-                assert cache[("!test:localhost", "$thread")] == fresh_history
 
         assert event_id == "$response"
         mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
@@ -4287,6 +4278,33 @@ class TestAgentBot:
 
         assert context is not None
         assert context.room is None
+
+    def test_build_tool_runtime_context_includes_event_cache(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Runtime context should expose the shared Matrix event cache."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot.event_cache = MagicMock()
+
+        target = MessageTarget.resolve(room_id="!test:localhost", thread_id="$thread", reply_to_event_id="$event")
+        context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
+
+        assert context is not None
+        assert context.event_cache is bot.event_cache
 
     def test_build_tool_runtime_context_returns_none_when_client_unavailable(
         self,
@@ -7813,7 +7831,16 @@ class TestAgentBot:
                 am_i_mentioned=False,
                 is_thread=False,
                 thread_id=None,
-                thread_history=[],
+                thread_history=ThreadHistoryResult(
+                    [],
+                    is_full_history=True,
+                    diagnostics={
+                        "cache_read_ms": 11.0,
+                        "incremental_refresh_ms": 22.0,
+                        "resolution_ms": 33.0,
+                        "sidecar_hydration_ms": 44.0,
+                    },
+                ),
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
@@ -7860,6 +7887,10 @@ class TestAgentBot:
         assert "placeholder_event_id" not in latency_kwargs
         assert "placeholder_visible_ms" not in latency_kwargs
         assert latency_kwargs["context_hydration_ms"] == 500.0
+        assert latency_kwargs["cache_read_ms"] == 11.0
+        assert latency_kwargs["incremental_refresh_ms"] == 22.0
+        assert latency_kwargs["resolution_ms"] == 33.0
+        assert latency_kwargs["sidecar_hydration_ms"] == 44.0
         assert latency_kwargs["payload_hydration_ms"] >= 0.0
         assert latency_kwargs["startup_total_ms"] == (
             latency_kwargs["context_hydration_ms"] + latency_kwargs["payload_hydration_ms"]

@@ -243,7 +243,7 @@ async def test_schedule_hook_send_message_inherits_context_thread_id(tmp_path: P
     ):
         await _execute_scheduled_workflow(client, _workflow("Resume work"), config, runtime_paths_for(config))
 
-    mock_latest_thread.assert_awaited_once_with(client, "!room:localhost", "$thread")
+    mock_latest_thread.assert_awaited_once_with(client, "!room:localhost", "$thread", event_cache=None)
     mock_schedule_send.assert_not_called()
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "resume"
@@ -274,7 +274,7 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
     ):
         await _execute_scheduled_workflow(client, _workflow("Resume work"), config, runtime_paths_for(config))
 
-    mock_latest_thread.assert_awaited_once_with(client, "!room:localhost", None)
+    mock_latest_thread.assert_awaited_once_with(client, "!room:localhost", None, event_cache=None)
     mock_schedule_send.assert_not_called()
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "room-level"

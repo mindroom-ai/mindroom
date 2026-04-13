@@ -5,6 +5,7 @@ import io
 import json
 import mimetypes
 import ssl as ssl_module
+import time
 from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -165,6 +166,16 @@ class ResolvedVisibleMessage:
         return message_data
 
 
+@dataclass(slots=True)
+class _ThreadHistoryFetchResult:
+    """Resolved thread history plus the raw sources and timing diagnostics used to build it."""
+
+    history: list[ResolvedVisibleMessage]
+    event_sources: list[dict[str, Any]]
+    resolution_ms: float
+    sidecar_hydration_ms: float
+
+
 def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
     """Return the explicit reply target encoded on one visible content payload."""
     if content is None:
@@ -183,9 +194,10 @@ def _thread_history_result(
     history: list[ResolvedVisibleMessage],
     *,
     is_full_history: bool,
+    diagnostics: Mapping[str, str | int | float | bool] | None = None,
 ) -> ThreadHistoryResult:
     """Wrap history with hydration metadata used by dispatch fast paths."""
-    return thread_history_result(history, is_full_history=is_full_history)
+    return thread_history_result(history, is_full_history=is_full_history, diagnostics=diagnostics)
 
 
 def replace_visible_message(
@@ -1110,6 +1122,8 @@ async def send_file_message(
     *,
     thread_id: str | None = None,
     caption: str | None = None,
+    event_cache: ConversationEventCache | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
     resolved_path = Path(file_path).expanduser().resolve()
@@ -1143,12 +1157,19 @@ async def send_file_message(
         content["url"] = mxc_uri
 
     if thread_id:
-        latest_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
+        resolved_latest_thread_event_id = latest_thread_event_id
+        if resolved_latest_thread_event_id is None:
+            resolved_latest_thread_event_id = await _latest_thread_event_id(
+                client,
+                room_id,
+                thread_id,
+                event_cache=event_cache,
+            )
         content["m.relates_to"] = {
             "rel_type": "m.thread",
             "event_id": thread_id,
             "is_falling_back": True,
-            "m.in_reply_to": {"event_id": latest_thread_event_id},
+            "m.in_reply_to": {"event_id": resolved_latest_thread_event_id},
         }
 
     return await send_message(client, room_id, content)
@@ -1281,6 +1302,23 @@ async def _resolve_thread_history_from_event_sources(
     hydrate_sidecars: bool = True,
 ) -> list[ResolvedVisibleMessage]:
     """Resolve visible thread history from cached raw event sources."""
+    messages, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        thread_id=thread_id,
+        event_sources=event_sources,
+        hydrate_sidecars=hydrate_sidecars,
+    )
+    return messages
+
+
+async def _resolve_thread_history_from_event_sources_timed(
+    client: nio.AsyncClient,
+    *,
+    thread_id: str,
+    event_sources: Sequence[dict[str, Any]],
+    hydrate_sidecars: bool = True,
+) -> tuple[list[ResolvedVisibleMessage], float]:
+    """Resolve visible thread history and return approximate sidecar hydration time."""
     parsed_events = [
         parsed_event
         for event_source in event_sources
@@ -1288,6 +1326,7 @@ async def _resolve_thread_history_from_event_sources(
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    sidecar_hydration_started = time.perf_counter()
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
         if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and _record_latest_thread_edit(
@@ -1310,7 +1349,33 @@ async def _resolve_thread_history_from_event_sources(
     )
     messages = list(messages_by_event_id.values())
     _sort_thread_history_root_first(messages, thread_id=thread_id)
-    return messages
+    return messages, round((time.perf_counter() - sidecar_hydration_started) * 1000, 1)
+
+
+async def resolve_thread_history_delta(
+    client: nio.AsyncClient,
+    *,
+    thread_id: str,
+    event_sources: Sequence[dict[str, Any]],
+) -> ThreadHistoryResult:
+    """Resolve one incremental set of raw thread events for resolved-cache updates."""
+    resolution_started = time.perf_counter()
+    messages, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        thread_id=thread_id,
+        event_sources=event_sources,
+        hydrate_sidecars=True,
+    )
+    return _thread_history_result(
+        messages,
+        is_full_history=True,
+        diagnostics={
+            "cache_read_ms": 0.0,
+            "incremental_refresh_ms": 0.0,
+            "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+            "sidecar_hydration_ms": sidecar_hydration_ms,
+        },
+    )
 
 
 async def _fetch_thread_history_without_cache(
@@ -1339,8 +1404,9 @@ async def _load_cached_thread_history(
     event_cache: ConversationEventCache,
     hydrate_sidecars: bool = True,
     refresh_cache: bool = True,
-) -> list[ResolvedVisibleMessage] | None:
+) -> ThreadHistoryResult | None:
     """Return cached thread history when it can be refreshed and resolved safely."""
+    cache_read_started = time.perf_counter()
     try:
         cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
     except Exception as exc:
@@ -1351,6 +1417,7 @@ async def _load_cached_thread_history(
             error=str(exc),
         )
         return None
+    cache_read_ms = round((time.perf_counter() - cache_read_started) * 1000, 1)
 
     if cached_event_sources is None:
         return None
@@ -1370,7 +1437,9 @@ async def _load_cached_thread_history(
         return None
 
     refreshed_event_sources = cached_event_sources
+    incremental_refresh_ms = 0.0
     if refresh_cache:
+        incremental_refresh_started = time.perf_counter()
         refreshed_event_sources = await _refresh_cached_thread_event_sources(
             client,
             room_id=room_id,
@@ -1379,13 +1448,27 @@ async def _load_cached_thread_history(
             event_cache=event_cache,
             cached_event_sources=cached_event_sources,
         )
-    return await _resolve_cached_thread_history(
+        incremental_refresh_ms = round((time.perf_counter() - incremental_refresh_started) * 1000, 1)
+    resolution_started = time.perf_counter()
+    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
         cached_event_sources=refreshed_event_sources,
         hydrate_sidecars=hydrate_sidecars,
+    )
+    if resolved_history is None:
+        return None
+    return _thread_history_result(
+        resolved_history,
+        is_full_history=hydrate_sidecars,
+        diagnostics={
+            "cache_read_ms": cache_read_ms,
+            "incremental_refresh_ms": incremental_refresh_ms,
+            "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+            "sidecar_hydration_ms": sidecar_hydration_ms,
+        },
     )
 
 
@@ -1399,7 +1482,7 @@ async def _load_cached_thread_result(
     refresh_cache: bool,
 ) -> ThreadHistoryResult | None:
     """Resolve cached thread history into the shared thread-result wrapper."""
-    cached_history = await _load_cached_thread_history(
+    return await _load_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
@@ -1407,11 +1490,6 @@ async def _load_cached_thread_result(
         hydrate_sidecars=hydrate_sidecars,
         refresh_cache=refresh_cache,
     )
-    if cached_history is None:
-        return None
-    # Cached snapshots can reconstruct the same event set without sidecar hydration.
-    # Keep those reads marked as previews so a later full-history consumer still reloads.
-    return _thread_history_result(cached_history, is_full_history=hydrate_sidecars)
 
 
 async def _refresh_cached_thread_event_sources(
@@ -1461,10 +1539,10 @@ async def _resolve_cached_thread_history(
     event_cache: ConversationEventCache,
     cached_event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
-) -> list[ResolvedVisibleMessage] | None:
+) -> tuple[list[ResolvedVisibleMessage] | None, float]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
     try:
-        return await _resolve_thread_history_from_event_sources(
+        return await _resolve_thread_history_from_event_sources_timed(
             client,
             thread_id=thread_id,
             event_sources=cached_event_sources,
@@ -1478,7 +1556,7 @@ async def _resolve_cached_thread_history(
             error=str(exc),
         )
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
-        return None
+        return None, 0.0
 
 
 async def _invalidate_thread_cache_entry(
@@ -1502,7 +1580,7 @@ async def _fetch_thread_history_with_events(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> tuple[list[ResolvedVisibleMessage], list[dict[str, Any]]]:
+) -> _ThreadHistoryFetchResult:
     """Fetch thread history and raw event sources from the homeserver."""
     try:
         return await _fetch_thread_history_via_relations_with_events(client, room_id, thread_id)
@@ -1867,36 +1945,58 @@ async def fetch_thread_history(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache | None = None,
-) -> list[ResolvedVisibleMessage]:
+    *,
+    refresh_cache: bool = True,
+) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
     if event_cache is None:
-        return await _fetch_thread_history_without_cache(client, room_id, thread_id)
+        resolution_started = time.perf_counter()
+        history = await _fetch_thread_history_without_cache(client, room_id, thread_id)
+        return _thread_history_result(
+            history,
+            is_full_history=True,
+            diagnostics={
+                "cache_read_ms": 0.0,
+                "incremental_refresh_ms": 0.0,
+                "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+                "sidecar_hydration_ms": 0.0,
+            },
+        )
 
     cached_history = await _load_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
+        refresh_cache=refresh_cache,
     )
     if cached_history is not None:
         return cached_history
 
-    thread_messages, event_sources = await _fetch_thread_history_with_events(client, room_id, thread_id)
+    fetch_result = await _fetch_thread_history_with_events(client, room_id, thread_id)
     await _store_thread_history_cache(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
-        event_sources=event_sources,
+        event_sources=fetch_result.event_sources,
     )
-
-    return thread_messages
+    return _thread_history_result(
+        fetch_result.history,
+        is_full_history=True,
+        diagnostics={
+            "cache_read_ms": 0.0,
+            "incremental_refresh_ms": 0.0,
+            "resolution_ms": fetch_result.resolution_ms,
+            "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
+        },
+    )
 
 
 async def _fetch_thread_history_via_relations_with_events(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> tuple[list[ResolvedVisibleMessage], list[dict[str, Any]]]:
+) -> _ThreadHistoryFetchResult:
     """Fetch thread history through relations plus explicit root lookup."""
     event_sources = await _fetch_thread_event_sources_via_relations(
         client,
@@ -1904,14 +2004,18 @@ async def _fetch_thread_history_via_relations_with_events(
         thread_id,
         include_latest_edits=True,
     )
-    return (
-        await _resolve_thread_history_from_event_sources(
-            client,
-            thread_id=thread_id,
-            event_sources=event_sources,
-            hydrate_sidecars=True,
-        ),
-        event_sources,
+    resolution_started = time.perf_counter()
+    history, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        thread_id=thread_id,
+        event_sources=event_sources,
+        hydrate_sidecars=True,
+    )
+    return _ThreadHistoryFetchResult(
+        history=history,
+        event_sources=event_sources,
+        resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
+        sidecar_hydration_ms=sidecar_hydration_ms,
     )
 
 
@@ -1921,25 +2025,28 @@ async def _fetch_thread_history_via_relations(
     thread_id: str,
 ) -> list[ResolvedVisibleMessage]:
     """Fetch thread history through relations plus explicit root lookup."""
-    messages, _event_sources = await _fetch_thread_history_via_relations_with_events(client, room_id, thread_id)
-    return messages
+    return (await _fetch_thread_history_via_relations_with_events(client, room_id, thread_id)).history
 
 
 async def _fetch_thread_history_via_room_messages_with_events(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> tuple[list[ResolvedVisibleMessage], list[dict[str, Any]]]:
+) -> _ThreadHistoryFetchResult:
     """Fetch all thread messages by scanning room history pages."""
     event_sources = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
-    return (
-        await _resolve_thread_history_from_event_sources(
-            client,
-            thread_id=thread_id,
-            event_sources=event_sources,
-            hydrate_sidecars=True,
-        ),
-        event_sources,
+    resolution_started = time.perf_counter()
+    history, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        thread_id=thread_id,
+        event_sources=event_sources,
+        hydrate_sidecars=True,
+    )
+    return _ThreadHistoryFetchResult(
+        history=history,
+        event_sources=event_sources,
+        resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
+        sidecar_hydration_ms=sidecar_hydration_ms,
     )
 
 
@@ -2027,8 +2134,7 @@ async def _fetch_thread_history_via_room_messages(
     thread_id: str,
 ) -> list[ResolvedVisibleMessage]:
     """Fetch all thread messages by scanning room history pages."""
-    messages, _event_sources = await _fetch_thread_history_via_room_messages_with_events(client, room_id, thread_id)
-    return messages
+    return (await _fetch_thread_history_via_room_messages_with_events(client, room_id, thread_id)).history
 
 
 async def _fetch_incremental_thread_events(  # noqa: C901, PLR0912
@@ -2183,16 +2289,18 @@ async def _latest_thread_event_id(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
+    *,
+    event_cache: ConversationEventCache | None = None,
 ) -> str:
     """Get the latest visible event ID in a thread for MSC3440 fallback compliance."""
-    try:
-        thread_messages = await fetch_thread_history(client, room_id, thread_id)
-    except Exception:
-        return thread_id
-    if thread_messages:
-        last_event_id = thread_messages[-1].visible_event_id
-        if last_event_id:
-            return last_event_id
+    latest_history_event_id = await _latest_thread_history_event_id(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+    )
+    if latest_history_event_id:
+        return latest_history_event_id
 
     try:
         relation_events = await _collect_related_events(
@@ -2205,6 +2313,60 @@ async def _latest_thread_event_id(
     except _ThreadHistoryFastPathUnavailableError:
         return thread_id
 
+    return _latest_thread_edit_event_id(relation_events, thread_id) or thread_id
+
+
+def _last_visible_event_id(messages: Sequence[ResolvedVisibleMessage] | None) -> str | None:
+    """Return the last visible event ID from one resolved thread history."""
+    if not messages:
+        return None
+    return messages[-1].visible_event_id or None
+
+
+async def _latest_thread_history_event_id(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache | None,
+) -> str | None:
+    """Read the latest visible thread event from cache or history fetches."""
+    if event_cache is not None:
+        cached_history = await _load_cached_thread_history(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=False,
+            refresh_cache=True,
+        )
+        cached_event_id = _last_visible_event_id(cached_history)
+        if cached_event_id is not None:
+            return cached_event_id
+        if cached_history is not None:
+            # The refresh above already consulted homeserver deltas for this cache entry.
+            return None
+
+    try:
+        if event_cache is None:
+            thread_messages = await fetch_thread_history(client, room_id, thread_id)
+        else:
+            thread_messages = await fetch_thread_history(
+                client,
+                room_id,
+                thread_id,
+                event_cache=event_cache,
+            )
+    except Exception:
+        return None
+    return _last_visible_event_id(thread_messages)
+
+
+def _latest_thread_edit_event_id(
+    relation_events: Sequence[nio.Event],
+    thread_id: str,
+) -> str | None:
+    """Return the newest edit event ID attached to one thread root."""
     latest_thread_edit: nio.RoomMessageText | nio.RoomMessageNotice | None = None
     for event in relation_events:
         if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
@@ -2224,9 +2386,7 @@ async def _latest_thread_event_id(
         )
         if latest_thread_edit is None or candidate_key > latest_key:
             latest_thread_edit = event
-    if latest_thread_edit is not None:
-        return latest_thread_edit.event_id
-    return thread_id
+    return latest_thread_edit.event_id if latest_thread_edit is not None else None
 
 
 async def get_latest_thread_event_id_if_needed(
@@ -2235,6 +2395,7 @@ async def get_latest_thread_event_id_if_needed(
     thread_id: str | None,
     reply_to_event_id: str | None = None,
     existing_event_id: str | None = None,
+    event_cache: ConversationEventCache | None = None,
 ) -> str | None:
     """Get the latest thread event ID only when needed for MSC3440 compliance.
 
@@ -2247,6 +2408,7 @@ async def get_latest_thread_event_id_if_needed(
         thread_id: Thread root event ID (can be None)
         reply_to_event_id: Event ID being replied to (if any)
         existing_event_id: Existing event ID being edited (if any)
+        event_cache: Advisory thread event cache used to avoid homeserver reads
 
     Returns:
         The latest event ID in the thread if needed, None otherwise
@@ -2258,7 +2420,7 @@ async def get_latest_thread_event_id_if_needed(
     # 3. We're not editing an existing message
     # 4. We're not making a genuine reply
     if thread_id and client and not existing_event_id and not reply_to_event_id:
-        return await _latest_thread_event_id(client, room_id, thread_id)
+        return await _latest_thread_event_id(client, room_id, thread_id, event_cache=event_cache)
     return None
 
 
@@ -2274,11 +2436,17 @@ async def build_threaded_edit_content(
     tool_trace: list[Any] | None = None,
     extra_content: dict[str, Any] | None = None,
     latest_thread_event_id: str | None = None,
+    event_cache: ConversationEventCache | None = None,
 ) -> dict[str, Any]:
     """Build edit content that preserves thread fallback semantics when needed."""
     latest_visible_thread_event_id = latest_thread_event_id
     if thread_id is not None and latest_visible_thread_event_id is None:
-        latest_visible_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
+        latest_visible_thread_event_id = await _latest_thread_event_id(
+            client,
+            room_id,
+            thread_id,
+            event_cache=event_cache,
+        )
 
     return format_message_with_mentions(
         config,

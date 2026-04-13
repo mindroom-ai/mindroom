@@ -64,6 +64,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.routing import suggest_agent_for_message
@@ -857,15 +858,21 @@ class TurnController:
         dispatch_started_at: float,
         context_ready_monotonic: float,
         payload_ready_monotonic: float,
+        thread_history: Sequence[ResolvedVisibleMessage],
     ) -> None:
         """Emit startup latency metrics for dispatch decisions that will respond."""
+        latency_event_data: dict[str, str | float | int | bool] = {
+            "event_id": event_id,
+            "action_kind": action_kind,
+            "context_hydration_ms": round((context_ready_monotonic - dispatch_started_at) * 1000, 1),
+            "payload_hydration_ms": round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
+            "startup_total_ms": round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
+        }
+        if isinstance(thread_history, ThreadHistoryResult):
+            latency_event_data.update(thread_history.diagnostics)
         self.deps.logger.info(
             "Response startup latency",
-            event_id=event_id,
-            action_kind=action_kind,
-            context_hydration_ms=round((context_ready_monotonic - dispatch_started_at) * 1000, 1),
-            payload_hydration_ms=round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
-            startup_total_ms=round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
+            **latency_event_data,
         )
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
@@ -960,12 +967,15 @@ class TurnController:
             return
 
         with bound_log_context(**dispatch.target.log_context):
+            if dispatch_timing is not None and isinstance(dispatch.context.thread_history, ThreadHistoryResult):
+                dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
             self._log_dispatch_latency(
                 event_id=event.event_id,
                 action_kind=action.kind,
                 dispatch_started_at=dispatch_started_at,
                 context_ready_monotonic=context_ready_monotonic,
                 payload_ready_monotonic=payload_ready_monotonic,
+                thread_history=dispatch.context.thread_history,
             )
 
         with bound_log_context(**dispatch.target.log_context):
@@ -1068,7 +1078,7 @@ class TurnController:
             await self._handle_message_inner(room, event)
 
     async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        """Handle one text message inside the per-turn thread-history cache scope."""
+        """Handle one text message inside the per-turn conversation lookup scope."""
         ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         self.deps.logger.info(
             "Received message",
@@ -1394,7 +1404,7 @@ class TurnController:
         room: nio.MatrixRoom,
         event: _MediaDispatchEvent,
     ) -> None:
-        """Handle one media event inside the per-turn thread-history cache scope."""
+        """Handle one media event inside the per-turn conversation lookup scope."""
         prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return

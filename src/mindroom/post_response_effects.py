@@ -9,10 +9,11 @@ from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.message_target import MessageTarget
+from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import (
-    maybe_generate_thread_summary,
     should_queue_thread_summary as should_queue_thread_summary_check,
 )
+from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -111,6 +112,15 @@ class PostResponseEffectsSupport:
             message_count_hint=message_count_hint,
         )
 
+    @timed("maybe_generate_thread_summary")
+    async def _timed_thread_summary(
+        self,
+        *,
+        summary_coro: Awaitable[None],
+    ) -> None:
+        """Run thread-summary generation with duration logging."""
+        await summary_coro
+
     async def _register_interactive_delivery(
         self,
         *,
@@ -169,16 +179,18 @@ class PostResponseEffectsSupport:
         thread_id: str,
         message_count_hint: int | None,
     ) -> None:
-        """Queue background thread summarization for one response."""
+        """Queue background thread summarization with timing instrumentation."""
         create_background_task(
-            maybe_generate_thread_summary(
-                client=self._client(),
-                room_id=room_id,
-                thread_id=thread_id,
-                config=self.runtime.config,
-                runtime_paths=self.runtime_paths,
-                conversation_access=self.conversation_access,
-                message_count_hint=message_count_hint,
+            self._timed_thread_summary(
+                summary_coro=maybe_generate_thread_summary(
+                    client=self._client(),
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    config=self.runtime.config,
+                    runtime_paths=self.runtime_paths,
+                    conversation_access=self.conversation_access,
+                    message_count_hint=message_count_hint,
+                ),
             ),
             name=f"thread_summary_{room_id}_{thread_id}",
             owner=self.runtime,

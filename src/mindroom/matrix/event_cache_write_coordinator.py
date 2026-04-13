@@ -93,6 +93,19 @@ class EventCacheWriteCoordinator:
         task.add_done_callback(lambda done_task: self._clear_room_tail(room_id, done_task))
         return task
 
+    async def wait_for_room_idle(self, room_id: str) -> None:
+        """Wait for the currently queued same-room update chain to drain."""
+        while True:
+            tail_task = self._room_update_tasks.get(room_id)
+            if tail_task is None:
+                return
+            try:
+                await tail_task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator."""
         await wait_for_background_tasks(timeout=5.0, owner=self.background_task_owner)

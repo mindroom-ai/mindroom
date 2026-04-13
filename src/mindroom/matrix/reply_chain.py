@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 
@@ -541,7 +541,7 @@ async def _resolve_reply_chain(
 
     if direct_thread_root_context is not None:
         context_root_id, thread_history, points_to_thread, is_full_thread_history = direct_thread_root_context
-        return context_root_id, list(thread_history), points_to_thread, is_full_thread_history
+        return context_root_id, cast("list[_HistoryMessage]", thread_history), points_to_thread, is_full_thread_history
 
     return _build_context_result(
         caches,
@@ -584,7 +584,7 @@ async def derive_conversation_context(
     thread_root_id = _thread_root_id_from_event_info(event_info)
     if thread_root_id is not None:
         thread_history = await access.get_thread_history(room_id, thread_root_id)
-        return True, thread_root_id, list(thread_history)
+        return True, thread_root_id, thread_history
 
     reply_chain_seed = _reply_chain_seed(event_info)
     if not reply_chain_seed:
@@ -637,7 +637,7 @@ async def derive_conversation_target(
         return (
             True,
             thread_root_id,
-            list(thread_history),
+            thread_history,
             not _thread_history_is_full(thread_history, default=False),
         )
 

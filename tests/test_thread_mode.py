@@ -1222,6 +1222,7 @@ class TestExtractedModuleLoggerRebinding:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = MagicMock()
+        bot.event_cache.get_thread_events = AsyncMock(return_value=None)
         sync_bot_runtime_state(bot)
 
         client = MagicMock()
@@ -1240,55 +1241,8 @@ class TestExtractedModuleLoggerRebinding:
             "!room:localhost",
             "$threadroot",
             event_cache=bot.event_cache,
+            refresh_cache=True,
         )
-
-    @pytest.mark.asyncio
-    async def test_conversation_access_promotes_full_snapshot_to_history_cache(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Full snapshots should satisfy later full-history reads inside the same turn."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = MagicMock()
-        sync_bot_runtime_state(bot)
-
-        snapshot = ThreadHistoryResult([], is_full_history=True)
-        with (
-            patch(
-                "mindroom.matrix.conversation_access.fetch_thread_snapshot",
-                new=AsyncMock(return_value=snapshot),
-            ) as fetch_thread_snapshot_mock,
-            patch(
-                "mindroom.matrix.conversation_access.fetch_thread_history",
-                new=AsyncMock(),
-            ) as fetch_thread_history_mock,
-        ):
-            bot.client = MagicMock()
-            async with bot._conversation_access.turn_scope():
-                snapshot_history = await bot._conversation_access.get_thread_snapshot(
-                    "!room:localhost",
-                    "$threadroot",
-                )
-                full_history = await bot._conversation_access.get_thread_history(
-                    "!room:localhost",
-                    "$threadroot",
-                )
-
-        assert snapshot_history is snapshot
-        assert full_history is snapshot
-        fetch_thread_snapshot_mock.assert_awaited_once()
-        fetch_thread_history_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_conversation_access_reloads_non_full_snapshot_for_history(
@@ -1309,6 +1263,7 @@ class TestExtractedModuleLoggerRebinding:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = MagicMock()
+        bot.event_cache.get_thread_events = AsyncMock(return_value=None)
         sync_bot_runtime_state(bot)
 
         preview_snapshot = ThreadHistoryResult([], is_full_history=False)

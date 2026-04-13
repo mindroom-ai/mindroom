@@ -60,6 +60,7 @@ def _make_context(
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
     agent_thread_mode: str = "thread",
+    event_cache: object | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -89,6 +90,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_access=AsyncMock(),
+        event_cache=event_cache,
         room=None,
         reply_to_event_id=reply_to_event_id,
         storage_path=storage_path,
@@ -212,7 +214,8 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
 async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     """thread_id='room' should disable thread metadata for sends."""
     tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
+    event_cache = MagicMock()
+    ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
 
     with (
         patch(
@@ -231,7 +234,7 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     assert payload["room_id"] == ctx.room_id
     assert payload["thread_id"] is None
     assert payload["event_id"] == "$evt"
-    mock_latest_thread.assert_awaited_once_with(ctx.client, ctx.room_id, None)
+    mock_latest_thread.assert_awaited_once_with(ctx.client, ctx.room_id, None, event_cache=event_cache)
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
@@ -368,6 +371,8 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         ctx.room_id,
         attachment.local_path,
         thread_id="$evt",
+        event_cache=None,
+        latest_thread_event_id="$evt",
     )
 
 
@@ -419,6 +424,8 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         ctx.room_id,
         attachment.local_path,
         thread_id=None,
+        event_cache=None,
+        latest_thread_event_id=None,
     )
 
 
@@ -467,6 +474,8 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         ctx.room_id,
         attachment.local_path,
         thread_id=ctx.thread_id,
+        event_cache=None,
+        latest_thread_event_id=ctx.thread_id,
     )
 
 
@@ -523,6 +532,8 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         ctx.room_id,
         attachment.local_path,
         thread_id=explicit_thread_id,
+        event_cache=None,
+        latest_thread_event_id=explicit_thread_id,
     )
 
 
@@ -568,6 +579,8 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         ctx.room_id,
         attachment.local_path,
         thread_id=None,
+        event_cache=None,
+        latest_thread_event_id=None,
     )
 
 
@@ -697,9 +710,9 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     first_call = mock_send_file.await_args_list[0]
     second_call = mock_send_file.await_args_list[1]
     assert first_call.args == (ctx.client, ctx.room_id, first_attachment.local_path)
-    assert first_call.kwargs == {"thread_id": None}
+    assert first_call.kwargs == {"thread_id": None, "event_cache": None, "latest_thread_event_id": None}
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
-    assert second_call.kwargs == {"thread_id": None}
+    assert second_call.kwargs == {"thread_id": None, "event_cache": None, "latest_thread_event_id": "$file_one"}
 
 
 @pytest.mark.asyncio
@@ -739,6 +752,8 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         ctx.room_id,
         generated_file,
         thread_id="$evt",
+        event_cache=None,
+        latest_thread_event_id="$evt",
     )
 
 
@@ -1976,14 +1991,14 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
 async def test_matrix_message_edit_happy_path() -> None:
     """Edit should update an existing message by target event ID."""
     tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
-    thread_messages = [
-        make_visible_message(event_id="$one", timestamp=1, sender="@alice:localhost", body="first"),
-        make_visible_message(event_id="$latest", timestamp=2, sender="@alice:localhost", body="latest"),
-    ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    event_cache = MagicMock()
+    ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
 
     with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_latest_thread_event_id_if_needed",
+            new=AsyncMock(return_value="$latest"),
+        ) as mock_latest,
         patch(
             "mindroom.custom_tools.matrix_message.edit_message",
             new=AsyncMock(return_value="$edit_evt"),
@@ -2006,7 +2021,13 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert args[3]["m.relates_to"]["event_id"] == "$ctx-thread:localhost"
     assert args[3]["m.relates_to"]["is_falling_back"] is True
     assert args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$ctx-thread:localhost")
+    mock_latest.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$ctx-thread:localhost",
+        event_cache=event_cache,
+    )
+    ctx.conversation_access.get_thread_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio

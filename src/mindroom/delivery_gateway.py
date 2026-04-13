@@ -321,6 +321,7 @@ class DeliveryGateway:
                 resolved_target.room_id,
                 effective_thread_id,
                 resolved_target.reply_to_event_id,
+                event_cache=self.deps.runtime.event_cache,
             )
             content = format_message_with_mentions(
                 config,
@@ -376,6 +377,7 @@ class DeliveryGateway:
                 sender_domain=self.deps.sender_domain,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
+                event_cache=self.deps.runtime.event_cache,
             )
 
         response = await edit_message(
@@ -611,6 +613,7 @@ class DeliveryGateway:
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
+            event_cache=self.deps.runtime.event_cache,
         )
 
     async def finalize_streamed_response(

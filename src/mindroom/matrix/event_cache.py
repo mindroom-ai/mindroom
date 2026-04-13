@@ -77,6 +77,9 @@ class ConversationEventCache(Protocol):
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""
 
+    async def append_thread_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
+        """Append one event to thread history without rewriting the point-lookup row."""
+
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""
 
@@ -458,39 +461,46 @@ class EventCache:
         """Compatibility wrapper for older cache call sites."""
         await self.store_events(room_id, thread_id, events)
 
-    async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
-        """Append one event when the thread already has cached data."""
-        normalized_event = normalize_event_source_for_cache(event)
-        async with self._acquire_db_operation(room_id, operation="append_event") as db:
-            cursor = await db.execute(
-                """
-                SELECT 1
-                FROM thread_events
-                WHERE room_id = ? AND thread_id = ?
-                LIMIT 1
-                """,
-                (room_id, thread_id),
-            )
-            row = await cursor.fetchone()
-            await cursor.close()
-            if row is None:
-                return False
+    async def _append_existing_thread_event(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        room_id: str,
+        thread_id: str,
+        normalized_event: dict[str, Any],
+        write_lookup_row: bool,
+    ) -> bool:
+        """Append one event to an existing cached thread."""
+        cursor = await db.execute(
+            """
+            SELECT 1
+            FROM thread_events
+            WHERE room_id = ? AND thread_id = ?
+            LIMIT 1
+            """,
+            (room_id, thread_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return False
 
-            event_id = _event_id(normalized_event)
-            event_json = json.dumps(normalized_event, separators=(",", ":"))
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    room_id,
-                    thread_id,
-                    event_id,
-                    _event_timestamp(normalized_event),
-                    event_json,
-                ),
-            )
+        event_id = _event_id(normalized_event)
+        event_json = json.dumps(normalized_event, separators=(",", ":"))
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                room_id,
+                thread_id,
+                event_id,
+                _event_timestamp(normalized_event),
+                event_json,
+            ),
+        )
+        if write_lookup_row:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO events(event_id, room_id, event_json, cached_at)
@@ -512,8 +522,32 @@ class EventCache:
                     """,
                     edit_row,
                 )
-            await db.commit()
-            return True
+        await db.commit()
+        return True
+
+    async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
+        """Append one event when the thread already has cached data."""
+        normalized_event = normalize_event_source_for_cache(event)
+        async with self._acquire_db_operation(room_id, operation="append_event") as db:
+            return await self._append_existing_thread_event(
+                db,
+                room_id=room_id,
+                thread_id=thread_id,
+                normalized_event=normalized_event,
+                write_lookup_row=True,
+            )
+
+    async def append_thread_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
+        """Append one event to thread history when the lookup row is already stored."""
+        normalized_event = normalize_event_source_for_cache(event)
+        async with self._acquire_db_operation(room_id, operation="append_thread_event") as db:
+            return await self._append_existing_thread_event(
+                db,
+                room_id=room_id,
+                thread_id=thread_id,
+                normalized_event=normalized_event,
+                write_lookup_row=False,
+            )
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""

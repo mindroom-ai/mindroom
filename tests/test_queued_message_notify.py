@@ -38,9 +38,10 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
@@ -588,6 +589,36 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
 
     mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
     assert request.thread_history == fresh_history
+
+
+@pytest.mark.asyncio
+async def test_refresh_thread_history_after_lock_skips_when_thread_version_is_unchanged(tmp_path: Path) -> None:
+    """Post-lock refresh should be skipped when the thread version did not advance."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    bot._conversation_access._resolved_thread_cache.bump_version("!room:localhost", "$thread")
+    bot._conversation_access._resolved_thread_cache.bump_version("!room:localhost", "$thread")
+    cached_history = thread_history_result([], is_full_history=True, thread_version=2)
+
+    with patch.object(
+        resolver,
+        "fetch_thread_history",
+        new=AsyncMock(side_effect=AssertionError("should skip refresh")),
+    ) as mock_fetch_thread_history:
+        request = await coordinator._refresh_thread_history_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=cached_history,
+                prompt="hello",
+                user_id="@user:localhost",
+            ),
+        )
+
+    mock_fetch_thread_history.assert_not_awaited()
+    assert request.thread_history is cached_history
 
 
 @pytest.mark.asyncio

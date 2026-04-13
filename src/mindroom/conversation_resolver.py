@@ -440,7 +440,7 @@ class ConversationResolver:
 
     @asynccontextmanager
     async def turn_thread_cache_scope(self) -> AsyncIterator[None]:
-        """Cache thread history for the lifetime of one message-handling turn."""
+        """Initialize per-turn conversation lookup memoization."""
         async with self.deps.conversation_access.turn_scope():
             yield
 
@@ -450,5 +450,5 @@ class ConversationResolver:
         room_id: str,
         thread_id: str,
     ) -> list[ResolvedVisibleMessage]:
-        """Fetch thread history once per turn for the same room/thread pair."""
-        return list(await self.deps.conversation_access.get_thread_history(room_id, thread_id))
+        """Fetch thread history through the shared conversation-access policy."""
+        return await self.deps.conversation_access.get_thread_history(room_id, thread_id)

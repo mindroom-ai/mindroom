@@ -245,6 +245,39 @@ class TestSendFileMessage:
         assert relates_to["m.in_reply_to"]["event_id"] == "$latest:localhost"
 
     @pytest.mark.asyncio
+    async def test_uses_precomputed_latest_thread_event_id_when_provided(self, tmp_path: Path) -> None:
+        """Threaded sends should skip lookup when the caller already resolved the latest event."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(_client: object, _room: str, content: dict) -> str:
+            nonlocal sent_content
+            sent_content = content
+            return "$evt:localhost"
+
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c", encoding="utf-8")
+
+        with (
+            patch("mindroom.matrix.client.send_message", side_effect=capture_send),
+            patch("mindroom.matrix.client._latest_thread_event_id", new_callable=AsyncMock) as mock_latest,
+        ):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                thread_id="$root:localhost",
+                latest_thread_event_id="$precomputed:localhost",
+            )
+
+        assert event_id == "$evt:localhost"
+        assert sent_content is not None
+        assert sent_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
+        mock_latest.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
         """Should return None when the file doesn't exist."""
         client = _mock_client()

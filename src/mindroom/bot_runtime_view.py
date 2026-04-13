@@ -35,6 +35,9 @@ class BotRuntimeView(Protocol):
     @property
     def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator | None: ...  # noqa: D102
 
+    @property
+    def last_sync_activity_monotonic(self) -> float | None: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
@@ -46,3 +49,4 @@ class BotRuntimeState:
     orchestrator: MultiAgentOrchestrator | None
     event_cache: ConversationEventCache | None
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
+    last_sync_activity_monotonic: float | None = None

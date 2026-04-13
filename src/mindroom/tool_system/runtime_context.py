@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.hooks.sender import HookMessageSender
     from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.event_cache import ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -73,6 +74,7 @@ class ToolRuntimeContext:
     config: Config
     runtime_paths: RuntimePaths
     conversation_access: ConversationReadAccess | None = None
+    event_cache: ConversationEventCache | None = None
     active_model_name: str | None = None
     session_id: str | None = None
     room: nio.MatrixRoom | None = None
@@ -141,6 +143,7 @@ class ToolRuntimeSupport:
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
             conversation_access=self.resolver.deps.conversation_access,
+            event_cache=self.runtime.event_cache,
             active_model_name=active_model_name,
             session_id=session_id,
             room=self.resolver.cached_room(target_room_id),

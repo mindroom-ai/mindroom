@@ -13,6 +13,7 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
+from mindroom.matrix.room_cache import cached_room_get_event
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -848,10 +849,10 @@ class MatrixApiTools(Toolkit):
         assert normalized_event_id is not None
 
         try:
-            response = await context.client.room_get_event(
-                room_id=room_id,
-                event_id=normalized_event_id,
-            )
+            if context.conversation_access is not None:
+                response = await context.conversation_access.get_event(room_id, normalized_event_id)
+            else:
+                response = await cached_room_get_event(context.client, None, room_id, normalized_event_id)
         except Exception as exc:
             return self._error_payload(
                 action="get_event",

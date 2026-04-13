@@ -18,6 +18,8 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
+_DEFAULT_CONVERSATION_ACCESS = object()
+
 
 @pytest.fixture(autouse=True)
 def _reset_matrix_api_rate_limit() -> None:
@@ -27,6 +29,7 @@ def _reset_matrix_api_rate_limit() -> None:
 def _make_context(
     *,
     room_id: str = "!room:localhost",
+    conversation_access: object | None = _DEFAULT_CONVERSATION_ACCESS,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -39,6 +42,9 @@ def _make_context(
     client.room_put_state = AsyncMock()
     client.room_redact = AsyncMock()
     client.room_get_event = AsyncMock()
+    resolved_conversation_access = (
+        AsyncMock() if conversation_access is _DEFAULT_CONVERSATION_ACCESS else conversation_access
+    )
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -48,6 +54,7 @@ def _make_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        conversation_access=resolved_conversation_access,
         room=None,
         reply_to_event_id="$reply:localhost",
         storage_path=runtime_root,
@@ -278,7 +285,7 @@ async def test_matrix_api_get_event_happy_path() -> None:
     """get_event should return the raw event plus convenience fields."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client.room_get_event.return_value = _event_response(room_id=ctx.room_id)
+    ctx.conversation_access.get_event.return_value = _event_response(room_id=ctx.room_id)
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_api(action="get_event", event_id="$evt:localhost"))
@@ -302,10 +309,51 @@ async def test_matrix_api_get_event_happy_path() -> None:
         "status": "ok",
         "tool": "matrix_api",
     }
-    ctx.client.room_get_event.assert_awaited_once_with(
-        room_id=ctx.room_id,
-        event_id="$evt:localhost",
-    )
+    ctx.conversation_access.get_event.assert_awaited_once_with(ctx.room_id, "$evt:localhost")
+    ctx.client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_get_event_falls_back_to_cached_room_lookup_without_conversation_access() -> None:
+    """get_event should use cached_room_get_event when conversation access is unavailable."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_access=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_api.cached_room_get_event",
+            new=AsyncMock(
+                return_value=_event_response(
+                    room_id=ctx.room_id,
+                    content={"body": "cached hello", "msgtype": "m.text"},
+                ),
+            ),
+        ) as cached_get_event,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_api(action="get_event", event_id="$evt:localhost"))
+
+    assert payload == {
+        "action": "get_event",
+        "event": {
+            "content": {"body": "cached hello", "msgtype": "m.text"},
+            "event_id": "$evt:localhost",
+            "origin_server_ts": 123,
+            "room_id": ctx.room_id,
+            "sender": "@alice:localhost",
+            "type": "m.room.message",
+        },
+        "event_id": "$evt:localhost",
+        "event_type": "m.room.message",
+        "found": True,
+        "origin_server_ts": 123,
+        "room_id": ctx.room_id,
+        "sender": "@alice:localhost",
+        "status": "ok",
+        "tool": "matrix_api",
+    }
+    cached_get_event.assert_awaited_once_with(ctx.client, None, ctx.room_id, "$evt:localhost")
+    ctx.client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -530,7 +578,7 @@ async def test_matrix_api_get_event_maps_not_found_to_found_false() -> None:
     """M_NOT_FOUND event reads should return found:false instead of an error."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client.room_get_event.return_value = nio.RoomGetEventError(
+    ctx.conversation_access.get_event.return_value = nio.RoomGetEventError(
         "missing",
         status_code="M_NOT_FOUND",
     )
@@ -546,6 +594,8 @@ async def test_matrix_api_get_event_maps_not_found_to_found_false() -> None:
         "status": "ok",
         "tool": "matrix_api",
     }
+    ctx.conversation_access.get_event.assert_awaited_once_with(ctx.room_id, "$missing:localhost")
+    ctx.client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -751,6 +801,7 @@ async def test_matrix_api_cross_room_access_is_denied(action: str, kwargs: dict[
     ctx.client.room_put_state.assert_not_awaited()
     ctx.client.room_redact.assert_not_awaited()
     ctx.client.room_get_event.assert_not_awaited()
+    ctx.conversation_access.get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -787,12 +838,6 @@ async def test_matrix_api_cross_room_access_is_denied(action: str, kwargs: dict[
             {"event_id": "$evt:localhost"},
             "room_redact",
             nio.RoomRedactResponse(event_id="$redaction:localhost", room_id="!other:localhost"),
-        ),
-        (
-            "get_event",
-            {"event_id": "$evt:localhost"},
-            "room_get_event",
-            _event_response(room_id="!other:localhost"),
         ),
     ],
 )
@@ -841,11 +886,31 @@ async def test_matrix_api_cross_room_access_allowed_uses_target_room_id(
             event_id="$evt:localhost",
             reason=None,
         )
-    else:
-        ctx.client.room_get_event.assert_awaited_once_with(
-            room_id="!other:localhost",
-            event_id="$evt:localhost",
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_cross_room_get_event_uses_target_room_id() -> None:
+    """Authorized cross-room get_event should read through conversation access for that room."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.conversation_access.get_event.return_value = _event_response(room_id="!other:localhost")
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.room_access_allowed", return_value=True),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="get_event",
+                room_id="!other:localhost",
+                event_id="$evt:localhost",
+            ),
         )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == "!other:localhost"
+    ctx.conversation_access.get_event.assert_awaited_once_with("!other:localhost", "$evt:localhost")
+    ctx.client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -221,7 +221,8 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     latest_mock = AsyncMock(return_value="$latest:localhost")
     monkeypatch.setattr(subagents_module, "send_message", send_mock)
     monkeypatch.setattr(subagents_module, "get_latest_thread_event_id_if_needed", latest_mock)
-    ctx = _make_context(tmp_path, requester_id="@user:localhost")
+    event_cache = MagicMock()
+    ctx = replace(_make_context(tmp_path, requester_id="@user:localhost"), event_cache=event_cache)
 
     await subagents_module._send_matrix_text(
         ctx,
@@ -231,7 +232,7 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
         original_sender=ctx.requester_id,
     )
 
-    latest_mock.assert_awaited_once_with(ctx.client, ctx.room_id, ctx.thread_id)
+    latest_mock.assert_awaited_once_with(ctx.client, ctx.room_id, ctx.thread_id, event_cache=event_cache)
     content = send_mock.await_args.args[2]
     assert content["m.relates_to"]["event_id"] == ctx.thread_id
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest:localhost"

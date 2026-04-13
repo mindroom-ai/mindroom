@@ -173,6 +173,7 @@ class MatrixMessageTools(Toolkit):
             context.client,
             room_id,
             thread_id,
+            event_cache=context.event_cache,
         )
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
@@ -743,12 +744,12 @@ class MatrixMessageTools(Toolkit):
 
         latest_thread_event_id: str | None = None
         if thread_id is not None:
-            conversation_access = context.conversation_access
-            if conversation_access is None:
-                return self._context_error()
-            thread_messages = await conversation_access.get_thread_history(room_id, thread_id)
-            if thread_messages:
-                latest_thread_event_id = thread_messages[-1].visible_event_id
+            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+                context.client,
+                room_id,
+                thread_id,
+                event_cache=context.event_cache,
+            )
             if latest_thread_event_id is None:
                 latest_thread_event_id = target
 

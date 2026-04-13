@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -149,6 +150,65 @@ async def test_send_context_attachments_sends_attachment_ids(tmp_path: Path) -> 
     assert result.attachment_event_ids == ["$file_evt"]
     assert result.resolved_attachment_ids == ["att_upload"]
     mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_context_attachments_reuses_latest_thread_event_id_for_multiple_files(tmp_path: Path) -> None:
+    """Threaded attachment batches should resolve the latest event once and advance it locally."""
+    first_file = tmp_path / "one.txt"
+    second_file = tmp_path / "two.txt"
+    first_file.write_text("one", encoding="utf-8")
+    second_file.write_text("two", encoding="utf-8")
+    first_attachment = register_local_attachment(
+        tmp_path,
+        first_file,
+        kind="file",
+        attachment_id="att_one",
+    )
+    second_attachment = register_local_attachment(
+        tmp_path,
+        second_file,
+        kind="file",
+        attachment_id="att_two",
+    )
+    assert first_attachment is not None
+    assert second_attachment is not None
+
+    event_cache = MagicMock()
+    context = _tool_context(tmp_path, attachment_ids=("att_one", "att_two"))
+    context = dataclasses.replace(context, event_cache=event_cache)
+
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.get_latest_thread_event_id_if_needed",
+            new=AsyncMock(return_value="$latest:localhost"),
+        ) as mock_latest,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
+        ) as mock_send,
+    ):
+        result, send_error = await send_context_attachments(
+            context,
+            attachment_ids=["att_one", "att_two"],
+            attachment_file_paths=[],
+        )
+
+    assert send_error is None
+    assert result is not None
+    assert result.attachment_event_ids == ["$file_evt_1", "$file_evt_2"]
+    mock_latest.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        context.thread_id,
+        event_cache=event_cache,
+    )
+    first_call = mock_send.await_args_list[0]
+    second_call = mock_send.await_args_list[1]
+    assert first_call.kwargs["latest_thread_event_id"] == "$latest:localhost"
+    assert second_call.kwargs["latest_thread_event_id"] == "$file_evt_1"
+    assert first_call.kwargs["event_cache"] is event_cache
+    assert second_call.kwargs["event_cache"] is event_cache
 
 
 @pytest.mark.asyncio
