@@ -64,6 +64,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
 
+    from agno.session.team import TeamSession
+
 
 def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(

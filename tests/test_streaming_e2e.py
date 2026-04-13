@@ -29,6 +29,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _matrix_client_mock() -> AsyncMock:
+    client = AsyncMock()
+    client.add_event_callback = MagicMock()
+    client.add_response_callback = MagicMock()
+    return client
+
+
 @pytest.mark.asyncio
 @pytest.mark.e2e  # Mark as end-to-end test
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
@@ -113,8 +120,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     calc_events: list[dict[str, object]] = []
 
     # Create mock clients for each agent
-    helper_client = AsyncMock()
-    calc_client = AsyncMock()
+    helper_client = _matrix_client_mock()
+    calc_client = _matrix_client_mock()
 
     # Configure login to return appropriate clients
     def login_side_effect(_homeserver: str, agent_user: object) -> object:
@@ -125,11 +132,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 return calc_client
             if agent_user.agent_name == "router":
                 # Return a mock client for the router
-                router_client = AsyncMock()
+                router_client = _matrix_client_mock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
                 router_client.sync_forever = AsyncMock()
                 return router_client
-        return AsyncMock()  # Default mock client
+        return _matrix_client_mock()  # Default mock client
 
     mock_login.side_effect = login_side_effect
 
@@ -385,7 +392,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
     # Mock login
     with patch("mindroom.bot.login_agent_user") as mock_login:
-        mock_client = AsyncMock()
+        mock_client = _matrix_client_mock()
         mock_login.return_value = mock_client
 
         # Track events

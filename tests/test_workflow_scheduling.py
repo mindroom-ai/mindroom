@@ -27,7 +27,7 @@ from mindroom.scheduling import (
     _WorkflowParseError,
     schedule_task,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
 
 def _mid(name: str) -> MatrixID:
@@ -489,7 +489,7 @@ class TestExecuteScheduledWorkflow:
 
     async def test_execute_workflow_error_handling(self) -> None:
         """Test error handling in execute_scheduled_workflow."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         config = _runtime_bound_config(Config())
         workflow = ScheduledWorkflow(
             schedule_type="once",

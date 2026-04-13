@@ -17,7 +17,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -98,7 +104,7 @@ class TestRoutingIntegration:
 
         # Mock clients
         for bot in [research_bot, news_bot]:
-            bot.client = AsyncMock()
+            bot.client = make_matrix_client_mock(user_id=bot.matrix_id)
 
             # Mock orchestrator
             mock_orchestrator = MagicMock()
