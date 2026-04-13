@@ -41,6 +41,7 @@ from mindroom.matrix.presence import build_agent_status_message, set_presence_st
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.users import (
     AgentMatrixUser,
     create_agent_user,
@@ -860,6 +861,34 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
+    def _restore_saved_sync_token(self) -> None:
+        """Restore the saved Matrix sync token onto the current client."""
+        assert self.client is not None
+        try:
+            token = load_sync_token(self.storage_path, self.agent_name)
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            return
+
+        if token is None:
+            return
+
+        self.client.next_batch = token
+        self.logger.info("matrix_sync_token_restored")
+
+    def _persist_sync_token(self) -> None:
+        """Persist the current Matrix sync token."""
+        if self.client is None:
+            return
+        token = self.client.next_batch
+        if not isinstance(token, str) or not token:
+            return
+
+        try:
+            save_sync_token(self.storage_path, self.agent_name, token)
+        except OSError as exc:
+            self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
+
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last successful sync or loop start."""
         if self._last_sync_monotonic is None:
@@ -876,8 +905,15 @@ class AgentBot:
             return
 
         if isinstance(_response, nio.SyncResponse):
+            # Cache before persisting so a crash prefers replaying one batch over
+            # skipping events whose timeline metadata never reached local state.
             self._conversation_access.cache_sync_timeline(_response)
 
+        # Event callbacks run fire-and-forget in background tasks. A crash after
+        # persisting `next_batch` but before all callback tasks finish can still
+        # lose events. That window is small, and tracking every background task
+        # here would add more complexity than this restart optimization warrants.
+        self._persist_sync_token()
         self._first_sync_done = True
 
         if first_sync_response:
@@ -963,6 +999,7 @@ class AgentBot:
             self.agent_user,
             runtime_paths=self.runtime_paths,
         )
+        self._restore_saved_sync_token()
         await self._initialize_runtime_support_services()
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
@@ -1200,6 +1237,7 @@ class AgentBot:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._coalescing_gate.drain_all()
+        self._persist_sync_token()
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 

@@ -35,6 +35,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_generate_response_mock,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -63,6 +64,13 @@ def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> Re
 def _state_writer(bot: AgentBot) -> object:
     """Return the writer instance actually captured by the resolver."""
     return unwrap_extracted_collaborator(bot._conversation_state_writer)
+
+
+def _make_client_mock(*, user_id: str = "@mindroom_general:localhost") -> AsyncMock:
+    """Return one AsyncClient-shaped mock with sync-token support for bot tests."""
+    client = make_matrix_client_mock(user_id=user_id)
+    client.homeserver = "http://localhost:8008"
+    return client
 
 
 def _conversation_runtime(
@@ -132,10 +140,7 @@ class TestThreadingBehavior:
         bot.orchestrator = mock_orchestrator
 
         # Create a mock client
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
-        bot.client.user_id = "@mindroom_general:localhost"
-        bot.client.homeserver = "http://localhost:8008"
+        bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
 
         # Initialize components that depend on client
 
@@ -159,10 +164,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_start_and_stop_manage_persistent_event_cache(self, bot: AgentBot) -> None:
         """Startup should wire standalone runtime support services onto the live runtime."""
-        start_client = AsyncMock(spec=nio.AsyncClient)
-        start_client.rooms = {}
-        start_client.user_id = "@mindroom_general:localhost"
-        start_client.homeserver = "http://localhost:8008"
+        start_client = _make_client_mock(user_id="@mindroom_general:localhost")
         start_client.add_event_callback = MagicMock()
         start_client.add_response_callback = MagicMock()
         start_client.close = AsyncMock()
@@ -2349,10 +2351,7 @@ class TestThreadingBehavior:
         bot.orchestrator = mock_orchestrator
 
         # Create a mock client
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
-        bot.client.user_id = "@mindroom_router:localhost"
-        bot.client.homeserver = "http://localhost:8008"
+        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
         # Initialize components that depend on client
 
@@ -2451,10 +2450,7 @@ class TestThreadingBehavior:
         bot.orchestrator = mock_orchestrator
 
         # Create a mock client
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
-        bot.client.user_id = "@mindroom_router:localhost"
-        bot.client.homeserver = "http://localhost:8008"
+        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
         # Initialize components that depend on client
 
@@ -2555,10 +2551,7 @@ class TestThreadingBehavior:
         mock_orchestrator.current_config = config
         bot.orchestrator = mock_orchestrator
 
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
-        bot.client.user_id = "@mindroom_router:localhost"
-        bot.client.homeserver = "http://localhost:8008"
+        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
@@ -2647,10 +2640,7 @@ class TestThreadingBehavior:
         mock_orchestrator.current_config = config
         bot.orchestrator = mock_orchestrator
 
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
-        bot.client.user_id = "@mindroom_router:localhost"
-        bot.client.homeserver = "http://localhost:8008"
+        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"

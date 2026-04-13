@@ -7,14 +7,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import nio
 import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, make_matrix_client_mock, orchestrator_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,7 +70,7 @@ class TestScheduledTaskRestoration:
         )
 
         # Mock the client and join_room
-        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
         router_bot.client.rooms = {}
 
         with (
@@ -130,7 +129,7 @@ class TestScheduledTaskRestoration:
         )
 
         # Mock the client and join_room
-        regular_bot.client = AsyncMock(spec=nio.AsyncClient)
+        regular_bot.client = make_matrix_client_mock(user_id=regular_user.user_id)
         regular_bot.client.rooms = {}
 
         with (
@@ -162,7 +161,7 @@ class TestScheduledTaskRestoration:
             runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
-        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
         router_bot.client.rooms = {"lobby": object()}
 
         with (
@@ -209,7 +208,7 @@ class TestScheduledTaskRestoration:
             runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
-        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
 
         with (
             patch(
@@ -254,7 +253,7 @@ class TestScheduledTaskRestoration:
             runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
-        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
 
         with (
             patch(
@@ -296,7 +295,7 @@ class TestScheduledTaskRestoration:
             runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
-        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
 
         with (
             patch(
@@ -338,7 +337,7 @@ class TestScheduledTaskRestoration:
             runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
-        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
         router_bot.client.rooms = {}
         drain_task = asyncio.create_task(asyncio.sleep(60))
         router_bot._deferred_overdue_task_drain_task = drain_task
@@ -413,7 +412,7 @@ class TestScheduledTaskRestoration:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["lobby"],
             )
-            bot.client = AsyncMock(spec=nio.AsyncClient)
+            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
             bot.client.rooms = {}
 
             with (

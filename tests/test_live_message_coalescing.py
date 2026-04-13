@@ -38,6 +38,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
     install_send_response_mock,
+    make_matrix_client_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -91,9 +92,7 @@ def _make_bot(
         user_id=f"@mindroom_{agent_name}:localhost",
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = agent_user.user_id
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     wrap_extracted_collaborators(bot)
     replace_turn_controller_deps(
         bot,
@@ -1096,6 +1095,7 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
 async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: Path) -> None:
     """Wait for an active flush task before finishing sync shutdown."""
     bot = _make_bot(tmp_path)
+    bot.client.next_batch = "s_test_token"
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello")
     entered_dispatch = asyncio.Event()

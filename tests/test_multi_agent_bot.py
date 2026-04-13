@@ -1156,6 +1156,7 @@ class TestAgentBot:
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        bot.client.next_batch = "s_test_token"
         bot.running = True
 
         await bot.stop()
