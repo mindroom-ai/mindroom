@@ -3748,12 +3748,12 @@ class TestAgentBot:
         assert any(name.startswith("memory_save_team_") for name in scheduled_names)
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_uses_refreshed_thread_history_for_summary_gate(
+    async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Team replies should pass the refreshed thread history into the shared summary gate."""
+        """Team replies should reuse the shared thread-summary helper after refreshing history."""
 
         async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
             return None
@@ -3850,9 +3850,14 @@ class TestAgentBot:
                 team_response=AsyncMock(return_value="Team reply"),
             ),
             patch(
-                "mindroom.response_runner.apply_post_response_effects",
+                "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(),
             ) as mock_post_effects,
+            patch(
+                "mindroom.response_runner.thread_summary_message_count_hint",
+                new=MagicMock(return_value=99),
+                create=True,
+            ),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
@@ -3880,7 +3885,7 @@ class TestAgentBot:
         outcome = mock_post_effects.await_args.args[0]
         assert outcome.thread_summary_room_id == "!test:localhost"
         assert outcome.thread_summary_thread_id == "$thread"
-        assert outcome.thread_summary_message_count_hint == 5
+        assert outcome.thread_summary_message_count_hint == 99
 
     @pytest.mark.asyncio
     async def test_team_generate_response_redacts_suppressed_streaming_reply(
