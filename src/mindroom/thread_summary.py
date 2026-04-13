@@ -116,8 +116,6 @@ def thread_summary_message_count_hint(
 ) -> int:
     """Return a lower-bound post-response thread size without refetching history."""
     return _count_non_summary_messages(thread_history) + 1
-
-
 def next_thread_summary_threshold(
     room_id: str,
     thread_id: str,

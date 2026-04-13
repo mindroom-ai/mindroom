@@ -3363,7 +3363,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        async def cached_history_refresh(room_id: str, thread_id: str) -> list[ResolvedVisibleMessage]:
+        async def cached_history_refresh(_room_id: str, _thread_id: str) -> list[ResolvedVisibleMessage]:
             return fresh_history
 
         with (
@@ -3531,6 +3531,7 @@ class TestAgentBot:
             return task
 
         config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 1
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)

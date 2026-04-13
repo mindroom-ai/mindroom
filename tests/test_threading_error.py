@@ -1643,10 +1643,17 @@ class TestThreadingBehavior:
                 room_id: str,
                 cached_events: list[tuple[str, str, dict[str, object]]],
                 redacted_event_ids: list[str],
+                room_threaded_events: list[dict[str, object]],
             ) -> None:
                 write_started.set()
                 await release_write.wait()
-                await original_persist(event_cache, room_id, cached_events, redacted_event_ids)
+                await original_persist(
+                    event_cache,
+                    room_id,
+                    cached_events,
+                    redacted_event_ids,
+                    room_threaded_events,
+                )
 
             with (
                 patch.object(access, "_persist_room_sync_timeline_updates", new=blocked_persist),
@@ -1843,10 +1850,17 @@ class TestThreadingBehavior:
                 room_id: str,
                 cached_events: list[tuple[str, str, dict[str, object]]],
                 redacted_event_ids: list[str],
+                room_threaded_events: list[dict[str, object]],
             ) -> None:
                 write_started.set()
                 await release_write.wait()
-                await original_persist(event_cache, room_id, cached_events, redacted_event_ids)
+                await original_persist(
+                    event_cache,
+                    room_id,
+                    cached_events,
+                    redacted_event_ids,
+                    room_threaded_events,
+                )
 
             refreshed_history = ThreadHistoryResult(
                 [_message(event_id="$thread", body="Root")],
