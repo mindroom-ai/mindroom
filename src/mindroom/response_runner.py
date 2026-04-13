@@ -56,6 +56,7 @@ from mindroom.streaming import (
     build_restart_interrupted_body,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
+from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 from mindroom.tool_system.worker_routing import (
@@ -215,16 +216,6 @@ def prepare_memory_and_model_context(
         runtime_paths=runtime_paths,
     )
     return prompt, thread_history, model_prompt_text, model_thread_history
-
-
-def _thread_summary_message_count_hint(
-    thread_history: Sequence[ResolvedVisibleMessage],
-) -> int:
-    """Return a lower-bound post-response thread size without refetching history."""
-    existing_non_summary_messages = sum(
-        1 for message in thread_history if not isinstance(message.content.get("io.mindroom.thread_summary"), dict)
-    )
-    return existing_non_summary_messages + 1
 
 
 class _ReplyEventWithSource(Protocol):
@@ -1243,7 +1234,7 @@ class ResponseRunner:
                 interactive_target=resolved_target,
                 thread_summary_room_id=request.room_id if request.thread_id is not None else None,
                 thread_summary_thread_id=request.thread_id,
-                thread_summary_message_count_hint=_thread_summary_message_count_hint(request.thread_history),
+                thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 strip_transient_enrichment_after_run=request.strip_transient_enrichment_after_run,
                 strip_transient_enrichment_before_effects=True,
                 dispatch_compaction_when_suppressed=True,
@@ -2278,7 +2269,7 @@ class ResponseRunner:
                 interactive_target=resolved_target,
                 thread_summary_room_id=request.room_id if request.thread_id is not None else None,
                 thread_summary_thread_id=request.thread_id,
-                thread_summary_message_count_hint=_thread_summary_message_count_hint(request.thread_history),
+                thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 memory_prompt=memory_prompt,
                 memory_thread_history=memory_thread_history,
                 strip_transient_enrichment_after_run=request.strip_transient_enrichment_after_run,
