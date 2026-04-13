@@ -886,7 +886,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             typing_indicator=noop_typing_indicator,
         ),
         patch(
-            "mindroom.response_runner.apply_post_response_effects",
+            "mindroom.response_lifecycle.apply_post_response_effects",
             new=AsyncMock(),
         ),
         patch(
