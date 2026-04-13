@@ -98,7 +98,6 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from .handled_turns import HandledTurnLedger
 from .inbound_turn_normalizer import (
     DispatchPayload,
     InboundTurnNormalizer,
@@ -337,7 +336,6 @@ class AgentBot:
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _standalone_runtime_support: StandaloneRuntimeSupport | None
     _turn_controller: TurnController
-    _handled_turn_ledger: HandledTurnLedger
 
     def __init__(
         self,
@@ -370,10 +368,6 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
-        )
-        self._handled_turn_ledger = HandledTurnLedger(
-            self.agent_name,
-            base_path=self.storage_path / "tracking",
         )
         self._standalone_runtime_support = None
         self._deferred_overdue_task_drain_task = None
@@ -465,7 +459,7 @@ class AgentBot:
         self._turn_store = TurnStore(
             TurnStoreDeps(
                 agent_name=self.agent_name,
-                handled_turn_ledger=self._handled_turn_ledger,
+                tracking_base_path=self.storage_path / "tracking",
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,

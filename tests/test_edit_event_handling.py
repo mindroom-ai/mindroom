@@ -48,12 +48,8 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@router:example.com"
 
-    # Mock other dependencies
-    bot._handled_turn_ledger = MagicMock()
-    bot._handled_turn_ledger.has_responded.return_value = False
-    bot._handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
@@ -142,11 +138,8 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@router:example.com"
-    bot._handled_turn_ledger = MagicMock()
-    bot._handled_turn_ledger.has_responded.return_value = False
-    bot._handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
 
@@ -240,11 +233,8 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    bot._handled_turn_ledger = MagicMock()
-    bot._handled_turn_ledger.has_responded.return_value = False
-    bot._handled_turn_ledger.get_turn_record.return_value = None
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, handled_turn_ledger=bot._handled_turn_ledger, logger=bot.logger)
+    replace_turn_controller_deps(bot, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 

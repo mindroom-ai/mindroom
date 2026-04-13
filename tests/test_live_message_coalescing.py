@@ -1436,7 +1436,7 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> None:
+async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
     """Mark every source event ID from a coalesced batch as responded."""
     bot = _make_bot(tmp_path)
     room = _make_room()
@@ -1473,12 +1473,11 @@ async def test_handled_turn_ledger_marks_all_batch_event_ids(tmp_path: Path) -> 
         )
         await asyncio.sleep(0.05)
 
-    assert bot._handled_turn_ledger.has_responded("$m1")
-    assert bot._handled_turn_ledger.has_responded("$m2")
-    assert bot._handled_turn_ledger.get_response_event_id("$m1") == "$response"
-    assert bot._handled_turn_ledger.get_response_event_id("$m2") == "$response"
-    turn_record = bot._handled_turn_ledger.get_turn_record("$m1")
+    assert bot._turn_store.has_responded("$m1")
+    assert bot._turn_store.has_responded("$m2")
+    turn_record = bot._turn_store.get_turn_record("$m1")
     assert turn_record is not None
+    assert turn_record.response_event_id == "$response"
     assert turn_record.source_event_ids == ("$m1", "$m2")
     assert turn_record.anchor_event_id == "$m2"
 
@@ -1616,7 +1615,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
-    assert bot._handled_turn_ledger.has_responded("$m1")
+    assert bot._turn_store.has_responded("$m1")
 
 
 @pytest.mark.asyncio
@@ -1673,7 +1672,7 @@ async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_p
     newer_mock.assert_called_once()
     assert list(newer_mock.call_args.args[2]) == []
     action_mock.assert_awaited_once()
-    assert not bot._handled_turn_ledger.has_responded("$img1")
+    assert not bot._turn_store.has_responded("$img1")
 
 
 @pytest.mark.asyncio
@@ -1709,7 +1708,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
 
     # Dispatch proceeded to completion
-    assert bot._handled_turn_ledger.has_responded("$m1")
+    assert bot._turn_store.has_responded("$m1")
 
 
 # ---------------------------------------------------------------------------
@@ -2180,7 +2179,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert bot._handled_turn_ledger.has_responded("$m1")
+    assert bot._turn_store.has_responded("$m1")
 
 
 @pytest.mark.asyncio
@@ -2225,7 +2224,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
 
     # Media-backed coalesced user batch MUST still be suppressed.
     action_mock.assert_not_awaited()
-    assert bot._handled_turn_ledger.has_responded("$img1")
+    assert bot._turn_store.has_responded("$img1")
 
 
 @pytest.mark.asyncio

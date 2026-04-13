@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from mindroom import constants, interactive
+from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.message_target import MessageTarget
@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult
-    from mindroom.handled_turns import HandledTurnState
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_access import ConversationReadAccess
@@ -50,7 +49,6 @@ class ResponseOutcome:
     strip_transient_enrichment_after_run: bool = False
     strip_transient_enrichment_before_effects: bool = False
     dispatch_compaction_when_suppressed: bool = False
-    handled_turn: HandledTurnState | None = None
 
 
 @dataclass(frozen=True)
@@ -76,7 +74,6 @@ class PostResponseEffectsDeps:
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
-    record_handled_turn: Callable[[HandledTurnState], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -192,7 +189,6 @@ class PostResponseEffectsSupport:
         strip_transient_enrichment: Callable[[], None] | None = None,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
-        record_handled_turn: Callable[[HandledTurnState], None] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -231,22 +227,7 @@ class PostResponseEffectsSupport:
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
             queue_thread_summary=self.queue_thread_summary,
-            record_handled_turn=record_handled_turn,
         )
-
-
-def matrix_run_metadata_for_handled_turn(
-    handled_turn: HandledTurnState,
-) -> dict[str, Any] | None:
-    """Build persisted run metadata for one handled turn."""
-    if not handled_turn.is_coalesced:
-        return None
-    metadata: dict[str, Any] = {
-        constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(handled_turn.source_event_ids),
-    }
-    if handled_turn.source_event_prompts:
-        metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
-    return metadata
 
 
 def clear_tracked_response_message(
@@ -361,6 +342,3 @@ async def apply_post_response_effects(  # noqa: C901
             outcome.thread_summary_thread_id,
             outcome.thread_summary_message_count_hint,
         )
-
-    if outcome.handled_turn is not None and deps.record_handled_turn is not None:
-        deps.record_handled_turn(outcome.handled_turn)

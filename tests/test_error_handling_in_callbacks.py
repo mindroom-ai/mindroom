@@ -42,9 +42,6 @@ async def test_callback_error_is_logged_not_raised(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
 
-    # Mock dependencies
-    bot._handled_turn_ledger = MagicMock()
-    bot._handled_turn_ledger.has_responded.return_value = False
     bot.logger = MagicMock()
 
     # Create a room and event

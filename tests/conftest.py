@@ -312,20 +312,9 @@ def sync_bot_runtime_state(bot: RuntimeBot) -> None:
     runtime.orchestrator = bot.orchestrator
 
 
-def _sync_turn_store_ledger(bot: RuntimeBot) -> None:
-    """Keep the extracted turn store aligned with direct test ledger swaps."""
-    store = unwrap_extracted_collaborator(bot._turn_store)
-    if store.deps.handled_turn_ledger is bot._handled_turn_ledger:
-        return
-    rebuilt = TurnStore(replace(store.deps, handled_turn_ledger=bot._handled_turn_ledger))
-    bot._turn_store = rebuilt
-    wrap_extracted_collaborators(bot, "_turn_store")
-
-
 def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:
     """Rebuild the turn policy after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
-    _sync_turn_store_ledger(bot)
     policy = unwrap_extracted_collaborator(bot._turn_policy)
     policy_field_names = set(policy.deps.__dataclass_fields__)
     policy_changes = {name: value for name, value in changes.items() if name in policy_field_names}
@@ -384,7 +373,6 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
     sync_bot_runtime_state(bot)
-    _sync_turn_store_ledger(bot)
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
     rebuilt_changes = {
@@ -408,7 +396,6 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
 def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
     """Rebuild the turn controller after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
-    _sync_turn_store_ledger(bot)
     controller = unwrap_extracted_collaborator(bot._turn_controller)
     controller_field_names = set(controller.deps.__dataclass_fields__)
     rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}

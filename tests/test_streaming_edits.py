@@ -138,7 +138,7 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, initial_event)
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
-        bot._handled_turn_ledger.record_handled_turn(
+        bot._turn_store.mark_handled(
             HandledTurnState.from_source_event_id("$initial123", response_event_id="$response123"),
         )
 
@@ -233,7 +233,7 @@ class TestStreamingEdits:
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        bot._handled_turn_ledger.record_handled_turn(HandledTurnState.from_source_event_id("$original123"))
+        bot._turn_store.mark_handled(HandledTurnState.from_source_event_id("$original123"))
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()
