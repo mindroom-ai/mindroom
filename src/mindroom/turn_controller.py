@@ -644,6 +644,11 @@ class TurnController:
             thread_id=selection.thread_id,
             reply_to_event_id=None if selection.thread_id else selection.question_event_id,
         )
+        response_target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=selection.thread_id,
+            reply_to_event_id=selection.question_event_id,
+        )
         ack_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=ack_target,
@@ -678,7 +683,7 @@ class TurnController:
                     existing_event_id=ack_event_id,
                     existing_event_is_placeholder=True,
                     user_id=user_id,
-                    target=ack_target,
+                    target=response_target,
                     matrix_run_metadata=selection_matrix_run_metadata,
                 ),
             )
