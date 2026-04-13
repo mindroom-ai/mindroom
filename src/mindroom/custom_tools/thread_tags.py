@@ -58,6 +58,21 @@ def _serialized_tags_for_output(
     return {tag: serialized[tag]} if tag in serialized else {}
 
 
+def _thread_matches_tag_filters(
+    tags: Mapping[str, ThreadTagRecord],
+    *,
+    tag: str | None,
+    include_tag: str | None,
+    exclude_tag: str | None,
+) -> bool:
+    """Return whether one tagged thread matches the requested list filters."""
+    if tag is not None and tag not in tags:
+        return False
+    if include_tag is not None and include_tag not in tags:
+        return False
+    return exclude_tag is None or exclude_tag not in tags
+
+
 class ThreadTagsTools(Toolkit):
     """Tools for tagging Matrix threads via shared room state."""
 
@@ -273,8 +288,10 @@ class ThreadTagsTools(Toolkit):
         thread_id: str | None = None,
         room_id: str | None = None,
         tag: str | None = None,
+        include_tag: str | None = None,
+        exclude_tag: str | None = None,
     ) -> str:
-        """List tags for one thread or all tagged threads in one room."""
+        """List tags for one thread or all tagged threads in one room, with optional tag filters."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
@@ -293,6 +310,8 @@ class ThreadTagsTools(Toolkit):
 
         try:
             normalized_tag = normalize_tag_name(tag) if tag is not None else None
+            normalized_include_tag = normalize_tag_name(include_tag) if include_tag is not None else None
+            normalized_exclude_tag = normalize_tag_name(exclude_tag) if exclude_tag is not None else None
         except ThreadTagsError as exc:
             return self._payload(
                 "error",
@@ -308,11 +327,14 @@ class ThreadTagsTools(Toolkit):
             allow_context_fallback=room_id is None,
         )
         if effective_thread_id is None:
+            room_wide_tag = (
+                normalized_tag if normalized_include_tag is None and normalized_exclude_tag is None else None
+            )
             try:
                 threads = await list_tagged_threads(
                     context.client,
                     resolved_room_id,
-                    tag=normalized_tag,
+                    tag=room_wide_tag,
                 )
             except ThreadTagsError as exc:
                 return self._payload(
@@ -320,6 +342,8 @@ class ThreadTagsTools(Toolkit):
                     action="list",
                     room_id=resolved_room_id,
                     tag=normalized_tag,
+                    include_tag=normalized_include_tag,
+                    exclude_tag=normalized_exclude_tag,
                     message=str(exc),
                 )
 
@@ -329,9 +353,17 @@ class ThreadTagsTools(Toolkit):
                 room_id=resolved_room_id,
                 room_wide=True,
                 tag=normalized_tag,
+                include_tag=normalized_include_tag,
+                exclude_tag=normalized_exclude_tag,
                 threads={
                     thread_root_id: _serialized_tags_for_output(state.tags, tag=normalized_tag)
                     for thread_root_id, state in threads.items()
+                    if _thread_matches_tag_filters(
+                        state.tags,
+                        tag=None if room_wide_tag is not None else normalized_tag,
+                        include_tag=normalized_include_tag,
+                        exclude_tag=normalized_exclude_tag,
+                    )
                 },
             )
 
@@ -348,6 +380,8 @@ class ThreadTagsTools(Toolkit):
                 room_id=resolved_room_id,
                 thread_id=effective_thread_id,
                 tag=normalized_tag,
+                include_tag=normalized_include_tag,
+                exclude_tag=normalized_exclude_tag,
                 message="Failed to resolve a canonical thread root for the target event.",
             )
 
@@ -364,10 +398,19 @@ class ThreadTagsTools(Toolkit):
                 room_id=resolved_room_id,
                 thread_id=normalized_thread_id,
                 tag=normalized_tag,
+                include_tag=normalized_include_tag,
+                exclude_tag=normalized_exclude_tag,
                 message=str(exc),
             )
 
-        tags = _serialized_tags_for_output(state.tags, tag=normalized_tag) if state is not None else {}
+        tags = {}
+        if state is not None and _thread_matches_tag_filters(
+            state.tags,
+            tag=normalized_tag,
+            include_tag=normalized_include_tag,
+            exclude_tag=normalized_exclude_tag,
+        ):
+            tags = _serialized_tags_for_output(state.tags, tag=normalized_tag)
 
         return self._payload(
             "ok",
@@ -375,5 +418,7 @@ class ThreadTagsTools(Toolkit):
             room_id=resolved_room_id,
             thread_id=normalized_thread_id,
             tag=normalized_tag,
+            include_tag=normalized_include_tag,
+            exclude_tag=normalized_exclude_tag,
             tags=tags,
         )
