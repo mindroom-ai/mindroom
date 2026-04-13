@@ -158,10 +158,10 @@ def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
     return unwrap_extracted_collaborator(bot._turn_store)
 
 
-def _mock_turn_store(bot: AgentBot | TeamBot, *, has_responded: bool = False) -> TurnStore:
+def _mock_turn_store(bot: AgentBot | TeamBot, *, is_handled: bool = False) -> TurnStore:
     """Patch the existing turn store in place for tests that only need dedupe control."""
     turn_store = _turn_store(bot)
-    turn_store.has_responded = MagicMock(return_value=has_responded)
+    turn_store.is_handled = MagicMock(return_value=is_handled)
     return turn_store
 
 
@@ -4408,7 +4408,7 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -4424,11 +4424,11 @@ class TestAgentBot:
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            turn_store.mark_handled.assert_called_once_with(
+            turn_store.record_turn.assert_called_once_with(
                 HandledTurnState.from_source_event_id(event.event_id),
             )
         else:
-            turn_store.mark_handled.assert_not_called()
+            turn_store.record_turn.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -4460,7 +4460,7 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -4491,11 +4491,11 @@ class TestAgentBot:
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            turn_store.mark_handled.assert_called_once_with(
+            turn_store.record_turn.assert_called_once_with(
                 HandledTurnState.from_source_event_id(event.event_id),
             )
         else:
-            turn_store.mark_handled.assert_not_called()
+            turn_store.record_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_forwards_image_to_generate_response(
@@ -4510,7 +4510,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -4577,7 +4577,7 @@ class TestAgentBot:
         assert list(media.files) == []
         assert list(media.videos) == []
         assert generate_kwargs["attachment_ids"] == [attachment_id]
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
                 room_id=room.room_id,
@@ -4600,7 +4600,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         history_attachment_id = "att_prev_image"
         current_attachment_id = _attachment_id_for_event("$img_event_history")
@@ -4625,7 +4625,7 @@ class TestAgentBot:
         install_generate_response_mock(bot, bot._generate_response)
         _replace_turn_policy_deps(bot, resolver=bot._conversation_resolver)
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -4687,7 +4687,7 @@ class TestAgentBot:
         assert current_attachment_id in generate_kwargs["prompt"]
         assert history_attachment_id in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is None
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
                 room_id=room.room_id,
@@ -4842,7 +4842,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -4878,7 +4878,7 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
 
         bot._generate_response.assert_not_called()
-        turn_store.mark_handled.assert_not_called()
+        turn_store.record_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_file_message_forwards_local_path_to_generate_response(
@@ -4892,7 +4892,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -4965,7 +4965,7 @@ class TestAgentBot:
         assert len(media.files) == 1
         assert str(media.files[0].filepath) == str(local_media_path)
         assert list(media.videos) == []
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
                 room_id=room.room_id,
@@ -4987,7 +4987,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -5028,7 +5028,7 @@ class TestAgentBot:
             await bot._on_media_message(room, event)
 
         bot._generate_response.assert_not_called()
-        turn_store.mark_handled.assert_not_called()
+        turn_store.record_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_routes_image_messages_in_multi_agent_rooms(
@@ -6452,7 +6452,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         event = MagicMock()
@@ -6505,7 +6505,7 @@ class TestAgentBot:
         assert mock_send_response.await_args.args[2].endswith(
             "private agents cannot participate in teams yet",
         )
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$reply",
@@ -6681,7 +6681,7 @@ class TestAgentBot:
             correlation_id="corr-hydrate-dispatch",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
-        _turn_store(bot).mark_handled = MagicMock()
+        _turn_store(bot).record_turn = MagicMock()
         full_history = [
             ResolvedVisibleMessage.synthetic(
                 sender="@user:localhost",
@@ -6905,12 +6905,12 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         turn_store = _turn_store(bot)
-        turn_store.visible_echo_event_id_for_sources = MagicMock(
+        turn_store.visible_echo_for_sources = MagicMock(
             side_effect=lambda source_event_ids: "$voice_echo"
             if tuple(source_event_ids) == ("$voice", "$text")
             else None,
         )
-        turn_store.has_responded = MagicMock(return_value=False)
+        turn_store.is_handled = MagicMock(return_value=False)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -6958,7 +6958,7 @@ class TestAgentBot:
         turn_record = bot._turn_store.get_turn_record("$text")
         assert turn_record is not None
         assert turn_record.response_event_id == "$voice_echo"
-        assert bot._turn_store.get_visible_echo_event_id("$text") == "$voice_echo"
+        assert bot._turn_store.visible_echo_for_source("$text") == "$voice_echo"
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_preserves_prompt_map_when_router_routes_coalesced_turn(
@@ -6979,7 +6979,7 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7062,7 +7062,7 @@ class TestAgentBot:
                 handled_turn=coalesced_turn,
             )
 
-        assert turn_store.mark_handled.call_args_list == [
+        assert turn_store.record_turn.call_args_list == [
             call(
                 HandledTurnState.create(
                     ["$voice", "$text"],
@@ -7212,7 +7212,7 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -7287,7 +7287,7 @@ class TestAgentBot:
         assert team_request.existing_event_id is None
         assert team_request.existing_event_is_placeholder is False
         mock_send_response.assert_not_awaited()
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$team-response",
@@ -7306,7 +7306,7 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -7363,7 +7363,7 @@ class TestAgentBot:
         mock_send_response.assert_not_awaited()
         assert mock_generate_response.await_args.kwargs["existing_event_id"] is None
         assert mock_generate_response.await_args.kwargs["existing_event_is_placeholder"] is False
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$response",
@@ -7383,7 +7383,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         turn_store = _mock_turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -7439,7 +7439,7 @@ class TestAgentBot:
         assert send_args[0] == room.room_id
         assert send_args[1] == "$img_event_fail"
         assert "Failed to download image" in send_args[2]
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
                 room_id=room.room_id,
@@ -7496,7 +7496,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -7552,7 +7552,7 @@ class TestAgentBot:
 
         mock_edit.assert_not_awaited()
         mock_send_response.assert_awaited_once()
-        turn_store.mark_handled.assert_called_once_with(
+        turn_store.record_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$error",
@@ -7570,7 +7570,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -7615,7 +7615,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        turn_store.mark_handled.assert_not_called()
+        turn_store.record_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_suppressed_cleanup_fails(
@@ -7628,7 +7628,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_response_runner")
         replace_turn_controller_deps(
@@ -7684,7 +7684,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        turn_store.mark_handled.assert_not_called()
+        turn_store.record_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(
@@ -7697,7 +7697,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         bot.logger = MagicMock()
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -7742,7 +7742,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        turn_store.mark_handled.assert_not_called()
+        turn_store.record_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_logs_startup_latency(
@@ -7755,7 +7755,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         turn_store = _turn_store(bot)
-        turn_store.mark_handled = MagicMock()
+        turn_store.record_turn = MagicMock()
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -8105,7 +8105,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         # Mark an event as already responded
-        bot._turn_store.mark_handled(HandledTurnState.from_source_event_id("event123"))
+        bot._turn_store.record_turn(HandledTurnState.from_source_event_id("event123"))
 
         # Create mock room and event
         mock_room = MagicMock()

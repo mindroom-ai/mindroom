@@ -452,7 +452,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "ingress_hook_runner": "_ingress_hook_runner",
         "response_runner": "_response_runner",
         "delivery_gateway": "_delivery_gateway",
-        "state_writer": "_conversation_state_writer",
         "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
         "edit_regenerator": "_edit_regenerator",

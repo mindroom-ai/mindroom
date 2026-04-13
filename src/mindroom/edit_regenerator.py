@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.coalescing import coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks.ingress import hook_ingress_policy
 from mindroom.matrix.identity import extract_agent_name
 from mindroom.matrix.message_content import extract_edit_body
@@ -82,9 +82,9 @@ class EditRegenerator:
             raise RuntimeError(msg)
         return client
 
-    def _mark_source_events_responded(self, handled_turn: HandledTurnState) -> None:
-        """Mark one or more source events as handled by the same response."""
-        self.deps.turn_store.mark_handled(handled_turn)
+    def _record_turn_record(self, turn_record: HandledTurnRecord) -> None:
+        """Persist one exact handled-turn record without losing its anchor event."""
+        self.deps.turn_store.record_turn_record(turn_record)
 
     async def edit_regeneration_context(
         self,
@@ -133,7 +133,7 @@ class EditRegenerator:
             return
 
         context = await self.deps.resolver.extract_message_context(room, event)
-        loaded_turn = self.deps.turn_store.load_turn_record(
+        loaded_turn = self.deps.turn_store.load_turn(
             room=room,
             thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
             original_event_id=original_event_id,
@@ -162,7 +162,7 @@ class EditRegenerator:
             thread_id=context.thread_id,
             reply_to_event_id=turn_record.anchor_event_id,
         )
-        regeneration_history_scope = turn_record.history_scope or self.deps.turn_store.default_history_scope()
+        regeneration_history_scope = turn_record.history_scope or self.deps.turn_store.response_history_scope()
         regeneration_response_owner = turn_record.response_owner or self.deps.agent_name
         if regeneration_response_owner != self.deps.agent_name:
             self._logger().debug(
@@ -242,7 +242,7 @@ class EditRegenerator:
             if regeneration_turn_record.is_coalesced
             else HandledTurnState.from_source_event_id(regeneration_turn_record.anchor_event_id)
         )
-        regeneration_matrix_run_metadata = self.deps.turn_store.matrix_run_metadata(
+        regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             regeneration_metadata_turn,
             additional_source_event_ids=(
                 (original_event_id,)
@@ -266,7 +266,7 @@ class EditRegenerator:
             correlation_id=event.event_id,
             policy=ingress_policy,
         ):
-            self._mark_source_events_responded(regeneration_handled_turn)
+            self._record_turn_record(regeneration_turn_record)
             return
 
         regenerated_event_id = await self.deps.generate_response(
@@ -295,13 +295,16 @@ class EditRegenerator:
         )
 
         if regenerated_event_id is not None:
-            self._mark_source_events_responded(
-                regeneration_handled_turn.with_response_event_id(regenerated_event_id),
+            self._record_turn_record(
+                replace(
+                    regeneration_turn_record,
+                    response_event_id=regenerated_event_id,
+                ),
             )
             self._logger().info("Successfully regenerated response for edited message")
         else:
             if needs_turn_record_backfill:
-                self._mark_source_events_responded(regeneration_handled_turn)
+                self._record_turn_record(regeneration_turn_record)
             self._logger().info(
                 "Suppressed regeneration left existing response unchanged",
                 original_event_id=original_event_id,

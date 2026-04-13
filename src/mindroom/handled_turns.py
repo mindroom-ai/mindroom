@@ -44,6 +44,7 @@ class _SerializedHandledTurnRecord(TypedDict):
     timestamp: float
     response_event_id: str | None
     completed: NotRequired[bool]
+    anchor_event_id: NotRequired[str]
     visible_echo_event_id: NotRequired[str | None]
     source_event_ids: NotRequired[list[str]]
     source_event_prompts: NotRequired[dict[str, str] | None]
@@ -233,38 +234,38 @@ class HandledTurnLedger:
 
         with self._thread_lock, self._file_lock(exclusive=True):
             self._responses = self._read_responses_file_locked()
-            timestamp = time.time()
-            visible_echo_event_id = handled_turn.visible_echo_event_id or self._visible_echo_for_sources(
-                normalized_source_event_ids,
+            self._persist_handled_turn_locked(
+                source_event_ids=normalized_source_event_ids,
+                response_event_id=handled_turn.response_event_id,
+                completed=True,
+                visible_echo_event_id=handled_turn.visible_echo_event_id,
+                source_event_prompts=handled_turn.source_event_prompts,
+                response_owner=handled_turn.response_owner,
+                history_scope=handled_turn.history_scope,
+                conversation_target=handled_turn.conversation_target,
             )
-            prompt_map = self._normalized_prompt_map(
+            self._save_responses_locked()
+        logger.debug("handled_turn_recorded", source_event_count=len(normalized_source_event_ids))
+
+    def record_handled_turn_record(self, turn_record: HandledTurnRecord) -> None:
+        """Record one exact handled-turn record without losing its explicit anchor."""
+        normalized_source_event_ids = _normalize_source_event_ids(turn_record.source_event_ids)
+        if not normalized_source_event_ids:
+            return
+
+        with self._thread_lock, self._file_lock(exclusive=True):
+            self._responses = self._read_responses_file_locked()
+            self._persist_handled_turn_locked(
                 normalized_source_event_ids,
-                handled_turn.source_event_prompts,
+                response_event_id=turn_record.response_event_id,
+                completed=turn_record.completed,
+                visible_echo_event_id=turn_record.visible_echo_event_id,
+                source_event_prompts=turn_record.source_event_prompts,
+                response_owner=turn_record.response_owner,
+                history_scope=turn_record.history_scope,
+                conversation_target=turn_record.conversation_target,
+                anchor_event_id=turn_record.anchor_event_id,
             )
-            response_owner = self._normalized_response_owner(
-                normalized_source_event_ids,
-                handled_turn.response_owner,
-            )
-            history_scope = self._normalized_history_scope(
-                normalized_source_event_ids,
-                handled_turn.history_scope,
-            )
-            conversation_target = self._normalized_conversation_target(
-                normalized_source_event_ids,
-                handled_turn.conversation_target,
-            )
-            for event_id in normalized_source_event_ids:
-                self._responses[event_id] = _serialized_record(
-                    timestamp=timestamp,
-                    response_event_id=handled_turn.response_event_id,
-                    completed=True,
-                    source_event_ids=normalized_source_event_ids,
-                    visible_echo_event_id=visible_echo_event_id,
-                    source_event_prompts=prompt_map,
-                    response_owner=response_owner,
-                    history_scope=history_scope,
-                    conversation_target=conversation_target,
-                )
             self._save_responses_locked()
         logger.debug("handled_turn_recorded", source_event_count=len(normalized_source_event_ids))
 
@@ -274,20 +275,16 @@ class HandledTurnLedger:
             self._responses = self._read_responses_file_locked()
             existing_record = self._responses.get(source_event_id)
             source_event_ids = _source_event_ids_for_record(source_event_id, existing_record)
-            prompt_map = _prompt_map_for_record(source_event_ids, existing_record)
-            response_owner = _response_owner_for_record(existing_record)
-            history_scope = _history_scope_for_record(existing_record)
-            conversation_target = _conversation_target_for_record(existing_record)
-            self._responses[source_event_id] = _serialized_record(
-                timestamp=time.time(),
+            self._persist_handled_turn_locked(
+                source_event_ids=source_event_ids,
                 response_event_id=_response_event_id_for_record(existing_record),
                 completed=_completed_for_record(existing_record),
-                source_event_ids=source_event_ids,
                 visible_echo_event_id=echo_event_id,
-                source_event_prompts=prompt_map,
-                response_owner=response_owner,
-                history_scope=history_scope,
-                conversation_target=conversation_target,
+                source_event_prompts=_prompt_map_for_record(source_event_ids, existing_record),
+                response_owner=_response_owner_for_record(existing_record),
+                history_scope=_history_scope_for_record(existing_record),
+                conversation_target=_conversation_target_for_record(existing_record),
+                anchor_event_id=_anchor_event_id_for_record(source_event_ids, existing_record),
             )
             self._save_responses_locked()
         logger.debug(
@@ -333,9 +330,8 @@ class HandledTurnLedger:
             if record is None:
                 return None
             source_event_ids = _source_event_ids_for_record(source_event_id, record)
-            # Coalesced turns reply to and regenerate from the last source event in the batch.
             return HandledTurnRecord(
-                anchor_event_id=source_event_ids[-1],
+                anchor_event_id=_anchor_event_id_for_record(source_event_ids, record),
                 source_event_ids=source_event_ids,
                 response_event_id=_response_event_id_for_record(record),
                 completed=_completed_for_record(record),
@@ -496,6 +492,41 @@ class HandledTurnLedger:
                 return visible_echo_event_id
         return None
 
+    def _persist_handled_turn_locked(
+        self,
+        source_event_ids: tuple[str, ...],
+        *,
+        response_event_id: str | None,
+        completed: bool,
+        visible_echo_event_id: str | None,
+        source_event_prompts: typing.Mapping[str, str] | None,
+        response_owner: str | None,
+        history_scope: HistoryScope | None,
+        conversation_target: MessageTarget | None,
+        anchor_event_id: str | None = None,
+    ) -> None:
+        """Persist one handled turn while the thread and file locks are already held."""
+        visible_echo_event_id = visible_echo_event_id or self._visible_echo_for_sources(source_event_ids)
+        prompt_map = self._normalized_prompt_map(source_event_ids, source_event_prompts)
+        response_owner = self._normalized_response_owner(source_event_ids, response_owner)
+        history_scope = self._normalized_history_scope(source_event_ids, history_scope)
+        conversation_target = self._normalized_conversation_target(source_event_ids, conversation_target)
+        anchor_event_id = self._normalized_anchor_event_id(source_event_ids, anchor_event_id)
+        timestamp = time.time()
+        for event_id in source_event_ids:
+            self._responses[event_id] = _serialized_record(
+                timestamp=timestamp,
+                response_event_id=response_event_id,
+                completed=completed,
+                anchor_event_id=anchor_event_id,
+                source_event_ids=source_event_ids,
+                visible_echo_event_id=visible_echo_event_id,
+                source_event_prompts=prompt_map,
+                response_owner=response_owner,
+                history_scope=history_scope,
+                conversation_target=conversation_target,
+            )
+
     def _normalized_prompt_map(
         self,
         source_event_ids: tuple[str, ...],
@@ -554,6 +585,21 @@ class HandledTurnLedger:
             if existing_conversation_target is not None:
                 return existing_conversation_target
         return None
+
+    def _normalized_anchor_event_id(
+        self,
+        source_event_ids: tuple[str, ...],
+        anchor_event_id: str | None,
+    ) -> str:
+        """Return the explicit anchor event ID or preserve an existing one."""
+        normalized_anchor_event_id = _normalized_event_id(anchor_event_id)
+        if normalized_anchor_event_id is not None:
+            return normalized_anchor_event_id
+        for event_id in source_event_ids:
+            existing_record = self._responses.get(event_id)
+            if existing_record is not None:
+                return _anchor_event_id_for_record(source_event_ids, existing_record)
+        return source_event_ids[-1]
 
 
 def _normalize_source_event_ids(source_event_ids: typing.Sequence[str]) -> tuple[str, ...]:
@@ -632,6 +678,7 @@ def _serialized_record(
     timestamp: float,
     response_event_id: str | None,
     completed: bool,
+    anchor_event_id: str | None,
     source_event_ids: tuple[str, ...],
     visible_echo_event_id: str | None = None,
     source_event_prompts: typing.Mapping[str, str] | None = None,
@@ -646,6 +693,8 @@ def _serialized_record(
         "completed": completed,
         "source_event_ids": list(source_event_ids),
     }
+    if anchor_event_id is not None and anchor_event_id != source_event_ids[-1]:
+        record["anchor_event_id"] = anchor_event_id
     if visible_echo_event_id is not None:
         record["visible_echo_event_id"] = visible_echo_event_id
     if source_event_prompts is not None:
@@ -754,6 +803,7 @@ def _normalize_serialized_record(
     )
     if not normalized_source_event_ids:
         normalized_source_event_ids = (event_id,)
+    anchor_event_id = _normalized_event_id(raw_record.get("anchor_event_id"))
     prompt_map = _prompt_map_for_record(normalized_source_event_ids, raw_record)
     response_owner = _response_owner_for_record(raw_record)
     history_scope = _history_scope_for_record(raw_record)
@@ -764,6 +814,8 @@ def _normalize_serialized_record(
         "completed": bool(raw_record.get("completed", True)),
         "source_event_ids": list(normalized_source_event_ids),
     }
+    if anchor_event_id is not None and anchor_event_id != normalized_source_event_ids[-1]:
+        normalized_record["anchor_event_id"] = anchor_event_id
     if isinstance(visible_echo_event_id, str):
         normalized_record["visible_echo_event_id"] = visible_echo_event_id
     if prompt_map is not None:
@@ -815,6 +867,17 @@ def _prompt_map_for_record(
         event_id: prompt for event_id in source_event_ids if isinstance((prompt := raw_prompt_map.get(event_id)), str)
     }
     return normalized_prompt_map or None
+
+
+def _anchor_event_id_for_record(
+    source_event_ids: tuple[str, ...],
+    record: _SerializedHandledTurnRecordLike | None,
+) -> str:
+    """Return the normalized anchor event ID for one record."""
+    if record is None:
+        return source_event_ids[-1]
+    anchor_event_id = _normalized_event_id(record.get("anchor_event_id"))
+    return anchor_event_id if anchor_event_id is not None else source_event_ids[-1]
 
 
 def _response_owner_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:

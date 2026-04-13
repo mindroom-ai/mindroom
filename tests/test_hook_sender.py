@@ -594,7 +594,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.mark_handled = MagicMock()
+    turn_store.record_turn = MagicMock()
 
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
@@ -611,7 +611,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     assert dispatch.envelope.hook_source == "hook-plugin:message:received"
     assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
-    turn_store.mark_handled.assert_not_called()
+    turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -844,7 +844,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._turn_controller._execute_command = AsyncMock()
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.mark_handled = MagicMock()
+    turn_store.record_turn = MagicMock()
 
     await bot._turn_controller._dispatch_text_message(
         room,
@@ -853,7 +853,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
 
     assert hook_calls == ["called"]
     bot._turn_controller._execute_command.assert_not_awaited()
-    turn_store.mark_handled.assert_called_once_with(
+    turn_store.record_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(event.event_id),
     )
 
@@ -882,7 +882,7 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.mark_handled = MagicMock()
+    turn_store.record_turn = MagicMock()
 
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
@@ -893,7 +893,7 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
     )
 
     assert dispatch is None
-    assert turn_store.mark_handled.call_args_list == [
+    assert turn_store.record_turn.call_args_list == [
         call(HandledTurnState.create(["$m1", "$m2"])),
     ]
 
@@ -918,7 +918,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
         ),
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.has_responded = MagicMock(return_value=False)
+    turn_store.is_handled = MagicMock(return_value=False)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._turn_policy.plan_turn = AsyncMock(
         return_value=DispatchPlan(
@@ -1824,8 +1824,8 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     """hook_dispatch should enforce room authorization against the preserved requester."""
     bot = _hook_bot(tmp_path)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.has_responded = MagicMock(return_value=False)
-    turn_store.mark_handled = MagicMock()
+    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.record_turn = MagicMock()
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     room.canonical_alias = None
     event = nio.RoomMessageText.from_dict(
@@ -1847,6 +1847,6 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         prechecked = bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is None
-    turn_store.mark_handled.assert_called_once_with(
+    turn_store.record_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(event.event_id),
     )

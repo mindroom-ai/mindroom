@@ -513,7 +513,6 @@ class AgentBot:
                 ingress_hook_runner=self._ingress_hook_runner,
                 response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
-                state_writer=self._conversation_state_writer,
                 tool_runtime=self._tool_runtime_support,
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,

@@ -86,9 +86,7 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
-    from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_access import MatrixConversationAccess
@@ -154,7 +152,6 @@ class TurnControllerDeps:
     ingress_hook_runner: IngressHookRunner
     response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
-    state_writer: ConversationStateWriter
     tool_runtime: ToolRuntimeSupport
     turn_store: TurnStore
     coalescing_gate: CoalescingGate
@@ -236,7 +233,7 @@ class TurnController:
         if requester_user_id == self.deps.matrix_id.full_id and source_kind != "hook_dispatch":
             return None
 
-        if not is_edit and self.deps.turn_store.has_responded(event.event_id):
+        if not is_edit and self.deps.turn_store.is_handled(event.event_id):
             return None
 
         if not is_authorized_sender(
@@ -270,33 +267,7 @@ class TurnController:
 
     def _mark_source_events_responded(self, handled_turn: HandledTurnState) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
-        self.deps.turn_store.mark_handled(handled_turn)
-
-    def _response_history_scope_for_action(
-        self,
-        response_action: ResponseAction,
-    ) -> HistoryScope | None:
-        """Return the persisted history scope used by one response action."""
-        if response_action.kind == "team":
-            assert response_action.form_team is not None
-            return self.deps.state_writer.team_history_scope(response_action.form_team.eligible_members)
-        if response_action.kind == "individual":
-            return self.deps.state_writer.history_scope()
-        return None
-
-    def _handled_turn_with_response_context(
-        self,
-        handled_turn: HandledTurnState,
-        *,
-        history_scope: HistoryScope | None,
-        conversation_target: MessageTarget | None,
-    ) -> HandledTurnState:
-        """Attach the persisted regeneration context for one response."""
-        return handled_turn.with_response_context(
-            response_owner=self.deps.agent_name,
-            history_scope=history_scope,
-            conversation_target=conversation_target,
-        )
+        self.deps.turn_store.record_turn(handled_turn)
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -323,7 +294,7 @@ class TurnController:
                 continue
             if message.event_id == event.event_id:
                 continue
-            if self.deps.turn_store.has_responded(message.event_id):
+            if self.deps.turn_store.is_handled(message.event_id):
                 continue
             if (
                 message.body
@@ -437,7 +408,7 @@ class TurnController:
         if self.deps.agent_name != ROUTER_AGENT_NAME or not self.deps.runtime.config.voice.visible_router_echo:
             return None
 
-        existing_visible_echo_event_id = self.deps.turn_store.get_visible_echo_event_id(event.event_id)
+        existing_visible_echo_event_id = self.deps.turn_store.visible_echo_for_source(event.event_id)
         if existing_visible_echo_event_id is not None:
             return existing_visible_echo_event_id
 
@@ -612,7 +583,7 @@ class TurnController:
             conversation_access=self.deps.resolver.deps.conversation_access,
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
-            record_handled_turn=self.deps.turn_store.mark_handled,
+            record_handled_turn=self.deps.turn_store.record_turn,
             send_response=send_response,
             send_skill_command_response=send_skill_command_response,
             run_skill_command_tool=run_skill_command_tool,
@@ -663,7 +634,7 @@ class TurnController:
                 source_event_id=selection.question_event_id,
             )
             return
-        selection_matrix_run_metadata = self.deps.turn_store.matrix_run_metadata(
+        selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             HandledTurnState.from_source_event_id(selection.question_event_id),
             additional_source_event_ids=(
                 (source_event_id,)
@@ -825,10 +796,9 @@ class TurnController:
                 extra_content=routed_extra_content or None,
             ),
         )
-        tracked_handled_turn = (
-            handled_turn or HandledTurnState.from_source_event_id(event.event_id)
-        ).with_response_context(
-            response_owner=self.deps.agent_name,
+        tracked_handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
+        tracked_handled_turn = self.deps.turn_store.attach_response_context(
+            tracked_handled_turn,
             history_scope=None,
             conversation_target=resolved_target,
         )
@@ -846,15 +816,13 @@ class TurnController:
         """Return the terminal handled-turn outcome for one ignored router turn."""
         visible_router_echo_event_id = (
             handled_turn.visible_echo_event_id
-            or self.deps.turn_store.visible_echo_event_id_for_sources(
+            or self.deps.turn_store.visible_echo_for_sources(
                 handled_turn.source_event_ids,
             )
         )
         if visible_router_echo_event_id is None:
             return None
-        if all(
-            self.deps.turn_store.has_responded(source_event_id) for source_event_id in handled_turn.source_event_ids
-        ):
+        if all(self.deps.turn_store.is_handled(source_event_id) for source_event_id in handled_turn.source_event_ids):
             return None
         return handled_turn.with_response_event_id(visible_router_echo_event_id)
 
@@ -1343,7 +1311,7 @@ class TurnController:
                     and list(tracked_route_handled_turn.source_event_ids) != [route_event.event_id]
                     and not single_direct_media_route
                 ):
-                    routing_kwargs["handled_turn"] = self._handled_turn_with_response_context(
+                    routing_kwargs["handled_turn"] = self.deps.turn_store.attach_response_context(
                         tracked_route_handled_turn,
                         history_scope=None,
                         conversation_target=dispatch.target,
@@ -1357,12 +1325,12 @@ class TurnController:
                 )
                 return
             assert plan.response_action is not None
-            handled_turn = self._handled_turn_with_response_context(
+            handled_turn = self.deps.turn_store.attach_response_context(
                 handled_turn,
-                history_scope=self._response_history_scope_for_action(plan.response_action),
+                history_scope=self.deps.turn_store.response_history_scope(plan.response_action),
                 conversation_target=dispatch.target,
             )
-            matrix_run_metadata = self.deps.turn_store.matrix_run_metadata(handled_turn)
+            matrix_run_metadata = self.deps.turn_store.build_run_metadata(handled_turn)
 
             async def build_payload(context: MessageContext) -> DispatchPayload:
                 effective_thread_id = self.deps.resolver.build_message_target(
