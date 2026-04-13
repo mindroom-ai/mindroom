@@ -32,7 +32,6 @@ from mindroom.bot import (
     AgentBot,
     MultiKnowledgeVectorDb,
     TeamBot,
-    _thread_summary_message_count_hint,
 )
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -95,6 +94,7 @@ from mindroom.response_runner import ResponseRequest, ResponseRunner, _merge_res
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
@@ -3478,7 +3478,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Threaded agent replies should queue summary generation."""
+        """Threaded agent replies should queue summary generation once the threshold is reached."""
 
         async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
             return None
@@ -3502,6 +3502,15 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        thread_history = [
+            _visible_message(
+                sender=f"@user{i}:localhost",
+                body=f"Message {i}",
+                event_id=f"$message{i}",
+                timestamp=i,
+            )
+            for i in range(4)
+        ]
 
         with (
             patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
@@ -3509,6 +3518,11 @@ class TestAgentBot:
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, return_value="ok"),
             patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")),
             patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
+            patch.object(
+                bot._conversation_access,
+                "get_thread_history",
+                new=AsyncMock(return_value=thread_history),
+            ) as mock_get_thread_history,
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch(
@@ -3525,13 +3539,14 @@ class TestAgentBot:
                 prompt="Summarize this thread",
                 reply_to_event_id="$event",
                 thread_id="$thread",
-                thread_history=[],
+                thread_history=thread_history,
                 user_id="@alice:localhost",
             )
 
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
+        mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
         mock_thread_summary.assert_awaited_once_with(
             client=bot.client,
             room_id="!test:localhost",
@@ -3539,7 +3554,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=bot.runtime_paths,
             conversation_access=bot._conversation_access,
-            message_count_hint=1,
+            message_count_hint=5,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -3692,6 +3707,141 @@ class TestAgentBot:
         assert any(name.startswith("memory_save_team_") for name in scheduled_names)
 
     @pytest.mark.asyncio
+    async def test_team_generate_response_uses_refreshed_thread_history_for_summary_gate(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Team replies should pass the refreshed thread history into the shared summary gate."""
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
+            await response_function(None)
+            return "$response"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+            owner: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
+
+        stale_history: list[ResolvedVisibleMessage] = []
+        fresh_history = [
+            _visible_message(
+                sender=f"@user{i}:localhost",
+                body=f"Message {i}",
+                event_id=f"$message{i}",
+                timestamp=i,
+            )
+            for i in range(4)
+        ]
+
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        team_member = config.get_ids(runtime_paths)["general"]
+        bot = TeamBot(
+            mock_agent_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_agents=[team_member],
+            team_mode="coordinate",
+        )
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        async def cached_history_refresh(room_id: str, thread_id: str) -> list[ResolvedVisibleMessage]:
+            cache = bot._conversation_access._turn_history_cache.get()
+            assert cache is not None
+            cache[(room_id, thread_id)] = fresh_history
+            return fresh_history
+
+        resolution = TeamResolution(
+            intent=TeamIntent.EXPLICIT_MEMBERS,
+            requested_members=[team_member],
+            member_statuses=[
+                TeamResolutionMember(
+                    agent=team_member,
+                    name="general",
+                    status=TeamMemberStatus.ELIGIBLE,
+                ),
+            ],
+            eligible_members=[team_member],
+            outcome=TeamOutcome.TEAM,
+            mode=TeamMode.COORDINATE,
+        )
+
+        with (
+            patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
+            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch.object(
+                bot._conversation_access,
+                "get_thread_history",
+                new=AsyncMock(side_effect=cached_history_refresh),
+            ) as mock_get_thread_history,
+            patch.object(
+                ResponseRunner,
+                "run_cancellable_response",
+                new=AsyncMock(side_effect=run_cancellable_response),
+            ),
+            patch.object(
+                bot._delivery_gateway,
+                "send_text",
+                new=AsyncMock(return_value="$response"),
+            ),
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=AsyncMock(return_value="Team reply"),
+            ),
+            patch(
+                "mindroom.response_runner.apply_post_response_effects",
+                new=AsyncMock(),
+            ) as mock_post_effects,
+            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+        ):
+            async with bot._conversation_resolver.turn_thread_cache_scope():
+                cache = bot._conversation_access._turn_history_cache.get()
+                assert cache is not None
+                cache[("!test:localhost", "$thread")] = stale_history
+
+                await bot._generate_response(
+                    room_id="!test:localhost",
+                    prompt="Team, summarize this thread",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    thread_history=stale_history,
+                    user_id="@alice:localhost",
+                )
+
+                assert cache[("!test:localhost", "$thread")] == fresh_history
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
+        assert mock_post_effects.await_count == 1
+        outcome = mock_post_effects.await_args.args[0]
+        assert outcome.thread_summary_room_id == "!test:localhost"
+        assert outcome.thread_summary_thread_id == "$thread"
+        assert outcome.thread_summary_message_count_hint == 5
+
+    @pytest.mark.asyncio
     async def test_team_generate_response_redacts_suppressed_streaming_reply(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -3825,7 +3975,7 @@ class TestAgentBot:
             ),
         )
 
-        assert _thread_summary_message_count_hint(thread_history) == 5
+        assert thread_summary_message_count_hint(thread_history) == 5
 
     @pytest.mark.asyncio
     async def test_generate_team_response_streams_into_placeholder_event(

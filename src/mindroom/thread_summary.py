@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
+from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -35,6 +36,7 @@ _MARKDOWN_INLINE_CODE_RE = re.compile(r"`([^`]*)`")
 _MARKDOWN_HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
 _MARKDOWN_BLOCKQUOTE_RE = re.compile(r"(?m)^\s{0,3}>\s?")
 _MARKDOWN_LIST_ITEM_RE = re.compile(r"(?m)^\s*(?:[-+*]|\d+\.)\s+")
+_PREQUEUE_CONCURRENCY_MARGIN = 2
 
 # In-memory tracking of last summarized message count per thread.
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
@@ -107,6 +109,40 @@ def _is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
 def _count_non_summary_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
     """Count visible thread messages while excluding summary notices."""
     return sum(1 for message in thread_history if not _is_thread_summary_message(message))
+
+
+def thread_summary_message_count_hint(
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> int:
+    """Return a lower-bound post-response thread size without refetching history."""
+    return _count_non_summary_messages(thread_history) + 1
+
+
+def next_thread_summary_threshold(
+    room_id: str,
+    thread_id: str,
+    config: Config,
+) -> int:
+    """Return the next summary threshold using the current in-memory baseline."""
+    return _next_threshold(
+        _last_summary_counts.get(thread_summary_cache_key(room_id, thread_id), 0),
+        first_threshold=config.defaults.thread_summary_first_threshold,
+        subsequent_interval=config.defaults.thread_summary_subsequent_interval,
+    )
+
+
+def should_queue_thread_summary(
+    room_id: str,
+    thread_id: str,
+    config: Config,
+    *,
+    message_count_hint: int | None,
+) -> bool:
+    """Return whether the lower-bound hint is close enough to justify a live recheck."""
+    if message_count_hint is None:
+        return True
+    threshold = next_thread_summary_threshold(room_id, thread_id, config)
+    return message_count_hint >= threshold - _PREQUEUE_CONCURRENCY_MARGIN
 
 
 async def _load_thread_history(
@@ -253,6 +289,16 @@ async def _generate_summary(
     return str(content) if content else None
 
 
+@timed("maybe_generate_thread_summary")
+async def _timed_generate_summary(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Run the summary generation attempt with timing instrumentation."""
+    return await _generate_summary(thread_history, config, runtime_paths)
+
+
 async def send_thread_summary_event(
     client: nio.AsyncClient,
     room_id: str,
@@ -322,9 +368,6 @@ async def maybe_generate_thread_summary(
     message_count_hint: int | None = None,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
-    first_threshold = config.defaults.thread_summary_first_threshold
-    subsequent_interval = config.defaults.thread_summary_subsequent_interval
-
     async with thread_summary_lock(room_id, thread_id):
         cache_key = thread_summary_cache_key(room_id, thread_id)
         # Recover from existing summary events on cache miss (e.g., after restart)
@@ -333,12 +376,7 @@ async def maybe_generate_thread_summary(
             if recovered > 0:
                 update_last_summary_count(room_id, thread_id, recovered)
 
-        last_count = _last_summary_counts.get(cache_key, 0)
-        threshold = _next_threshold(
-            last_count,
-            first_threshold=first_threshold,
-            subsequent_interval=subsequent_interval,
-        )
+        threshold = next_thread_summary_threshold(room_id, thread_id, config)
 
         # message_count_hint comes from a pre-send snapshot and is only a
         # lower bound. Other agents or humans can post before this background
@@ -350,7 +388,7 @@ async def maybe_generate_thread_summary(
         if message_count < threshold:
             return
         try:
-            summary = await _generate_summary(thread_history, config, runtime_paths)
+            summary = await _timed_generate_summary(thread_history, config, runtime_paths)
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
