@@ -131,25 +131,6 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
     return "matrix_message" in tool_names
 
 
-def _session_type_for_history_scope(scope: HistoryScope) -> SessionType:
-    """Return the Agno session type used by one persisted history scope."""
-    return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
-
-
-def _team_history_scope(
-    *,
-    agent_name: str,
-    team_agents: Sequence[MatrixID],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> HistoryScope:
-    """Return the persisted team-history scope for one team response."""
-    if agent_name in config.teams:
-        return HistoryScope(kind="team", scope_id=agent_name)
-    team_member_names = [matrix_id.agent_name(config, runtime_paths) or matrix_id.username for matrix_id in team_agents]
-    return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
-
-
 def _append_matrix_prompt_context(
     prompt: str,
     *,
@@ -983,23 +964,16 @@ class ResponseRunner:
             user_id=requester_user_id,
             session_id=session_id,
         )
-        session_scope = _team_history_scope(
-            agent_name=self.deps.agent_name,
-            team_agents=list(team_request.team_agents),
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        )
+        session_scope = self.deps.state_writer.team_history_scope(list(team_request.team_agents))
+        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def team_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_team_storage(
-                team_agents=list(team_request.team_agents),
-                execution_identity=execution_identity,
-            )
+            return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=tool_context,
             session_id=session_id,
-            session_type=SessionType.TEAM,
+            session_type=session_type,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=resolved_target.resolved_thread_id,
@@ -1019,7 +993,7 @@ class ResponseRunner:
 
         strip_transient_enrichment, persist_response_event_id = self._build_session_storage_effects(
             session_id=session_id,
-            session_type=SessionType.TEAM,
+            session_type=session_type,
             create_storage=team_storage_factory,
         )
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
@@ -1627,7 +1601,7 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = _session_type_for_history_scope(session_scope)
+        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def history_storage_factory() -> SqliteDb:
             return self.deps.state_writer.create_storage(runtime.execution_identity, scope=session_scope)
@@ -1745,7 +1719,7 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = _session_type_for_history_scope(session_scope)
+        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def history_storage_factory() -> SqliteDb:
             return self.deps.state_writer.create_storage(runtime.execution_identity, scope=session_scope)
@@ -1973,7 +1947,7 @@ class ResponseRunner:
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=tool_context,
             session_id=session_id,
-            session_type=SessionType.AGENT,
+            session_type=self.deps.state_writer.session_type_for_scope(session_scope),
             scope=session_scope,
             room_id=room_id,
             thread_id=resolved_target.resolved_thread_id,
@@ -2220,7 +2194,7 @@ class ResponseRunner:
 
         strip_transient_enrichment, persist_response_event_id = self._build_session_storage_effects(
             session_id=session_id,
-            session_type=_session_type_for_history_scope(self.deps.state_writer.history_scope()),
+            session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
         )
         def note_delivery_started(event_id: str | None) -> None:
@@ -2284,7 +2258,7 @@ class ResponseRunner:
                 delivery_result=delivery_result,
                 response_run_id=response_run_id,
                 session_id=session_id,
-                session_type=_session_type_for_history_scope(self.deps.state_writer.history_scope()),
+                session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
                 execution_identity=execution_identity,
                 compaction_outcomes=tuple(compaction_outcomes),
                 interactive_target=resolved_target,

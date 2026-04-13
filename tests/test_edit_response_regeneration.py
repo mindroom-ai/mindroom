@@ -1979,6 +1979,141 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
     }
 
 
+@pytest.mark.asyncio
+async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_when_suppressed(
+    tmp_path: Path,
+) -> None:
+    """Suppressed interactive-selection regeneration should still backfill a converged question anchor."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.rooms = {}
+    replace_edit_regenerator_deps(bot)
+    _record_handled_turn(
+        bot._turn_store,
+        ["$selection:example.com"],
+        response_event_id="$response:example.com",
+    )
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* 2",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "2",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$selection:example.com",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* 2",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "2",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$selection:example.com",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+        "origin_server_ts": 1000000,
+        "type": "m.room.message",
+        "room_id": "!test:example.com",
+    }
+
+    session_id = create_session_id("!test:example.com", None)
+    storage = MagicMock()
+    storage.get_session.return_value = AgentSession(
+        session_id=session_id,
+        runs=[
+            RunOutput(
+                run_id="run-selection",
+                session_id=session_id,
+                metadata={
+                    "matrix_event_id": "$question:example.com",
+                    "matrix_source_event_ids": ["$selection:example.com"],
+                    "matrix_response_event_id": "$response:example.com",
+                },
+            ),
+        ],
+    )
+    generate_response = AsyncMock(return_value=None)
+    replace_edit_regenerator_deps(bot, generate_response=generate_response)
+
+    with (
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(
+            bot._conversation_state_writer,
+            "create_storage",
+            return_value=storage,
+        ),
+        patch.object(
+            bot._ingress_hook_runner,
+            "emit_message_received_hooks",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_full_thread_history=False,
+        )
+
+        await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+        loaded_turn = bot._turn_store.load_turn(
+            room=room,
+            thread_id=None,
+            original_event_id="$selection:example.com",
+            requester_user_id=edit_event.sender,
+        )
+
+    generate_response.assert_awaited_once()
+    assert loaded_turn is not None
+    assert loaded_turn.record.anchor_event_id == "$question:example.com"
+    assert loaded_turn.record.response_event_id == "$response:example.com"
+    assert loaded_turn.requires_backfill is False
+
+
 def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path: Path) -> None:
     """TurnStore should compare matching persisted runs across thread and room scopes."""
     agent_user = AgentMatrixUser(

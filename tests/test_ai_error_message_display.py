@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.db.base import SessionType
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -77,11 +78,14 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
-    bot._conversation_state_writer.create_team_storage = MagicMock(return_value=MagicMock())
     bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
     bot._conversation_state_writer.history_scope = MagicMock(
         return_value=HistoryScope(kind="agent", scope_id=bot.agent_name),
     )
+    bot._conversation_state_writer.team_history_scope = MagicMock(
+        return_value=HistoryScope(kind="team", scope_id=bot.agent_name),
+    )
+    bot._conversation_state_writer.session_type_for_scope = MagicMock(return_value=SessionType.AGENT)
     bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
     return bot
 

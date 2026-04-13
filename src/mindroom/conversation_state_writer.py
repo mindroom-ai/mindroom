@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -50,11 +49,11 @@ class ConversationStateWriter:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         return HistoryScope(kind="agent", scope_id=self.deps.agent_name)
 
-    def _history_session_type(self, scope: HistoryScope) -> SessionType:
+    def session_type_for_scope(self, scope: HistoryScope) -> SessionType:
         """Return the Agno session type used by one persisted history scope."""
         return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
 
-    def _team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
+    def team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
         """Return the persisted team-history scope for one team response."""
         config = self.deps.runtime.config
         if self.deps.agent_name in config.teams:
@@ -77,7 +76,7 @@ class ConversationStateWriter:
         )
         if (
             normalized_scope == self.history_scope()
-            and self._history_session_type(normalized_scope) is SessionType.AGENT
+            and self.session_type_for_scope(normalized_scope) is SessionType.AGENT
         ):
             return create_session_storage(
                 agent_name=self.deps.agent_name,
@@ -88,26 +87,6 @@ class ConversationStateWriter:
         return create_scope_session_storage(
             agent_name=normalized_scope.scope_id if normalized_scope.kind == "agent" else self.deps.agent_name,
             scope=normalized_scope,
-            config=config,
-            runtime_paths=self.deps.runtime_paths,
-            execution_identity=execution_identity,
-        )
-
-    def create_team_storage(
-        self,
-        *,
-        team_agents: list[MatrixID],
-        execution_identity: ToolExecutionIdentity | None,
-        create_scope_session_storage_fn: Callable[..., SqliteDb] | None = None,
-    ) -> SqliteDb:
-        """Create the canonical shared storage backing one team response."""
-        factory = (
-            create_scope_session_storage if create_scope_session_storage_fn is None else create_scope_session_storage_fn
-        )
-        config = self.deps.runtime.config
-        return factory(
-            agent_name=self.deps.agent_name,
-            scope=self._team_history_scope(team_agents),
             config=config,
             runtime_paths=self.deps.runtime_paths,
             execution_identity=execution_identity,

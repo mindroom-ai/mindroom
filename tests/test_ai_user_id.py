@@ -237,10 +237,11 @@ def _build_response_runner(
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(
-        side_effect=lambda *_args, **_kwargs: _open_test_storage(history_storage),
-    )
-    bot._conversation_state_writer.create_team_storage = MagicMock(
-        side_effect=lambda *_args, **_kwargs: _open_test_storage(team_history_storage),
+        side_effect=lambda *_args, **kwargs: _open_test_storage(
+            team_history_storage
+            if isinstance(kwargs.get("scope"), HistoryScope) and kwargs["scope"].kind == "team"
+            else history_storage,
+        ),
     )
     bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
     bot._conversation_state_writer.history_scope = MagicMock(
@@ -248,6 +249,17 @@ def _build_response_runner(
             kind="team" if bot.agent_name in config.teams else "agent",
             scope_id=bot.agent_name,
         ),
+    )
+    bot._conversation_state_writer.team_history_scope = MagicMock(
+        side_effect=lambda team_agents: HistoryScope(
+            kind="team",
+            scope_id=bot.agent_name
+            if bot.agent_name in config.teams
+            else f"team_{'+'.join(sorted(mid.agent_name(config, runtime_paths) or mid.username for mid in team_agents))}",
+        ),
+    )
+    bot._conversation_state_writer.session_type_for_scope = MagicMock(
+        side_effect=lambda scope: SessionType.TEAM if scope.kind == "team" else SessionType.AGENT,
     )
     bot._edit_message = AsyncMock(return_value=True)
     delivery_gateway = MagicMock()

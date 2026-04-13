@@ -13,7 +13,6 @@ from agno.run.team import TeamRunOutput
 from mindroom import constants
 from mindroom.agents import get_agent_session, get_team_session, remove_run_by_event_id
 from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
-from mindroom.history.types import HistoryScope
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
 
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.matrix.identity import MatrixID
+    from mindroom.history.types import HistoryScope
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
@@ -106,6 +105,10 @@ class TurnStore:
             handled_turn.with_visible_echo_event_id(visible_echo_event_id),
         )
 
+    def record_turn_record(self, turn_record: HandledTurnRecord) -> None:
+        """Persist one exact handled-turn record without losing its anchor event."""
+        self._ledger.record_handled_turn_record(turn_record)
+
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)
@@ -135,7 +138,7 @@ class TurnStore:
             return self.deps.state_writer.history_scope()
         if response_action.kind == "team":
             assert response_action.form_team is not None
-            return self._team_history_scope(response_action.form_team.eligible_members)
+            return self.deps.state_writer.team_history_scope(response_action.form_team.eligible_members)
         return None
 
     def attach_response_context(
@@ -278,21 +281,6 @@ class TurnStore:
             ),
         )
 
-    def _session_type_for_scope(self, scope: HistoryScope) -> SessionType:
-        """Return the Agno session type used by one persisted history scope."""
-        return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
-
-    def _team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
-        """Return the persisted team-history scope for one team response."""
-        config = self.deps.resolver.deps.runtime.config
-        runtime_paths = self.deps.resolver.deps.runtime_paths
-        if self.deps.agent_name in config.teams:
-            return HistoryScope(kind="team", scope_id=self.deps.agent_name)
-        team_member_names = [
-            matrix_id.agent_name(config, runtime_paths) or matrix_id.username for matrix_id in team_agents
-        ]
-        return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
-
     def _persisted_turn_metadata_for_run(self, metadata: dict[str, Any]) -> _PersistedTurnMetadata | None:
         """Parse persisted run metadata needed for coalesced edit regeneration."""
         anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
@@ -356,7 +344,7 @@ class TurnStore:
     ) -> _PersistedTurnMetadata | None:
         """Load persisted run metadata for one edited turn when available."""
         history_scope = self.deps.state_writer.history_scope()
-        session_type = self._session_type_for_scope(history_scope)
+        session_type = self.deps.state_writer.session_type_for_scope(history_scope)
         session_contexts = [
             (request.thread_id, create_session_id(request.room.room_id, request.thread_id)),
             (None, create_session_id(request.room.room_id, None)),
@@ -408,7 +396,7 @@ class TurnStore:
     ) -> None:
         """Remove persisted runs tied to the pre-edit message before regenerating."""
         history_scope = self.deps.state_writer.history_scope()
-        session_type = self._session_type_for_scope(history_scope)
+        session_type = self.deps.state_writer.session_type_for_scope(history_scope)
         session_contexts = [
             (request.thread_id, create_session_id(request.room.room_id, request.thread_id)),
             (None, create_session_id(request.room.room_id, None)),
@@ -468,7 +456,7 @@ class TurnStore:
         )
         removed_any = False
         try:
-            session_type = self._session_type_for_scope(turn_record.history_scope)
+            session_type = self.deps.state_writer.session_type_for_scope(turn_record.history_scope)
             for source_event_id in turn_record.source_event_ids:
                 removed_any = (
                     remove_run_by_event_id(
