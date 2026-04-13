@@ -53,6 +53,9 @@ class _DummyVectorDb:
 
 class _DummyCollection:
     def count(self) -> int:
+        if _DummyChromaDb.raise_on_count:
+            msg = "count() should not be called in this test"
+            raise AssertionError(msg)
         return len(_DummyChromaDb.metadatas)
 
     def get(
@@ -115,6 +118,7 @@ class _DummyKnowledge:
 
 class _DummyChromaDb:
     metadatas: ClassVar[list[object]] = []
+    raise_on_count: ClassVar[bool] = False
 
     def __init__(self, **_: object) -> None:
         self.collection_name = "mindroom_knowledge"
@@ -520,6 +524,23 @@ async def test_load_indexed_files_recovers_source_paths(dummy_manager: Knowledge
     assert indexed_count == 2
     status = dummy_manager.get_status()
     assert status["indexed_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_load_indexed_files_does_not_use_collection_count(dummy_manager: KnowledgeManager) -> None:
+    """Loading indexed files should page via get() without relying on collection.count()."""
+    _DummyChromaDb.metadatas = [
+        {"source_path": "docs/a.txt"},
+        {"source_path": "notes/b.md"},
+    ]
+    _DummyChromaDb.raise_on_count = True
+
+    try:
+        indexed_count = await dummy_manager.load_indexed_files()
+    finally:
+        _DummyChromaDb.raise_on_count = False
+
+    assert indexed_count == 2
 
 
 @pytest.mark.asyncio
@@ -2269,6 +2290,29 @@ async def test_initialize_shared_knowledge_managers_resumes_partial_git_index_wi
         assert initialize_calls == 0
     finally:
         await shutdown_shared_knowledge_managers()
+
+
+def test_startup_index_mode_does_not_use_collection_count_for_existing_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup index mode should detect existing vectors via get(), not collection.count()."""
+    _DummyChromaDb.metadatas = [{"source_path": "doc.md"}]
+    _DummyChromaDb.raise_on_count = True
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    manager._save_persisted_indexing_state("indexing")
+
+    try:
+        assert manager._startup_index_mode() == "resume"
+    finally:
+        _DummyChromaDb.raise_on_count = False
 
 
 @pytest.mark.asyncio

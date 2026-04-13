@@ -497,7 +497,9 @@ class KnowledgeManager:
         if not isinstance(vector_db, ChromaDb) or not vector_db.exists():
             return False
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        return collection.count() > 0
+        result = collection.get(limit=1, include=[])
+        ids = result.get("ids", []) or []
+        return bool(ids)
 
     def _startup_index_mode(self) -> Literal["full_reindex", "resume", "incremental"]:
         persisted_state = self._load_persisted_indexing_state()
@@ -816,15 +818,11 @@ class KnowledgeManager:
             return {}
 
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        total_count = collection.count()
-        if total_count == 0:
-            return {}
-
         indexed_files: dict[str, tuple[int, int] | None] = {}
         offset = 0
         batch_size = 1_000
 
-        while offset < total_count:
+        while True:
             result = collection.get(
                 limit=batch_size,
                 offset=offset,
