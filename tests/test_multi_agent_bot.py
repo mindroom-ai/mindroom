@@ -1318,9 +1318,8 @@ class TestAgentBot:
             mock_stream_agent_response.assert_called_once()
             stream_kwargs = mock_stream_agent_response.call_args.kwargs
             assert stream_kwargs["agent_name"] == "calculator"
-            assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert stream_kwargs["model_prompt"].startswith("[")
-            assert stream_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert stream_kwargs["prompt"].startswith("[")
+            assert stream_kwargs["prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
@@ -1343,9 +1342,8 @@ class TestAgentBot:
             mock_ai_response.assert_called_once()
             ai_kwargs = mock_ai_response.call_args.kwargs
             assert ai_kwargs["agent_name"] == "calculator"
-            assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert ai_kwargs["model_prompt"].startswith("[")
-            assert ai_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert ai_kwargs["prompt"].startswith("[")
+            assert ai_kwargs["prompt"].endswith(f"{mention_id}: What's 2+2?")
             assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
@@ -1404,11 +1402,11 @@ class TestAgentBot:
             )
 
         assert delivery.event_id == "$response"
-        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
-        assert "[Matrix metadata for tool calls]" in model_prompt
-        assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: none" in model_prompt
-        assert "reply_to_event_id: $event123" in model_prompt
+        prompt = mock_ai.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in prompt
+        assert "room_id: !test:localhost" in prompt
+        assert "thread_id: $event123" in prompt
+        assert "reply_to_event_id: $event123" in prompt
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
@@ -1450,11 +1448,11 @@ class TestAgentBot:
             )
 
         assert delivery.event_id == "$response"
-        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
-        assert "[Matrix metadata for tool calls]" in model_prompt
-        assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: none" in model_prompt
-        assert "reply_to_event_id: $event123" in model_prompt
+        prompt = mock_ai.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in prompt
+        assert "room_id: !test:localhost" in prompt
+        assert "thread_id: $event123" in prompt
+        assert "reply_to_event_id: $event123" in prompt
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
@@ -1506,11 +1504,11 @@ class TestAgentBot:
                 )
 
         assert delivery.event_id == "$response"
-        model_prompt = mock_stream_agent_response.call_args.kwargs["model_prompt"]
-        assert "[Matrix metadata for tool calls]" in model_prompt
-        assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: none" in model_prompt
-        assert "reply_to_event_id: $event456" in model_prompt
+        prompt = mock_stream_agent_response.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in prompt
+        assert "room_id: !test:localhost" in prompt
+        assert "thread_id: $event456" in prompt
+        assert "reply_to_event_id: $event456" in prompt
 
     @pytest.mark.asyncio
     async def test_process_and_respond_uses_safe_thread_root_for_prompt_metadata(
@@ -1559,9 +1557,9 @@ class TestAgentBot:
                 ),
             )
 
-        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
-        assert "thread_id: $thread_root:localhost" in model_prompt
-        assert "reply_to_event_id: $reply_plain:localhost" in model_prompt
+        prompt = mock_ai.call_args.kwargs["prompt"]
+        assert "thread_id: $thread_root:localhost" in prompt
+        assert "reply_to_event_id: $reply_plain:localhost" in prompt
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_resolves_knowledge_once(
@@ -2923,9 +2921,8 @@ class TestAgentBot:
             )
 
         assert mock_ai.call_args.kwargs["show_tool_calls"] is True
-        assert mock_ai.call_args.kwargs["prompt"] == "Use research skill"
-        assert mock_ai.call_args.kwargs["model_prompt"].startswith("[")
-        assert mock_ai.call_args.kwargs["model_prompt"].endswith("Use research skill")
+        assert mock_ai.call_args.kwargs["prompt"].startswith("[")
+        assert mock_ai.call_args.kwargs["prompt"].endswith("Use research skill")
 
     @pytest.mark.asyncio
     async def test_skill_command_room_mode_uses_room_level_session_id(
@@ -4371,10 +4368,9 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         assert generate_kwargs["room_id"] == "!test:localhost"
-        assert "Available attachment IDs" not in generate_kwargs["prompt"]
-        assert generate_kwargs["model_prompt"] is not None
-        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
-        assert attachment_id in generate_kwargs["model_prompt"]
+        assert "Available attachment IDs" in generate_kwargs["prompt"]
+        assert attachment_id in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is None
         assert generate_kwargs["reply_to_event_id"] == "$img_event"
         assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
@@ -4492,11 +4488,9 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         assert generate_kwargs["attachment_ids"] == [current_attachment_id, history_attachment_id]
-        assert current_attachment_id not in generate_kwargs["prompt"]
-        assert history_attachment_id not in generate_kwargs["prompt"]
-        assert generate_kwargs["model_prompt"] is not None
-        assert current_attachment_id in generate_kwargs["model_prompt"]
-        assert history_attachment_id in generate_kwargs["model_prompt"]
+        assert current_attachment_id in generate_kwargs["prompt"]
+        assert history_attachment_id in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is None
         turn_store.mark_handled.assert_called_once_with(
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
@@ -4545,19 +4539,18 @@ class TestAgentBot:
             )
 
         assert payload.attachment_ids == ["att_image"]
-        assert payload.prompt == "describe this"
-        assert payload.model_prompt is not None
-        assert "Available attachment IDs" in payload.model_prompt
-        assert "att_image" in payload.model_prompt
+        assert "Available attachment IDs" in payload.prompt
+        assert "att_image" in payload.prompt
+        assert payload.model_prompt is None
         assert list(payload.media.images) == [stored_image, fallback_image]
 
     @pytest.mark.asyncio
-    async def test_build_dispatch_payload_with_attachments_keeps_raw_prompt_clean(
+    async def test_build_dispatch_payload_with_attachments_appends_attachment_ids_to_prompt(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Attachment IDs should be isolated to model_prompt instead of mutating the raw user prompt."""
+        """Attachment-aware dispatch should append attachment IDs to the prompt payload."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -4585,10 +4578,9 @@ class TestAgentBot:
                 ),
             )
 
-        assert payload.prompt == "describe this"
-        assert payload.model_prompt is not None
-        assert "Available attachment IDs" in payload.model_prompt
-        assert "att_image" in payload.model_prompt
+        assert "Available attachment IDs" in payload.prompt
+        assert "att_image" in payload.prompt
+        assert payload.model_prompt is None
 
     @pytest.mark.asyncio
     async def test_message_enrichment_appends_to_existing_model_prompt(
@@ -4770,10 +4762,9 @@ class TestAgentBot:
         assert generate_kwargs["thread_history"] == []
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
-        assert "Available attachment IDs" not in generate_kwargs["prompt"]
-        assert generate_kwargs["model_prompt"] is not None
-        assert "Available attachment IDs" in generate_kwargs["model_prompt"]
-        assert attachment_id in generate_kwargs["model_prompt"]
+        assert "Available attachment IDs" in generate_kwargs["prompt"]
+        assert attachment_id in generate_kwargs["prompt"]
+        assert generate_kwargs["model_prompt"] is None
         media = generate_kwargs["media"]
         assert len(media.files) == 1
         assert str(media.files[0].filepath) == str(local_media_path)

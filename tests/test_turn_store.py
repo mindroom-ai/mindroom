@@ -7,8 +7,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from mindroom.bot import AgentBot
+from mindroom.config.main import Config
 from mindroom.handled_turns import HandledTurnState
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_store import TurnStore, TurnStoreDeps
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: Path) -> None:
@@ -63,10 +66,26 @@ def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:
     assert offenders == []
 
 
-def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim() -> None:
-    """AgentBot should not keep the transitional handled-turn shim."""
+def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim(tmp_path: Path) -> None:
+    """AgentBot instances should route handled-turn state only through TurnStore."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="agent",
+            user_id="@mindroom_agent:localhost",
+            display_name="Agent",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
     # Split the string so this guard test does not match its own source text.
-    assert ("_handled" + "_turn_ledger") not in AgentBot.__dict__
+    removed_attr = "_handled" + "_turn_ledger"
+    assert removed_attr not in AgentBot.__dict__
+    assert not hasattr(bot, removed_attr)
+    assert removed_attr not in vars(bot)
 
 
 def test_no_test_references_removed_bot_handled_turn_ledger_shim() -> None:
