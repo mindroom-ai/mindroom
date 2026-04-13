@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.db.base import SessionType
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -76,10 +76,12 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
         side_effect=resolve_response_thread_root_for_test,
     )
     bot._conversation_state_writer = MagicMock()
-    bot._conversation_state_writer.create_history_scope_storage = MagicMock(return_value=MagicMock())
-    bot._conversation_state_writer.create_team_history_storage = MagicMock(return_value=MagicMock())
+    bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
+    bot._conversation_state_writer.create_team_storage = MagicMock(return_value=MagicMock())
     bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
-    bot._conversation_state_writer.history_session_type = MagicMock(return_value=SessionType.AGENT)
+    bot._conversation_state_writer.history_scope = MagicMock(
+        return_value=HistoryScope(kind="agent", scope_id=bot.agent_name),
+    )
     bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
     return bot
 

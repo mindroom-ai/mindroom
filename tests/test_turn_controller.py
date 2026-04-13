@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,7 +11,6 @@ from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.message_target import MessageTarget
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
 from tests.conftest import (
@@ -23,6 +21,12 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from mindroom.message_target import MessageTarget
 
 
 @pytest.mark.asyncio
@@ -71,7 +75,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
 
     captured_target = None
 
-    async def generate_response(  # noqa: PLR0913
+    async def generate_response(
         room_id: str,
         prompt: str,
         reply_to_event_id: str,

@@ -131,6 +131,25 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
     return "matrix_message" in tool_names
 
 
+def _session_type_for_history_scope(scope: HistoryScope) -> SessionType:
+    """Return the Agno session type used by one persisted history scope."""
+    return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
+
+
+def _team_history_scope(
+    *,
+    agent_name: str,
+    team_agents: Sequence[MatrixID],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> HistoryScope:
+    """Return the persisted team-history scope for one team response."""
+    if agent_name in config.teams:
+        return HistoryScope(kind="team", scope_id=agent_name)
+    team_member_names = [matrix_id.agent_name(config, runtime_paths) or matrix_id.username for matrix_id in team_agents]
+    return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
+
+
 def _append_matrix_prompt_context(
     prompt: str,
     *,
@@ -964,10 +983,15 @@ class ResponseRunner:
             user_id=requester_user_id,
             session_id=session_id,
         )
-        session_scope = self.deps.state_writer.team_history_scope(list(team_request.team_agents))
+        session_scope = _team_history_scope(
+            agent_name=self.deps.agent_name,
+            team_agents=list(team_request.team_agents),
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
 
         def team_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_team_history_storage(
+            return self.deps.state_writer.create_team_storage(
                 team_agents=list(team_request.team_agents),
                 execution_identity=execution_identity,
             )
@@ -1603,10 +1627,10 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = self.deps.state_writer.history_session_type()
+        session_type = _session_type_for_history_scope(session_scope)
 
         def history_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_history_scope_storage(runtime.execution_identity)
+            return self.deps.state_writer.create_storage(runtime.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime.tool_context,
@@ -1721,10 +1745,10 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = self.deps.state_writer.history_session_type()
+        session_type = _session_type_for_history_scope(session_scope)
 
         def history_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_history_scope_storage(runtime.execution_identity)
+            return self.deps.state_writer.create_storage(runtime.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime.tool_context,
@@ -1944,10 +1968,7 @@ class ResponseRunner:
         session_scope = HistoryScope(kind="agent", scope_id=agent_name)
 
         def history_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_storage_for_history_scope(
-                scope=session_scope,
-                execution_identity=execution_identity,
-            )
+            return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=tool_context,
@@ -2199,8 +2220,8 @@ class ResponseRunner:
 
         strip_transient_enrichment, persist_response_event_id = self._build_session_storage_effects(
             session_id=session_id,
-            session_type=self.deps.state_writer.history_session_type(),
-            create_storage=lambda: self.deps.state_writer.create_history_scope_storage(execution_identity),
+            session_type=_session_type_for_history_scope(self.deps.state_writer.history_scope()),
+            create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
         )
         def note_delivery_started(event_id: str | None) -> None:
             nonlocal delivery_stage_started, tracked_event_id
@@ -2263,7 +2284,7 @@ class ResponseRunner:
                 delivery_result=delivery_result,
                 response_run_id=response_run_id,
                 session_id=session_id,
-                session_type=self.deps.state_writer.history_session_type(),
+                session_type=_session_type_for_history_scope(self.deps.state_writer.history_scope()),
                 execution_identity=execution_identity,
                 compaction_outcomes=tuple(compaction_outcomes),
                 interactive_target=resolved_target,

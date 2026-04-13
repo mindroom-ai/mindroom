@@ -27,7 +27,7 @@ def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: 
         ),
     )
 
-    store.mark_handled(HandledTurnState.from_source_event_id("$event", response_event_id="$response"))
+    store.record_turn(HandledTurnState.from_source_event_id("$event", response_event_id="$response"))
 
     reloaded_store = TurnStore(
         TurnStoreDeps(
@@ -39,7 +39,7 @@ def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: 
         ),
     )
 
-    assert reloaded_store.has_responded("$event")
+    assert reloaded_store.is_handled("$event")
     turn_record = reloaded_store.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.response_event_id == "$response"

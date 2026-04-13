@@ -128,7 +128,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot._turn_store.has_responded(command_event.event_id), (
+        assert bot._turn_store.is_handled(command_event.event_id), (
             "Command event should be marked as responded to prevent re-processing"
         )
 
@@ -221,7 +221,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371
-        assert bot._turn_store.has_responded(unknown_command_event.event_id), (
+        assert bot._turn_store.is_handled(unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
 
@@ -306,7 +306,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot._turn_store.has_responded(message_event.event_id), (
+        assert bot._turn_store.is_handled(message_event.event_id), (
             "Router event should be marked as responded to prevent re-routing"
         )
         turn_record = bot._turn_store.get_turn_record(message_event.event_id)

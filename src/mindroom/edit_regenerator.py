@@ -84,7 +84,7 @@ class EditRegenerator:
 
     def _mark_source_events_responded(self, handled_turn: HandledTurnState) -> None:
         """Mark one or more source events as handled by the same response."""
-        self.deps.turn_store.mark_handled(handled_turn)
+        self.deps.turn_store.record_turn(handled_turn)
 
     async def edit_regeneration_context(
         self,
@@ -133,7 +133,7 @@ class EditRegenerator:
             return
 
         context = await self.deps.resolver.extract_message_context(room, event)
-        loaded_turn = self.deps.turn_store.load_turn_record(
+        loaded_turn = self.deps.turn_store.load_turn(
             room=room,
             thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
             original_event_id=original_event_id,
@@ -162,7 +162,7 @@ class EditRegenerator:
             thread_id=context.thread_id,
             reply_to_event_id=turn_record.anchor_event_id,
         )
-        regeneration_history_scope = turn_record.history_scope or self.deps.turn_store.default_history_scope()
+        regeneration_history_scope = turn_record.history_scope or self.deps.turn_store.response_history_scope()
         regeneration_response_owner = turn_record.response_owner or self.deps.agent_name
         if regeneration_response_owner != self.deps.agent_name:
             self._logger().debug(
@@ -242,7 +242,7 @@ class EditRegenerator:
             if regeneration_turn_record.is_coalesced
             else HandledTurnState.from_source_event_id(regeneration_turn_record.anchor_event_id)
         )
-        regeneration_matrix_run_metadata = self.deps.turn_store.matrix_run_metadata(
+        regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             regeneration_metadata_turn,
             additional_source_event_ids=(
                 (original_event_id,)

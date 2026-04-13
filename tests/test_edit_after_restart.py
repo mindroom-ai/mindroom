@@ -76,7 +76,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Simulate that the bot has already responded to the original message
     original_event_id = "$original:example.com"
     response_event_id = "$response:example.com"
-    bot._turn_store.mark_handled(
+    bot._turn_store.record_turn(
         HandledTurnState.create(
             [original_event_id],
             response_event_id=response_event_id,
@@ -86,7 +86,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Also mark the edit event as "seen" (simulating it was delivered before restart)
     # With the correct implementation, edits should still be processed
     edit_event_id = "$edit:example.com"
-    bot._turn_store.mark_handled(HandledTurnState.create([edit_event_id]))
+    bot._turn_store.record_turn(HandledTurnState.create([edit_event_id]))
 
     # Create an edit event that would be redelivered after restart
     edit_event = nio.RoomMessageText.from_dict(
@@ -144,7 +144,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
 async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path) -> None:
     """Test that the bot correctly skips regular messages that are redelivered after restart.
 
-    This is the original purpose of the has_responded check - prevent duplicate responses.
+    This is the original purpose of the is_handled check - prevent duplicate responses.
     """
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -189,7 +189,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mark a message as already responded to
     message_event_id = "$message:example.com"
-    bot._turn_store.mark_handled(HandledTurnState.create([message_event_id]))
+    bot._turn_store.record_turn(HandledTurnState.create([message_event_id]))
 
     # Create a regular message event (not an edit)
     message_event = nio.RoomMessageText.from_dict(
