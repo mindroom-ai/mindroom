@@ -96,16 +96,24 @@ async def _ensure_managers(config: Config, runtime_paths: constants.RuntimePaths
     )
 
 
+def _get_existing_manager(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> KnowledgeManager | None:
+    return get_shared_knowledge_manager_for_config(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+
 async def _ensure_manager(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> KnowledgeManager | None:
-    existing = get_shared_knowledge_manager_for_config(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    existing = _get_existing_manager(config, base_id, runtime_paths)
     if existing is not None:
         return existing
     managers = await _ensure_managers(config, runtime_paths)
@@ -155,13 +163,12 @@ async def _stream_upload_to_destination(upload: UploadFile, destination: Path, f
 async def list_knowledge_bases(request: Request) -> dict[str, Any]:
     """List all configured knowledge bases with status summaries."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    manager_map = await _ensure_managers(config, runtime_paths)
 
     bases: list[dict[str, Any]] = []
     for base_id in sorted(config.knowledge_bases):
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
-        manager = manager_map.get(base_id)
+        manager = _get_existing_manager(config, base_id, runtime_paths)
         if manager is None:
             file_count = len(_list_file_info(root)[0])
             indexed_count = 0
@@ -177,6 +184,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
                 "watch": base_config.watch,
                 "file_count": file_count,
                 "indexed_count": indexed_count,
+                "manager_available": manager is not None,
             },
         )
 
@@ -191,7 +199,7 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     """List all managed files currently present in one knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    manager = await _ensure_manager(config, base_id, runtime_paths)
+    manager = _get_existing_manager(config, base_id, runtime_paths)
     files, total_size = _list_file_info(root, manager.list_files() if manager is not None else None)
 
     return {
@@ -199,6 +207,7 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
         "files": files,
         "total_size": total_size,
         "file_count": len(files),
+        "manager_available": manager is not None,
     }
 
 
@@ -278,7 +287,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    manager = await _ensure_manager(config, base_id, runtime_paths)
+    manager = _get_existing_manager(config, base_id, runtime_paths)
 
     if manager is not None:
         manager_status = manager.get_status()
@@ -294,6 +303,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "watch": config.knowledge_bases[base_id].watch,
         "file_count": file_count,
         "indexed_count": indexed_count,
+        "manager_available": manager is not None,
     }
 
 

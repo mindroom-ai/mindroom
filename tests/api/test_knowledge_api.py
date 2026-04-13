@@ -67,11 +67,11 @@ def test_client(tmp_path: Path) -> TestClient:
     return TestClient(main.app)
 
 
-def test_knowledge_bases_list_initializes_managers_with_full_reindex(
+def test_knowledge_bases_list_uses_existing_manager_without_initializing(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Base listing should initialize managers with full create-time indexing."""
+    """Base listing should use an existing manager without triggering initialization."""
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
@@ -79,8 +79,12 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
 
     with (
         patch(
+            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
+            return_value=manager,
+        ) as get_manager,
+        patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
+            new=AsyncMock(),
         ) as init_managers,
     ):
         response = test_client.get("/api/knowledge/bases")
@@ -91,8 +95,9 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     assert payload["bases"][0]["name"] == "research"
     assert payload["bases"][0]["indexed_count"] == 3
     assert payload["bases"][0]["file_count"] == 4
-    init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is True
+    assert payload["bases"][0]["manager_available"] is True
+    get_manager.assert_called_once()
+    init_managers.assert_not_awaited()
 
 
 def test_knowledge_root_resolves_relative_path_from_config_dir(
@@ -131,8 +136,12 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
 
     with (
         patch(
+            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
+            return_value=manager,
+        ) as get_manager,
+        patch(
             "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
+            new=AsyncMock(),
         ) as init_managers,
     ):
         response = test_client.get("/api/knowledge/bases/research/files")
@@ -149,8 +158,78 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
             "type": "md",
         },
     ]
-    init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is True
+    assert payload["manager_available"] is True
+    get_manager.assert_called_once()
+    init_managers.assert_not_awaited()
+
+
+def test_knowledge_status_uses_existing_manager_without_initializing(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Status should use an existing manager without triggering initialization."""
+    config = _knowledge_config(tmp_path)
+    manager = MagicMock()
+    manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
+    _publish_committed_runtime_config(test_client.app, config)
+
+    with (
+        patch(
+            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
+            return_value=manager,
+        ) as get_manager,
+        patch(
+            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
+            new=AsyncMock(),
+        ) as init_managers,
+    ):
+        response = test_client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "base_id": "research",
+        "folder_path": str(tmp_path.resolve()),
+        "watch": False,
+        "file_count": 4,
+        "indexed_count": 3,
+        "manager_available": True,
+    }
+    get_manager.assert_called_once()
+    init_managers.assert_not_awaited()
+
+
+def test_knowledge_status_falls_back_without_initializing_when_manager_missing(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Status should remain fast and best-effort when no manager exists yet."""
+    config = _knowledge_config(tmp_path)
+    (tmp_path / "note.md").write_text("hello", encoding="utf-8")
+    _publish_committed_runtime_config(test_client.app, config)
+
+    with (
+        patch(
+            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
+            return_value=None,
+        ) as get_manager,
+        patch(
+            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
+            new=AsyncMock(),
+        ) as init_managers,
+    ):
+        response = test_client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "base_id": "research",
+        "folder_path": str(tmp_path.resolve()),
+        "watch": False,
+        "file_count": 1,
+        "indexed_count": 0,
+        "manager_available": False,
+    }
+    get_manager.assert_called_once()
+    init_managers.assert_not_awaited()
 
 
 def test_knowledge_upload_rolls_back_on_oversized_file(
