@@ -24,9 +24,12 @@ from mindroom.thread_summary import (
     _thread_locks,
     _ThreadSummary,
     maybe_generate_thread_summary,
+    next_thread_summary_threshold,
     normalize_thread_summary_text,
     send_thread_summary_event,
+    should_queue_thread_summary,
     thread_summary_cache_key,
+    thread_summary_message_count_hint,
     update_last_summary_count,
 )
 
@@ -333,6 +336,64 @@ def _clear_summary_counts() -> None:
     _thread_locks.clear()
 
 
+class TestThreadSummaryMessageCountHint:
+    """Lower-bound message-count hints used by the pre-queue gate."""
+
+    def test_ignores_existing_summary_notice_and_accounts_for_new_reply(self) -> None:
+        """Summary notices must not count, but the just-sent reply must."""
+        thread_history = [
+            *_make_thread_history(4),
+            _make_summary_notice_message("$thread1", message_count=4),
+        ]
+
+        assert thread_summary_message_count_hint(thread_history) == 5
+
+
+class TestShouldQueueThreadSummary:
+    """Cheap pre-queue gating based on the cached threshold and lower-bound hint."""
+
+    def test_margin_near_first_threshold_queues(self) -> None:
+        """Hints within the concurrency margin should still queue a live recheck."""
+        config = _mock_config()
+
+        assert should_queue_thread_summary(
+            "!room:x",
+            "$thread1",
+            config,
+            message_count_hint=4,
+        )
+
+    def test_far_below_first_threshold_skips_queue(self) -> None:
+        """Hints that are still clearly below threshold should skip queueing."""
+        config = _mock_config()
+
+        assert not should_queue_thread_summary(
+            "!room:x",
+            "$thread1",
+            config,
+            message_count_hint=2,
+        )
+
+    def test_cached_summary_uses_subsequent_threshold(self) -> None:
+        """Once a summary baseline exists, the gate should honor the same margin."""
+        update_last_summary_count("!room:x", "$thread1", 5)
+        config = _mock_config()
+
+        assert next_thread_summary_threshold("!room:x", "$thread1", config) == 15
+        assert not should_queue_thread_summary(
+            "!room:x",
+            "$thread1",
+            config,
+            message_count_hint=12,
+        )
+        assert should_queue_thread_summary(
+            "!room:x",
+            "$thread1",
+            config,
+            message_count_hint=13,
+        )
+
+
 @pytest.mark.asyncio
 class TestMaybeGenerateThreadSummary:
     """Integration tests for the threshold-gated summary pipeline."""
@@ -384,6 +445,30 @@ class TestMaybeGenerateThreadSummary:
 
         mock_fetch.assert_awaited_once()
         mock_gen.assert_not_awaited()
+
+    async def test_below_threshold_skips_timed_generation_helper(self) -> None:
+        """Timing should only wrap actual generation attempts, not early threshold skips."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                return_value=_make_thread_history(3),
+            ),
+            patch(
+                "mindroom.thread_summary._timed_generate_summary",
+                new=AsyncMock(return_value="Summary"),
+            ) as mock_timed_gen,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_timed_gen.assert_not_awaited()
 
     async def test_at_threshold_generates(self) -> None:
         """LLM is called and event sent when count reaches threshold."""

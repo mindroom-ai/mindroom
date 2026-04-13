@@ -27,6 +27,7 @@ from mindroom.ai import (
     queued_message_signal_context,
     stream_agent_response,
 )
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.bot import AgentBot
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig
@@ -39,7 +40,13 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.post_response_effects import (
+    PostResponseEffectsDeps,
+    PostResponseEffectsSupport,
+    ResponseOutcome,
+    apply_post_response_effects,
+)
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
@@ -54,7 +61,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
 
 
@@ -264,6 +271,94 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     )
 
     queue_thread_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
+    """A stale hint just below threshold should still reach the live summary check."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    runtime = BotRuntimeState(
+        client=client,
+        config=config,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    conversation_access = MagicMock()
+    support = PostResponseEffectsSupport(
+        runtime=runtime,
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        delivery_gateway=MagicMock(),
+        conversation_access=conversation_access,
+    )
+    deps = support.build_deps(
+        room_id="!room:localhost",
+        reply_to_event_id="$event",
+        thread_id="$thread",
+        interactive_agent_name="general",
+    )
+    thread_history = [
+        ResolvedVisibleMessage.synthetic(
+            sender=f"@user{i}:localhost",
+            body=f"Message {i}",
+            timestamp=i,
+            event_id=f"$message{i}",
+        )
+        for i in range(5)
+    ]
+    scheduled_tasks: list[asyncio.Task[None]] = []
+
+    def schedule_background_task(
+        coro: Coroutine[object, object, None],
+        *,
+        name: str,
+        error_handler: object | None = None,  # noqa: ARG001
+        owner: object | None = None,  # noqa: ARG001
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(coro, name=name)
+        scheduled_tasks.append(task)
+        return task
+
+    with (
+        patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
+        patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)) as mock_fetch,
+        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
+        patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as mock_send,
+        patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
+    ):
+        await apply_post_response_effects(
+            ResponseOutcome(
+                resolved_event_id="$response",
+                delivery_result=DeliveryResult(
+                    event_id="$response",
+                    response_text="visible",
+                    delivery_kind="sent",
+                    suppressed=False,
+                ),
+                thread_summary_room_id="!room:localhost",
+                thread_summary_thread_id="$thread",
+                thread_summary_message_count_hint=4,
+            ),
+            deps,
+        )
+
+        assert scheduled_tasks
+        await asyncio.gather(*scheduled_tasks)
+
+    mock_fetch.assert_awaited_once_with(conversation_access, "!room:localhost", "$thread")
+    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths)
+    mock_send.assert_awaited_once_with(
+        client,
+        "!room:localhost",
+        "$thread",
+        "Summary",
+        5,
+        "default",
+    )
 
 
 @pytest.mark.asyncio

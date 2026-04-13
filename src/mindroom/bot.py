@@ -164,21 +164,6 @@ _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 
 
-def _thread_summary_message_count_hint(
-    thread_history: Sequence[ResolvedVisibleMessage],
-) -> int:
-    """Return a lower-bound post-response thread size without refetching history.
-
-    The summary task runs only after this bot has already appended one visible
-    reply to the thread, so the hint must account for that new non-summary
-    message. Existing summary notices do not count toward the thresholds.
-    """
-    existing_non_summary_messages = sum(
-        1 for message in thread_history if not isinstance(message.content.get("io.mindroom.thread_summary"), dict)
-    )
-    return existing_non_summary_messages + 1
-
-
 def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
@@ -1714,7 +1699,7 @@ class TeamBot(AgentBot):
 
         media_inputs = media or MediaInputs()
 
-        event_id = await self._generate_team_response_helper(
+        return await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
@@ -1751,10 +1736,3 @@ class TeamBot(AgentBot):
             matrix_run_metadata=matrix_run_metadata,
             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )
-        if thread_id is not None and event_id is not None:
-            self._post_response_effects_support.queue_thread_summary(
-                room_id=room_id,
-                thread_id=thread_id,
-                message_count_hint=_thread_summary_message_count_hint(thread_history),
-            )
-        return event_id

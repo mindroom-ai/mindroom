@@ -9,8 +9,10 @@ from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.message_target import MessageTarget
-from mindroom.thread_summary import maybe_generate_thread_summary
-from mindroom.timing import timed
+from mindroom.thread_summary import (
+    maybe_generate_thread_summary,
+    should_queue_thread_summary as should_queue_thread_summary_check,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -73,6 +75,7 @@ class PostResponseEffectsDeps:
     strip_transient_enrichment: Callable[[], None] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
+    should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
 
 
@@ -94,14 +97,19 @@ class PostResponseEffectsSupport:
             raise RuntimeError(msg)
         return client
 
-    @timed("maybe_generate_thread_summary")
-    async def _timed_thread_summary(
+    def should_queue_thread_summary(
         self,
-        *,
-        summary_coro: Awaitable[None],
-    ) -> None:
-        """Run thread-summary generation with duration logging."""
-        await summary_coro
+        room_id: str,
+        thread_id: str,
+        message_count_hint: int | None,
+    ) -> bool:
+        """Return whether a thread-summary check should be queued for this response."""
+        return should_queue_thread_summary_check(
+            room_id=room_id,
+            thread_id=thread_id,
+            config=self.runtime.config,
+            message_count_hint=message_count_hint,
+        )
 
     async def _register_interactive_delivery(
         self,
@@ -161,19 +169,16 @@ class PostResponseEffectsSupport:
         thread_id: str,
         message_count_hint: int | None,
     ) -> None:
-        """Queue background thread summarization with timing instrumentation."""
-        summary_coro = maybe_generate_thread_summary(
-            client=self._client(),
-            room_id=room_id,
-            thread_id=thread_id,
-            config=self.runtime.config,
-            runtime_paths=self.runtime_paths,
-            conversation_access=self.conversation_access,
-            message_count_hint=message_count_hint,
-        )
+        """Queue background thread summarization for one response."""
         create_background_task(
-            self._timed_thread_summary(
-                summary_coro=summary_coro,
+            maybe_generate_thread_summary(
+                client=self._client(),
+                room_id=room_id,
+                thread_id=thread_id,
+                config=self.runtime.config,
+                runtime_paths=self.runtime_paths,
+                conversation_access=self.conversation_access,
+                message_count_hint=message_count_hint,
             ),
             name=f"thread_summary_{room_id}_{thread_id}",
             owner=self.runtime,
@@ -226,6 +231,7 @@ class PostResponseEffectsSupport:
             strip_transient_enrichment=strip_transient_enrichment,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
+            should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
         )
 
@@ -335,6 +341,14 @@ async def apply_post_response_effects(  # noqa: C901
         and (delivery_result is None or not delivery_result.suppressed)
         and outcome.thread_summary_room_id is not None
         and outcome.thread_summary_thread_id is not None
+        and (
+            deps.should_queue_thread_summary is None
+            or deps.should_queue_thread_summary(
+                outcome.thread_summary_room_id,
+                outcome.thread_summary_thread_id,
+                outcome.thread_summary_message_count_hint,
+            )
+        )
         and deps.queue_thread_summary is not None
     ):
         deps.queue_thread_summary(
