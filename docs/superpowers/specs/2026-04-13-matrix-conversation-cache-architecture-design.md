@@ -246,8 +246,9 @@ Sync processing collects candidate updates.
 `MatrixConversationCache` persists them in room order.
 Per-thread version bumps and invalidations happen after successful persistence.
 If persistence fails for a thread-affecting update, that thread is marked repair-required so the next read bypasses freshness shortcuts and repairs from the homeserver.
-If a mutation cannot resolve the thread at all, the affected event ID is recorded only as a room-scoped lookup candidate until a concrete thread read proves which thread it belongs to.
-That room-scoped candidate metadata is bounded and only protects immediate follow-up reads until it is promoted or pruned.
+If a mutation cannot resolve the thread at all, the affected event ID is recorded as a durable lookup-repair obligation in the SQLite event cache.
+That obligation is correctness state, not disposable cache metadata.
+It remains until a concrete thread read can promote it to one thread-specific repair or an equivalent authoritative refill clears it.
 
 ## Error Handling
 
@@ -276,13 +277,21 @@ If repair cannot succeed, the read fails explicitly rather than silently serving
 ### Runtime repair failure
 
 If a forced repair read cannot produce a verified authoritative refill, the thread remains repair-required.
+The system may still choose a conservative Matrix fallback relation such as the thread root for outbound sends, but it must not silently mark suspect history current.
 
 ### Runtime concurrent mutation
 
 Concurrent thread-affecting reads and writes serialize through the same per-thread freshness lock.
-If a thread-unknown lookup failure arrives during a read, the room-scoped candidate is left pending and later post-lock freshness checks must still route the next use through the cache service instead of trusting raw generation equality alone.
+If a thread-unknown lookup failure arrives during a read, the durable lookup-repair obligation remains pending until the cache has enough persisted event-thread membership to promote it.
+Later post-lock freshness checks must still route the next use through the cache service instead of trusting raw generation equality alone.
 The service does not cache an empty healed result just because one fallback path returned no events.
 Repair completion requires proof that the homeserver-backed refill actually succeeded.
+
+### Runtime outbound threading
+
+MSC3440 fallback event selection is part of the same freshness boundary.
+High-level delivery code must not read raw cached thread history directly from `matrix.client`.
+Instead, outbound send paths must ask `MatrixConversationCache` for the latest visible thread event so the same room-write draining, repair-required checks, and per-thread locking rules apply before deciding which fallback event to reference.
 
 ## Enforcement Pass
 
@@ -306,6 +315,7 @@ Homeserver repair paths must distinguish between:
 
 Only the verified refill path may clear repair-required state.
 The repair path must not silently replace a broken thread with an empty cached thread after a transient homeserver failure.
+Only the cache service may decide when outbound fallback threading can trust a cached tail event.
 
 ### Read-side concurrency contract
 
@@ -316,6 +326,7 @@ The code may not snapshot thread version or repair-required state before lock ac
 
 This pass also removes repo-level examples that would teach future agents the wrong standard.
 That includes stale dependency metadata, lint violations, formatter violations, and any touched helper that encodes the wrong ownership or contract shape.
+That also includes high-level callers importing low-level `matrix.client` fallback helpers when `conversation_cache` is already available.
 
 ## Boundary Changes Required
 
@@ -331,12 +342,15 @@ That includes stale dependency metadata, lint violations, formatter violations, 
 
 - Cache initialization is mandatory for standalone and orchestrated startup.
 - `AgentBot` construction does not resolve cache paths or create private cache instances before runtime initialization.
+- `matrix_api.get_event` returns the raw Matrix event payload and does not route through edited-view cache projection.
 - Sync-delivered edits that require original-event thread lookup invalidate resolved-thread state correctly.
 - Failed sync persistence marks threads repair-required and forces homeserver-backed repair on next read.
 - Live thread mutations that receive degraded write results mark the thread repair-required through the same shared mutation contract.
 - Sync errors do not update freshness clocks used to suppress repair reads.
 - Forced repair reads do not clear repair-required after degraded homeserver fallback results.
 - Resolved-thread cache reuse rechecks version and repair-required state after taking the per-thread entry lock.
+- Durable unresolved lookup repairs are not silently evicted when many failures occur in one room.
+- Outbound send paths use `conversation_cache` for latest-thread fallback selection instead of reading cached thread history directly from `matrix.client`.
 - Team responses queue exactly one summary job through post-response effects.
 - API schedule editing does not instantiate private cache backends directly.
 - Dependency metadata and lint checks match the renamed private cache modules and touched files.

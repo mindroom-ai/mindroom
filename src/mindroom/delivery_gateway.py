@@ -29,7 +29,6 @@ from mindroom.hooks.types import (
 from mindroom.matrix.client import (
     build_threaded_edit_content,
     edit_message,
-    get_latest_thread_event_id_if_needed,
     send_message,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -316,12 +315,12 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         else:
-            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-                client,
-                resolved_target.room_id,
-                effective_thread_id,
-                resolved_target.reply_to_event_id,
-                event_cache=self.deps.runtime.event_cache,
+            latest_thread_event_id = (
+                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+                    resolved_target.room_id,
+                    effective_thread_id,
+                    resolved_target.reply_to_event_id,
+                )
             )
             content = format_message_with_mentions(
                 config,
@@ -594,6 +593,12 @@ class DeliveryGateway:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config
+        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+            request.target.room_id,
+            request.target.resolved_thread_id,
+            request.target.reply_to_event_id,
+            request.existing_event_id,
+        )
         return await send_streaming_response(
             client,
             request.target.room_id,
@@ -613,7 +618,7 @@ class DeliveryGateway:
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
-            event_cache=self.deps.runtime.event_cache,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
     async def finalize_streamed_response(

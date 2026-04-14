@@ -121,10 +121,75 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_latest_edit.return_value = None
     event_cache.get_thread_events.return_value = None
     event_cache.get_thread_id_for_event.return_value = None
+    _install_event_cache_repair_tracking(event_cache)
     event_cache.append_event.return_value = True
     event_cache.append_thread_event.return_value = False
     event_cache.redact_event.return_value = False
     return event_cache
+
+
+def _install_event_cache_repair_tracking(event_cache: AsyncMock) -> None:
+    """Attach in-memory repair tracking behavior to one cache-shaped mock."""
+    pending_lookup_repairs: set[tuple[str, str]] = set()
+    repair_required_threads: set[tuple[str, str]] = set()
+
+    _install_event_cache_pending_lookup_tracking(event_cache, pending_lookup_repairs)
+    _install_event_cache_thread_repair_tracking(event_cache, repair_required_threads)
+
+
+def _install_event_cache_pending_lookup_tracking(
+    event_cache: AsyncMock,
+    pending_lookup_repairs: set[tuple[str, str]],
+) -> None:
+    """Attach lookup-repair tracking behavior to one cache-shaped mock."""
+
+    async def mark_pending_lookup_repair(room_id: str, event_id: str) -> None:
+        pending_lookup_repairs.add((room_id, event_id))
+
+    async def matching_pending_lookup_repairs(room_id: str, thread_id: str) -> frozenset[str]:
+        matching_event_ids: set[str] = set()
+        for candidate_room_id, event_id in pending_lookup_repairs:
+            if candidate_room_id != room_id:
+                continue
+            if await event_cache.get_thread_id_for_event(room_id, event_id) == thread_id:
+                matching_event_ids.add(event_id)
+        return frozenset(matching_event_ids)
+
+    async def pending_lookup_repairs_for_event_ids(room_id: str, event_ids: frozenset[str]) -> frozenset[str]:
+        return frozenset(
+            event_id
+            for candidate_room_id, event_id in pending_lookup_repairs
+            if candidate_room_id == room_id and event_id in event_ids
+        )
+
+    async def consume_pending_lookup_repairs(room_id: str, event_ids: frozenset[str]) -> None:
+        for event_id in event_ids:
+            pending_lookup_repairs.discard((room_id, event_id))
+
+    event_cache.mark_pending_lookup_repair.side_effect = mark_pending_lookup_repair
+    event_cache.matching_pending_lookup_repairs.side_effect = matching_pending_lookup_repairs
+    event_cache.pending_lookup_repairs_for_event_ids.side_effect = pending_lookup_repairs_for_event_ids
+    event_cache.consume_pending_lookup_repairs.side_effect = consume_pending_lookup_repairs
+
+
+def _install_event_cache_thread_repair_tracking(
+    event_cache: AsyncMock,
+    repair_required_threads: set[tuple[str, str]],
+) -> None:
+    """Attach thread-repair tracking behavior to one cache-shaped mock."""
+
+    async def thread_repair_required(room_id: str, thread_id: str) -> bool:
+        return (room_id, thread_id) in repair_required_threads
+
+    async def mark_thread_repair_required(room_id: str, thread_id: str) -> None:
+        repair_required_threads.add((room_id, thread_id))
+
+    async def clear_thread_repair_required(room_id: str, thread_id: str) -> None:
+        repair_required_threads.discard((room_id, thread_id))
+
+    event_cache.thread_repair_required.side_effect = thread_repair_required
+    event_cache.mark_thread_repair_required.side_effect = mark_thread_repair_required
+    event_cache.clear_thread_repair_required.side_effect = clear_thread_repair_required
 
 
 def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> _EventCacheWriteCoordinator:

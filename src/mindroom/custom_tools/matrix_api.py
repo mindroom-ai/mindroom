@@ -848,10 +848,7 @@ class MatrixApiTools(Toolkit):
         assert normalized_event_id is not None
 
         try:
-            if context.conversation_cache is not None:
-                response = await context.conversation_cache.get_event(room_id, normalized_event_id)
-            else:
-                response = await context.client.room_get_event(room_id, normalized_event_id)
+            response = await context.client.room_get_event(room_id, normalized_event_id)
         except Exception as exc:
             return self._error_payload(
                 action="get_event",

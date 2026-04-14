@@ -14,7 +14,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -61,6 +67,7 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
 
     # Mock orchestrator
     mock_orchestrator = MagicMock()

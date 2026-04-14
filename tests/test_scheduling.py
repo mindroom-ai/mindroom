@@ -101,6 +101,7 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
+    conversation_cache = _conversation_cache()
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start:
         restored = await restore_scheduled_tasks(
@@ -109,6 +110,7 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
             event_cache=_event_cache(),
+            conversation_cache=conversation_cache,
         )
 
     assert restored == 1
@@ -166,6 +168,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
+    conversation_cache = _conversation_cache()
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
         await restore_scheduled_tasks(
@@ -174,6 +177,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
             config=config,
             runtime_paths=_runtime_paths(),
             event_cache=_event_cache(),
+            conversation_cache=conversation_cache,
         )
 
     mock_start_during_restore.assert_not_called()
@@ -182,7 +186,13 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
         patch("mindroom.scheduling._start_scheduled_task", side_effect=[True, True]) as mock_start,
         patch("mindroom.scheduling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
     ):
-        drained = await drain_deferred_overdue_tasks(client, config, _runtime_paths(), _event_cache())
+        drained = await drain_deferred_overdue_tasks(
+            client,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            conversation_cache,
+        )
 
     assert drained == 2
     assert [call.args[1] for call in mock_start.call_args_list] == ["task_overdue_1", "task_overdue_2"]
@@ -239,6 +249,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
+    conversation_cache = _conversation_cache()
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
         await restore_scheduled_tasks(
@@ -247,6 +258,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
             config=config,
             runtime_paths=_runtime_paths(),
             event_cache=_event_cache(),
+            conversation_cache=conversation_cache,
         )
 
     mock_start_during_restore.assert_not_called()
@@ -258,7 +270,13 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
         ) as mock_start,
         patch("mindroom.scheduling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
     ):
-        drained = await drain_deferred_overdue_tasks(client, config, _runtime_paths(), _event_cache())
+        drained = await drain_deferred_overdue_tasks(
+            client,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            conversation_cache,
+        )
 
     assert drained == 1
     assert [call.args[1] for call in mock_start.call_args_list] == ["task_overdue_1", "task_overdue_2"]
@@ -295,6 +313,7 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
+    conversation_cache = _conversation_cache()
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -303,6 +322,7 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
             event_cache=_event_cache(),
+            conversation_cache=conversation_cache,
         )
 
     assert restored == 1
@@ -339,6 +359,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
+    conversation_cache = _conversation_cache()
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -347,6 +368,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
             event_cache=_event_cache(),
+            conversation_cache=conversation_cache,
         )
 
     assert restored == 1
@@ -684,7 +706,15 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
         patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
     ):
-        await _run_once_task(client, "task_once_cancelled", workflow, config, _runtime_paths(), _event_cache())
+        await _run_once_task(
+            client,
+            "task_once_cancelled",
+            workflow,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            _conversation_cache(),
+        )
 
     execute_mock.assert_not_awaited()
 
@@ -718,7 +748,15 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
     ):
-        await _run_once_task(client, "task_once_updated", initial_workflow, config, _runtime_paths(), _event_cache())
+        await _run_once_task(
+            client,
+            "task_once_updated",
+            initial_workflow,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            _conversation_cache(),
+        )
 
     execute_mock.assert_awaited_once()
     executed_workflow = execute_mock.await_args.args[1]
@@ -749,7 +787,15 @@ async def test_run_once_task_marks_completed_after_success() -> None:
         ),
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
     ):
-        await _run_once_task(client, "task_once_completed", workflow, config, _runtime_paths(), _event_cache())
+        await _run_once_task(
+            client,
+            "task_once_completed",
+            workflow,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            _conversation_cache(),
+        )
 
     execute_mock.assert_awaited_once()
     client.room_put_state.assert_awaited_once()
@@ -785,7 +831,15 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
         ),
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=False)) as execute_mock,
     ):
-        await _run_once_task(client, "task_once_failed", workflow, config, _runtime_paths(), _event_cache())
+        await _run_once_task(
+            client,
+            "task_once_failed",
+            workflow,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            _conversation_cache(),
+        )
 
     execute_mock.assert_awaited_once()
     client.room_put_state.assert_awaited_once()
@@ -836,7 +890,7 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
             {},
             config,
             _runtime_paths(),
-            _event_cache(),
+            _conversation_cache(),
         )
 
     execute_mock.assert_awaited_once()
@@ -873,7 +927,15 @@ async def test_run_cron_task_keeps_pending_state_after_success() -> None:
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
         patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
     ):
-        await _run_cron_task(client, "task_cron_pending", workflow, {}, config, _runtime_paths(), _event_cache())
+        await _run_cron_task(
+            client,
+            "task_cron_pending",
+            workflow,
+            {},
+            config,
+            _runtime_paths(),
+            _conversation_cache(),
+        )
 
     execute_mock.assert_awaited_once()
     client.room_put_state.assert_not_awaited()
@@ -900,7 +962,15 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
     ):
-        await _run_cron_task(client, "task_cron_cancelled", workflow, {}, config, _runtime_paths(), _event_cache())
+        await _run_cron_task(
+            client,
+            "task_cron_cancelled",
+            workflow,
+            {},
+            config,
+            _runtime_paths(),
+            _conversation_cache(),
+        )
 
     execute_mock.assert_not_awaited()
 
@@ -1230,6 +1300,7 @@ async def test_save_edited_scheduled_task_preserves_created_at() -> None:
         config=MagicMock(),
         runtime_paths=_runtime_paths(),
         event_cache=_event_cache(),
+        conversation_cache=_conversation_cache(),
         existing_task=existing_task,
         restart_task=False,
     )
@@ -1276,6 +1347,7 @@ async def test_save_edited_scheduled_task_allows_persist_only_without_event_cach
         config=MagicMock(),
         runtime_paths=_runtime_paths(),
         event_cache=None,
+        conversation_cache=None,
         existing_task=existing_task,
         restart_task=False,
     )
@@ -1321,6 +1393,7 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change() -> None
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
             event_cache=_event_cache(),
+            conversation_cache=_conversation_cache(),
             existing_task=existing_task,
             restart_task=False,
         )

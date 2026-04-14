@@ -513,6 +513,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
     """Hook sends should include hook metadata and thread relations."""
     bot = _hook_bot(tmp_path)
     bot.client = AsyncMock()
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
 
     captured_content: dict[str, object] = {}
 
@@ -521,7 +522,6 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         return "$hook-event"
 
     with (
-        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
         patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
     ):
         event_id = await bot._hook_send_message(
@@ -539,6 +539,10 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
     assert isinstance(captured_content["m.relates_to"], dict)
     assert captured_content["m.relates_to"]["rel_type"] == "m.thread"
     assert captured_content["m.relates_to"]["event_id"] == "$thread"
+    bot._conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread",
+    )
 
 
 @pytest.mark.asyncio
@@ -553,8 +557,8 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
         captured_content.update(content)
         return "$hook-event"
 
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
     with (
-        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
         patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
     ):
         event_id = await bot._hook_send_message(
@@ -991,9 +995,9 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
         await ctx.send_message("!room:localhost", "router started")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
-        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
         patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
     ):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
@@ -1022,9 +1026,9 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
     orchestrator.agent_bots = {"router": bot}
     bot.orchestrator = orchestrator
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
-        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
         patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
     ):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)

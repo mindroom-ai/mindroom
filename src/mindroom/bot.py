@@ -783,6 +783,7 @@ class AgentBot:
             self.config,
             self.runtime_paths,
             self.event_cache,
+            self._conversation_cache,
         )
         if restored_tasks > 0:
             self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
@@ -1276,6 +1277,7 @@ class AgentBot:
                 self.config,
                 self.runtime_paths,
                 self.event_cache,
+                self._conversation_cache,
             )
             if drained_count > 0:
                 self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
@@ -1613,7 +1615,7 @@ class AgentBot:
             extra_content,
             trigger_dispatch=trigger_dispatch,
             sender_domain=self.matrix_id.domain,
-            event_cache=self.event_cache,
+            conversation_cache=self._conversation_cache,
         )
         if event_id:
             self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)

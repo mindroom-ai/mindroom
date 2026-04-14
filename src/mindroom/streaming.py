@@ -38,10 +38,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.conversation_cache import ConversationEventCache
     from mindroom.timing import DispatchPipelineTiming
-
-from mindroom.matrix.client import get_latest_thread_event_id_if_needed
 
 logger = get_logger(__name__)
 
@@ -532,7 +529,6 @@ async def send_streaming_response(
     runtime_paths: RuntimePaths,
     response_stream: AsyncIterator[_StreamInputChunk],
     *,
-    event_cache: ConversationEventCache,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
@@ -543,6 +539,7 @@ async def send_streaming_response(
     extra_content: dict[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text)."""
     resolved_target = target or MessageTarget.resolve(
@@ -551,18 +548,6 @@ async def send_streaming_response(
         reply_to_event_id=reply_to_event_id,
         room_mode=room_mode,
     )
-
-    if resolved_target.is_room_mode:
-        latest_thread_event_id = None
-    else:
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            client,
-            resolved_target.room_id,
-            resolved_target.resolved_thread_id,
-            resolved_target.reply_to_event_id,
-            existing_event_id,
-            event_cache=event_cache,
-        )
 
     sc = config.defaults.streaming
     streaming = streaming_cls(

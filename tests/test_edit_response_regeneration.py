@@ -43,6 +43,7 @@ from mindroom.turn_store import LoadedTurnRecord
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
+    install_runtime_cache_support,
     patch_response_runner_module,
     replace_edit_regenerator_deps,
     replace_turn_controller_deps,
@@ -3222,6 +3223,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
+    install_runtime_cache_support(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner", "_turn_policy")

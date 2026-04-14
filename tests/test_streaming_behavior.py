@@ -38,7 +38,7 @@ from mindroom.streaming import (
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    make_event_cache_mock,
+    install_runtime_cache_support,
     patch_response_runner_module,
     replace_response_runner_deps,
     runtime_paths_for,
@@ -146,6 +146,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_runtime_cache_support(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -164,6 +165,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_runtime_cache_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -290,6 +292,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_runtime_cache_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -763,7 +766,6 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=empty_stream(),
-                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 room_mode=True,
@@ -818,6 +820,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_runtime_cache_support(bot)
         bot.client = MagicMock(rooms={})
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         replace_response_runner_deps(
@@ -856,7 +859,6 @@ class TestStreamingBehavior:
             return "$stream_1"
 
         with (
-            patch("mindroom.streaming.get_latest_thread_event_id_if_needed", new=no_latest_thread_event),
             patch("mindroom.streaming.send_message", new=record_send),
             patch("mindroom.streaming.edit_message", new=record_edit),
             patch_response_runner_module(
@@ -1000,7 +1002,6 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
-                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1042,7 +1043,6 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
-                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1086,7 +1086,6 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
-                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1137,7 +1136,6 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
-                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1194,20 +1192,18 @@ class TestStreamingConfig:
                 super().__init__(**kwargs)
                 captured.append(self)
 
-        with patch("mindroom.streaming.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)):
-            event_id, text = await send_streaming_response(
-                client=mock_client,
-                room_id="!r:localhost",
-                reply_to_event_id="$orig",
-                thread_id=None,
-                sender_domain="localhost",
-                config=config,
-                runtime_paths=runtime_paths,
-                response_stream=empty_stream(),
-                event_cache=make_event_cache_mock(),
-                streaming_cls=CapturingStreamingResponse,
-                room_mode=True,
-            )
+        event_id, text = await send_streaming_response(
+            client=mock_client,
+            room_id="!r:localhost",
+            reply_to_event_id="$orig",
+            thread_id=None,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths,
+            response_stream=empty_stream(),
+            streaming_cls=CapturingStreamingResponse,
+            room_mode=True,
+        )
 
         assert event_id == "$cfg_test"
         assert text == "hello"

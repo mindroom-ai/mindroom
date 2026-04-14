@@ -14,6 +14,12 @@ from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow,
 from tests.conftest import make_event_cache_mock
 
 
+def _conversation_cache() -> AsyncMock:
+    access = AsyncMock()
+    access.get_latest_thread_event_id_if_needed.return_value = None
+    return access
+
+
 def _make_state_event(state_key: str, workflow: ScheduledWorkflow, status: str = "pending", idx: int = 1) -> dict:
     """Build a Matrix state event dict for a scheduled task."""
     return {
@@ -77,6 +83,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
         config,
         resolve_runtime_paths(process_env={}),
         make_event_cache_mock(),
+        _conversation_cache(),
     )
     # recent past once-task is restored; invalid cron and cancelled cron are skipped
     assert restored == 1
@@ -109,6 +116,7 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
         config,
         resolve_runtime_paths(process_env={}),
         make_event_cache_mock(),
+        _conversation_cache(),
     )
     assert restored == 0
 
@@ -149,6 +157,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) 
         config,
         resolve_runtime_paths(process_env={}),
         make_event_cache_mock(),
+        _conversation_cache(),
     )
     assert restored == 1
     start_mock.assert_called_once()
@@ -195,6 +204,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
         config,
         resolve_runtime_paths(process_env={}),
         make_event_cache_mock(),
+        _conversation_cache(),
     )
 
     assert restored == 0

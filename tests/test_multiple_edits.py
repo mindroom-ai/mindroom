@@ -14,7 +14,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,6 +66,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test:localhost"
+    install_runtime_cache_support(bot)
 
     # Mock room send to return a response event ID
     mock_send_response = MagicMock()

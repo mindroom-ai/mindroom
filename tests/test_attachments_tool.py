@@ -26,9 +26,19 @@ if TYPE_CHECKING:
 
 
 def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> ToolRuntimeContext:
+    async def _latest_thread_event_id(
+        _room_id: str,
+        thread_id: str | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> str | None:
+        return thread_id
+
     client = MagicMock()
     client.rooms = {"!room:localhost": MagicMock()}
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    conversation_cache = AsyncMock()
+    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     return ToolRuntimeContext(
         agent_name="openclaw",
         room_id="!room:localhost",
@@ -39,6 +49,7 @@ def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> To
         config=MagicMock(),
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=conversation_cache,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )
@@ -179,12 +190,9 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     event_cache = MagicMock()
     context = _tool_context(tmp_path, attachment_ids=("att_one", "att_two"))
     context = dataclasses.replace(context, event_cache=event_cache)
+    context.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest:localhost")
 
     with (
-        patch(
-            "mindroom.custom_tools.attachments.get_latest_thread_event_id_if_needed",
-            new=AsyncMock(return_value="$latest:localhost"),
-        ) as mock_latest,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
@@ -199,11 +207,9 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     assert send_error is None
     assert result is not None
     assert result.attachment_event_ids == ["$file_evt_1", "$file_evt_2"]
-    mock_latest.assert_awaited_once_with(
-        context.client,
+    context.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         context.room_id,
         context.thread_id,
-        event_cache=event_cache,
     )
     first_call = mock_send.await_args_list[0]
     second_call = mock_send.await_args_list[1]

@@ -16,7 +16,6 @@ from mindroom.streaming import send_streaming_response
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
-    make_event_cache_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -120,7 +119,6 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 response_stream=response_stream(),
-                event_cache=make_event_cache_mock(),
                 existing_event_id=existing_event_id,
                 adopt_existing_placeholder=existing_event_is_placeholder,
                 target=target,

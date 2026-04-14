@@ -44,9 +44,14 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
 
 
-def _conversation_cache(thread_history: list[object] | None = None) -> MagicMock:
+def _conversation_cache(
+    thread_history: list[object] | None = None,
+    *,
+    latest_thread_event_id: str | None = None,
+) -> MagicMock:
     access = MagicMock()
     access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
+    access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     return access
 
 
@@ -411,12 +416,8 @@ class TestExecuteScheduledWorkflow:
             created_by="@user:server",
         )
 
-        event_cache = _event_cache()
+        conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
         with (
-            patch(
-                "mindroom.scheduling.get_latest_thread_event_id_if_needed",
-                new=AsyncMock(return_value="$latest456"),
-            ) as mock_latest_thread,
             patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event123")) as mock_send,
         ):
             await _execute_scheduled_workflow(
@@ -424,14 +425,12 @@ class TestExecuteScheduledWorkflow:
                 workflow,
                 config,
                 runtime_paths_for(config),
-                event_cache,
+                conversation_cache,
             )
 
-        mock_latest_thread.assert_awaited_once_with(
-            client,
+        conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
             "!room:server",
             "$thread123",
-            event_cache=event_cache,
         )
         mock_send.assert_awaited_once()
         call_args = mock_send.await_args
@@ -468,15 +467,18 @@ class TestExecuteScheduledWorkflow:
         )
 
         with (
-            patch(
-                "mindroom.scheduling.get_latest_thread_event_id_if_needed",
-                new=AsyncMock(),
-            ) as mock_latest_thread,
             patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event456")) as mock_send,
         ):
-            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config), _event_cache())
+            conversation_cache = _conversation_cache()
+            await _execute_scheduled_workflow(
+                client,
+                workflow,
+                config,
+                runtime_paths_for(config),
+                conversation_cache,
+            )
 
-        mock_latest_thread.assert_not_awaited()
+        conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
         mock_send.assert_awaited_once()
         content = mock_send.await_args.args[2]
         assert "⏰ [Automated Task]" not in content["body"]
@@ -498,7 +500,13 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event789")) as mock_send:
-            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config), _event_cache())
+            await _execute_scheduled_workflow(
+                client,
+                workflow,
+                config,
+                runtime_paths_for(config),
+                _conversation_cache(latest_thread_event_id="$thread123"),
+            )
             mock_send.assert_awaited_once()
 
             # Check the message content
@@ -526,7 +534,13 @@ class TestExecuteScheduledWorkflow:
 
         with patch("mindroom.scheduling.send_message", new=mock_send):
             # Should not raise, but log error
-            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config), _event_cache())
+            await _execute_scheduled_workflow(
+                client,
+                workflow,
+                config,
+                runtime_paths_for(config),
+                _conversation_cache(latest_thread_event_id="$thread123"),
+            )
 
             # Should have tried to send original and error message
             assert mock_send.call_count == 2
@@ -550,14 +564,17 @@ class TestExecuteScheduledWorkflow:
         )
 
         with (
-            patch(
-                "mindroom.scheduling.get_latest_thread_event_id_if_needed",
-                new=AsyncMock(return_value="$latest123"),
-            ),
             patch("mindroom.scheduling.send_message", new=AsyncMock(side_effect=[None, "$error456"])) as mock_send,
             patch("mindroom.scheduling.logger.info") as mock_info,
         ):
-            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config), _event_cache())
+            conversation_cache = _conversation_cache(latest_thread_event_id="$latest123")
+            await _execute_scheduled_workflow(
+                client,
+                workflow,
+                config,
+                runtime_paths_for(config),
+                conversation_cache,
+            )
 
         assert mock_send.await_count == 2
         mock_info.assert_not_called()
@@ -577,7 +594,13 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
-            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config), _event_cache())
+            await _execute_scheduled_workflow(
+                client,
+                workflow,
+                config,
+                runtime_paths_for(config),
+                _conversation_cache(),
+            )
             mock_send.assert_not_called()
 
 

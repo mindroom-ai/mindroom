@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `mindroom.matrix.conversation_cache` the required read-through owner of Matrix conversation data, enforce the thread-cache boundary uniformly, and eliminate stale-read and duplicate-summary regressions.
+**Goal:** Make `mindroom.matrix.conversation_cache` the required read-through owner of Matrix conversation data, enforce the thread-cache boundary uniformly for both reads and outbound sends, and eliminate stale-read, repair-obligation-loss, and duplicate-summary regressions.
 
-**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, and repair policy. This enforcement pass finishes that architecture at the thread-cache seam by moving generation, repair-required state, promoted lookup repairs, and the read/write lock into one thread-scoped freshness state, using non-reused generation tokens, bounding disposable in-memory freshness metadata, and turning room-level lookup failures into thread-specific repairs only when a read proves they intersect that thread.
+**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, repair policy, and outbound thread-tail lookup. This enforcement pass finishes that architecture by keeping correctness obligations durable in SQLite event-cache tables, reducing in-memory thread freshness state to sparse process-local generation and locking, and removing high-level imports of raw `matrix.client` thread-fallback helpers where `conversation_cache` is already available.
 
 **Tech Stack:** Python, asyncio, aiosqlite, matrix-nio, pytest, AsyncMock, existing Matrix cache and bot runtime abstractions.
 
@@ -16,8 +16,8 @@
 
 - Modify: `src/mindroom/matrix/conversation_cache.py`
 - Modify: `src/mindroom/matrix/client.py`
-- Modify: `src/mindroom/matrix/thread_history_result.py`
 - Modify: `src/mindroom/matrix/thread_cache.py`
+- Modify: `src/mindroom/matrix/_event_cache.py`
 
 ### Runtime ownership and injection
 
@@ -30,15 +30,25 @@
 ### Callers that must consume the public boundary only
 
 - Modify: `src/mindroom/api/schedules.py`
+- Modify: `src/mindroom/custom_tools/attachments.py`
+- Modify: `src/mindroom/custom_tools/matrix_api.py`
+- Modify: `src/mindroom/custom_tools/matrix_message.py`
+- Modify: `src/mindroom/custom_tools/subagents.py`
+- Modify: `src/mindroom/delivery_gateway.py`
+- Modify: `src/mindroom/hooks/sender.py`
 - Modify: `src/mindroom/scheduling.py`
 - Modify: `src/mindroom/commands/handler.py`
 - Modify: `src/mindroom/post_response_effects.py`
 - Modify: `src/mindroom/response_runner.py`
 - Modify: `src/mindroom/thread_summary.py`
+- Modify: `src/mindroom/streaming.py`
 
 ### Tests
 
 - Modify: `tests/test_threading_error.py`
+- Modify: `tests/test_hook_sender.py`
+- Modify: `tests/test_matrix_api_tool.py`
+- Modify: `tests/test_matrix_message_tool.py`
 - Modify: `tests/test_multi_agent_bot.py`
 - Modify: `tests/test_scheduling.py`
 - Modify: `tests/test_matrix_sync_tokens.py`

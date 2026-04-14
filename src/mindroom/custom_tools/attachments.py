@@ -19,7 +19,7 @@ from mindroom.attachments import (
 from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
-from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_file_message
+from mindroom.matrix.client import send_file_message
 from mindroom.tool_system.runtime_context import (
     append_tool_runtime_attachment_id,
     attachment_id_available_in_tool_runtime_context,
@@ -204,11 +204,10 @@ async def _send_attachment_paths(
 ) -> tuple[list[str], str | None]:
     """Upload local attachment paths to Matrix, preserving order."""
     attachment_event_ids: list[str] = []
-    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-        context.client,
+    assert context.conversation_cache is not None
+    latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
         room_id,
         thread_id,
-        event_cache=context.event_cache,
     )
     for attachment_path in attachment_paths:
         attachment_event_id = await send_file_message(

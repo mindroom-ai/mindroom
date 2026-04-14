@@ -32,10 +32,7 @@ from mindroom.hooks import (
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
 from mindroom.logging_config import bound_log_context, get_logger
-from mindroom.matrix.client import (
-    get_latest_thread_event_id_if_needed,
-    send_message,
-)
+from mindroom.matrix.client import send_message
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content
@@ -289,6 +286,7 @@ def _start_scheduled_task(
     config: Config,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
 ) -> bool:
     """Start the asyncio task for a scheduled workflow and track it globally."""
     existing_task = _running_tasks.get(task_id)
@@ -301,11 +299,19 @@ def _start_scheduled_task(
 
     if workflow.schedule_type == "once":
         task = asyncio.create_task(
-            _run_once_task(client, task_id, workflow, config, runtime_paths, event_cache),
+            _run_once_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache),
         )
     else:
         task = asyncio.create_task(
-            _run_cron_task(client, task_id, workflow, _running_tasks, config, runtime_paths, event_cache),
+            _run_cron_task(
+                client,
+                task_id,
+                workflow,
+                _running_tasks,
+                config,
+                runtime_paths,
+                conversation_cache,
+            ),
         )
     _running_tasks[task_id] = task
     return True
@@ -332,6 +338,7 @@ async def drain_deferred_overdue_tasks(
     config: Config,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
 ) -> int:
     """Start queued overdue one-time tasks after Matrix sync is ready."""
     drained_count = 0
@@ -348,6 +355,7 @@ async def drain_deferred_overdue_tasks(
                 config,
                 runtime_paths,
                 event_cache,
+                conversation_cache,
             ):
                 drained_count += 1
         except Exception:
@@ -516,13 +524,14 @@ async def _save_scheduled_task(
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
     event_cache: ConversationEventCache | None = None,
+    conversation_cache: ConversationCacheProtocol | None = None,
     status: str = "pending",
     created_at: datetime | str | None = None,
     restart_task: bool = True,
 ) -> None:
     """Persist scheduled task state and optionally restart its in-memory task runner."""
     if restart_task:
-        if config is None or runtime_paths is None or event_cache is None:
+        if config is None or runtime_paths is None or event_cache is None or conversation_cache is None:
             msg = "Scheduled task runtime context is required when restart_task=True"
             raise ValueError(msg)
         _cancel_running_task(task_id)
@@ -551,7 +560,8 @@ async def _save_scheduled_task(
         assert config is not None
         assert runtime_paths is not None
         assert event_cache is not None
-        _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache)
+        assert conversation_cache is not None
+        _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache)
 
 
 async def save_edited_scheduled_task(
@@ -562,6 +572,7 @@ async def save_edited_scheduled_task(
     config: Config,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None,
+    conversation_cache: ConversationCacheProtocol | None,
     existing_task: ScheduledTaskRecord,
     restart_task: bool = False,
 ) -> ScheduledTaskRecord:
@@ -581,6 +592,7 @@ async def save_edited_scheduled_task(
         config=config,
         runtime_paths=runtime_paths,
         event_cache=event_cache,
+        conversation_cache=conversation_cache,
         status="pending",
         created_at=existing_task.created_at,
         restart_task=restart_task,
@@ -687,13 +699,12 @@ Examples of event/condition phrasing to include in the message (do not include t
 
 
 async def _build_workflow_message_content(
-    client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     target: MessageTarget,
     config: Config,
     runtime_paths: RuntimePaths,
     message_text: str,
-    event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
 ) -> dict[str, typing.Any]:
     """Build Matrix message content for a scheduled workflow."""
     if workflow.new_thread:
@@ -710,11 +721,9 @@ async def _build_workflow_message_content(
     assert workflow.room_id is not None  # Caller checks this
     latest_thread_event_id = None
     if target.resolved_thread_id is not None:
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            client,
+        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
             workflow.room_id,
             target.resolved_thread_id,
-            event_cache=event_cache,
         )
     return format_message_with_mentions(
         config,
@@ -727,21 +736,18 @@ async def _build_workflow_message_content(
 
 
 async def _build_scheduled_failure_content(
-    client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     target: MessageTarget,
     error_message: str,
-    event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
 ) -> dict[str, typing.Any]:
     """Build a failure message that follows the scheduled workflow target."""
     latest_thread_event_id = None
     if target.resolved_thread_id is not None:
         assert workflow.room_id is not None
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            client,
+        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
             workflow.room_id,
             target.resolved_thread_id,
-            event_cache=event_cache,
         )
     return build_message_content(
         body=error_message,
@@ -755,7 +761,7 @@ async def _execute_scheduled_workflow(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
     task_id: str = "scheduled-task",
 ) -> bool:
     """Execute a scheduled workflow by posting its message to the thread."""
@@ -783,7 +789,7 @@ async def _execute_scheduled_workflow(
                         client,
                         config,
                         runtime_paths,
-                        event_cache=event_cache,
+                        conversation_cache=conversation_cache,
                     ),
                     room_state_querier=build_hook_room_state_querier(client),
                     room_state_putter=build_hook_room_state_putter(client),
@@ -801,13 +807,12 @@ async def _execute_scheduled_workflow(
                 message_text = context.message_text
 
             content = await _build_workflow_message_content(
-                client,
                 workflow,
                 target,
                 config,
                 runtime_paths,
                 message_text,
-                event_cache,
+                conversation_cache,
             )
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
@@ -827,11 +832,10 @@ async def _execute_scheduled_workflow(
             if workflow.room_id:
                 error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
                 error_content = await _build_scheduled_failure_content(
-                    client,
                     workflow,
                     target,
                     error_message,
-                    event_cache,
+                    conversation_cache,
                 )
                 try:
                     await send_message(client, workflow.room_id, error_content)
@@ -849,7 +853,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     running_tasks: dict[str, asyncio.Task],
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
 ) -> None:
     """Run a recurring task based on cron schedule."""
     if not workflow.room_id:
@@ -930,7 +934,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     workflow,
                     config,
                     runtime_paths,
-                    event_cache,
+                    conversation_cache,
                     task_id=task_id,
                 )
                 if task_id not in running_tasks:
@@ -946,11 +950,10 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
             if workflow.room_id:
                 error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
                 error_content = await _build_scheduled_failure_content(
-                    client,
                     workflow,
                     current_target,
                     error_message,
-                    event_cache,
+                    conversation_cache,
                 )
                 await send_message(client, workflow.room_id, error_content)
     finally:
@@ -964,6 +967,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
 ) -> None:
     """Run a one-time scheduled task."""
     if not workflow.room_id:
@@ -1018,7 +1022,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 latest_workflow,
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=event_cache,
+                conversation_cache=conversation_cache,
                 task_id=task_id,
             )
             final_status = "completed" if execution_succeeded else "failed"
@@ -1054,11 +1058,10 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             if workflow.room_id:
                 error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
                 error_content = await _build_scheduled_failure_content(
-                    client,
                     workflow,
                     current_target,
                     error_message,
-                    event_cache,
+                    conversation_cache,
                 )
                 await send_message(client, workflow.room_id, error_content)
             if latest_pending_task is not None:
@@ -1284,6 +1287,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 event_cache=event_cache,
                 existing_task=existing_task,
                 restart_task=restart_task,
+                conversation_cache=conversation_cache,
             )
         else:
             await _save_scheduled_task(
@@ -1294,6 +1298,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 config=config,
                 runtime_paths=runtime_paths,
                 event_cache=event_cache,
+                conversation_cache=conversation_cache,
                 status="pending",
                 created_at=datetime.now(UTC).isoformat(),
                 restart_task=restart_task,
@@ -1536,6 +1541,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
     config: Config,
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
 ) -> int:
     """Restore scheduled tasks from Matrix state after bot restart.
 
@@ -1586,6 +1592,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                                 config=config,
                                 runtime_paths=runtime_paths,
                                 event_cache=event_cache,
+                                conversation_cache=conversation_cache,
                                 status="failed",
                                 created_at=content.get("created_at"),
                                 restart_task=False,
@@ -1610,7 +1617,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                 continue
 
             # Start the appropriate task
-            if _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache):
+            if _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache):
                 restored_count += 1
 
         except (KeyError, ValueError, json.JSONDecodeError):

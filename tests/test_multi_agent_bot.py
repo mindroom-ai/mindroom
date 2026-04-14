@@ -1106,6 +1106,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -1124,6 +1125,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -1145,6 +1147,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -1158,7 +1161,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
-    @patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed")
+    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
@@ -2204,7 +2207,7 @@ class TestAgentBot:
 
         with (
             patch(
-                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
             patch("mindroom.delivery_gateway.send_message", new=AsyncMock(side_effect=record_send)),
@@ -3349,7 +3352,7 @@ class TestAgentBot:
                 side_effect=fake_store_conversation_memory,
             ),
             patch(
-                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
             patch("mindroom.delivery_gateway.send_message", new=AsyncMock(side_effect=record_send)),
@@ -5372,6 +5375,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
@@ -5455,6 +5459,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
@@ -5514,6 +5519,7 @@ class TestAgentBot:
         """After router routes an image, the selected agent should resolve it via attachments."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -6981,6 +6987,7 @@ class TestAgentBot:
         """Human follow-ups in an actively responding thread must bypass IN_FLIGHT coalescing."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7705,7 +7712,7 @@ class TestAgentBot:
     @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot")
     @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history")
     @patch("mindroom.response_runner.should_use_streaming")
-    @patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed")
+    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
         mock_get_latest_thread: AsyncMock,
@@ -7748,6 +7755,7 @@ class TestAgentBot:
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
         )
+        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         # Mock orchestrator with agent_bots
@@ -7962,6 +7970,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         # Mark an event as already responded

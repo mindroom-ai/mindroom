@@ -55,7 +55,17 @@ def _make_context(
     thread_id: str | None = "$ctx-thread:localhost",
     requester_id: str = "@alice:localhost",
 ) -> ToolRuntimeContext:
+    async def _latest_thread_event_id(
+        _room_id: str,
+        thread_id: str | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> str | None:
+        return thread_id
+
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    conversation_cache = AsyncMock()
+    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     return ToolRuntimeContext(
         agent_name="openclaw",
         room_id=room_id,
@@ -66,6 +76,7 @@ def _make_context(
         config=config or _make_config(),
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=conversation_cache,
         room=None,
         reply_to_event_id=None,
         storage_path=tmp_path,
@@ -220,11 +231,10 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
 ) -> None:
     """Threaded subagent sends should include the latest thread event for fallback replies."""
     send_mock = AsyncMock(return_value="$evt")
-    latest_mock = AsyncMock(return_value="$latest:localhost")
     monkeypatch.setattr(subagents_module, "send_message", send_mock)
-    monkeypatch.setattr(subagents_module, "get_latest_thread_event_id_if_needed", latest_mock)
     event_cache = MagicMock()
     ctx = replace(_make_context(tmp_path, requester_id="@user:localhost"), event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest:localhost")
 
     await subagents_module._send_matrix_text(
         ctx,
@@ -234,7 +244,10 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
         original_sender=ctx.requester_id,
     )
 
-    latest_mock.assert_awaited_once_with(ctx.client, ctx.room_id, ctx.thread_id, event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        ctx.room_id,
+        ctx.thread_id,
+    )
     content = send_mock.await_args.args[2]
     assert content["m.relates_to"]["event_id"] == ctx.thread_id
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest:localhost"

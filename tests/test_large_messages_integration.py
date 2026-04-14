@@ -21,7 +21,6 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
-from tests.conftest import make_event_cache_mock
 
 
 class MockClient:
@@ -536,7 +535,6 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
-        event_cache=make_event_cache_mock(),
         streaming_cls=ReplacementStreamingResponse,
     )
 
@@ -568,7 +566,6 @@ async def test_streaming_with_extra_content_metadata() -> None:
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
-        event_cache=make_event_cache_mock(),
         streaming_cls=ReplacementStreamingResponse,
         extra_content=extra_content,
     )
@@ -603,7 +600,6 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
-        event_cache=make_event_cache_mock(),
         streaming_cls=ReplacementStreamingResponse,
     )
 
@@ -634,7 +630,6 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
-        event_cache=make_event_cache_mock(),
         streaming_cls=ReplacementStreamingResponse,
     )
 
@@ -664,7 +659,6 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
-        event_cache=make_event_cache_mock(),
         show_tool_calls=False,
     )
 

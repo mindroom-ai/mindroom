@@ -191,19 +191,19 @@ class TestAIErrorDisplay:
 
             mock_stream.return_value = error_stream()
 
-            # Mock send_streaming_response to return the accumulated text
-            with patch("mindroom.delivery_gateway.send_streaming_response") as mock_send_streaming:
-                _build_response_runner(bot)
-                error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
-                mock_send_streaming.return_value = ("$msg_id", error_text)
-
+            _build_response_runner(bot)
+            error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
+            with patch(
+                "mindroom.delivery_gateway.DeliveryGateway.deliver_stream",
+                new=AsyncMock(return_value=("$msg_id", error_text)),
+            ) as mock_deliver_stream:
                 # Call the method with an existing_event_id
                 await bot._response_runner.process_and_respond_streaming(
                     _response_request(existing_event_id="$thinking_msg"),
                 )
 
-                # Verify send_streaming_response was called with the error stream
-                mock_send_streaming.assert_called_once()
+                # Verify the delivery gateway was asked to stream the response.
+                mock_deliver_stream.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:

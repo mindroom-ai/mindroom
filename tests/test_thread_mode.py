@@ -443,7 +443,7 @@ class TestRouterHandoffThreadMode:
             patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="assistant")),
             patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
             patch(
-                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
@@ -481,7 +481,7 @@ class TestRouterHandoffThreadMode:
             patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="coder")),
             patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
             patch(
-                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new_callable=AsyncMock,
                 return_value="$latest",
             ) as mock_get_latest,
@@ -923,7 +923,6 @@ class TestSendStreamingResponseRoomMode:
 
         with (
             patch("mindroom.streaming.send_message", side_effect=mock_send),
-            patch("mindroom.streaming.get_latest_thread_event_id_if_needed") as mock_get_latest,
         ):
             await send_streaming_response(
                 client,
@@ -934,11 +933,9 @@ class TestSendStreamingResponseRoomMode:
                 config,
                 runtime_paths_for(config),
                 empty_stream(),
-                event_cache=make_event_cache_mock(),
                 room_mode=True,
             )
 
-        mock_get_latest.assert_not_called()
         assert "m.relates_to" not in captured
 
 
@@ -1225,8 +1222,7 @@ class TestExtractedModuleLoggerRebinding:
             tmp_path,
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = MagicMock()
-        bot.event_cache.get_thread_events = AsyncMock(return_value=None)
+        bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
 
         client = MagicMock()
@@ -1266,8 +1262,7 @@ class TestExtractedModuleLoggerRebinding:
             tmp_path,
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = MagicMock()
-        bot.event_cache.get_thread_events = AsyncMock(return_value=None)
+        bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
 
         preview_snapshot = ThreadHistoryResult([], is_full_history=False)

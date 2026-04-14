@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.tools import Toolkit
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
+from mindroom.matrix.client import send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import (
@@ -257,11 +257,10 @@ async def _send_matrix_text(
     """Send a formatted text message to a Matrix room, optionally in a thread."""
     latest_thread_event_id = None
     if thread_id is not None:
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            context.client,
+        assert context.conversation_cache is not None
+        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
-            event_cache=context.event_cache,
         )
     content = format_message_with_mentions(
         context.config,

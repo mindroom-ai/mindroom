@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 _RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
-_EVENT_CACHE_SCHEMA_VERSION = 1
+_EVENT_CACHE_SCHEMA_VERSION = 2
 logger = get_logger(__name__)
 
 
@@ -82,6 +82,31 @@ class ConversationEventCache(Protocol):
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""
+
+    async def mark_pending_lookup_repair(self, room_id: str, event_id: str) -> None:
+        """Persist one unresolved event-to-thread repair obligation."""
+
+    async def matching_pending_lookup_repairs(self, room_id: str, thread_id: str) -> frozenset[str]:
+        """Return unresolved repair event IDs whose durable thread mapping now matches one thread."""
+
+    async def pending_lookup_repairs_for_event_ids(
+        self,
+        room_id: str,
+        event_ids: frozenset[str],
+    ) -> frozenset[str]:
+        """Return unresolved repair event IDs that intersect one candidate event-id set."""
+
+    async def consume_pending_lookup_repairs(self, room_id: str, event_ids: frozenset[str]) -> None:
+        """Clear unresolved repair obligations that have been promoted to one thread."""
+
+    async def thread_repair_required(self, room_id: str, thread_id: str) -> bool:
+        """Return whether one thread still requires an authoritative repair."""
+
+    async def mark_thread_repair_required(self, room_id: str, thread_id: str) -> None:
+        """Persist one thread-level repair requirement."""
+
+    async def clear_thread_repair_required(self, room_id: str, thread_id: str) -> None:
+        """Clear one thread-level repair requirement after a durable refill."""
 
     async def redact_event(
         self,
@@ -232,9 +257,45 @@ class _EventCache:
                 ON event_edits(room_id, original_event_id, origin_server_ts DESC, edit_event_id DESC)
                 """,
             )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_threads (
+                    room_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    PRIMARY KEY (room_id, event_id)
+                )
+                """,
+            )
+            await self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_event_threads_room_thread
+                ON event_threads(room_id, thread_id, event_id)
+                """,
+            )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_lookup_repairs (
+                    room_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (room_id, event_id)
+                )
+                """,
+            )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_repairs (
+                    room_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    PRIMARY KEY (room_id, thread_id)
+                )
+                """,
+            )
             schema_version = await self._schema_version()
             if schema_version < _EVENT_CACHE_SCHEMA_VERSION:
                 await self._backfill_event_edits()
+                await self._backfill_event_threads()
                 await self._db.execute(f"PRAGMA user_version = {_EVENT_CACHE_SCHEMA_VERSION}")
             await self._db.commit()
 
@@ -361,6 +422,19 @@ class _EventCache:
                         """,
                         edit_rows,
                     )
+                thread_rows = [
+                    row
+                    for row in (_event_thread_row(room_id, event_data) for _event_id, event_data in room_events)
+                    if row is not None
+                ]
+                if thread_rows:
+                    await db.executemany(
+                        """
+                        INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
+                        VALUES (?, ?, ?)
+                        """,
+                        thread_rows,
+                    )
                 await db.commit()
 
     async def store_events(self, room_id: str, thread_id: str, events: list[dict[str, Any]]) -> None:
@@ -421,6 +495,20 @@ class _EventCache:
                     """,
                     edit_rows,
                 )
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (
+                        room_id,
+                        event_id,
+                        thread_id,
+                    )
+                    for event_id, _origin_server_ts, _event_json in serialized_events
+                ],
+            )
             await db.commit()
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
@@ -529,6 +617,17 @@ class _EventCache:
                     """,
                     edit_row,
                 )
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
+            VALUES (?, ?, ?)
+            """,
+            (
+                room_id,
+                event_id,
+                thread_id,
+            ),
+        )
         await db.commit()
         return True
 
@@ -562,7 +661,7 @@ class _EventCache:
             cursor = await db.execute(
                 """
                 SELECT thread_id
-                FROM thread_events
+                FROM event_threads
                 WHERE room_id = ? AND event_id = ?
                 """,
                 (room_id, event_id),
@@ -570,6 +669,112 @@ class _EventCache:
             row = await cursor.fetchone()
             await cursor.close()
             return None if row is None else str(row[0])
+
+    async def mark_pending_lookup_repair(self, room_id: str, event_id: str) -> None:
+        """Persist one unresolved event-to-thread repair obligation."""
+        async with self._acquire_db_operation(room_id, operation="mark_pending_lookup_repair") as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO pending_lookup_repairs(room_id, event_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (room_id, event_id, time.time()),
+            )
+            await db.commit()
+
+    async def matching_pending_lookup_repairs(self, room_id: str, thread_id: str) -> frozenset[str]:
+        """Return unresolved repair event IDs that now map durably to one thread."""
+        async with self._acquire_db_operation(room_id, operation="matching_pending_lookup_repairs") as db:
+            cursor = await db.execute(
+                """
+                SELECT pending_lookup_repairs.event_id
+                FROM pending_lookup_repairs
+                JOIN event_threads
+                  ON event_threads.room_id = pending_lookup_repairs.room_id
+                 AND event_threads.event_id = pending_lookup_repairs.event_id
+                WHERE pending_lookup_repairs.room_id = ? AND event_threads.thread_id = ?
+                """,
+                (room_id, thread_id),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            return frozenset(str(row[0]) for row in rows)
+
+    async def pending_lookup_repairs_for_event_ids(
+        self,
+        room_id: str,
+        event_ids: frozenset[str],
+    ) -> frozenset[str]:
+        """Return unresolved repair event IDs that intersect one candidate event-id set."""
+        if not event_ids:
+            return frozenset()
+        requested_event_ids = set(event_ids)
+        async with self._acquire_db_operation(room_id, operation="pending_lookup_repairs_for_event_ids") as db:
+            cursor = await db.execute(
+                """
+                SELECT event_id
+                FROM pending_lookup_repairs
+                WHERE room_id = ?
+                """,
+                (room_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            return frozenset(str(row[0]) for row in rows if str(row[0]) in requested_event_ids)
+
+    async def consume_pending_lookup_repairs(self, room_id: str, event_ids: frozenset[str]) -> None:
+        """Clear unresolved repair obligations that have been promoted to one thread."""
+        if not event_ids:
+            return
+        async with self._acquire_db_operation(room_id, operation="consume_pending_lookup_repairs") as db:
+            await db.executemany(
+                """
+                DELETE FROM pending_lookup_repairs
+                WHERE room_id = ? AND event_id = ?
+                """,
+                [(room_id, event_id) for event_id in event_ids],
+            )
+            await db.commit()
+
+    async def thread_repair_required(self, room_id: str, thread_id: str) -> bool:
+        """Return whether one thread still requires an authoritative repair."""
+        async with self._acquire_db_operation(room_id, operation="thread_repair_required") as db:
+            cursor = await db.execute(
+                """
+                SELECT 1
+                FROM thread_repairs
+                WHERE room_id = ? AND thread_id = ?
+                LIMIT 1
+                """,
+                (room_id, thread_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            return row is not None
+
+    async def mark_thread_repair_required(self, room_id: str, thread_id: str) -> None:
+        """Persist one thread-level repair requirement."""
+        async with self._acquire_db_operation(room_id, operation="mark_thread_repair_required") as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO thread_repairs(room_id, thread_id)
+                VALUES (?, ?)
+                """,
+                (room_id, thread_id),
+            )
+            await db.commit()
+
+    async def clear_thread_repair_required(self, room_id: str, thread_id: str) -> None:
+        """Clear one thread-level repair requirement after a durable refill."""
+        async with self._acquire_db_operation(room_id, operation="clear_thread_repair_required") as db:
+            await db.execute(
+                """
+                DELETE FROM thread_repairs
+                WHERE room_id = ? AND thread_id = ?
+                """,
+                (room_id, thread_id),
+            )
+            await db.commit()
 
     async def redact_event(
         self,
@@ -632,6 +837,50 @@ class _EventCache:
             edit_rows,
         )
 
+    async def _backfill_event_threads(self) -> None:
+        """Populate the durable event-to-thread index from cached thread rows and events."""
+        db = self._require_db()
+        cursor = await db.execute(
+            """
+            SELECT room_id, thread_id, event_id
+            FROM thread_events
+            """,
+        )
+        thread_rows = [
+            (str(room_id), str(event_id), str(thread_id)) for room_id, thread_id, event_id in await cursor.fetchall()
+        ]
+        await cursor.close()
+        if thread_rows:
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
+                VALUES (?, ?, ?)
+                """,
+                thread_rows,
+            )
+        cursor = await db.execute(
+            """
+            SELECT room_id, event_json
+            FROM events
+            """,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        event_rows = [
+            row
+            for room_id, event_json in rows
+            for row in [_event_thread_row(str(room_id), json.loads(str(event_json)))]
+            if row is not None
+        ]
+        if event_rows:
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
+                VALUES (?, ?, ?)
+                """,
+                event_rows,
+            )
+
 
 def _event_id(event: dict[str, Any]) -> str:
     event_id = event.get("event_id")
@@ -639,6 +888,20 @@ def _event_id(event: dict[str, Any]) -> str:
         return event_id
     msg = "Cached Matrix event is missing event_id"
     raise ValueError(msg)
+
+
+def _event_thread_row(room_id: str, event: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return one durable event-to-thread mapping row when thread membership is explicit."""
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        return None
+    event_info = EventInfo.from_event(event)
+    thread_id = event_info.thread_id
+    if not isinstance(thread_id, str):
+        thread_id = event_info.thread_id_from_edit
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    return room_id, event_id, thread_id
 
 
 def _event_timestamp(event: dict[str, Any]) -> int:

@@ -36,7 +36,6 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
     edit_message,
-    get_latest_thread_event_id_if_needed,
     get_room_threads_page,
     send_file_message,
     send_message,
@@ -169,11 +168,10 @@ class MatrixMessageTools(Toolkit):
         ignore_mentions: bool,
     ) -> str | None:
         formatted_text = parse_and_format_interactive(text, extract_mapping=False).formatted_text
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            context.client,
+        assert context.conversation_cache is not None
+        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
-            event_cache=context.event_cache,
         )
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
@@ -745,11 +743,10 @@ class MatrixMessageTools(Toolkit):
 
         latest_thread_event_id: str | None = None
         if thread_id is not None:
-            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-                context.client,
+            assert context.conversation_cache is not None
+            latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
                 room_id,
                 thread_id,
-                event_cache=context.event_cache,
             )
             if latest_thread_event_id is None:
                 latest_thread_event_id = target

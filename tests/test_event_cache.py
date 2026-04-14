@@ -879,7 +879,7 @@ async def test_initialize_backfills_event_edit_index_from_old_schema(tmp_path: P
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$reply_edit"
     assert latest_edit["content"]["m.new_content"]["body"] == "Final reply"
-    assert schema_version == 1
+    assert schema_version == event_cache_module._EVENT_CACHE_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio

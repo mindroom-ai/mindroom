@@ -266,6 +266,9 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     response_hooks = MagicMock()
     response_hooks.apply_before_response = before_hooks
     response_hooks.emit_after_response = after_hooks
+    conversation_cache = SimpleNamespace(
+        get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
+    )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=SimpleNamespace(
@@ -280,7 +283,10 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
             logger=MagicMock(),
             redact_message_event=AsyncMock(return_value=True),
             sender_domain="localhost",
-            resolver=SimpleNamespace(build_message_target=MagicMock()),
+            resolver=SimpleNamespace(
+                build_message_target=MagicMock(),
+                deps=SimpleNamespace(conversation_cache=conversation_cache),
+            ),
             response_hooks=response_hooks,
         ),
     )
@@ -318,10 +324,10 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
     capsys.readouterr()
     gateway = DeliveryGateway(replace(gateway.deps, logger=get_logger("tests.delivery")))
 
-    with (
-        patch("mindroom.delivery_gateway.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value="$latest")),
-        patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")),
-    ):
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value="$latest",
+    )
+    with patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")):
         event_id = await gateway.send_text(
             SendTextRequest(
                 target=target,

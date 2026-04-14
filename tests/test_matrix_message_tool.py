@@ -69,6 +69,14 @@ def _make_context(
     agent_thread_mode: str = "thread",
     event_cache: object = _DEFAULT_EVENT_CACHE,
 ) -> ToolRuntimeContext:
+    async def _latest_thread_event_id(
+        _room_id: str,
+        thread_id: str | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> str | None:
+        return thread_id
+
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
         Config(
@@ -87,6 +95,8 @@ def _make_context(
     client.room_get_event_relations = MagicMock(
         side_effect=lambda *_args, **_kwargs: _empty_async_iterator(),
     )
+    conversation_cache = AsyncMock()
+    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -96,7 +106,7 @@ def _make_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=AsyncMock(),
+        conversation_cache=conversation_cache,
         event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
         reply_to_event_id=reply_to_event_id,
@@ -223,12 +233,9 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     tool = MatrixMessageTools()
     event_cache = MagicMock()
     ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
-        patch(
-            "mindroom.custom_tools.matrix_message.get_latest_thread_event_id_if_needed",
-            new=AsyncMock(return_value=None),
-        ) as mock_latest_thread,
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
         tool_runtime_context(ctx),
     ):
@@ -241,7 +248,10 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     assert payload["room_id"] == ctx.room_id
     assert payload["thread_id"] is None
     assert payload["event_id"] == "$evt"
-    mock_latest_thread.assert_awaited_once_with(ctx.client, ctx.room_id, None, event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        ctx.room_id,
+        None,
+    )
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
@@ -349,6 +359,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     )
     assert attachment is not None
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_upload",))
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.return_value = "$evt"
 
     with (
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
@@ -885,12 +896,9 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _make_context(storage_path=tmp_path)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=ctx.thread_id)
 
     with (
-        patch(
-            "mindroom.custom_tools.matrix_message.get_latest_thread_event_id_if_needed",
-            new=AsyncMock(return_value=ctx.thread_id),
-        ),
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
@@ -2010,12 +2018,9 @@ async def test_matrix_message_edit_happy_path() -> None:
     tool = MatrixMessageTools()
     event_cache = MagicMock()
     ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
 
     with (
-        patch(
-            "mindroom.custom_tools.matrix_message.get_latest_thread_event_id_if_needed",
-            new=AsyncMock(return_value="$latest"),
-        ) as mock_latest,
         patch(
             "mindroom.custom_tools.matrix_message.edit_message",
             new=AsyncMock(return_value="$edit_evt"),
@@ -2038,11 +2043,9 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert args[3]["m.relates_to"]["event_id"] == "$ctx-thread:localhost"
     assert args[3]["m.relates_to"]["is_falling_back"] is True
     assert args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-    mock_latest.assert_awaited_once_with(
-        ctx.client,
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         ctx.room_id,
         "$ctx-thread:localhost",
-        event_cache=event_cache,
     )
     ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
