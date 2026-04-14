@@ -1210,7 +1210,7 @@ class TurnController:
                 coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
             )
 
-    async def _dispatch_text_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         event: _TextDispatchEvent | _PrecheckedTextDispatchEvent,

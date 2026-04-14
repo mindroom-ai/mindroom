@@ -1956,8 +1956,6 @@ class TestThreadHistoryCache:
         assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
 
     @pytest.mark.asyncio
-
-    @pytest.mark.asyncio
     async def test_fetch_thread_history_gracefully_degrades_when_cache_read_fails(self) -> None:
         """Database errors should fall back to the homeserver without failing the call."""
         root_event = self._make_text_event(

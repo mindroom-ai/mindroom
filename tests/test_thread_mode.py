@@ -1160,10 +1160,11 @@ class TestExtractedModuleLoggerRebinding:
         )
 
         original_logger.warning.assert_called_once_with(
-            "Failed to append live thread event to cache",
+            "Failed to append thread event to cache",
             room_id="!room:localhost",
             thread_id="$threadroot",
             event_id="$event123",
+            context="live",
             error="cache write failed",
         )
         rebound_logger.warning.assert_not_called()

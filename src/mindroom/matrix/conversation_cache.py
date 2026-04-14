@@ -31,7 +31,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
 
     import structlog
 

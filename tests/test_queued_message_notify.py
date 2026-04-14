@@ -38,8 +38,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.matrix.cache.thread_cache import resolved_thread_cache_entry
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget

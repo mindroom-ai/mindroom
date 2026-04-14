@@ -14,7 +14,6 @@ from mindroom.matrix.cache.thread_cache_helpers import (
     resolved_cache_diagnostics,
 )
 from mindroom.matrix.cache.thread_history_result import (
-    THREAD_HISTORY_SOURCE_HOMESERVER,
     ThreadHistoryResult,
     thread_history_result,
 )

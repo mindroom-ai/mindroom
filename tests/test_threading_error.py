@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,11 +27,11 @@ from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.cache.thread_cache import (
     ResolvedThreadCache,
+)
+from mindroom.matrix.cache.thread_cache import (
     resolved_thread_cache_entry as _resolved_thread_cache_entry_impl,
 )
 from mindroom.matrix.cache.thread_history_result import (
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
     thread_history_result as _thread_history_result_impl,
 )
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -88,10 +86,8 @@ def resolved_thread_cache_entry(
     *,
     history: Sequence[ResolvedVisibleMessage],
     source_event_ids: frozenset[str],
-    thread_version: int = 0,
 ) -> object:
-    """Build one cache entry while ignoring the deleted version field in legacy tests."""
-    _ = thread_version
+    """Build one cache entry for resolved-thread cache tests."""
     return _resolved_thread_cache_entry_impl(
         history=history,
         source_event_ids=source_event_ids,
@@ -102,11 +98,9 @@ def thread_history_result(
     history: list[ResolvedVisibleMessage],
     *,
     is_full_history: bool,
-    thread_version: int | None = None,
     diagnostics: dict[str, str | int | float | bool] | None = None,
 ) -> ThreadHistoryResult:
-    """Wrap history for tests while ignoring the deleted version field."""
-    _ = thread_version
+    """Wrap history with hydration metadata for thread tests."""
     return _thread_history_result_impl(
         history,
         is_full_history=is_full_history,
@@ -146,7 +140,6 @@ def _prime_resolved_thread_history(
     thread_id: str,
     history: list[ResolvedVisibleMessage],
     source_event_ids: frozenset[str],
-    thread_version: int = 0,
 ) -> None:
     """Seed one resolved-thread cache entry for targeted cache-coherence tests."""
     access._resolved_thread_cache.store(
@@ -466,7 +459,6 @@ class TestThreadingBehavior:
             thread_id="$thread",
             history=[_message(event_id="$thread", body="Root")],
             source_event_ids=frozenset({"$thread"}),
-            thread_version=7,
         )
 
         try:
@@ -619,7 +611,6 @@ class TestThreadingBehavior:
             resolved_thread_cache_entry(
                 history=[_message(event_id="$thread", body="Root")],
                 source_event_ids=frozenset({"$thread"}),
-                thread_version=0,
             ),
         )
         await bot._close_runtime_support_services()
@@ -1535,6 +1526,7 @@ class TestThreadingBehavior:
         assert reply_chain.nodes.get("!test:localhost", "$original:localhost") is None
         assert reply_chain.nodes.get("!test:localhost", "$reply:localhost") is None
         assert reply_chain.roots.get("!test:localhost", "$reply:localhost") is None
+
     @pytest.mark.asyncio
     async def test_reset_runtime_state_clears_reply_chain_caches(self, bot: AgentBot) -> None:
         """Runtime resets should clear reply-chain caches as well as resolved thread state."""

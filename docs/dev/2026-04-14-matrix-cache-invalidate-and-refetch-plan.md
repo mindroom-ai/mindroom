@@ -10,6 +10,16 @@ On any cache ambiguity, invalidate the thread snapshot and rebuild it from Matri
 
 **Tech Stack:** Python 3.13, `nio`, SQLite event cache, Matrix conversation cache, pytest, pre-commit.
 
+## Final State
+
+Implemented on 2026-04-14 with three commits for cache-core deletion, caller-boundary cleanup, and final verification.
+The shipped model keeps durable event blobs, durable thread snapshots, and a small in-memory resolved-thread cache with entry locks and TTL only.
+The read path is now `lookup -> hit return -> miss fetch, store, return`.
+The write path now treats explicit threaded mutations as append-plus-invalidate and ambiguous mutations as invalidate-only.
+The repair tables, repair exceptions, generation bookkeeping, incremental refresh, and sync-freshness read heuristics were deleted.
+`custom_tools/matrix_api.py` now resolves threaded write detection through `ConversationCacheProtocol` during normal operation instead of reaching into the raw event cache directly.
+Validation for the final implementation is the full nix-shell pytest run, pre-commit run, and diff review against `origin/main`.
+
 ---
 
 ## Goals
