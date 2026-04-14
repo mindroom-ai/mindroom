@@ -208,17 +208,22 @@ def _relations_client(
         return ()
 
     client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(root_event))
-    client.room_get_event_relations = MagicMock(
-        side_effect=lambda _room_id,
-        event_id,
+
+    def room_get_event_relations(
+        _room_id: str,
+        event_id: str,
         *,
-        rel_type,
-        _event_type,
-        _direction=nio.MessageDirection.back,
-        _limit=None: _event_iter(
-            relation_events(event_id, rel_type),
-        ),
-    )
+        rel_type: RelationshipType,
+        event_type: str | None = None,  # noqa: ARG001
+        direction: nio.MessageDirection = nio.MessageDirection.back,  # noqa: ARG001
+        limit: int | None = None,  # noqa: ARG001
+        _event_type: str | None = None,  # noqa: ARG001
+        _direction: nio.MessageDirection = nio.MessageDirection.back,  # noqa: ARG001
+        _limit: int | None = None,  # noqa: ARG001
+    ) -> AsyncGenerator[nio.Event, None]:
+        return _event_iter(relation_events(event_id, rel_type))
+
+    client.room_get_event_relations = MagicMock(side_effect=room_get_event_relations)
     client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(room_id="!test:localhost", chunk=[], start="", end=None),
     )

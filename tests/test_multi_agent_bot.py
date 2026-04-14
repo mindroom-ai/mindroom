@@ -111,6 +111,7 @@ from tests.conftest import (
     install_send_response_mock,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    make_matrix_client_mock,
     patch_response_runner_module,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
@@ -132,11 +133,8 @@ if TYPE_CHECKING:
 
 
 def _make_matrix_client_mock() -> AsyncMock:
-    """Return a minimal Matrix client mock for bot tests."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
-    client.user_id = "@mindroom_test:example.com"
-    return client
+    """Return one Matrix client mock with safe thread-history defaults."""
+    return make_matrix_client_mock()
 
 
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
@@ -3718,8 +3716,9 @@ class TestAgentBot:
                 new=AsyncMock(return_value="$response"),
             ),
             patch(
-                "mindroom.post_response_effects.PostResponseEffectsSupport.queue_thread_summary",
-            ) as mock_queue_thread_summary,
+                "mindroom.post_response_effects.maybe_generate_thread_summary",
+                new_callable=AsyncMock,
+            ) as mock_thread_summary,
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
@@ -3735,7 +3734,7 @@ class TestAgentBot:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        mock_queue_thread_summary.assert_not_called()
+        mock_thread_summary.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_team_generate_response_redacts_suppressed_streaming_reply(

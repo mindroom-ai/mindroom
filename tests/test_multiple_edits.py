@@ -18,6 +18,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -63,9 +64,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     mock_orchestrator.current_config = config
     bot.orchestrator = mock_orchestrator
 
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
     install_runtime_cache_support(bot)
 
     # Mock room send to return a response event ID

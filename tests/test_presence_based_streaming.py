@@ -13,17 +13,21 @@ from mindroom.bot import AgentBot, create_bot_for_entity
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import bind_runtime_paths, install_runtime_cache_support, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def _mock_client() -> AsyncMock:
-    """Return an AsyncClient mock with an explicit empty room cache."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
-    return client
+    """Return an AsyncClient mock with safe thread-history defaults."""
+    return make_matrix_client_mock()
 
 
 class TestPresenceDetection:
@@ -289,8 +293,7 @@ class TestBotIntegration:
 
         bot = create_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
         assert isinstance(bot, AgentBot)
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
+        bot.client = _mock_client()
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
@@ -352,8 +355,7 @@ class TestBotIntegration:
 
         bot = create_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
         assert isinstance(bot, AgentBot)
-        bot.client = AsyncMock(spec=nio.AsyncClient)
-        bot.client.rooms = {}
+        bot.client = _mock_client()
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
