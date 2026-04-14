@@ -1337,12 +1337,12 @@ class TestExtractedModuleLoggerRebinding:
         assert [message.event_id for message in full_history] == ["$threadroot", "$reply"]
 
     @pytest.mark.asyncio
-    async def test_coalescing_thread_id_uses_canonical_relation_walk(
+    async def test_coalescing_thread_id_ignores_plain_reply_relations(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Pre-gate coalescing should avoid full dispatch-target derivation for reply chains."""
+        """Pre-gate coalescing should not infer a thread from plain reply relations."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1388,13 +1388,76 @@ class TestExtractedModuleLoggerRebinding:
         ):
             thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
-        assert thread_id == "$thread-root:localhost"
-        canonicalize_mock.assert_awaited_once_with(
-            bot.client,
+        assert thread_id is None
+        canonicalize_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Only explicit thread events should defer full history after snapshot preview."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        sync_bot_runtime_state(bot)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.name = "Direct Thread Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "follow-up",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                        "m.in_reply_to": {"event_id": "$thread-msg:localhost"},
+                    },
+                },
+            },
+        )
+        preview_snapshot = ThreadHistoryResult(
+            [
+                _message(event_id="$thread-root:localhost", body="Root"),
+                _message(event_id="$thread-msg:localhost", body="Earlier reply"),
+            ],
+            is_full_history=False,
+        )
+
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_snapshot",
+            AsyncMock(return_value=preview_snapshot),
+        ) as mock_snapshot:
+            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread-root:localhost"
+        assert [message.event_id for message in context.thread_history] == [
+            "$thread-root:localhost",
+            "$thread-msg:localhost",
+        ]
+        assert context.requires_full_thread_history is True
+        mock_snapshot.assert_awaited_once_with(
             room.room_id,
-            "$reply-seed:localhost",
-            access=bot._conversation_cache,
-            caches=bot._conversation_resolver.reply_chain,
+            "$thread-root:localhost",
+            allow_durable_cache=False,
         )
 
 

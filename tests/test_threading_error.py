@@ -3515,8 +3515,8 @@ class TestThreadingBehavior:
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_extract_context_preserves_plain_replies_before_thread_link(self, bot: AgentBot) -> None:
-        """Reply-chain messages should be preserved when chain eventually points to a thread."""
+    async def test_extract_context_plain_reply_to_threaded_message_stays_plain_reply(self, bot: AgentBot) -> None:
+        """Plain replies should not inherit thread context from earlier threaded messages."""
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"
@@ -3583,30 +3583,17 @@ class TestThreadingBehavior:
             ],
         )
 
-        thread_history = [
-            _message(event_id="$thread_root:localhost", body="Thread root"),
-            _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
-        ]
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=thread_history),
+            AsyncMock(),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
-        assert [msg.event_id for msg in context.thread_history] == [
-            "$thread_root:localhost",
-            "$thread_msg:localhost",
-            "$plain1:localhost",
-            "$plain2:localhost",
-        ]
-        mock_fetch.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root:localhost",
-            allow_durable_cache=False,
-        )
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_context_hydrates_sidecar_plain_reply_chain_messages(self, bot: AgentBot) -> None:
@@ -3704,11 +3691,11 @@ class TestThreadingBehavior:
         bot.client.download.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_defers_sidecar_hydration_until_full_history_is_requested(
+    async def test_extract_dispatch_context_plain_reply_does_not_require_full_thread_history(
         self,
         bot: AgentBot,
     ) -> None:
-        """Dispatch preview should stay lightweight until one explicit full-history read is requested."""
+        """Dispatch preview should not promote plain replies into deferred thread hydration."""
         _clear_mxc_cache()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -3780,62 +3767,23 @@ class TestThreadingBehavior:
             ],
         )
 
-        preview_snapshot = ThreadHistoryResult(
-            [
-                _message(event_id="$thread_root:localhost", body="Thread root"),
-                _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
-            ],
-            is_full_history=False,
-        )
-        full_thread_history = [
-            _message(event_id="$thread_root:localhost", body="Thread root"),
-            _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
-        ]
-        mock_snapshot = AsyncMock(return_value=preview_snapshot)
-
         with (
-            patch.object(bot._conversation_cache, "get_thread_snapshot", new=mock_snapshot),
+            patch.object(bot._conversation_cache, "get_thread_snapshot", new=AsyncMock()) as mock_snapshot,
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=full_thread_history),
+                AsyncMock(),
             ) as mock_fetch,
         ):
             preview_context = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
-            assert preview_context.thread_id == "$thread_root:localhost"
-            assert [msg.event_id for msg in preview_context.thread_history] == [
-                "$thread_root:localhost",
-                "$thread_msg:localhost",
-                "$plain1:localhost",
-            ]
-            assert preview_context.thread_history[-1].body == "Preview plain reply [Message continues in attached file]"
-            assert preview_context.requires_full_thread_history is True
+            assert preview_context.is_thread is False
+            assert preview_context.thread_id is None
+            assert preview_context.thread_history == []
+            assert preview_context.requires_full_thread_history is False
             bot.client.download.assert_not_awaited()
-            assert bot.client.room_get_event.await_count == 2
-
-            full_context = await bot._conversation_resolver.extract_message_context(room, event)
-
-        assert full_context.thread_id == "$thread_root:localhost"
-        assert [msg.event_id for msg in full_context.thread_history] == [
-            "$thread_root:localhost",
-            "$thread_msg:localhost",
-            "$plain1:localhost",
-        ]
-        assert full_context.thread_history[-1].body == "Hydrated plain reply from sidecar"
-        assert full_context.thread_history[-1].content["body"] == "Hydrated plain reply from sidecar"
-        bot.client.download.assert_awaited_once()
-        assert bot.client.room_get_event.await_count == 2
-        mock_snapshot.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root:localhost",
-            allow_durable_cache=False,
-        )
-        mock_fetch.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root:localhost",
-            allow_durable_cache=False,
-        )
+            mock_snapshot.assert_not_called()
+            mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_context_preserves_plain_replies_across_thread_reentries(self, bot: AgentBot) -> None:

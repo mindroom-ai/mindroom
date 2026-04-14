@@ -347,8 +347,11 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
 
 
 @pytest.mark.asyncio
-async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_team: Config, tmp_path: Path) -> None:
-    """TeamBot should continue the resolved thread when mention comes as a plain reply."""
+async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root(
+    config_with_team: Config,
+    tmp_path: Path,
+) -> None:
+    """TeamBot should treat a plain reply as a plain reply even if it points at a threaded event."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = config_with_team.get_ids(runtime_paths)
@@ -391,23 +394,6 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         },
     }
 
-    bot.client.room_get_event = AsyncMock(
-        return_value=nio.RoomGetEventResponse.from_dict(
-            {
-                "content": {
-                    "body": "Earlier team message",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-                },
-                "event_id": "$thread_msg",
-                "sender": "@mindroom_t1:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": "!room:localhost",
-                "type": "m.room.message",
-            },
-        ),
-    )
-
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
@@ -423,9 +409,9 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
 
     assert bot.client.room_send.call_count >= 1
     first_content = bot.client.room_send.call_args_list[0].kwargs["content"]
-    assert first_content["m.relates_to"]["rel_type"] == "m.thread"
-    assert first_content["m.relates_to"]["event_id"] == "$thread_root"
     assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$evt_plain_reply"
+    assert first_content["m.relates_to"].get("rel_type") is None
+    assert first_content["m.relates_to"].get("event_id") is None
 
 
 @pytest.mark.asyncio
