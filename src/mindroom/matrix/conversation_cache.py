@@ -67,6 +67,9 @@ class ConversationCacheProtocol(Protocol):
     async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
         """Resolve full thread history for one conversation root."""
 
+    async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
+        """Resolve the cached thread root for one event when known."""
+
     async def get_latest_thread_event_id_if_needed(
         self,
         room_id: str,
@@ -353,6 +356,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
         """Resolve full thread history for one conversation root."""
         return await self._reads.get_thread_history(room_id, thread_id)
+
+    async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
+        """Resolve the cached thread root for one event when known."""
+        return await self.runtime.event_cache.get_thread_id_for_event(room_id, event_id)
 
     async def get_latest_thread_event_id_if_needed(
         self,

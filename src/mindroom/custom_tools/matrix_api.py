@@ -383,6 +383,18 @@ class MatrixApiTools(Toolkit):
         return None
 
     @staticmethod
+    async def _get_thread_id_for_event(
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        event_id: str,
+    ) -> str | None:
+        """Resolve one event's cached thread root through the public conversation cache when available."""
+        if context.conversation_cache is not None:
+            return await context.conversation_cache.get_thread_id_for_event(room_id, event_id)
+        return await context.event_cache.get_thread_id_for_event(room_id, event_id)
+
+    @staticmethod
     async def _requires_conversation_cache_write(
         context: ToolRuntimeContext,
         *,
@@ -400,7 +412,11 @@ class MatrixApiTools(Toolkit):
             return False
         try:
             return isinstance(
-                await context.event_cache.get_thread_id_for_event(room_id, event_info.original_event_id),
+                await MatrixApiTools._get_thread_id_for_event(
+                    context,
+                    room_id=room_id,
+                    event_id=event_info.original_event_id,
+                ),
                 str,
             )
         except Exception as exc:
@@ -421,7 +437,14 @@ class MatrixApiTools(Toolkit):
     ) -> bool:
         """Return whether one redact payload must update threaded conversation cache state."""
         try:
-            return isinstance(await context.event_cache.get_thread_id_for_event(room_id, event_id), str)
+            return isinstance(
+                await MatrixApiTools._get_thread_id_for_event(
+                    context,
+                    room_id=room_id,
+                    event_id=event_id,
+                ),
+                str,
+            )
         except Exception as exc:
             logger.warning(
                 "Failed to resolve redaction target thread mapping for matrix_api redact",

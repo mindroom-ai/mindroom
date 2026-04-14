@@ -418,6 +418,35 @@ async def test_matrix_api_send_event_rejects_threaded_edit_without_conversation_
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_thread_lookup_uses_conversation_cache_facade() -> None:
+    """Threaded edit detection should prefer conversation_cache over direct event_cache access."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
+    ctx.event_cache.get_thread_id_for_event.side_effect = AssertionError("unexpected direct event_cache lookup")
+    content = {
+        "body": "* updated",
+        "msgtype": "m.text",
+        "m.new_content": {"body": "updated", "msgtype": "m.text"},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply:localhost"},
+    }
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+                dry_run=True,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["dry_run"] is True
+    ctx.conversation_cache.get_thread_id_for_event.assert_awaited_once_with(ctx.room_id, "$reply:localhost")
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_get_state_happy_path() -> None:
     """get_state should return the fetched content."""
     tool = MatrixApiTools()
@@ -548,6 +577,32 @@ async def test_matrix_api_redact_rejects_threaded_target_without_conversation_ca
     assert payload["status"] == "error"
     assert "Conversation cache is required" in payload["message"]
     ctx.client.room_redact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_redact_thread_lookup_uses_conversation_cache_facade() -> None:
+    """Threaded redaction detection should prefer conversation_cache over direct event_cache access."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
+    ctx.event_cache.get_thread_id_for_event.side_effect = AssertionError("unexpected direct event_cache lookup")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$target:localhost",
+                reason="cleanup",
+                dry_run=True,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["dry_run"] is True
+    ctx.conversation_cache.get_thread_id_for_event.assert_awaited_once_with(
+        ctx.room_id,
+        "$target:localhost",
+    )
 
 
 @pytest.mark.asyncio
