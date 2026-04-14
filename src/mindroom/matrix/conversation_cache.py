@@ -521,16 +521,28 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_id: str | None,
         *,
         reason: str,
+        queue_write: bool = True,
     ) -> None:
         if not isinstance(event_id, str) or not event_id:
             return
-        await self.runtime.event_cache.mark_pending_lookup_repair(room_id, event_id)
-        self.logger.debug(
-            "Marked Matrix thread lookup repair pending",
-            room_id=room_id,
-            event_id=event_id,
-            reason=reason,
-        )
+
+        async def persist_lookup_repair() -> None:
+            await self.runtime.event_cache.mark_pending_lookup_repair(room_id, event_id)
+            self.logger.debug(
+                "Marked Matrix thread lookup repair pending",
+                room_id=room_id,
+                event_id=event_id,
+                reason=reason,
+            )
+
+        if queue_write:
+            await self._queue_room_cache_update(
+                room_id,
+                persist_lookup_repair,
+                name="matrix_cache_mark_lookup_repair_pending",
+            )
+            return
+        await persist_lookup_repair()
 
     async def _promote_lookup_repairs_locked(
         self,
@@ -1220,27 +1232,31 @@ class MatrixConversationCache(ConversationCacheProtocol):
             else None,
         )
 
-        try:
-            appended = await self._queue_room_cache_update(
+        async def append_and_finalize() -> bool:
+            try:
+                appended = await event_cache.append_event(room_id, thread_id, event_source)
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to append live thread event to cache",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    event_id=event.event_id,
+                    error=str(exc),
+                )
+                appended = False
+            await self._finalize_thread_cache_mutation(
                 room_id,
-                lambda: event_cache.append_event(room_id, thread_id, event_source),
-                name="matrix_cache_append_live_event",
+                thread_id,
+                persisted=bool(appended),
+                invalidate_resolved=event_info.is_edit,
+                failure_reason="live_append_failed",
             )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to append live thread event to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event.event_id,
-                error=str(exc),
-            )
-            appended = False
-        await self._finalize_thread_cache_mutation(
+            return bool(appended)
+
+        await self._queue_room_cache_update(
             room_id,
-            thread_id,
-            persisted=bool(appended),
-            invalidate_resolved=event_info.is_edit,
-            failure_reason="live_append_failed",
+            append_and_finalize,
+            name="matrix_cache_append_live_event",
         )
 
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
@@ -1277,27 +1293,31 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     reason="live_redaction_lookup_missing",
                 )
 
-        try:
-            redacted = await self._queue_room_cache_update(
+        async def redact_and_finalize() -> bool:
+            try:
+                redacted = await event_cache.redact_event(room_id, event.redacts)
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to apply live redaction to cache",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    redacted_event_id=event.redacts,
+                    error=str(exc),
+                )
+                redacted = False
+            await self._finalize_thread_cache_mutation(
                 room_id,
-                lambda: event_cache.redact_event(room_id, event.redacts),
-                name="matrix_cache_apply_redaction",
+                thread_id,
+                persisted=bool(redacted),
+                invalidate_resolved=True,
+                failure_reason="live_redaction_failed",
             )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to apply live redaction to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                redacted_event_id=event.redacts,
-                error=str(exc),
-            )
-            redacted = False
-        await self._finalize_thread_cache_mutation(
+            return bool(redacted)
+
+        await self._queue_room_cache_update(
             room_id,
-            thread_id,
-            persisted=bool(redacted),
-            invalidate_resolved=True,
-            failure_reason="live_redaction_failed",
+            redact_and_finalize,
+            name="matrix_cache_apply_redaction",
         )
 
     async def _resolve_sync_thread_id(
@@ -1328,6 +1348,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 event_info.original_event_id,
                 reason="sync_thread_lookup_failed",
+                queue_write=False,
             )
             return None
 
@@ -1351,6 +1372,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 event_info.original_event_id,
                 reason="sync_thread_lookup_missing",
+                queue_write=False,
             )
             return None, False
 
@@ -1452,6 +1474,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     room_id,
                     redacted_event_id,
                     reason="sync_redaction_lookup_failed",
+                    queue_write=False,
                 )
                 redacted = False
             else:
@@ -1460,6 +1483,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                         room_id,
                         redacted_event_id,
                         reason="sync_redaction_lookup_missing",
+                        queue_write=False,
                     )
             await self._finalize_thread_cache_mutation(
                 room_id,

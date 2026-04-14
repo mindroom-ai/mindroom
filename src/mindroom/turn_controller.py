@@ -926,8 +926,6 @@ class TurnController:
         try:
             if dispatch_timing is not None:
                 dispatch_timing.mark("response_payload_start")
-            if dispatch.context.requires_full_thread_history:
-                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             context_ready_monotonic = time.monotonic()
             payload = await payload_builder(dispatch.context)
             prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
@@ -1245,8 +1243,6 @@ class TurnController:
             ):
                 self._mark_source_events_responded(handled_turn)
                 return
-            if dispatch.context.requires_full_thread_history:
-                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             if self._should_skip_deep_synthetic_full_dispatch(
                 event_id=event.event_id,
                 envelope=dispatch.envelope,

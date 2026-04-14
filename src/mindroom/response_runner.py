@@ -39,7 +39,6 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import is_user_online, should_use_streaming
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import store_conversation_memory
 from mindroom.memory._prompting import strip_user_turn_time_prefix
@@ -711,22 +710,6 @@ class ResponseRunner:
     ) -> ResponseRequest:
         """Refresh thread history once this turn owns the lifecycle lock."""
         if request.thread_id is None:
-            return request
-
-        if isinstance(
-            request.thread_history,
-            ThreadHistoryResult,
-        ) and await self.deps.resolver.deps.conversation_cache.is_thread_history_current(
-            request.room_id,
-            request.thread_id,
-            request.thread_history,
-        ):
-            self.deps.logger.debug(
-                "Skipping post-lock thread refresh because thread version is unchanged",
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                thread_version=request.thread_history.thread_version,
-            )
             return request
 
         refreshed_history = await self.deps.resolver.fetch_thread_history(

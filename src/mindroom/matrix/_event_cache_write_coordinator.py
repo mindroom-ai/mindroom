@@ -105,6 +105,9 @@ class _EventCacheWriteCoordinator:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     raise
+            finally:
+                if self._room_update_tasks.get(room_id) is tail_task and tail_task.done():
+                    self._clear_room_tail(room_id, tail_task)
 
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator."""

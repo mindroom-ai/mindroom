@@ -595,19 +595,22 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
 
 
 @pytest.mark.asyncio
-async def test_refresh_thread_history_after_lock_skips_when_thread_version_is_unchanged(tmp_path: Path) -> None:
-    """Post-lock refresh should be skipped when the thread version did not advance."""
+async def test_refresh_thread_history_after_lock_refreshes_even_when_thread_version_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Post-lock refresh should not trust request-scoped thread-version equality."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
     bot._conversation_cache._resolved_thread_cache.bump_version("!room:localhost", "$thread")
     bot._conversation_cache._resolved_thread_cache.bump_version("!room:localhost", "$thread")
     cached_history = thread_history_result([], is_full_history=True, thread_version=2)
+    refreshed_history = [SimpleNamespace(event_id="$reply-2", body="updated")]
 
     with patch.object(
         resolver,
         "fetch_thread_history",
-        new=AsyncMock(side_effect=AssertionError("should skip refresh")),
+        new=AsyncMock(return_value=refreshed_history),
     ) as mock_fetch_thread_history:
         request = await coordinator._refresh_thread_history_after_lock(
             ResponseRequest(
@@ -620,8 +623,8 @@ async def test_refresh_thread_history_after_lock_skips_when_thread_version_is_un
             ),
         )
 
-    mock_fetch_thread_history.assert_not_awaited()
-    assert request.thread_history is cached_history
+    mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
+    assert request.thread_history == refreshed_history
 
 
 @pytest.mark.asyncio

@@ -6431,12 +6431,12 @@ class TestAgentBot:
         mock_history.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_skips_rehydration_after_snapshot_fallback(
+    async def test_extract_dispatch_context_skips_extra_full_history_fetch_after_snapshot_fallback(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Fallback snapshots should not trigger a second full-history fetch during hydration."""
+        """Fallback snapshots should not trigger a second full-history fetch during dispatch extraction."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_cache_support(bot)
@@ -6486,25 +6486,22 @@ class TestAgentBot:
                 "mindroom.matrix.client._fetch_thread_history_via_room_messages",
                 new=AsyncMock(return_value=full_history),
             ) as mock_snapshot_fallback,
-            patch.object(bot._conversation_cache, "get_thread_history", new=AsyncMock()) as mock_hydrate_fetch,
         ):
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            await bot._conversation_resolver.hydrate_dispatch_context(room, event, context)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert context.thread_history == full_history
         assert context.requires_full_thread_history is False
         mock_snapshot_fallback.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
-        mock_hydrate_fetch.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_hydrates_full_history_before_resolving_action(
+    async def test_dispatch_text_message_keeps_full_history_hydration_out_of_normal_dispatch(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch should hydrate full thread history before reply-chain routing decisions."""
+        """Normal dispatch should keep pre-lock thread context lightweight."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -6546,36 +6543,16 @@ class TestAgentBot:
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
         _set_turn_store_tracker(bot, MagicMock())
-        full_history = [
-            ResolvedVisibleMessage.synthetic(
-                sender="@user:localhost",
-                body="Full root",
-                event_id="$thread_root",
-                timestamp=1,
-                content={"body": "Full root"},
-            ),
-            ResolvedVisibleMessage.synthetic(
-                sender="@mindroom_calculator:localhost",
-                body="Full reply",
-                event_id="$reply",
-                timestamp=2,
-                content={"body": "Full reply"},
-            ),
-        ]
+        snapshot_history = list(dispatch.context.thread_history)
         call_order: list[str] = []
 
         async def fake_plan(*_args: object, **_kwargs: object) -> DispatchPlan:
             call_order.append("action")
-            assert dispatch.context.thread_history == full_history
+            assert dispatch.context.thread_history == snapshot_history
             return DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(kind="individual"),
             )
-
-        async def fake_hydrate(_room: nio.MatrixRoom, _event: nio.RoomMessageText, context: MessageContext) -> None:
-            call_order.append("hydrate")
-            context.thread_history = full_history
-            context.requires_full_thread_history = False
 
         async def fake_build_payload(*_args: object, **_kwargs: object) -> DispatchPayload:
             call_order.append("payload")
@@ -6583,7 +6560,7 @@ class TestAgentBot:
 
         async def fake_generate_response(*_args: object, **kwargs: object) -> str:
             call_order.append("generate")
-            assert kwargs["thread_history"] == full_history
+            assert kwargs["thread_history"] == snapshot_history
             assert kwargs["existing_event_id"] is None
             assert kwargs["existing_event_is_placeholder"] is False
             return "$response"
@@ -6599,11 +6576,6 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
             patch.object(
-                bot._conversation_resolver,
-                "hydrate_dispatch_context",
-                new=AsyncMock(side_effect=fake_hydrate),
-            ),
-            patch.object(
                 bot._inbound_turn_normalizer,
                 "build_dispatch_payload_with_attachments",
                 new=AsyncMock(side_effect=fake_build_payload),
@@ -6615,9 +6587,9 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        assert call_order == ["hydrate", "action", "payload", "generate"]
-        assert dispatch.context.thread_history == full_history
-        assert dispatch.context.requires_full_thread_history is False
+        assert call_order == ["action", "payload", "generate"]
+        assert dispatch.context.thread_history == snapshot_history
+        assert dispatch.context.requires_full_thread_history is True
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_skip_path_does_not_hydrate_full_history(
@@ -6625,7 +6597,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Skip paths should stop after required routing hydration and avoid payload work."""
+        """Skip paths should avoid both payload work and pre-lock full-history hydration."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -6666,7 +6638,6 @@ class TestAgentBot:
                 "plan_turn",
                 new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
             ),
-            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()) as mock_hydrate,
             patch.object(
                 bot._inbound_turn_normalizer,
                 "build_dispatch_payload_with_attachments",
@@ -6679,11 +6650,6 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        mock_hydrate.assert_awaited_once()
-        hydrate_args = mock_hydrate.await_args.args
-        assert hydrate_args[0] is room
-        assert hydrate_args[1].event_id == event.event_id
-        assert hydrate_args[2] is dispatch.context
         mock_build_payload.assert_not_awaited()
         mock_execute.assert_not_awaited()
 
@@ -6741,7 +6707,6 @@ class TestAgentBot:
             ),
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
             patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
-            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()) as mock_hydrate,
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -6749,7 +6714,6 @@ class TestAgentBot:
             )
 
         mock_execute_command.assert_awaited_once()
-        mock_hydrate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_dispatch_marks_visible_echo_from_any_coalesced_source_event(

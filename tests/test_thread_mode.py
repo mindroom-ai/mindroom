@@ -671,7 +671,7 @@ class TestExtractMessageContextRoomMode:
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Context extraction and hydration should go through the extracted resolver."""
+        """Context extraction helpers should go through the extracted resolver."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -701,12 +701,10 @@ class TestExtractMessageContextRoomMode:
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
         bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
         bot._conversation_resolver.extract_message_context_impl = AsyncMock(return_value=context)
-        bot._conversation_resolver.hydrate_dispatch_context = AsyncMock()
 
         assert await bot._conversation_resolver.extract_dispatch_context(room, event) is context
         assert await bot._conversation_resolver.extract_message_context(room, event, full_history=False) is context
         assert await bot._conversation_resolver.extract_message_context_impl(room, event, full_history=True) is context
-        await bot._conversation_resolver.hydrate_dispatch_context(room, event, context)
 
         bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
         bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
@@ -719,7 +717,6 @@ class TestExtractMessageContextRoomMode:
             event,
             full_history=True,
         )
-        bot._conversation_resolver.hydrate_dispatch_context.assert_awaited_once_with(room, event, context)
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
         self,

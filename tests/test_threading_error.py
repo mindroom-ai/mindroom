@@ -94,9 +94,12 @@ def _runtime_event_cache() -> AsyncMock:
     return make_event_cache_mock()
 
 
-def _runtime_write_coordinator() -> MagicMock:
-    """Return a coordinator-shaped mock for runtime-state tests."""
-    return MagicMock(spec=_EventCacheWriteCoordinator)
+def _runtime_write_coordinator() -> _EventCacheWriteCoordinator:
+    """Return one real coordinator for runtime-state tests."""
+    return _EventCacheWriteCoordinator(
+        logger=MagicMock(),
+        background_task_owner=object(),
+    )
 
 
 def _prime_resolved_thread_history(
@@ -1616,7 +1619,173 @@ class TestThreadingBehavior:
 
         assert await bot._conversation_cache._thread_requires_refresh("!test:localhost", "$thread_msg:localhost")
 
-    def test_sync_redaction_invalidates_cached_reply_chain_for_redacted_edit(self) -> None:
+    @pytest.mark.asyncio
+    async def test_wait_for_room_idle_returns_after_completed_tail_task(self) -> None:
+        """Room-idle waiting should not livelock on a tail task that already finished."""
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+
+        try:
+            completed_task = asyncio.create_task(asyncio.sleep(0, result=object()))
+            await completed_task
+            coordinator._room_update_tasks["!room:localhost"] = completed_task
+            await asyncio.wait_for(coordinator.wait_for_room_idle("!room:localhost"), timeout=0.2)
+            assert coordinator._room_update_tasks.get("!room:localhost") is None
+        finally:
+            await coordinator.close()
+
+    @pytest.mark.asyncio
+    async def test_is_thread_history_current_waits_for_queued_lookup_repair_visibility(self) -> None:
+        """Freshness checks should not trust a room while a lookup-repair write is still in flight."""
+        event_cache = _runtime_event_cache()
+        original_mark_pending_lookup_repair = event_cache.mark_pending_lookup_repair.side_effect
+        event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread")
+        write_started = asyncio.Event()
+        allow_write = asyncio.Event()
+
+        async def delayed_mark_pending_lookup_repair(room_id: str, event_id: str) -> None:
+            write_started.set()
+            await allow_write.wait()
+            await original_mark_pending_lookup_repair(room_id, event_id)
+
+        event_cache.mark_pending_lookup_repair.side_effect = delayed_mark_pending_lookup_repair
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=AsyncMock(spec=nio.AsyncClient),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        stale_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply-1", body="Reply 1", sender="@agent:localhost"),
+            ],
+            is_full_history=True,
+            thread_version=1,
+        )
+        _prime_resolved_thread_history(
+            access,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            history=list(stale_history),
+            source_event_ids=frozenset({"$thread", "$reply-1"}),
+            thread_version=1,
+        )
+
+        try:
+            pending_write = asyncio.create_task(
+                access._mark_lookup_repair_pending(
+                    "!room:localhost",
+                    "$reply-1",
+                    reason="live_lookup_failed",
+                ),
+            )
+            await write_started.wait()
+
+            currentness_task = asyncio.create_task(
+                access.is_thread_history_current("!room:localhost", "$thread", stale_history),
+            )
+            await asyncio.sleep(0)
+
+            assert currentness_task.done() is False
+
+            allow_write.set()
+            await pending_write
+            assert await currentness_task is False
+        finally:
+            await coordinator.close()
+
+    @pytest.mark.asyncio
+    async def test_get_thread_history_waits_for_live_append_finalization(self, bot: AgentBot) -> None:
+        """Authoritative thread reads should not reuse stale resolved history while live finalization is pending."""
+        event_cache = _runtime_event_cache()
+        event_cache.append_event = AsyncMock(return_value=True)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        access = bot._conversation_cache
+        stale_history = ThreadHistoryResult(
+            [_message(event_id="$thread", body="Root")],
+            is_full_history=True,
+            thread_version=1,
+        )
+        _prime_resolved_thread_history(
+            access,
+            room_id="!test:localhost",
+            thread_id="$thread",
+            history=list(stale_history),
+            source_event_ids=frozenset({"$thread"}),
+            thread_version=1,
+        )
+        access._resolved_thread_cache.bump_version("!test:localhost", "$thread")
+        finalize_started = asyncio.Event()
+        allow_finalize = asyncio.Event()
+        original_finalize = access._finalize_thread_cache_mutation
+        refreshed_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply", body="Reply", sender="@user:localhost"),
+            ],
+            is_full_history=True,
+        )
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+                },
+                "event_id": "$reply",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        async def delayed_finalize(*args: object, **kwargs: object) -> None:
+            finalize_started.set()
+            await allow_finalize.wait()
+            await original_finalize(*args, **kwargs)
+
+        with (
+            patch.object(access, "_finalize_thread_cache_mutation", new=AsyncMock(side_effect=delayed_finalize)),
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_thread_history",
+                new=AsyncMock(return_value=refreshed_history),
+            ),
+        ):
+            append_task = asyncio.create_task(
+                access.append_live_event(
+                    "!test:localhost",
+                    event,
+                    event_info=EventInfo.from_event(event.source),
+                ),
+            )
+            await finalize_started.wait()
+
+            history_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$thread"))
+            await asyncio.sleep(0)
+
+            assert history_task.done() is False
+
+            allow_finalize.set()
+            await append_task
+            history = await history_task
+
+        assert history.thread_version is not None
+        assert history.thread_version > stale_history.thread_version
+        assert [message.event_id for message in history] == ["$thread", "$reply"]
+
+    @pytest.mark.asyncio
+    async def test_sync_redaction_invalidates_cached_reply_chain_for_redacted_edit(self) -> None:
         """Sync redactions should evict stale reply-chain nodes for a cached edit and its original."""
         access = MatrixConversationCache(
             logger=MagicMock(),
@@ -1697,6 +1866,7 @@ class TestThreadingBehavior:
         }
 
         access.cache_sync_timeline(sync_response)
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
 
         assert reply_chain.nodes.get("!test:localhost", "$original:localhost") is None
         assert reply_chain.nodes.get("!test:localhost", "$edit:localhost") is None
@@ -4413,11 +4583,11 @@ class TestThreadingBehavior:
         bot.client.download.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_defers_sidecar_hydration_and_reuses_reply_chain_nodes(
+    async def test_extract_dispatch_context_defers_sidecar_hydration_until_full_history_is_requested(
         self,
         bot: AgentBot,
     ) -> None:
-        """Dispatch preview should defer sidecar hydration and reuse cached reply-chain nodes later."""
+        """Dispatch preview should stay lightweight until one explicit full-history read is requested."""
         _clear_mxc_cache()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -4510,29 +4680,29 @@ class TestThreadingBehavior:
                 AsyncMock(return_value=full_thread_history),
             ) as mock_fetch,
         ):
-            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            preview_context = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
-            assert context.thread_id == "$thread_root:localhost"
-            assert [msg.event_id for msg in context.thread_history] == [
+            assert preview_context.thread_id == "$thread_root:localhost"
+            assert [msg.event_id for msg in preview_context.thread_history] == [
                 "$thread_root:localhost",
                 "$thread_msg:localhost",
                 "$plain1:localhost",
             ]
-            assert context.thread_history[-1].body == "Preview plain reply [Message continues in attached file]"
-            assert context.requires_full_thread_history is True
+            assert preview_context.thread_history[-1].body == "Preview plain reply [Message continues in attached file]"
+            assert preview_context.requires_full_thread_history is True
             bot.client.download.assert_not_awaited()
             assert bot.client.room_get_event.await_count == 2
 
-            await bot._conversation_resolver.hydrate_dispatch_context(room, event, context)
+            full_context = await bot._conversation_resolver.extract_message_context(room, event)
 
-        assert context.thread_id == "$thread_root:localhost"
-        assert [msg.event_id for msg in context.thread_history] == [
+        assert full_context.thread_id == "$thread_root:localhost"
+        assert [msg.event_id for msg in full_context.thread_history] == [
             "$thread_root:localhost",
             "$thread_msg:localhost",
             "$plain1:localhost",
         ]
-        assert context.thread_history[-1].body == "Hydrated plain reply from sidecar"
-        assert context.thread_history[-1].content["body"] == "Hydrated plain reply from sidecar"
+        assert full_context.thread_history[-1].body == "Hydrated plain reply from sidecar"
+        assert full_context.thread_history[-1].content["body"] == "Hydrated plain reply from sidecar"
         bot.client.download.assert_awaited_once()
         assert bot.client.room_get_event.await_count == 2
         mock_snapshot.assert_awaited_once_with(room.room_id, "$thread_root:localhost")

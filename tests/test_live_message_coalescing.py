@@ -1619,8 +1619,8 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_path: Path) -> None:
-    """Media-backed turns must use replay snapshot history even after hydration mutates planning history."""
+async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_history(tmp_path: Path) -> None:
+    """Media-backed turns must use replay snapshot history instead of mutable planning history."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
@@ -1632,7 +1632,6 @@ async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_p
         server_timestamp=1000,
     )
     dispatch = _prepared_dispatch(event_id="$img1", body="[Attached image]")
-    dispatch.context.requires_full_thread_history = True
     hydrated_msg = ResolvedVisibleMessage(
         sender="@user:localhost",
         body="hydrated newer message",
@@ -1644,20 +1643,13 @@ async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_p
     )
 
     action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-
-    async def hydrate_context(*_args: object) -> None:
-        dispatch.context.thread_history = [hydrated_msg]
-        dispatch.context.requires_full_thread_history = False
+    dispatch.context.thread_history = [hydrated_msg]
+    dispatch.context.replay_guard_history = []
 
     newer_mock = MagicMock(return_value=False)
     with (
         patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-        patch.object(
-            bot._conversation_resolver,
-            "hydrate_dispatch_context",
-            new=AsyncMock(side_effect=hydrate_context),
-        ) as hydrate_mock,
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=newer_mock),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
@@ -1668,7 +1660,6 @@ async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_p
             media_events=[image_event],
         )
 
-    hydrate_mock.assert_awaited_once()
     newer_mock.assert_called_once()
     assert list(newer_mock.call_args.args[2]) == []
     action_mock.assert_awaited_once()
