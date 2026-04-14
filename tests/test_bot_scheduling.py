@@ -365,6 +365,8 @@ class TestBotTaskRestoration:
                 mock_client = AsyncMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.device_id = "TEST_DEVICE"
+                mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
@@ -413,6 +415,8 @@ class TestBotTaskRestoration:
                 mock_client = AsyncMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.device_id = "TEST_DEVICE"
+                mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
