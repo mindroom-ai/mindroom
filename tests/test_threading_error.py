@@ -304,6 +304,49 @@ class TestMatrixConversationCacheThreadReads:
         )
 
     @pytest.mark.asyncio
+    async def test_notify_outbound_message_plain_edit_lookup_miss_does_not_invalidate_room_threads(self) -> None:
+        """Plain room-mode edits should not stale-mark every cached thread when no thread mapping exists."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+
+        access.notify_outbound_message(
+            "!room:localhost",
+            "$edit:localhost",
+            {
+                "body": "* updated",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message:localhost"},
+            },
+        )
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_notify_outbound_redaction_lookup_miss_does_not_invalidate_room_threads(self) -> None:
+        """Plain redactions should not stale-mark every cached thread when no thread mapping exists."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+
+        access.notify_outbound_redaction("!room:localhost", "$room-message:localhost")
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.redact_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:
         """Thread invalidation must delete cached rows when the stale marker cannot be persisted."""
         event_cache = _runtime_event_cache()

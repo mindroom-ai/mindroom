@@ -1255,7 +1255,6 @@ def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, An
     if not isinstance(replacement, Mapping):
         return None
     candidates: tuple[object, ...] = (
-        replacement,
         replacement.get("event"),
         replacement.get("latest_event"),
     )
@@ -1265,6 +1264,14 @@ def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, An
         normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
         if _parse_visible_text_message_event(normalized_candidate) is not None:
             return normalized_candidate
+    replacement_candidate = {key: value for key, value in replacement.items() if isinstance(key, str)}
+    if {
+        "event_id",
+        "sender",
+        "type",
+        "origin_server_ts",
+    }.issubset(replacement_candidate) and _parse_visible_text_message_event(replacement_candidate) is not None:
+        return replacement_candidate
     return None
 
 

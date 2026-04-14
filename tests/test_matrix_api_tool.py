@@ -394,6 +394,36 @@ async def test_matrix_api_send_event_allows_room_mode_edit_without_conversation_
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_room_mode_edit_with_cache_does_not_notify_thread_bookkeeping() -> None:
+    """Room-mode edits should not call threaded cache bookkeeping when the target is not in a thread."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.return_value = None
+    content = {
+        "body": "* updated",
+        "msgtype": "m.text",
+        "m.new_content": {"body": "updated", "msgtype": "m.text"},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message"},
+    }
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$send:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.conversation_cache.notify_outbound_message.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_send_event_rejects_threaded_edit_without_conversation_cache() -> None:
     """Threaded edits must require cache write-through even when only the cached original reveals the thread."""
     tool = MatrixApiTools()
@@ -521,9 +551,10 @@ async def test_matrix_api_put_state_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_happy_path() -> None:
-    """Redact should call room_redact and return the redaction event id."""
+    """Threaded redactions should call room_redact and notify threaded cache bookkeeping."""
     tool = MatrixApiTools()
     ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
         event_id="$redaction:localhost",
         room_id=ctx.room_id,
@@ -555,10 +586,34 @@ async def test_matrix_api_redact_happy_path() -> None:
         event_id="$target:localhost",
         reason="cleanup",
     )
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
-        ctx.room_id,
-        "$target:localhost",
+    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(ctx.room_id, "$target:localhost")
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_redact_room_level_target_does_not_notify_thread_bookkeeping() -> None:
+    """Room-level redactions should not call threaded cache bookkeeping when the target is not in a thread."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.return_value = None
+    ctx.client.room_redact.return_value = nio.RoomRedactResponse(
+        event_id="$redaction:localhost",
+        room_id=ctx.room_id,
     )
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$target:localhost",
+                reason="cleanup",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.conversation_cache.notify_outbound_redaction.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -632,9 +687,10 @@ async def test_matrix_api_redact_dry_run_rejects_threaded_target_without_convers
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_ignores_cache_failure_after_successful_redact() -> None:
-    """A successful redact should delegate advisory bookkeeping through the cache facade."""
+    """A successful threaded redact should delegate advisory bookkeeping through the cache facade."""
     tool = MatrixApiTools()
     ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
         event_id="$redaction:localhost",
         room_id=ctx.room_id,

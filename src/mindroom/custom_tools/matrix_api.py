@@ -462,9 +462,14 @@ class MatrixApiTools(Toolkit):
         event_type: str,
         event_id: str,
         content: dict[str, object],
+        requires_conversation_cache_write: bool,
     ) -> None:
         """Record a successful threaded room-message send in the local conversation cache."""
-        if event_type != "m.room.message" or context.conversation_cache is None:
+        if (
+            event_type != "m.room.message"
+            or context.conversation_cache is None
+            or not requires_conversation_cache_write
+        ):
             return
         context.conversation_cache.notify_outbound_message(
             room_id,
@@ -573,6 +578,7 @@ class MatrixApiTools(Toolkit):
                 event_type=normalized_event_type,
                 event_id=response.event_id,
                 content=normalized_content,
+                requires_conversation_cache_write=requires_conversation_cache_write,
             )
             self._audit_write(
                 context=context,
@@ -923,7 +929,7 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomRedactResponse):
-            if context.conversation_cache is not None:
+            if requires_conversation_cache_write and context.conversation_cache is not None:
                 context.conversation_cache.notify_outbound_redaction(
                     room_id,
                     normalized_event_id,

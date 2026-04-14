@@ -367,7 +367,12 @@ class ThreadWritePolicy:
             context="outbound",
         )
         if thread_id is None:
-            await self._invalidate_room_threads(room_id, reason="outbound_lookup_missing")
+            self.logger.debug(
+                "Skipping outbound thread cache bookkeeping for non-threaded message mutation",
+                room_id=room_id,
+                event_id=event_id,
+                original_event_id=event_info.original_event_id,
+            )
             return
         await self._invalidate_known_thread(
             room_id,
@@ -466,6 +471,13 @@ class ThreadWritePolicy:
             redacted_event_id,
             failure_message="Ignoring outbound Matrix redaction cache lookup failure after successful redact",
         )
+        if thread_id is None:
+            self.logger.debug(
+                "Skipping outbound thread cache bookkeeping for non-threaded redaction",
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+            )
+            return
         redacted = await self._redact_cached_event(
             room_id,
             redacted_event_id,

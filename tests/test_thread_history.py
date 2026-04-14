@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -343,6 +344,64 @@ class TestThreadHistory:
         assert history[0].event_id == "$thread_root"
         assert history[0].body == "Updated root"
         client.room_get_event_relations.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_uses_nested_bundled_root_edit_without_validation_noise(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Nested bundled replacement payloads should not be parsed through the outer wrapper."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Original root",
+            server_timestamp=1000,
+            source_content={
+                "body": "Original root",
+            },
+        )
+        root_event.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "latest_event": {
+                        "event_id": "$root_edit",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 3000,
+                        "type": "m.room.message",
+                        "content": {
+                            "body": "* Updated root",
+                            "msgtype": "m.text",
+                            "m.new_content": {"body": "Updated root", "msgtype": "m.text"},
+                            "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_root"},
+                        },
+                    },
+                },
+            },
+        }
+        thread_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply in thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [thread_event],
+                self._relation_key("$reply", RelationshipType.replacement): [],
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
+            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert history[0].event_id == "$thread_root"
+        assert history[0].body == "Updated root"
+        assert not any("Error validating event" in record.getMessage() for record in caplog.records)
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_relations_path_applies_reply_edits_and_stream_status(self) -> None:
