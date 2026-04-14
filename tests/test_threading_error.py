@@ -1122,6 +1122,61 @@ class TestThreadingBehavior:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_cache_sync_timeline_plain_edit_lookup_miss_does_not_invalidate_room_threads(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Sync room-mode edits should not stale-mark every cached thread on lookup miss."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.redact_event = AsyncMock()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(
+            return_value={
+                "event_id": "$room_msg:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "type": "m.room.message",
+                "content": {"body": "Room message", "msgtype": "m.text"},
+            },
+        )
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* Updated room message",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "Updated room message",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$room_msg:localhost"},
+                },
+                "event_id": "$room_edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+        }
+
+        bot._conversation_cache.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$room_msg:localhost")
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_cache_sync_timeline_serializes_same_room_updates_in_order(self, bot: AgentBot) -> None:
         """Later sync updates for one room should wait for earlier queued cache writes."""
         store_started = asyncio.Event()
@@ -1608,6 +1663,54 @@ class TestThreadingBehavior:
         )
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_plain_edit_lookup_miss_does_not_invalidate_room_threads(self, bot: AgentBot) -> None:
+        """Live room-mode edits should not stale-mark every cached thread on lookup miss."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(
+            return_value={
+                "event_id": "$room_msg:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567889,
+                "type": "m.room.message",
+                "content": {"body": "Room message", "msgtype": "m.text"},
+            },
+        )
+        event_cache.append_event = AsyncMock()
+        bot.event_cache = event_cache
+        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=bot._runtime_view,
+        )
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$room_msg:localhost"},
+                },
+                "event_id": "$edit_event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        await bot._conversation_cache.append_live_event(
+            "!test:localhost",
+            edit_event,
+            event_info=EventInfo.from_event(edit_event.source),
+        )
+        await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+
+        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$room_msg:localhost")
+        event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2629,6 +2732,61 @@ class TestThreadingBehavior:
             room.room_id,
             "$thread_root:localhost",
         )
+
+    @pytest.mark.asyncio
+    async def test_extract_context_edit_of_plain_root_message_stays_room_level(self, bot: AgentBot) -> None:
+        """Edits of plain room-root messages should not be promoted into thread context."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$room_message:localhost"},
+                },
+                "event_id": "$edit_event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Room message",
+                        "msgtype": "m.text",
+                    },
+                    "event_id": "$room_message:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567895,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_history",
+            AsyncMock(),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
+
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_message:localhost")
+        mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_context_plain_reply_to_threaded_message_stays_plain_reply(self, bot: AgentBot) -> None:

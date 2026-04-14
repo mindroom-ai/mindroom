@@ -322,6 +322,31 @@ class ThreadWritePolicy:
             return event_info.thread_id or event_info.thread_id_from_edit
         return None
 
+    async def _should_invalidate_room_for_lookup_miss(
+        self,
+        room_id: str,
+        *,
+        event_info: EventInfo,
+        event_id: str | None,
+        context: str,
+    ) -> bool:
+        original_event_id = event_info.original_event_id
+        if not event_info.is_edit or not isinstance(original_event_id, str):
+            return False
+        try:
+            original_event = await self.runtime.event_cache.get_event(room_id, original_event_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to resolve original event after thread lookup miss",
+                room_id=room_id,
+                event_id=event_id,
+                original_event_id=original_event_id,
+                context=context,
+                error=str(exc),
+            )
+            return True
+        return original_event is None
+
     async def _append_event_to_cache(
         self,
         room_id: str,
@@ -561,7 +586,20 @@ class ThreadWritePolicy:
             context="live",
         )
         if thread_id is None:
-            await self._invalidate_room_threads(room_id, reason="live_lookup_missing")
+            if await self._should_invalidate_room_for_lookup_miss(
+                room_id,
+                event_info=event_info,
+                event_id=event.event_id,
+                context="live",
+            ):
+                await self._invalidate_room_threads(room_id, reason="live_lookup_missing")
+                return
+            self.logger.debug(
+                "Skipping live thread cache bookkeeping for known non-threaded message mutation",
+                room_id=room_id,
+                event_id=event.event_id,
+                original_event_id=event_info.original_event_id,
+            )
             return
 
         event_source = normalize_nio_event_for_cache(event)
@@ -641,7 +679,20 @@ class ThreadWritePolicy:
                 context="sync",
             )
             if thread_id is None:
-                await self._invalidate_room_threads(room_id, reason="sync_lookup_missing")
+                if await self._should_invalidate_room_for_lookup_miss(
+                    room_id,
+                    event_info=event_info,
+                    event_id=event_id if isinstance(event_id, str) else None,
+                    context="sync",
+                ):
+                    await self._invalidate_room_threads(room_id, reason="sync_lookup_missing")
+                    continue
+                self.logger.debug(
+                    "Skipping sync thread cache bookkeeping for known non-threaded message mutation",
+                    room_id=room_id,
+                    event_id=event_id,
+                    original_event_id=event_info.original_event_id,
+                )
                 continue
             await self._invalidate_known_thread(
                 room_id,

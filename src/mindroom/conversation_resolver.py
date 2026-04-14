@@ -293,22 +293,26 @@ class ConversationResolver:
         event_info: EventInfo,
     ) -> str | None:
         """Resolve explicit thread identity for one event without reply-chain inference."""
-        if event_info.thread_id is not None:
-            return event_info.thread_id
-        if event_info.thread_id_from_edit is not None:
-            return event_info.thread_id_from_edit
-        if not event_info.is_edit or event_info.original_event_id is None:
+        resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        original_event_id = event_info.original_event_id
+        if resolved_thread_id is not None:
+            return resolved_thread_id
+        if not event_info.is_edit or original_event_id is None:
             return None
 
-        original_event = await self.deps.conversation_cache.get_event(room_id, event_info.original_event_id)
+        original_event = await self.deps.conversation_cache.get_event(room_id, original_event_id)
         if not isinstance(original_event, nio.RoomGetEventResponse):
             return None
 
         original_info = EventInfo.from_event(original_event.event.source)
-        resolved_thread_id = original_info.thread_id or original_info.thread_id_from_edit
-        if resolved_thread_id is not None:
-            return resolved_thread_id
-        return event_info.original_event_id if original_info.can_be_thread_root else None
+        if original_info.can_be_thread_root:
+            resolved_thread_id = await self.deps.conversation_cache.get_thread_id_for_event(
+                room_id,
+                original_event_id,
+            )
+        else:
+            resolved_thread_id = original_info.thread_id or original_info.thread_id_from_edit
+        return resolved_thread_id
 
     async def derive_conversation_context(
         self,

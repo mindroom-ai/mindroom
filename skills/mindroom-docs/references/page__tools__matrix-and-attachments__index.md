@@ -1,21 +1,21 @@
 # Matrix & Attachments
 
-Use these tools to work inside the active Matrix room and thread, send follow-up messages, mark threads resolved, and reuse files that belong to the current conversation.
+Use these tools to work inside the active Matrix room and thread, send follow-up messages, manage thread tags and summaries, and reuse files that belong to the current conversation.
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `matrix-and-attachments` group. Use these tools when you need to send or inspect Matrix messages, manage thread resolution or summary state, or handle attachment IDs that are scoped to the current room and thread.
+This page documents the built-in tools in the `matrix-and-attachments` group. Use these tools when you need to send or inspect Matrix messages, manage thread tags or summaries, or handle attachment IDs that are scoped to the current room and thread.
 
 ## Tools On This Page
 
 - \[`matrix_message`\] - Send, reply, react, read, edit, or inspect Matrix conversation context.
-- \[`thread_resolution`\] - Mark a Matrix thread resolved or unresolved with shared room-state markers.
+- \[`thread_tags`\] - Add, remove, and inspect shared tags on a Matrix thread.
 - \[`thread_summary`\] - Set or update a Matrix thread summary from the current room and thread context.
 - \[`attachments`\] - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
 ## Common Setup Notes
 
-All four tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation. `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately. Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run. Current source on this branch exposes `matrix_message`, `thread_resolution`, `thread_summary`, and `attachments` as the registered tools in this area. The issue references `thread_tags.py` and `matrix_api.py`, but those files are not present in this worktree, so they are not documented as standalone tools on this page.
+These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation. `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately. Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run. Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `matrix_api`, and `attachments` in this area.
 
 ## \[`matrix_message`\]
 
@@ -57,13 +57,13 @@ matrix_message(action="react", target="$event123", message="✅")
 - Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
 - If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
 
-## \[`thread_resolution`\]
+## \[`thread_tags`\]
 
-`thread_resolution` lets agents mark a thread resolved or reopened using shared Matrix state instead of only plain text conventions.
+`thread_tags` lets agents add, remove, and inspect shared thread tags using Matrix room state.
 
 ### What It Does
 
-`thread_resolution` exposes `resolve_thread()` and `unresolve_thread()`. Both operations default to the current room and current thread context, and both return an error when no thread can be resolved for the target room. The tool normalizes the supplied event into the canonical thread root before writing state, so replying to any event in the thread still targets the same resolution marker. Resolution state is stored as `com.mindroom.thread.resolution` room state keyed by the canonical thread root event ID. `unresolve_thread(canonical=True)` skips live canonicalization and treats the provided `thread_id` as an already-normalized state key, which is useful when the original event is gone. Writes fail unless both the running Matrix client and the human requester have enough power to send that state event in the target room. When the requester differs from the bot account, the requester must also be joined to the target room.
+`thread_tags` exposes `tag_thread()`, `untag_thread()`, and `list_thread_tags()`. All three operations default to the current room and active explicit thread context. When there is no active explicit thread, pass `thread_id` explicitly. The tool normalizes the supplied event into the canonical thread root before reading or writing state. Tags are stored as `io.mindroom.thread_tags` room state keyed by the canonical thread root event ID. Writes fail unless both the running Matrix client and the human requester have enough power to send that state event in the target room. When the requester differs from the bot account, the requester must also be joined to the target room.
 
 ### Configuration
 
@@ -75,20 +75,20 @@ This tool has no tool-specific inline configuration fields.
 agents:
   assistant:
     tools:
-      - thread_resolution
+      - thread_tags
 ```
 
 ```
-resolve_thread()
-unresolve_thread()
-resolve_thread(room_id="!ops:example.org", thread_id="$threadRootEvent")
+tag_thread("blocked")
+untag_thread("blocked")
+list_thread_tags(thread_id="$threadRootEvent")
 ```
 
 ### Notes
 
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
-- The returned payload includes `resolved_by`, `resolved_at`, and `updated_at` so a caller can surface who closed or reopened the thread.
-- Use `canonical=True` on `unresolve_thread()` only when you already have the canonical state key and do not want the tool to fetch the original event again.
+- Tag writes and removals return the updated canonical tag state for the target thread.
+- `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 
 ## \[`thread_summary`\]
 
@@ -96,7 +96,7 @@ resolve_thread(room_id="!ops:example.org", thread_id="$threadRootEvent")
 
 ### What It Does
 
-`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None)`. The tool defaults to the active room and current thread from `ToolRuntimeContext`. When the agent is replying at room scope, it can still target the correct thread through the current reply context. The tool normalizes the target to the canonical thread root before sending a new `m.notice` summary event with `io.mindroom.thread_summary` metadata. Manual summaries are marked with `model_name="manual"` and update the cached last-summary count so later automatic summaries continue from the new baseline. A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
+`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None)`. The tool defaults to the active room and current thread from `ToolRuntimeContext`. When there is no active explicit thread, pass `thread_id` explicitly. The tool normalizes the target to the canonical thread root before sending a new `m.notice` summary event with `io.mindroom.thread_summary` metadata. Manual summaries are marked with `model_name="manual"` and update the cached last-summary count so later automatic summaries continue from the new baseline. A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
 
 ### Configuration
 

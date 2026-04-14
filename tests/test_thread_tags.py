@@ -1534,3 +1534,90 @@ async def test_normalize_thread_root_event_id_resolves_thread_edit_via_original_
 
     assert normalized == "$thread-root:localhost"
     client.room_get_event.assert_awaited_once_with("!room:localhost", "$edit:localhost")
+
+
+@pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_resolves_thread_reply_edit_via_original_event_without_nested_thread_metadata() -> (
+    None
+):
+    """Edits of thread replies should fall back through the original event when nested thread metadata is absent."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$edit:localhost",
+                content={
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "edited",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-reply:localhost",
+                    },
+                },
+            ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                    },
+                },
+            ),
+        ],
+    )
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$edit:localhost",
+    )
+
+    assert normalized == "$thread-root:localhost"
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
+
+
+@pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_resolves_thread_root_edit_via_original_event() -> None:
+    """Edits of thread-root messages should normalize back to the original root event."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$edit:localhost",
+                content={
+                    "body": "* edited root",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "edited root",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-root:localhost",
+                    },
+                },
+            ),
+            _message_event_response(
+                "$thread-root:localhost",
+                content={"body": "Root", "msgtype": "m.text"},
+            ),
+        ],
+    )
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$edit:localhost",
+    )
+
+    assert normalized == "$thread-root:localhost"
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-root:localhost")
