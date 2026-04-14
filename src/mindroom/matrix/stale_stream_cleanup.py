@@ -23,11 +23,10 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
-    build_edit_event_content,
-    edit_message,
+    edit_message_result,
     get_joined_rooms,
     resolve_latest_visible_messages,
-    send_message,
+    send_message_result,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
@@ -189,20 +188,20 @@ async def auto_resume_interrupted_threads(
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            response_event_id = await send_message(client, interrupted_thread.room_id, content)
-            if response_event_id:
+            delivered = await send_message_result(client, interrupted_thread.room_id, content)
+            if delivered is not None:
                 if conversation_cache is not None:
                     await conversation_cache.record_outbound_message(
                         interrupted_thread.room_id,
-                        response_event_id,
-                        content,
+                        delivered.event_id,
+                        delivered.content_sent,
                     )
                 logger.info(
                     "Queued auto-resume after restart",
                     room_id=interrupted_thread.room_id,
                     thread_id=interrupted_thread.thread_id,
                     target_event_id=interrupted_thread.target_event_id,
-                    event_id=response_event_id,
+                    event_id=delivered.event_id,
                 )
                 resumed_count += 1
             else:
@@ -1062,7 +1061,7 @@ async def _edit_stale_message(
         extra_content=extra_content,
     )
 
-    response_event_id = await edit_message(
+    delivered = await edit_message_result(
         client,
         room_id,
         target_event_id,
@@ -1070,17 +1069,12 @@ async def _edit_stale_message(
         new_text,
         extra_content=extra_content,
     )
-    if response_event_id:
+    if delivered is not None:
         if conversation_cache is not None:
             await conversation_cache.record_outbound_message(
                 room_id,
-                response_event_id,
-                build_edit_event_content(
-                    event_id=target_event_id,
-                    new_content=content,
-                    new_text=new_text,
-                    extra_content=extra_content,
-                ),
+                delivered.event_id,
+                delivered.content_sent,
             )
         return True
 

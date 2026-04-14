@@ -19,7 +19,7 @@ from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import make_event_cache_mock
+from tests.conftest import delivered_matrix_side_effect, make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -230,8 +230,8 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Threaded subagent sends should include the latest thread event for fallback replies."""
-    send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "send_message", send_mock)
+    send_mock = AsyncMock(side_effect=delivered_matrix_side_effect("$evt"))
+    monkeypatch.setattr(subagents_module, "send_message_result", send_mock)
     event_cache = MagicMock()
     ctx = replace(_make_context(tmp_path, requester_id="@user:localhost"), event_cache=event_cache)
     ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest:localhost")

@@ -28,7 +28,12 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix._event_cache import _EventCache
 from mindroom.matrix._event_cache_write_coordinator import _EventCacheWriteCoordinator
-from mindroom.matrix.client import PermanentMatrixStartupError, ResolvedVisibleMessage, ThreadHistoryResult
+from mindroom.matrix.client import (
+    DeliveredMatrixEvent,
+    PermanentMatrixStartupError,
+    ResolvedVisibleMessage,
+    ThreadHistoryResult,
+)
 from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadRepairRequiredError
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
@@ -1578,6 +1583,122 @@ class TestThreadingBehavior:
         event_cache.mark_thread_repair_required.assert_awaited_once_with("!test:localhost", "$thread:localhost")
 
     @pytest.mark.asyncio
+    async def test_wait_for_room_idle_ignores_outbound_advisory_failure_after_successful_send(self) -> None:
+        """Unrelated room-idle waiters should not inherit advisory failures from successful sends."""
+        event_cache = _runtime_event_cache()
+        finalize_started = asyncio.Event()
+        allow_finalize_failure = asyncio.Event()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread:localhost")
+        event_cache.append_event = AsyncMock(return_value=False)
+
+        failure_message = "cache repair write failed"
+
+        async def _fail_mark_thread_repair_required(_room_id: str, _thread_id: str) -> None:
+            finalize_started.set()
+            await allow_finalize_failure.wait()
+            raise RuntimeError(failure_message)
+
+        event_cache.mark_thread_repair_required = AsyncMock(side_effect=_fail_mark_thread_repair_required)
+        coordinator = _runtime_write_coordinator()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+
+        send_task = asyncio.create_task(
+            access.record_outbound_message(
+                "!test:localhost",
+                "$edit:localhost",
+                {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread:localhost"},
+                },
+            ),
+        )
+        await asyncio.wait_for(finalize_started.wait(), timeout=1.0)
+
+        waiter_task = asyncio.create_task(coordinator.wait_for_room_idle("!test:localhost"))
+        await asyncio.sleep(0)
+        assert waiter_task.done() is False
+
+        allow_finalize_failure.set()
+        await asyncio.wait_for(send_task, timeout=1.0)
+        await asyncio.wait_for(waiter_task, timeout=1.0)
+
+        event_cache.append_event.assert_awaited_once()
+        event_cache.mark_thread_repair_required.assert_awaited_once_with("!test:localhost", "$thread:localhost")
+
+    @pytest.mark.asyncio
+    async def test_reset_runtime_state_clears_reply_chain_caches(self, bot: AgentBot) -> None:
+        """Runtime resets should clear reply-chain caches as well as resolved thread state."""
+        reply_chain = bot._conversation_resolver.reply_chain
+        reply_chain.nodes.put(
+            "!test:localhost",
+            "$original:localhost",
+            _ReplyChainNode(
+                message=_message(event_id="$original:localhost", body="original"),
+                parent_event_id=None,
+                thread_root_id=None,
+                has_relations=False,
+            ),
+        )
+        reply_chain.roots.put(
+            "!test:localhost",
+            "$reply:localhost",
+            _ReplyChainRoot(root_event_id="$original:localhost", points_to_thread=False),
+        )
+
+        bot._conversation_cache.reset_runtime_state()
+
+        assert reply_chain.nodes.get("!test:localhost", "$original:localhost") is None
+        assert reply_chain.roots.get("!test:localhost", "$reply:localhost") is None
+
+    @pytest.mark.asyncio
+    async def test_get_event_queues_persistent_cache_fill_through_room_write_barrier(self) -> None:
+        """Point-event cache fills should use the same room-ordered coordinator as other durable writes."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_event = AsyncMock(return_value=None)
+        event_cache.store_event = AsyncMock()
+        coordinator = _runtime_write_coordinator()
+        client = _make_client_mock()
+        client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {"body": "hello", "msgtype": "m.text"},
+                    "event_id": "$event:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=client,
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+
+        with patch.object(coordinator, "queue_room_update", wraps=coordinator.queue_room_update) as mock_queue:
+            await access.get_event("!test:localhost", "  $event:localhost  ")
+
+        event_cache.store_event.assert_awaited_once()
+        stored_event_id, stored_room_id, stored_event_source = event_cache.store_event.await_args.args
+        assert stored_event_id == "$event:localhost"
+        assert stored_room_id == "!test:localhost"
+        assert stored_event_source["event_id"] == "$event:localhost"
+        mock_queue.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_live_edit_false_write_marks_thread_repair_required(self, bot: AgentBot) -> None:
         """A degraded live append result should still mark the thread repair-required."""
         event_cache = _runtime_event_cache()
@@ -1783,7 +1904,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_local_bot_redaction_ignores_cache_failure_after_successful_redact(self, bot: AgentBot) -> None:
-        """A successful local redact should not fail just because advisory cache write-through fails."""
+        """A successful local redact should delegate advisory bookkeeping through the cache facade."""
         bot.client = AsyncMock(spec=nio.AsyncClient)
         bot.client.room_redact = AsyncMock(
             return_value=nio.RoomRedactResponse(
@@ -1791,9 +1912,7 @@ class TestThreadingBehavior:
                 room_id="!test:localhost",
             ),
         )
-        bot._conversation_cache.record_outbound_redaction = AsyncMock(
-            side_effect=RuntimeError("cache write failed"),
-        )
+        bot._conversation_cache.record_outbound_redaction = AsyncMock()
 
         result = await bot._redact_message_event(
             room_id="!test:localhost",
@@ -5731,8 +5850,13 @@ class TestThreadingBehavior:
                 AsyncMock(return_value="$latest:localhost"),
             ),
             patch(
-                "mindroom.delivery_gateway.send_message",
-                AsyncMock(return_value="$router_response:localhost"),
+                "mindroom.delivery_gateway.send_message_result",
+                AsyncMock(
+                    return_value=DeliveredMatrixEvent(
+                        event_id="$router_response:localhost",
+                        content_sent={"body": "router relay"},
+                    ),
+                ),
             ) as mock_send,
         ):
             await bot._turn_controller._execute_router_relay(

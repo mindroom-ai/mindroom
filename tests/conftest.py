@@ -2,7 +2,7 @@
 
 import os
 import re
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
@@ -22,7 +22,11 @@ from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendText
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.matrix._event_cache import _EventCache
 from mindroom.matrix._event_cache_write_coordinator import _EventCacheWriteCoordinator
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client import (
+    DeliveredMatrixEvent,
+    ResolvedVisibleMessage,
+    build_edit_event_content,
+)
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.turn_controller import TurnController
 from mindroom.turn_policy import TurnPolicy
@@ -37,6 +41,8 @@ __all__ = [
     "build_private_template_dir",
     "bypass_authorization",
     "create_mock_room",
+    "delivered_matrix_event",
+    "delivered_matrix_side_effect",
     "install_edit_message_mock",
     "install_generate_response_mock",
     "install_runtime_cache_support",
@@ -112,6 +118,57 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     return client
+
+
+def delivered_matrix_event(
+    event_id: str,
+    content: Mapping[str, object] | None = None,
+) -> DeliveredMatrixEvent:
+    """Return one delivered Matrix event using the exact content payload seen by the helper."""
+    return DeliveredMatrixEvent(
+        event_id=event_id,
+        content_sent={} if content is None else dict(content),
+    )
+
+
+def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[DeliveredMatrixEvent]]:
+    """Build one async mock side effect that mirrors send/edit helpers returning delivered events."""
+
+    async def _deliver(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+        if "content" in kwargs:
+            content = kwargs["content"]
+            content_mapping = content if isinstance(content, Mapping) else None
+            return delivered_matrix_event(event_id, content_mapping)
+        if "new_content" in kwargs:
+            new_content = kwargs["new_content"]
+            new_text = kwargs.get("new_text")
+            if isinstance(new_content, Mapping) and isinstance(new_text, str):
+                return delivered_matrix_event(
+                    event_id,
+                    build_edit_event_content(
+                        event_id=str(args[2]) if len(args) > 2 else "",
+                        new_content=dict(new_content),
+                        new_text=new_text,
+                    ),
+                )
+            content = new_content
+            content_mapping = content if isinstance(content, Mapping) else None
+            return delivered_matrix_event(event_id, content_mapping)
+        if len(args) > 4 and isinstance(args[3], Mapping) and isinstance(args[4], str):
+            return delivered_matrix_event(
+                event_id,
+                build_edit_event_content(
+                    event_id=str(args[2]),
+                    new_content=dict(args[3]),
+                    new_text=args[4],
+                ),
+            )
+        content_index = 2 if len(args) <= 3 else 3
+        content = args[content_index] if len(args) > content_index else None
+        content_mapping = content if isinstance(content, Mapping) else None
+        return delivered_matrix_event(event_id, content_mapping)
+
+    return _deliver
 
 
 def make_event_cache_mock() -> AsyncMock:

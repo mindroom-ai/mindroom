@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_side_effect,
     install_runtime_cache_support,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -158,7 +159,10 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
     with (
         patch("mindroom.response_runner.ai_response") as mock_ai_response,
         patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-        patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
+        patch(
+            "mindroom.delivery_gateway.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),

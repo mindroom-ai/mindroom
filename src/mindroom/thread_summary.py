@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import send_message
+from mindroom.matrix.client import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.timing import timed
 
@@ -345,29 +345,20 @@ async def send_thread_summary_event(
             },
         },
     )
-    event_id = await send_message(client, room_id, content)
-    if event_id is not None:
-        try:
-            await conversation_cache.record_outbound_message(
-                room_id,
-                event_id,
-                content,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Ignoring thread summary cache write-through failure after successful send",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event_id,
-                error=str(exc),
-            )
+    delivered = await send_message_result(client, room_id, content)
+    if delivered is not None:
+        await conversation_cache.record_outbound_message(
+            room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
         logger.info(
             "Sent thread summary",
             room_id=room_id,
             thread_id=thread_id,
             message_count=message_count,
         )
-        return event_id
+        return delivered.event_id
     logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id)
     return None
 

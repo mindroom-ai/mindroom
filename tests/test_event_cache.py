@@ -491,7 +491,7 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(tmp_path: Pat
 
     try:
         await cache.store_event("$reply", "!room:localhost", _cache_source(reply_event))
-        response = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -538,7 +538,7 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(tmp_p
                 ("$reply_edit", "!room:localhost", _cache_source(edit_event)),
             ],
         )
-        response = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -579,7 +579,7 @@ async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(tmp
 
     try:
         await cache.store_event("$reply_edit", "!room:localhost", _cache_source(edit_event))
-        response = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -635,9 +635,9 @@ async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(tmp_path
                 ("$reply_edit_2", "!room:localhost", _cache_source(newer_edit)),
             ],
         )
-        latest_response = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        latest_response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
         redacted = await cache.redact_event("!room:localhost", "$reply_edit_2")
-        fallback_response = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        fallback_response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -805,7 +805,7 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(tmp_pat
         await cache.invalidate_thread("!room:localhost", "$thread_root")
 
         latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
-        response = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 

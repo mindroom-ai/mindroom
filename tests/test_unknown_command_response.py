@@ -16,6 +16,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    delivered_matrix_event,
     install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -89,7 +90,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
-    ) -> str:
+    ) -> object:
         # Extract thread_id from content if present
         thread_id = None
         if "m.relates_to" in content:
@@ -104,13 +105,13 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
                 "thread_id": thread_id,
             },
         )
-        return "$response_event"
+        return delivered_matrix_event("$response_event", content)
 
     # Add orchestrator mock
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
         await bot._on_message(room, event)
 
     # Verify error message was sent
@@ -200,7 +201,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
-    ) -> str:
+    ) -> object:
         # Extract thread_id from content if present
         thread_id = None
         if "m.relates_to" in content:
@@ -222,13 +223,13 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
                 "thread_id": thread_id,
             },
         )
-        return "$response_event"
+        return delivered_matrix_event("$response_event", content)
 
     # Add orchestrator mock
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
         await bot._on_message(room, event)
 
     # The current bug: it tries to use the event as thread root and fails
@@ -316,7 +317,7 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
-    ) -> str:
+    ) -> object:
         # Extract thread_id from content if present
         thread_id = None
         if "m.relates_to" in content:
@@ -331,13 +332,13 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
                 "thread_id": thread_id,
             },
         )
-        return "$response_event"
+        return delivered_matrix_event("$response_event", content)
 
     # Add orchestrator mock
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
         await bot._on_message(room, event)
 
     # Should use the original message as thread root, not the reply

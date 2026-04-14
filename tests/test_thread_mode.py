@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    delivered_matrix_event,
     install_runtime_cache_support,
     install_send_response_mock,
     make_event_cache_mock,
@@ -428,10 +429,10 @@ class TestRouterHandoffThreadMode:
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured_content.clear()
             captured_content.update(content)
-            return "$reply"
+            return delivered_matrix_event("$reply", content)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -441,7 +442,7 @@ class TestRouterHandoffThreadMode:
 
         with (
             patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="assistant")),
-            patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
+            patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new_callable=AsyncMock,
@@ -469,17 +470,17 @@ class TestRouterHandoffThreadMode:
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured_content.clear()
             captured_content.update(content)
-            return "$reply"
+            return delivered_matrix_event("$reply", content)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
 
         with (
             patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="coder")),
-            patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
+            patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new_callable=AsyncMock,
@@ -791,11 +792,11 @@ class TestSendResponseRoomMode:
 
         captured_content: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured_content.update(content)
-            return "$response_event"
+            return delivered_matrix_event("$response_event", content)
 
-        with patch("mindroom.delivery_gateway.send_message", side_effect=mock_send):
+        with patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send):
             event_id = await bot._send_response(
                 room_id="!room:localhost",
                 reply_to_event_id="$event123",
@@ -853,12 +854,12 @@ class TestStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured.update(content)
-            return "$sent"
+            return delivered_matrix_event("$sent", content)
 
         client = AsyncMock()
-        with patch("mindroom.streaming.send_message", side_effect=mock_send):
+        with patch("mindroom.streaming.send_message_result", side_effect=mock_send):
             await sr._send_or_edit_message(client, is_final=True)
 
         assert "m.relates_to" not in captured
@@ -879,12 +880,12 @@ class TestStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured.update(content)
-            return "$sent"
+            return delivered_matrix_event("$sent", content)
 
         client = AsyncMock()
-        with patch("mindroom.streaming.send_message", side_effect=mock_send):
+        with patch("mindroom.streaming.send_message_result", side_effect=mock_send):
             await sr._send_or_edit_message(client, is_final=True)
 
         assert "m.relates_to" in captured
@@ -914,12 +915,12 @@ class TestSendStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured.update(content)
-            return "$sent"
+            return delivered_matrix_event("$sent", content)
 
         with (
-            patch("mindroom.streaming.send_message", side_effect=mock_send),
+            patch("mindroom.streaming.send_message_result", side_effect=mock_send),
         ):
             await send_streaming_response(
                 client,

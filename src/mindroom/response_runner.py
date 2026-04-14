@@ -729,10 +729,10 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> ResponseRequest:
         """Refresh thread history and rebuild any history-derived payload once locked."""
-        request = await self._refresh_thread_history_after_lock(request)
-        if request.prepare_after_lock is None:
-            return request
         try:
+            request = await self._refresh_thread_history_after_lock(request)
+            if request.prepare_after_lock is None:
+                return request
             return await request.prepare_after_lock(request)
         except Exception as exc:
             raise PostLockRequestPreparationError from exc

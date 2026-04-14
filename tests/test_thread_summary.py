@@ -1137,7 +1137,11 @@ class TestSendSummaryEvent:
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_cache = AsyncMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
-        conversation_cache.record_outbound_message.side_effect = RuntimeError("cache write failed")
+
+        async def _record_outbound_message(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        conversation_cache.record_outbound_message = AsyncMock(side_effect=_record_outbound_message)
 
         result = await send_thread_summary_event(
             client,

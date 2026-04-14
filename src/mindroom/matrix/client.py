@@ -189,6 +189,14 @@ class _ThreadHistoryFetchResult:
     authoritative_refill: bool
 
 
+@dataclass(frozen=True, slots=True)
+class DeliveredMatrixEvent:
+    """One successfully delivered Matrix event plus the exact sent content payload."""
+
+    event_id: str
+    content_sent: dict[str, Any]
+
+
 def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
     """Return the explicit reply target encoded on one visible content payload."""
     if content is None:
@@ -1003,9 +1011,12 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
     )
     return False
 
-
-async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
-    """Send a message to a Matrix room.
+async def send_message_result(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+) -> DeliveredMatrixEvent | None:
+    """Send a message to a Matrix room and return the exact delivered payload.
 
     Automatically handles large messages that exceed the Matrix event size limit
     by uploading the full content as MXC and sending a maximum-size preview.
@@ -1016,25 +1027,30 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         content: The message content dictionary
 
     Returns:
-        The event ID of the sent message, or None if sending failed
+        The delivered event id plus the exact sent content, or None if sending failed
 
     """
     if not _can_send_to_encrypted_room(client, room_id, operation="send_message"):
         return None
 
-    # Handle large messages if needed
-    content = await prepare_large_message(client, room_id, content)
+    content_sent = await prepare_large_message(client, room_id, content)
 
     response = await client.room_send(
         room_id=room_id,
         message_type="m.room.message",
-        content=content,
+        content=content_sent,
     )
     if isinstance(response, nio.RoomSendResponse):
         logger.debug("matrix_message_sent", room_id=room_id, event_id=str(response.event_id))
-        return str(response.event_id)
+        return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
     logger.error("matrix_message_send_failed", room_id=room_id, error=str(response))
     return None
+
+
+async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
+    """Send a message to a Matrix room and return its event id."""
+    delivered = await send_message_result(client, room_id, content)
+    return delivered.event_id if delivered is not None else None
 
 
 def _guess_mimetype(file_path: Path) -> str:
@@ -1181,18 +1197,14 @@ async def send_file_message(
             "m.in_reply_to": {"event_id": latest_thread_event_id},
         }
 
-    event_id = await send_message(client, room_id, content)
-    if event_id is not None and conversation_cache is not None:
-        try:
-            await conversation_cache.record_outbound_message(room_id, event_id, content)
-        except Exception as exc:
-            logger.warning(
-                "Ignoring outbound Matrix file-message cache write-through failure after successful send",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
-    return event_id
+    delivered = await send_message_result(client, room_id, content)
+    if delivered is not None and conversation_cache is not None:
+        await conversation_cache.record_outbound_message(
+            room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
+    return delivered.event_id if delivered is not None else None
 
 
 def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
@@ -2433,15 +2445,15 @@ def build_edit_event_content(
     return edit_content
 
 
-async def edit_message(
+async def edit_message_result(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
     new_content: dict[str, Any],
     new_text: str,
     extra_content: dict[str, Any] | None = None,
-) -> str | None:
-    """Edit an existing Matrix message.
+) -> DeliveredMatrixEvent | None:
+    """Edit an existing Matrix message and return the exact delivered payload.
 
     Automatically handles large messages that exceed the Matrix event size limit
     by uploading the full content as MXC and sending a maximum-size preview.
@@ -2455,7 +2467,7 @@ async def edit_message(
         extra_content: Optional extra keys to merge into both edit payload layers
 
     Returns:
-        The event ID of the edit message, or None if editing failed
+        The delivered edit event plus exact sent content, or None if editing failed
 
     """
     edit_content = build_edit_event_content(
@@ -2465,5 +2477,24 @@ async def edit_message(
         extra_content=extra_content,
     )
 
-    # send_message will handle large messages, including the lower threshold for edits
-    return await send_message(client, room_id, edit_content)
+    return await send_message_result(client, room_id, edit_content)
+
+
+async def edit_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    new_content: dict[str, Any],
+    new_text: str,
+    extra_content: dict[str, Any] | None = None,
+) -> str | None:
+    """Edit an existing Matrix message and return the edit event id."""
+    delivered = await edit_message_result(
+        client,
+        room_id,
+        event_id,
+        new_content,
+        new_text,
+        extra_content=extra_content,
+    )
+    return delivered.event_id if delivered is not None else None

@@ -19,7 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import build_edit_event_content, edit_message, send_message
+from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import is_sync_restart_cancel
@@ -378,31 +378,22 @@ class StreamingResponse:
             return STREAM_STATUS_PENDING
         return STREAM_STATUS_STREAMING
 
-    async def _record_streaming_send(self, event_id: str, content: dict[str, Any]) -> None:
+    async def _record_streaming_send(self, event_id: str, content_sent: dict[str, Any]) -> None:
         """Persist one just-sent streaming message into the conversation cache."""
         if self.conversation_cache is None:
             return
-        await self.conversation_cache.record_outbound_message(self.room_id, event_id, content)
+        await self.conversation_cache.record_outbound_message(self.room_id, event_id, content_sent)
 
     async def _record_streaming_edit(
         self,
         edit_event_id: str,
         *,
-        content: dict[str, Any],
-        display_text: str,
+        content_sent: dict[str, Any],
     ) -> None:
         """Persist one just-sent streaming edit into the conversation cache."""
         if self.conversation_cache is None or self.event_id is None:
             return
-        await self.conversation_cache.record_outbound_message(
-            self.room_id,
-            edit_event_id,
-            build_edit_event_content(
-                event_id=self.event_id,
-                new_content=content,
-                new_text=display_text,
-            ),
-        )
+        await self.conversation_cache.record_outbound_message(self.room_id, edit_event_id, content_sent)
 
     def _mark_first_visible_reply_if_needed(self) -> None:
         """Mark first visible reply timing once visible text exists."""
@@ -411,11 +402,11 @@ class StreamingResponse:
 
     async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
         """Send the initial streaming event."""
-        response_event_id = await send_message(client, self.room_id, content)
-        if response_event_id is None:
+        delivered = await send_message_result(client, self.room_id, content)
+        if delivered is None:
             return False
-        self.event_id = response_event_id
-        await self._record_streaming_send(response_event_id, content)
+        self.event_id = delivered.event_id
+        await self._record_streaming_send(delivered.event_id, delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
         logger.debug("Initial streaming message sent", event_id=self.event_id)
         return True
@@ -429,10 +420,10 @@ class StreamingResponse:
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
-        response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
-        if response_event_id is None:
+        delivered = await edit_message_result(client, self.room_id, self.event_id, content, display_text)
+        if delivered is None:
             return False
-        await self._record_streaming_edit(response_event_id, content=content, display_text=display_text)
+        await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
         return True
 

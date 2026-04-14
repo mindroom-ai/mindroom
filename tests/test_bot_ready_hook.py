@@ -28,6 +28,7 @@ from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    delivered_matrix_event,
     install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -212,9 +213,9 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
 
     captured_content: dict[str, object] = {}
 
-    async def mock_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+    async def mock_send(_client: object, _room_id: str, content: dict[str, object]) -> object:
         captured_content.update(content)
-        return "$hook-event"
+        return delivered_matrix_event("$hook-event", content)
 
     @hook(EVENT_BOT_READY)
     async def on_ready(ctx: AgentLifecycleContext) -> None:
@@ -225,7 +226,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
+        patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send),
     ):
         await bot._on_sync_response(MagicMock())
 
@@ -475,16 +476,16 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
 
     sent_clients: list[object] = []
 
-    async def mock_send(client: object, _room_id: str, _content: dict[str, object]) -> str:
+    async def mock_send(client: object, _room_id: str, content: dict[str, object]) -> object:
         sent_clients.append(client)
-        return "$hook-event"
+        return delivered_matrix_event("$hook-event", content)
 
     sender = bot._hook_context_support.message_sender()
     assert sender is not None
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
-        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
+        patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send),
     ):
         event_id = await sender("!room:localhost", "hello", None, "test-plugin:bot:ready", None)
 

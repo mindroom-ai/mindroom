@@ -25,6 +25,7 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_side_effect,
     make_event_cache_mock,
     make_visible_message,
     runtime_paths_for,
@@ -213,7 +214,10 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="send", message="hello"))
@@ -236,7 +240,10 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -276,7 +283,10 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
         patch(
             "mindroom.custom_tools.matrix_message.add_reaction_buttons",
@@ -320,7 +330,10 @@ async def test_matrix_message_send_plain_text_skips_interactive_registration_and
     ctx = _make_context()
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
         patch(
             "mindroom.custom_tools.matrix_message.parse_and_format_interactive",
             wraps=parse_and_format_interactive,
@@ -362,7 +375,10 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     ctx.conversation_cache.get_latest_thread_event_id_if_needed.return_value = "$evt"
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -416,7 +432,10 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
     )
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -464,8 +483,8 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message",
-            new=AsyncMock(return_value="$reply_evt"),
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$reply_evt")),
         ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
@@ -517,8 +536,8 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message",
-            new=AsyncMock(return_value="$send_evt"),
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$send_evt")),
         ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
@@ -571,7 +590,10 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_only",))
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -752,7 +774,10 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
     ctx = _make_context(storage_path=tmp_path)
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -801,7 +826,10 @@ async def test_matrix_message_send_text_failure_does_not_attempt_attachments(tmp
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_text_fail",))
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value=None)) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(return_value=None),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.matrix_message.send_context_attachments",
             new=AsyncMock(),
@@ -901,7 +929,10 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
     ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=ctx.thread_id)
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -938,7 +969,10 @@ async def test_matrix_message_reply_defaults_to_context_thread() -> None:
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="reply", message="hello"))
@@ -957,7 +991,10 @@ async def test_matrix_message_thread_reply_defaults_to_context_thread() -> None:
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="thread-reply", message="hello"))
@@ -1049,8 +1086,8 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
         patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
         patch(
@@ -1107,8 +1144,8 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ),
         tool_runtime_context(ctx),
     ):
@@ -1142,8 +1179,8 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
         patch("mindroom.custom_tools.matrix_message.clear_interactive_question") as mock_clear,
         patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
@@ -2024,8 +2061,8 @@ async def test_matrix_message_edit_happy_path() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
         tool_runtime_context(ctx),
     ):
@@ -2166,7 +2203,7 @@ async def test_matrix_message_reply_room_sentinel_disables_context_thread_fallba
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock()) as mock_send,
+        patch("mindroom.custom_tools.matrix_message.send_message_result", new=AsyncMock()) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="reply", thread_id="room", message="hello"))
@@ -2225,7 +2262,10 @@ async def test_matrix_message_rate_limit_guardrail() -> None:
     ctx = _make_context()
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_MAX_ACTIONS", 1),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_WINDOW_SECONDS", 60.0),
         tool_runtime_context(ctx),
@@ -2254,7 +2294,10 @@ async def test_matrix_message_rate_limit_counts_attachments_weight(tmp_path: Pat
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_weighted",))
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),

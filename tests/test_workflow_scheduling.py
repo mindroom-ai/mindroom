@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import (
@@ -48,11 +49,18 @@ def _conversation_cache(
     thread_history: list[object] | None = None,
     *,
     latest_thread_event_id: str | None = None,
+    record_error: Exception | None = None,
 ) -> AsyncMock:
     access = AsyncMock()
     access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
-    access.record_outbound_message = AsyncMock()
+
+    async def _record_outbound_message(*_args: object, **_kwargs: object) -> None:
+        if record_error is not None:
+            access.record_outbound_failures.append(record_error)
+
+    access.record_outbound_failures = []
+    access.record_outbound_message = AsyncMock(side_effect=_record_outbound_message)
     return access
 
 
@@ -419,7 +427,15 @@ class TestExecuteScheduledWorkflow:
 
         conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
         with (
-            patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event123")) as mock_send,
+            patch(
+                "mindroom.scheduling.send_message_result",
+                new=AsyncMock(
+                    return_value=DeliveredMatrixEvent(
+                        event_id="$event123",
+                        content_sent={"body": "sent"},
+                    ),
+                ),
+            ) as mock_send,
         ):
             await _execute_scheduled_workflow(
                 client,
@@ -468,7 +484,15 @@ class TestExecuteScheduledWorkflow:
         )
 
         with (
-            patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event456")) as mock_send,
+            patch(
+                "mindroom.scheduling.send_message_result",
+                new=AsyncMock(
+                    return_value=DeliveredMatrixEvent(
+                        event_id="$event456",
+                        content_sent={"body": "sent"},
+                    ),
+                ),
+            ) as mock_send,
         ):
             conversation_cache = _conversation_cache()
             await _execute_scheduled_workflow(
@@ -500,7 +524,15 @@ class TestExecuteScheduledWorkflow:
             room_id="!room:server",
         )
 
-        with patch("mindroom.scheduling.send_message", new=AsyncMock(return_value="$event789")) as mock_send:
+        with patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$event789",
+                    content_sent={"body": "sent"},
+                ),
+            ),
+        ) as mock_send:
             await _execute_scheduled_workflow(
                 client,
                 workflow,
@@ -531,9 +563,14 @@ class TestExecuteScheduledWorkflow:
         )
 
         # Mock send_message to raise an error only on the first call
-        mock_send = AsyncMock(side_effect=[Exception("Send failed"), "$error123"])
+        mock_send = AsyncMock(
+            side_effect=[
+                Exception("Send failed"),
+                DeliveredMatrixEvent(event_id="$error123", content_sent={"body": "error"}),
+            ],
+        )
 
-        with patch("mindroom.scheduling.send_message", new=mock_send):
+        with patch("mindroom.scheduling.send_message_result", new=mock_send):
             # Should not raise, but log error
             await _execute_scheduled_workflow(
                 client,
@@ -565,7 +602,18 @@ class TestExecuteScheduledWorkflow:
         )
 
         with (
-            patch("mindroom.scheduling.send_message", new=AsyncMock(side_effect=[None, "$error456"])) as mock_send,
+            patch(
+                "mindroom.scheduling.send_message_result",
+                new=AsyncMock(
+                    side_effect=[
+                        None,
+                        DeliveredMatrixEvent(
+                            event_id="$error456",
+                            content_sent={"body": "error"},
+                        ),
+                    ],
+                ),
+            ) as mock_send,
             patch("mindroom.scheduling.logger.info") as mock_info,
         ):
             conversation_cache = _conversation_cache(latest_thread_event_id="$latest123")
@@ -582,6 +630,43 @@ class TestExecuteScheduledWorkflow:
         error_content = mock_send.await_args_list[1].args[2]
         assert "Scheduled task failed" in error_content["body"]
 
+    async def test_execute_workflow_ignores_cache_failure_after_successful_send(self) -> None:
+        """Successful scheduled delivery should stay successful when advisory cache write-through fails."""
+        client = AsyncMock()
+        config = _runtime_bound_config(Config())
+        workflow = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC),
+            message="Check the queue depth",
+            description="Queue check",
+            room_id="!room:server",
+            thread_id="$thread123",
+        )
+        conversation_cache = _conversation_cache(
+            latest_thread_event_id="$latest123",
+            record_error=RuntimeError("cache write failed"),
+        )
+
+        with patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$event123",
+                    content_sent={"body": "Check the queue depth"},
+                ),
+            ),
+        ):
+            result = await _execute_scheduled_workflow(
+                client,
+                workflow,
+                config,
+                runtime_paths_for(config),
+                conversation_cache,
+            )
+
+        assert result is True
+        conversation_cache.record_outbound_message.assert_awaited_once()
+
     async def test_execute_workflow_no_room_id(self) -> None:
         """Test that workflow without room_id doesn't execute."""
         client = AsyncMock()
@@ -594,7 +679,7 @@ class TestExecuteScheduledWorkflow:
             room_id=None,  # No room ID
         )
 
-        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message_result", new=AsyncMock()) as mock_send:
             await _execute_scheduled_workflow(
                 client,
                 workflow,

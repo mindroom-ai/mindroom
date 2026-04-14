@@ -71,6 +71,7 @@ from mindroom.hooks import (
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix.client import (
+    DeliveredMatrixEvent,
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
     ThreadHistoryResult,
@@ -102,6 +103,8 @@ from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction,
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    delivered_matrix_event,
+    delivered_matrix_side_effect,
     install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_cache_support,
@@ -1958,8 +1961,8 @@ class TestAgentBot:
                 new_callable=AsyncMock,
             ) as mock_send_streaming_response,
             patch(
-                "mindroom.delivery_gateway.edit_message",
-                new=AsyncMock(return_value=_room_send_response("$edit")),
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
         ):
             mock_send_streaming_response.return_value = ("$response", "chunk")
@@ -2084,8 +2087,8 @@ class TestAgentBot:
         matrix_ids = config.get_ids(runtime_paths_for(config))
         with (
             patch(
-                "mindroom.delivery_gateway.edit_message",
-                new=AsyncMock(return_value=_room_send_response("$edit")),
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -2136,8 +2139,8 @@ class TestAgentBot:
         bot._conversation_state_writer.create_storage = MagicMock(return_value=storage)
         with (
             patch(
-                "mindroom.delivery_gateway.edit_message",
-                new=AsyncMock(return_value=_room_send_response("$edit")),
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -2180,9 +2183,9 @@ class TestAgentBot:
         """Team helper should preserve the canonical thread root across placeholder and edit flow."""
         sent_contents: list[dict[str, object]] = []
 
-        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
             sent_contents.append(content)
-            return "$team"
+            return delivered_matrix_event("$team", content)
 
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
@@ -2218,10 +2221,10 @@ class TestAgentBot:
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
-            patch("mindroom.delivery_gateway.send_message", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch(
-                "mindroom.delivery_gateway.edit_message",
-                new=AsyncMock(return_value=_room_send_response("$edit")),
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -2569,7 +2572,10 @@ class TestAgentBot:
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value=interactive_response),
             ),
-            patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
             patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
             patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
         ):
@@ -3317,9 +3323,9 @@ class TestAgentBot:
             scheduled_tasks.append(task)
             return task
 
-        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
             sent_contents.append(content)
-            return "$thinking"
+            return delivered_matrix_event("$thinking", content)
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -3365,7 +3371,7 @@ class TestAgentBot:
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
-            patch("mindroom.delivery_gateway.send_message", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
         ):
             await bot._generate_response(
                 room_id="!test:localhost",
@@ -3432,8 +3438,14 @@ class TestAgentBot:
             patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, return_value="ok"),
-            patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")),
-            patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+            ),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",

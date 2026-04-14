@@ -32,7 +32,7 @@ from mindroom.hooks import (
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
 from mindroom.logging_config import bound_log_context, get_logger
-from mindroom.matrix.client import send_message
+from mindroom.matrix.client import send_message_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content
@@ -774,12 +774,12 @@ async def _notify_scheduled_workflow_failure(
         conversation_cache,
     )
     try:
-        error_event_id = await send_message(client, workflow.room_id, error_content)
-        if error_event_id is not None:
+        delivered = await send_message_result(client, workflow.room_id, error_content)
+        if delivered is not None:
             await conversation_cache.record_outbound_message(
                 workflow.room_id,
-                error_event_id,
-                error_content,
+                delivered.event_id,
+                delivered.content_sent,
             )
     except Exception:
         logger.exception("Failed to send scheduled workflow failure message")
@@ -846,16 +846,20 @@ async def _execute_scheduled_workflow(
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
             content["com.mindroom.source_kind"] = "scheduled"
-            event_id = await send_message(client, workflow.room_id, content)
-            if event_id is None:
+            delivered = await send_message_result(client, workflow.room_id, content)
+            if delivered is None:
                 _raise_scheduled_workflow_send_error()
-            await conversation_cache.record_outbound_message(workflow.room_id, event_id, content)
+            await conversation_cache.record_outbound_message(
+                workflow.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
             logger.info(
                 "Executed scheduled workflow",
                 description=workflow.description,
                 thread_id=target.resolved_thread_id,
                 new_thread=workflow.new_thread,
-                event_id=event_id,
+                event_id=delivered.event_id,
             )
         except Exception as e:
             logger.exception("Failed to execute scheduled workflow")
@@ -980,12 +984,12 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                error_event_id = await send_message(client, workflow.room_id, error_content)
-                if error_event_id is not None:
+                delivered = await send_message_result(client, workflow.room_id, error_content)
+                if delivered is not None:
                     await conversation_cache.record_outbound_message(
                         workflow.room_id,
-                        error_event_id,
-                        error_content,
+                        delivered.event_id,
+                        delivered.content_sent,
                     )
     finally:
         _cleanup_task_if_current(task_id, running_tasks)
@@ -1094,12 +1098,12 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                error_event_id = await send_message(client, workflow.room_id, error_content)
-                if error_event_id is not None:
+                delivered = await send_message_result(client, workflow.room_id, error_content)
+                if delivered is not None:
                     await conversation_cache.record_outbound_message(
                         workflow.room_id,
-                        error_event_id,
-                        error_content,
+                        delivered.event_id,
+                        delivered.content_sent,
                     )
             if latest_pending_task is not None:
                 try:

@@ -38,7 +38,13 @@ from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     StreamingResponse,
 )
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    delivered_matrix_event,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 _VISIBLE_MESSAGE_IDS = count(1)
 
@@ -655,11 +661,11 @@ class TestStreamingFinalizeStatuses:
         client = AsyncMock()
 
         with (
-            patch("mindroom.streaming.send_message", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message", new_callable=AsyncMock) as mock_edit_message,
+            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
+            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
         ):
-            mock_send_message.return_value = "$event1"
-            mock_edit_message.return_value = "$edit1"
+            mock_send_message.return_value = delivered_matrix_event("$event1")
+            mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
                 room_id="!room:localhost",
@@ -686,11 +692,11 @@ class TestStreamingFinalizeStatuses:
         client = AsyncMock()
 
         with (
-            patch("mindroom.streaming.send_message", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message", new_callable=AsyncMock) as mock_edit_message,
+            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
+            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
         ):
-            mock_send_message.return_value = "$event1"
-            mock_edit_message.return_value = "$edit1"
+            mock_send_message.return_value = delivered_matrix_event("$event1")
+            mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
                 room_id="!room:localhost",
@@ -715,11 +721,11 @@ class TestStreamingFinalizeStatuses:
         client = AsyncMock()
 
         with (
-            patch("mindroom.streaming.send_message", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message", new_callable=AsyncMock) as mock_edit_message,
+            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
+            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
         ):
-            mock_send_message.return_value = "$event1"
-            mock_edit_message.return_value = "$edit1"
+            mock_send_message.return_value = delivered_matrix_event("$event1")
+            mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
                 room_id="!room:localhost",
@@ -744,11 +750,11 @@ class TestStreamingFinalizeStatuses:
         client = AsyncMock()
 
         with (
-            patch("mindroom.streaming.send_message", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message", new_callable=AsyncMock) as mock_edit_message,
+            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
+            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
         ):
-            mock_send_message.return_value = "$event1"
-            mock_edit_message.side_effect = [None, "$edit2"]
+            mock_send_message.return_value = delivered_matrix_event("$event1")
+            mock_edit_message.side_effect = [None, delivered_matrix_event("$edit2")]
 
             streaming = StreamingResponse(
                 room_id="!room:localhost",
@@ -774,11 +780,11 @@ class TestStreamingFinalizeStatuses:
         client = AsyncMock()
 
         with (
-            patch("mindroom.streaming.send_message", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message", new_callable=AsyncMock) as mock_edit_message,
+            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
+            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
         ):
-            mock_send_message.return_value = "$event1"
-            mock_edit_message.side_effect = [RuntimeError("transport boom"), "$edit2"]
+            mock_send_message.return_value = delivered_matrix_event("$event1")
+            mock_edit_message.side_effect = [RuntimeError("transport boom"), delivered_matrix_event("$edit2")]
 
             streaming = StreamingResponse(
                 room_id="!room:localhost",

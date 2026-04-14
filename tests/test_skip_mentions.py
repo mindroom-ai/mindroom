@@ -30,6 +30,7 @@ from mindroom.message_target import MessageTarget
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    delivered_matrix_side_effect,
     make_event_cache_mock,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -131,9 +132,10 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
 
     with patch("mindroom.delivery_gateway.format_message_with_mentions") as mock_create:
         mock_create.return_value = mock_content.copy()
-        with patch("mindroom.delivery_gateway.send_message") as mock_send:
-            mock_send.return_value = "$response123"
-
+        with patch(
+            "mindroom.delivery_gateway.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$response123")),
+        ) as mock_send:
             # Call the actual _send_response method with skip_mentions=True
             await AgentBot._send_response(
                 bot,
@@ -334,7 +336,10 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
     gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
         return_value="$latest",
     )
-    with patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")):
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ):
         event_id = await gateway.send_text(
             SendTextRequest(
                 target=target,
@@ -358,7 +363,10 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
         return_value="$latest",
     )
 
-    with patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")):
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ):
         event_id = await gateway.send_text(
             SendTextRequest(
                 target=target,
@@ -384,7 +392,10 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
         return_value="$latest",
     )
 
-    with patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value="$edit-event")):
+    with patch(
+        "mindroom.delivery_gateway.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit-event")),
+    ):
         edited = await gateway.edit_text(
             EditTextRequest(
                 target=target,

@@ -19,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.hooks import MessageEnvelope
+from mindroom.matrix.client import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -623,8 +624,13 @@ class TestStreamingBehavior:
         with (
             patch("mindroom.streaming.time.time", return_value=100.25),
             patch(
-                "mindroom.streaming.edit_message",
-                new=AsyncMock(return_value="$existing_event"),
+                "mindroom.streaming.edit_message_result",
+                new=AsyncMock(
+                    return_value=DeliveredMatrixEvent(
+                        event_id="$existing_event",
+                        content_sent={"body": PROGRESS_PLACEHOLDER},
+                    ),
+                ),
             ) as mock_edit,
         ):
             await streaming._throttled_send(mock_client, progress_hint=True)
@@ -701,8 +707,13 @@ class TestStreamingBehavior:
 
         # Now finalize with no text ever emitted
         with patch(
-            "mindroom.streaming.edit_message",
-            new=AsyncMock(return_value="$placeholder_msg"),
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$placeholder_msg",
+                    content_sent={"body": PROGRESS_PLACEHOLDER},
+                ),
+            ),
         ) as mock_edit:
             await streaming.finalize(mock_client)
 
@@ -728,8 +739,13 @@ class TestStreamingBehavior:
         streaming.event_id = "$existing_msg"
 
         with patch(
-            "mindroom.streaming.edit_message",
-            new=AsyncMock(return_value="$existing_msg"),
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$existing_msg",
+                    content_sent={"body": PROGRESS_PLACEHOLDER},
+                ),
+            ),
         ) as mock_edit:
             await streaming.finalize(mock_client)
 
@@ -747,16 +763,16 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_contents.append((new_content, new_text))
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         async def empty_stream() -> AsyncIterator[str]:
             if False:
                 yield ""
             return
 
-        with patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)):
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             event_id, accumulated = await send_streaming_response(
                 client=mock_client,
                 room_id="!test:localhost",
@@ -788,9 +804,32 @@ class TestStreamingBehavior:
         async def one_chunk_stream() -> AsyncIterator[str]:
             yield "Hello from stream"
 
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+        ) -> DeliveredMatrixEvent:
+            return DeliveredMatrixEvent(event_id="$stream-send", content_sent=dict(content))
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            event_id: str,
+            new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            return DeliveredMatrixEvent(
+                event_id="$stream-edit",
+                content_sent=build_edit_event_content(
+                    event_id=event_id,
+                    new_content=dict(new_content),
+                    new_text=new_text,
+                ),
+            )
+
         with (
-            patch("mindroom.streaming.send_message", new=AsyncMock(return_value="$stream-send")),
-            patch("mindroom.streaming.edit_message", new=AsyncMock(return_value="$stream-edit")),
+            patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
         ):
             event_id, accumulated = await send_streaming_response(
                 client=mock_client,
@@ -882,9 +921,13 @@ class TestStreamingBehavior:
             source_kind="message",
         )
 
-        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+        ) -> DeliveredMatrixEvent:
             sent_contents.append(content)
-            return "$stream_1"
+            return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
         async def record_edit(
             _client: object,
@@ -892,12 +935,12 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
-        ) -> str:
-            return "$stream_1"
+        ) -> DeliveredMatrixEvent:
+            return DeliveredMatrixEvent(event_id="$stream_1", content_sent={})
 
         with (
-            patch("mindroom.streaming.send_message", new=record_send),
-            patch("mindroom.streaming.edit_message", new=record_edit),
+            patch("mindroom.streaming.send_message_result", new=record_send),
+            patch("mindroom.streaming.edit_message_result", new=record_edit),
             patch_response_runner_module(
                 ensure_request_knowledge_managers=empty_request_knowledge_managers,
                 stream_agent_response=MagicMock(return_value=response_stream()),
@@ -934,11 +977,15 @@ class TestStreamingBehavior:
             reply_to_event_id="$reply:localhost",
         )
 
-        async def record_send(_client: object, room_id: str, content: dict[str, object]) -> str:
+        async def record_send(
+            _client: object,
+            room_id: str,
+            content: dict[str, object],
+        ) -> DeliveredMatrixEvent:
             sent_messages.append((room_id, content))
-            return "$stream_1"
+            return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
-        with patch("mindroom.streaming.send_message", new=record_send):
+        with patch("mindroom.streaming.send_message_result", new=record_send):
             streaming = StreamingResponse(
                 room_id="!stale:localhost",
                 reply_to_event_id="$stale_reply:localhost",
@@ -1018,16 +1065,16 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
         async def cancelling_stream() -> AsyncIterator[str]:
             yield "Partial answer"
             raise asyncio.CancelledError
 
         with (
-            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
             pytest.raises(asyncio.CancelledError),
         ):
             await send_streaming_response(
@@ -1059,16 +1106,16 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_messages.append((new_content, new_text))
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         async def cancelling_stream() -> AsyncIterator[str]:
             yield "Partial answer"
             raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
         with (
-            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
             pytest.raises(asyncio.CancelledError),
         ):
             await send_streaming_response(
@@ -1101,9 +1148,9 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
         async def failing_stream() -> AsyncIterator[str]:
             yield "Partial answer"
@@ -1111,7 +1158,7 @@ class TestStreamingBehavior:
             raise RuntimeError(msg)
 
         with (
-            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
             pytest.raises(StreamingDeliveryError, match="model backend disconnected") as exc_info,
         ):
             await send_streaming_response(
@@ -1150,9 +1197,9 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
         async def failing_stream() -> AsyncIterator[str]:
             if False:
@@ -1161,7 +1208,7 @@ class TestStreamingBehavior:
             raise RuntimeError(msg)
 
         with (
-            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
             pytest.raises(StreamingDeliveryError, match="provider stream failed") as exc_info,
         ):
             await send_streaming_response(

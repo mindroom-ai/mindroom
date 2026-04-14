@@ -258,7 +258,7 @@ async def test_matrix_api_send_event_rejects_threaded_room_message_without_conve
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send() -> None:
-    """A successful send_event should still succeed when advisory cache write-through fails."""
+    """A successful send_event should delegate advisory bookkeeping through the cache facade."""
     tool = MatrixApiTools()
     ctx = _make_context()
     content = {
@@ -275,12 +275,8 @@ async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send
         event_id="$send:localhost",
         room_id=ctx.room_id,
     )
-    ctx.conversation_cache.record_outbound_message.side_effect = RuntimeError("cache write failed")
 
-    with (
-        patch("mindroom.custom_tools.matrix_api.logger.warning"),
-        tool_runtime_context(ctx),
-    ):
+    with tool_runtime_context(ctx):
         payload = json.loads(
             await tool.matrix_api(
                 action="send_event",
@@ -499,20 +495,38 @@ async def test_matrix_api_redact_rejects_threaded_target_without_conversation_ca
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_redact_dry_run_rejects_threaded_target_without_conversation_cache() -> None:
+    """Threaded redaction dry-runs must validate the same cache prerequisite as real execution."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    ctx.event_cache.get_thread_id_for_event.return_value = "$thread:localhost"
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$target:localhost",
+                reason="cleanup",
+                dry_run=True,
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Conversation cache is required" in payload["message"]
+    ctx.client.room_redact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_redact_ignores_cache_failure_after_successful_redact() -> None:
-    """A successful redact should still succeed when advisory cache write-through fails."""
+    """A successful redact should delegate advisory bookkeeping through the cache facade."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
         event_id="$redaction:localhost",
         room_id=ctx.room_id,
     )
-    ctx.conversation_cache.record_outbound_redaction.side_effect = RuntimeError("cache write failed")
 
-    with (
-        patch("mindroom.custom_tools.matrix_api.logger.warning"),
-        tool_runtime_context(ctx),
-    ):
+    with tool_runtime_context(ctx):
         payload = json.loads(
             await tool.matrix_api(
                 action="redact",

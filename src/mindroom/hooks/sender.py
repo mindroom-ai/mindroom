@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.hooks.types import HookMessageSender  # noqa: TC001
-from mindroom.matrix.client import send_message
+from mindroom.matrix.client import send_message_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
 
@@ -70,10 +70,11 @@ async def send_hook_message(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=content_extra,
     )
-    event_id = await send_message(client, room_id, content)
-    if event_id is not None:
-        await conversation_cache.record_outbound_message(room_id, event_id, content)
-    return event_id
+    delivered = await send_message_result(client, room_id, content)
+    if delivered is not None:
+        await conversation_cache.record_outbound_message(room_id, delivered.event_id, delivered.content_sent)
+        return delivered.event_id
+    return None
 
 
 def build_hook_message_sender(

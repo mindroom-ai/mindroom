@@ -42,6 +42,7 @@ from mindroom.thread_utils import create_session_id
 from mindroom.turn_store import LoadedTurnRecord
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_side_effect,
     install_generate_response_mock,
     install_runtime_cache_support,
     patch_response_runner_module,
@@ -349,7 +350,10 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             ai_response=mock_ai_response,
         ),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value="$edit")) as mock_edit,
+        patch(
+            "mindroom.delivery_gateway.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ) as mock_edit,
     ):
         # Setup mocks
         mock_context.return_value = MagicMock(

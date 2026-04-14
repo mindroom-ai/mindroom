@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.tools import Toolkit
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.matrix.client import send_message
+from mindroom.matrix.client import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import (
@@ -272,11 +272,12 @@ async def _send_matrix_text(
     )
     if original_sender:
         content[ORIGINAL_SENDER_KEY] = original_sender
-    event_id = await send_message(context.client, room_id, content)
-    if event_id is not None:
+    delivered = await send_message_result(context.client, room_id, content)
+    if delivered is not None:
         assert context.conversation_cache is not None
-        await context.conversation_cache.record_outbound_message(room_id, event_id, content)
-    return event_id
+        await context.conversation_cache.record_outbound_message(room_id, delivered.event_id, delivered.content_sent)
+        return delivered.event_id
+    return None
 
 
 def _spawn_room_mode_error(context: ToolRuntimeContext, *, target_agent: str) -> str | None:

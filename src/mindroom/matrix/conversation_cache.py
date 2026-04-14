@@ -178,7 +178,7 @@ async def _cached_room_get_event(
     event_cache: ConversationEventCache,
     room_id: str,
     event_id: str,
-) -> nio.RoomGetEventResponse | RoomGetEventError:
+) -> tuple[nio.RoomGetEventResponse | RoomGetEventError, dict[str, Any] | None]:
     """Return one event through the persistent cache when available."""
     normalized_event_id = event_id.strip()
     if normalized_event_id:
@@ -200,7 +200,7 @@ async def _cached_room_get_event(
                     event_source=cached_event,
                 )
                 if cached_response is not None:
-                    return cached_response
+                    return cached_response, None
                 logger.warning(
                     "Cached Matrix event could not be reconstructed",
                     room_id=room_id,
@@ -210,7 +210,7 @@ async def _cached_room_get_event(
 
     response = await client.room_get_event(room_id, normalized_event_id)
     if not isinstance(response, nio.RoomGetEventResponse):
-        return response
+        return response, None
 
     event = response.event
     event_source = event.source if isinstance(event.source, dict) else {}
@@ -223,28 +223,13 @@ async def _cached_room_get_event(
         if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
         else None,
     )
-    try:
-        await event_cache.store_event(
-            normalized_event_id,
-            room_id,
-            normalized_event_source,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to cache Matrix event lookup",
-            room_id=room_id,
-            event_id=normalized_event_id,
-            error=str(exc),
-        )
-    reconstructed_response = await _cached_room_get_event_response(
+    visible_response = await _cached_room_get_event_response(
         client,
         event_cache,
         room_id=room_id,
         event_source=normalized_event_source,
     )
-    if reconstructed_response is not None:
-        return reconstructed_response
-    return response
+    return (visible_response if visible_response is not None else response), normalized_event_source
 
 
 @dataclass
@@ -377,12 +362,31 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if turn_cache is not None and cache_key in turn_cache:
             return turn_cache[cache_key]
 
-        response = await _cached_room_get_event(
+        normalized_event_id = event_id.strip()
+        response, fetched_event_source = await _cached_room_get_event(
             self._require_client(),
             self.runtime.event_cache,
             room_id,
             event_id,
         )
+        if fetched_event_source is not None:
+
+            async def persist_lookup_event() -> None:
+                await self.runtime.event_cache.store_event(normalized_event_id, room_id, fetched_event_source)
+
+            try:
+                await self._queue_room_cache_update(
+                    room_id,
+                    persist_lookup_event,
+                    name="matrix_cache_store_room_get_event",
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to cache Matrix event lookup",
+                    room_id=room_id,
+                    event_id=event_id,
+                    error=str(exc),
+                )
         if turn_cache is not None:
             turn_cache[cache_key] = response
         return response
@@ -403,6 +407,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
     def reset_runtime_state(self) -> None:
         """Drop in-memory conversation state tied to one runtime lifetime."""
         self._resolved_thread_cache.clear()
+        reply_chain_caches = self._reply_chain_caches()
+        if reply_chain_caches is not None:
+            reply_chain_caches.clear()
 
     async def _fetch_thread_history_from_client(
         self,
@@ -449,13 +456,24 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_id: str | None,
         *,
         reason: str,
-        queue_write: bool = True,
     ) -> None:
         await self._writes._mark_lookup_repair_pending(
             room_id,
             event_id,
             reason=reason,
-            queue_write=queue_write,
+        )
+
+    async def _mark_lookup_repair_pending_locked(
+        self,
+        room_id: str,
+        event_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        await self._writes._mark_lookup_repair_pending_locked(
+            room_id,
+            event_id,
+            reason=reason,
         )
 
     async def _promote_lookup_repairs_locked(
@@ -751,11 +769,27 @@ class MatrixConversationCache(ConversationCacheProtocol):
         content: dict[str, Any],
     ) -> None:
         """Write one locally sent threaded message or edit through to the cache."""
-        await self._writes.record_outbound_message(room_id, event_id, content)
+        try:
+            await self._writes.record_outbound_message(room_id, event_id, content)
+        except Exception as exc:
+            self.logger.warning(
+                "Ignoring outbound threaded message cache write-through failure after successful send",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
 
     async def record_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Write one locally redacted threaded message through to the cache."""
-        await self._writes.record_outbound_redaction(room_id, redacted_event_id)
+        try:
+            await self._writes.record_outbound_redaction(room_id, redacted_event_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Ignoring outbound threaded message cache redaction failure after successful redact",
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+                error=str(exc),
+            )
 
     async def append_live_event(
         self,

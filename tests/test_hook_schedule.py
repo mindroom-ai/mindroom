@@ -23,7 +23,13 @@ from mindroom.scheduling import (
     _run_once_task,
     set_scheduling_hook_registry,
 )
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    delivered_matrix_side_effect,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -88,7 +94,10 @@ async def test_schedule_hook_rewrites_message_text(tmp_path: Path) -> None:
     conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
 
     with (
-        patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send,
+        patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
+        ) as mock_send,
     ):
         await _execute_scheduled_workflow(
             AsyncMock(),
@@ -113,7 +122,10 @@ async def test_schedule_hook_can_suppress_synthetic_message(tmp_path: Path) -> N
     config = _config(tmp_path)
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [suppress])]))
 
-    with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
+    with patch(
+        "mindroom.scheduling.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
+    ) as mock_send:
         await _execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Do not send"),
@@ -143,7 +155,10 @@ async def test_schedule_hook_suppression_log_includes_workflow_thread_context(
     setup_logging(level="INFO", runtime_paths=runtime_paths_for(config))
     capsys.readouterr()
 
-    with patch("mindroom.scheduling.send_message", new=AsyncMock()):
+    with patch(
+        "mindroom.scheduling.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
+    ):
         await _execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Do not send"),
@@ -273,8 +288,14 @@ async def test_schedule_hook_send_message_inherits_context_thread_id(tmp_path: P
     conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
 
     with (
-        patch("mindroom.hooks.sender.send_message", new=AsyncMock(return_value="$hook-event")) as mock_hook_send,
-        patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_schedule_send,
+        patch(
+            "mindroom.hooks.sender.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
+        ) as mock_hook_send,
+        patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
+        ) as mock_schedule_send,
     ):
         await _execute_scheduled_workflow(
             client,
@@ -307,8 +328,14 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
     conversation_cache = _conversation_cache(latest_thread_event_id=None)
 
     with (
-        patch("mindroom.hooks.sender.send_message", new=AsyncMock(return_value="$hook-event")) as mock_hook_send,
-        patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_schedule_send,
+        patch(
+            "mindroom.hooks.sender.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
+        ) as mock_hook_send,
+        patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
+        ) as mock_schedule_send,
     ):
         await _execute_scheduled_workflow(
             client,
@@ -341,8 +368,14 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
     conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
 
     with (
-        patch("mindroom.hooks.sender.send_message", new=AsyncMock(return_value="$hook-event")) as mock_hook_send,
-        patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_schedule_send,
+        patch(
+            "mindroom.hooks.sender.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
+        ) as mock_hook_send,
+        patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
+        ) as mock_schedule_send,
     ):
         await _execute_scheduled_workflow(
             client,

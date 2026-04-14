@@ -131,28 +131,32 @@ class ThreadWritePolicy:
         event_id: str | None,
         *,
         reason: str,
-        queue_write: bool = True,
     ) -> None:
         if not isinstance(event_id, str) or not event_id:
             return
 
-        async def persist_lookup_repair() -> None:
-            await self.cache.runtime.event_cache.mark_pending_lookup_repair(room_id, event_id)
-            self.cache.logger.debug(
-                "Marked Matrix thread lookup repair pending",
-                room_id=room_id,
-                event_id=event_id,
-                reason=reason,
-            )
+        await self.cache._queue_room_cache_update(
+            room_id,
+            lambda: self._mark_lookup_repair_pending_locked(room_id, event_id, reason=reason),
+            name="matrix_cache_mark_lookup_repair_pending",
+        )
 
-        if queue_write:
-            await self.cache._queue_room_cache_update(
-                room_id,
-                persist_lookup_repair,
-                name="matrix_cache_mark_lookup_repair_pending",
-            )
+    async def _mark_lookup_repair_pending_locked(
+        self,
+        room_id: str,
+        event_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        if not isinstance(event_id, str) or not event_id:
             return
-        await persist_lookup_repair()
+        await self.cache.runtime.event_cache.mark_pending_lookup_repair(room_id, event_id)
+        self.cache.logger.debug(
+            "Marked Matrix thread lookup repair pending",
+            room_id=room_id,
+            event_id=event_id,
+            reason=reason,
+        )
 
     async def _promote_lookup_repairs_locked(
         self,
@@ -291,11 +295,10 @@ class ThreadWritePolicy:
                 error=str(exc),
             )
             if has_explicit_thread_relation:
-                await self._mark_lookup_repair_pending(
+                await self._mark_lookup_repair_pending_locked(
                     room_id,
                     event_info.original_event_id or event_id,
                     reason="outbound_lookup_failed",
-                    queue_write=False,
                 )
             else:
                 await self._invalidate_resolved_threads_for_event_ids(
@@ -309,11 +312,10 @@ class ThreadWritePolicy:
             return thread_id
 
         if has_explicit_thread_relation:
-            await self._mark_lookup_repair_pending(
+            await self._mark_lookup_repair_pending_locked(
                 room_id,
                 event_info.original_event_id or event_id,
                 reason="outbound_lookup_missing",
-                queue_write=False,
             )
         else:
             await self._invalidate_resolved_threads_for_event_ids(
@@ -359,13 +361,22 @@ class ThreadWritePolicy:
             event_id,
             event_source,
         )
-        await self.cache._finalize_thread_cache_mutation(
-            room_id,
-            thread_id,
-            persisted=appended,
-            invalidate_resolved=event_info.is_edit,
-            failure_reason="outbound_append_failed",
-        )
+        try:
+            await self.cache._finalize_thread_cache_mutation(
+                room_id,
+                thread_id,
+                persisted=appended,
+                invalidate_resolved=event_info.is_edit,
+                failure_reason="outbound_append_failed",
+            )
+        except Exception as exc:
+            self.cache.logger.warning(
+                "Ignoring outbound threaded message cache finalization failure after successful send",
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event_id,
+                error=str(exc),
+            )
 
     async def record_outbound_message(
         self,
@@ -686,11 +697,10 @@ class ThreadWritePolicy:
                 error=str(exc),
             )
             if has_explicit_thread_relation:
-                await self._mark_lookup_repair_pending(
+                await self._mark_lookup_repair_pending_locked(
                     room_id,
                     event_info.original_event_id,
                     reason="sync_thread_lookup_failed",
-                    queue_write=False,
                 )
             else:
                 await self._invalidate_resolved_threads_for_event_ids(
@@ -716,11 +726,10 @@ class ThreadWritePolicy:
         if thread_id is None:
             event_info = EventInfo.from_event(event_source)
             if _has_explicit_thread_relation(event_info):
-                await self._mark_lookup_repair_pending(
+                await self._mark_lookup_repair_pending_locked(
                     room_id,
                     event_info.original_event_id,
                     reason="sync_thread_lookup_missing",
-                    queue_write=False,
                 )
             else:
                 await self._invalidate_resolved_threads_for_event_ids(

@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.matrix.client import _msgtype_for_mimetype, _upload_file_as_mxc, send_file_message, send_message
+from mindroom.matrix.client import (
+    DeliveredMatrixEvent,
+    _msgtype_for_mimetype,
+    _upload_file_as_mxc,
+    send_file_message,
+    send_message,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -146,15 +152,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "report.pdf"
         file.write_bytes(b"%PDF")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -178,10 +184,10 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "secret.bin"
         file.write_bytes(b"\x00" * 8)
@@ -199,7 +205,7 @@ class TestSendFileMessage:
                     },
                 ),
             ),
-            patch("mindroom.matrix.client.send_message", side_effect=capture_send),
+            patch("mindroom.matrix.client.send_message_result", side_effect=capture_send),
         ):
             event_id = await send_file_message(
                 client,
@@ -221,15 +227,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -254,16 +260,16 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
         with (
-            patch("mindroom.matrix.client.send_message", side_effect=capture_send),
+            patch("mindroom.matrix.client.send_message_result", side_effect=capture_send),
         ):
             event_id = await send_file_message(
                 client,
@@ -302,7 +308,25 @@ class TestSendFileMessage:
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with patch("mindroom.matrix.client.send_message", new=AsyncMock(return_value="$evt:localhost")):
+        with patch(
+            "mindroom.matrix.client.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$evt:localhost",
+                    content_sent={
+                        "msgtype": "m.file",
+                        "body": "data.csv",
+                        "url": "mxc://localhost/t1",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$root:localhost",
+                            "is_falling_back": True,
+                            "m.in_reply_to": {"event_id": "$precomputed:localhost"},
+                        },
+                    },
+                ),
+            ),
+        ):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -326,11 +350,27 @@ class TestSendFileMessage:
         client = _mock_client(encrypted=False)
         client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
         conversation_cache = AsyncMock()
-        conversation_cache.record_outbound_message.side_effect = RuntimeError("cache write failed")
+
+        async def _record_outbound_message(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        conversation_cache.record_outbound_message = AsyncMock(side_effect=_record_outbound_message)
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with patch("mindroom.matrix.client.send_message", new=AsyncMock(return_value="$evt:localhost")):
+        with patch(
+            "mindroom.matrix.client.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$evt:localhost",
+                    content_sent={
+                        "msgtype": "m.file",
+                        "body": "data.csv",
+                        "url": "mxc://localhost/t1",
+                    },
+                ),
+            ),
+        ):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -383,15 +423,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "report.pdf"
         file.write_bytes(b"%PDF")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
             await send_file_message(
                 client,
                 "!room:localhost",
@@ -453,15 +493,15 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "photo.png"
         file.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -483,15 +523,15 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "clip.mp4"
         file.write_bytes(b"\x00\x00\x00\x1cftyp")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",

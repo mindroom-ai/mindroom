@@ -35,11 +35,10 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
-    build_edit_event_content,
-    edit_message,
+    edit_message_result,
     get_room_threads_page,
     send_file_message,
-    send_message,
+    send_message_result,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
@@ -188,11 +187,16 @@ class MatrixMessageTools(Toolkit):
             latest_thread_event_id=latest_thread_event_id,
             extra_content=extra_content or None,
         )
-        event_id = await send_message(context.client, room_id, content)
-        if event_id is not None:
+        delivered = await send_message_result(context.client, room_id, content)
+        if delivered is not None:
             assert context.conversation_cache is not None
-            await context.conversation_cache.record_outbound_message(room_id, event_id, content)
-        return event_id
+            await context.conversation_cache.record_outbound_message(
+                room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+            return delivered.event_id
+        return None
 
     async def _maybe_add_interactive_question(
         self,
@@ -773,8 +777,8 @@ class MatrixMessageTools(Toolkit):
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
-        edit_event_id = await edit_message(context.client, room_id, target, content, formatted_text)
-        if edit_event_id is None:
+        delivered = await edit_message_result(context.client, room_id, target, content, formatted_text)
+        if delivered is None:
             return self._payload(
                 "error",
                 action="edit",
@@ -786,12 +790,8 @@ class MatrixMessageTools(Toolkit):
         assert context.conversation_cache is not None
         await context.conversation_cache.record_outbound_message(
             room_id,
-            edit_event_id,
-            build_edit_event_content(
-                event_id=target,
-                new_content=content,
-                new_text=formatted_text,
-            ),
+            delivered.event_id,
+            delivered.content_sent,
         )
 
         if interactive_response.option_map and interactive_response.options_list:
@@ -815,7 +815,7 @@ class MatrixMessageTools(Toolkit):
             room_id=room_id,
             thread_id=thread_id,
             target=target,
-            event_id=edit_event_id,
+            event_id=delivered.event_id,
         )
 
     def _message_context(

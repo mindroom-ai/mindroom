@@ -15,6 +15,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_side_effect,
     install_generate_response_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -109,7 +110,10 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         async def response_stream() -> AsyncIterator[str]:
             yield "Processed selection"
 
-        with patch("mindroom.streaming.edit_message", new=AsyncMock(return_value="$edit:localhost")) as mock_edit:
+        with patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit:localhost")),
+        ) as mock_edit:
             event_id, accumulated = await send_streaming_response(
                 client=bot.client,
                 room_id=room_id,

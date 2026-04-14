@@ -49,7 +49,7 @@ from mindroom.post_response_effects import (
     ResponseOutcome,
     apply_post_response_effects,
 )
-from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
@@ -738,6 +738,34 @@ async def test_refresh_thread_history_after_lock_refreshes_when_redaction_candid
 
     mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
     assert request.thread_history == refreshed_history
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path) -> None:
+    """Post-lock refresh failures should route through the normalized preparation error boundary."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+
+    with (
+        patch.object(
+            coordinator,
+            "_refresh_thread_history_after_lock",
+            new=AsyncMock(side_effect=RuntimeError("repair required")),
+        ),
+        pytest.raises(PostLockRequestPreparationError) as excinfo,
+    ):
+        await coordinator._prepare_request_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+            ),
+        )
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
 
 
 @pytest.mark.asyncio

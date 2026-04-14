@@ -63,6 +63,9 @@ class _LRUCache[T]:
     def __len__(self) -> int:
         return len(self._data)
 
+    def clear(self) -> None:
+        self._data.clear()
+
 
 @dataclass
 class _ReplyChainNode:
@@ -131,6 +134,11 @@ class ReplyChainCaches:
             return
         while self._invalidate_nodes(room_id, pending_event_ids) or self._invalidate_roots(room_id, pending_event_ids):
             pass
+
+    def clear(self) -> None:
+        """Drop all process-local reply-chain caches for one runtime lifetime."""
+        self.nodes.clear()
+        self.roots.clear()
 
 
 # ---------------------------------------------------------------------------
