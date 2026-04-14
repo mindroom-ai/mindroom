@@ -6560,12 +6560,12 @@ class TestAgentBot:
         mock_history.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_skips_extra_full_history_fetch_after_snapshot_fallback(
+    async def test_extract_dispatch_context_marks_direct_thread_snapshot_for_later_full_hydration(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Authoritative snapshot refresh should not trigger a second full-history fetch during dispatch extraction."""
+        """Direct-thread preview should stay lightweight and request later full hydration."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_cache_support(bot)
@@ -6586,7 +6586,7 @@ class TestAgentBot:
                 "type": "m.room.message",
             },
         )
-        full_history = ThreadHistoryResult(
+        snapshot_history = ThreadHistoryResult(
             [
                 ResolvedVisibleMessage.synthetic(
                     sender="@user:localhost",
@@ -6603,20 +6603,20 @@ class TestAgentBot:
                     content={"body": "Reply"},
                 ),
             ],
-            is_full_history=True,
+            is_full_history=False,
         )
 
         with patch(
-            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=full_history),
-        ) as mock_refresh:
+            "mindroom.matrix.conversation_cache.fetch_thread_snapshot",
+            new=AsyncMock(return_value=snapshot_history),
+        ) as mock_snapshot:
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
-        assert context.thread_history == full_history
-        assert context.requires_full_thread_history is False
-        assert mock_refresh.await_count == 1
+        assert context.thread_history == snapshot_history
+        assert context.requires_full_thread_history is True
+        assert mock_snapshot.await_count == 1
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(  # noqa: PLR0915

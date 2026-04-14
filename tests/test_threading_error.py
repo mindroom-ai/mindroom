@@ -28,6 +28,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
@@ -2092,8 +2093,8 @@ class TestThreadingBehavior:
         assert [message.body for message in initial_history] == ["Root", "Original reply"]
         assert [message.body for message in refreshed_history] == ["Root", "Edited reply"]
         assert [message.body for message in cached_history] == ["Root", "Edited reply"]
-        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        restarted_client.room_messages.assert_awaited_once()
+        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        restarted_client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_lookup_miss_sync_edit_marks_room_stale_durably_and_forces_refetch(
@@ -2174,8 +2175,8 @@ class TestThreadingBehavior:
         assert cache_state.room_invalidation_reason == "sync_lookup_missing"
         assert [message.body for message in refreshed_history] == ["Root", "Refetched reply"]
         assert [message.body for message in cached_history] == ["Root", "Refetched reply"]
-        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        restarted_client.room_messages.assert_awaited_once()
+        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        restarted_client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_get_thread_history_raises_when_refresh_fails(self) -> None:
@@ -2254,7 +2255,7 @@ class TestThreadingBehavior:
         async def queued_update() -> None:
             queued_update_started.set()
 
-        access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=slow_refresh)
+        access._reads.fetch_thread_snapshot_from_client = AsyncMock(side_effect=slow_refresh)
 
         refresh_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$thread:localhost"))
         await asyncio.wait_for(refresh_started.wait(), timeout=1.0)

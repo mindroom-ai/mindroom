@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import aiohttp
 import nio
@@ -18,6 +18,7 @@ from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
@@ -54,7 +55,7 @@ async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistory
 async def fetch_thread_snapshot(*args: object, **kwargs: object) -> ThreadHistoryResult:
     """Inject a concrete event cache for test-local snapshot helpers."""
     kwargs.setdefault("event_cache", _event_cache())
-    return await matrix_client_module.refresh_thread_history_from_source(*args, **kwargs)
+    return await matrix_client_module.fetch_thread_snapshot(*args, **kwargs)
 
 
 def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
@@ -233,7 +234,12 @@ class TestThreadHistory:
             )
 
         assert history == expected_history
-        mock_fallback.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+        mock_fallback.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            hydrate_sidecars=True,
+        )
         mock_store.assert_awaited_once_with(
             event_cache,
             room_id="!room:localhost",
@@ -502,7 +508,12 @@ class TestThreadHistory:
             )
 
         assert history == fallback_history
-        mock_room_scan.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+        mock_room_scan.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            hydrate_sidecars=True,
+        )
         mock_store.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -555,7 +566,7 @@ class TestThreadHistory:
                     content={"body": "refreshed"},
                 ),
             ],
-            is_full_history=True,
+            is_full_history=False,
         )
         client = AsyncMock()
 
@@ -566,10 +577,16 @@ class TestThreadHistory:
             snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
 
         assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is True
+        assert snapshot.is_full_history is False
         assert [message.event_id for message in snapshot] == ["$thread_root"]
         assert snapshot[0].body == "refreshed"
-        mock_refresh.assert_awaited_once()
+        mock_refresh.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            ANY,
+            hydrate_sidecars=False,
+        )
 
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_miss_preserves_authoritative_non_text_children(self) -> None:
@@ -592,20 +609,27 @@ class TestThreadHistory:
                     thread_id="$thread_root",
                 ),
             ],
-            is_full_history=True,
+            is_full_history=False,
         )
         client = AsyncMock()
 
         with patch(
             "mindroom.matrix.client.refresh_thread_history_from_source",
             new=AsyncMock(return_value=refreshed_history),
-        ):
+        ) as mock_refresh:
             snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
 
         assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is True
+        assert snapshot.is_full_history is False
         assert [message.event_id for message in snapshot] == ["$thread_root", "$reply_audio"]
         assert snapshot[1].content["msgtype"] == "m.audio"
+        mock_refresh.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            ANY,
+            hydrate_sidecars=False,
+        )
 
     @pytest.mark.asyncio
     async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
@@ -1721,8 +1745,8 @@ class TestThreadHistoryCache:
         return event
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_ignores_durable_raw_snapshot_cache(self, tmp_path: Path) -> None:
-        """Direct history fetches should refetch from Matrix instead of trusting durable raw thread snapshots."""
+    async def test_fetch_thread_history_uses_durable_raw_snapshot_cache_when_fresh(self, tmp_path: Path) -> None:
+        """Direct history fetches should reuse fresh durable thread snapshots."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
@@ -1756,7 +1780,7 @@ class TestThreadHistoryCache:
         page = MagicMock(spec=nio.RoomMessagesResponse)
         page.chunk = [reply_event, root_event]
         page.end = None
-        client.room_messages = AsyncMock(return_value=page)
+        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
         try:
             history = await fetch_thread_history(
                 client,
@@ -1768,11 +1792,12 @@ class TestThreadHistoryCache:
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-        client.room_messages.assert_awaited_once()
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_ignores_durable_raw_snapshot_cache(self, tmp_path: Path) -> None:
-        """Snapshot reads should refetch instead of trusting durable raw thread snapshots from older runs."""
+    async def test_fetch_thread_snapshot_uses_durable_raw_snapshot_cache_when_fresh(self, tmp_path: Path) -> None:
+        """Snapshot reads should reuse fresh durable thread snapshots without sidecar hydration."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
@@ -1806,7 +1831,7 @@ class TestThreadHistoryCache:
         page = MagicMock(spec=nio.RoomMessagesResponse)
         page.chunk = [reply_event, root_event]
         page.end = None
-        client.room_messages = AsyncMock(return_value=page)
+        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
 
         try:
             snapshot = await fetch_thread_snapshot(
@@ -1819,11 +1844,12 @@ class TestThreadHistoryCache:
             await cache.close()
 
         assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is True
+        assert snapshot.is_full_history is False
         assert [message.event_id for message in snapshot] == ["$thread_root", "$reply"]
         assert snapshot[0].body == "voice-note.ogg"
         assert snapshot[0].to_dict()["msgtype"] == "m.audio"
-        client.room_messages.assert_awaited_once()
+        assert snapshot.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_miss_populates_cache(self, tmp_path: Path) -> None:
@@ -1932,8 +1958,8 @@ class TestThreadHistoryCache:
         assert [message.body for message in history] == ["Root message", "Fresh reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
         assert [message.body for message in second_history] == ["Root message", "Fresh reply"]
-        assert second_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert client.room_messages.await_count == 2
+        assert second_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert client.room_messages.await_count == 1
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_returns_stale_cached_history_with_diagnostic_on_refetch_failure(
@@ -2044,6 +2070,8 @@ class TestThreadHistoryCache:
             },
         )
         broken_cache = MagicMock(spec=_EventCache)
+        broken_cache.get_thread_cache_state = AsyncMock(return_value=None)
+        broken_cache.get_thread_events = AsyncMock(return_value=None)
         broken_cache.replace_thread = AsyncMock(side_effect=RuntimeError("db broken"))
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]

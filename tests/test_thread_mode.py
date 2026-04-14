@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
-from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
@@ -1224,11 +1225,21 @@ class TestExtractedModuleLoggerRebinding:
         bot.event_cache = make_event_cache_mock()
         bot.event_cache.get_thread_events = AsyncMock(
             return_value=[
-                {"event_id": "$threadroot", "content": {"body": "Root"}},
+                {
+                    "event_id": "$threadroot",
+                    "sender": "@user:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 1000,
+                    "content": {"body": "Root", "msgtype": "m.text"},
+                },
                 {
                     "event_id": "$reply",
+                    "sender": "@agent:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 2000,
                     "content": {
                         "body": "Reply",
+                        "msgtype": "m.text",
                         "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
                     },
                 },
@@ -1238,7 +1249,7 @@ class TestExtractedModuleLoggerRebinding:
 
         client = AsyncMock()
         with patch(
-            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
             new=AsyncMock(return_value=[]),
         ) as fetch_thread_history_mock:
             bot.client = client
@@ -1247,20 +1258,23 @@ class TestExtractedModuleLoggerRebinding:
                 "$threadroot",
             )
 
-        fetch_thread_history_mock.assert_awaited_once_with(
+        fetch_thread_history_mock.assert_awaited_once()
+        call_args = fetch_thread_history_mock.await_args
+        assert call_args.args == (
             client,
             "!room:localhost",
             "$threadroot",
-            event_cache=bot.event_cache,
         )
+        assert call_args.kwargs["event_cache"] is bot.event_cache
+        assert call_args.kwargs["runtime_started_at"] == bot._runtime_view.runtime_started_at
 
     @pytest.mark.asyncio
-    async def test_conversation_cache_uses_authoritative_refresh_for_snapshot_and_history(
+    async def test_conversation_cache_reuses_fresh_durable_snapshot_before_full_history_hydration(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Snapshot and history reads should both use the authoritative refresh path."""
+        """Fresh durable thread rows should serve snapshots before full-history hydration."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1274,39 +1288,53 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
+        bot.event_cache.get_thread_cache_state = AsyncMock(
+            return_value=ThreadCacheState(
+                validated_at=time.time(),
+                invalidated_at=None,
+                invalidation_reason=None,
+                room_invalidated_at=None,
+                room_invalidation_reason=None,
+            ),
+        )
         bot.event_cache.get_thread_events = AsyncMock(
             return_value=[
-                {"event_id": "$threadroot", "content": {"body": "Root"}},
+                {
+                    "event_id": "$threadroot",
+                    "sender": "@user:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 1000,
+                    "content": {"body": "Root", "msgtype": "m.text"},
+                },
                 {
                     "event_id": "$reply",
+                    "sender": "@agent:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 2000,
                     "content": {
                         "body": "Reply",
+                        "msgtype": "m.text",
                         "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
                     },
                 },
             ],
         )
 
-        hydrated_history = ThreadHistoryResult([], is_full_history=True)
-        with patch(
-            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=hydrated_history),
-        ) as refresh_mock:
-            bot.client = AsyncMock()
-            async with bot._conversation_cache.turn_scope():
-                snapshot_history = await bot._conversation_cache.get_thread_snapshot(
-                    "!room:localhost",
-                    "$threadroot",
-                )
-                full_history = await bot._conversation_cache.get_thread_history(
-                    "!room:localhost",
-                    "$threadroot",
-                )
+        bot.client = AsyncMock()
+        async with bot._conversation_cache.turn_scope():
+            snapshot_history = await bot._conversation_cache.get_thread_snapshot(
+                "!room:localhost",
+                "$threadroot",
+            )
+            full_history = await bot._conversation_cache.get_thread_history(
+                "!room:localhost",
+                "$threadroot",
+            )
 
-        assert snapshot_history is hydrated_history
-        assert full_history == hydrated_history
+        assert snapshot_history.is_full_history is False
+        assert [message.event_id for message in snapshot_history] == ["$threadroot", "$reply"]
         assert full_history.is_full_history is True
-        assert refresh_mock.await_count == 2
+        assert [message.event_id for message in full_history] == ["$threadroot", "$reply"]
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_uses_canonical_relation_walk(

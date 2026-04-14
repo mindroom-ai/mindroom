@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 type ThreadHistoryDiagnosticValue = str | int | float | bool
 
 THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
+THREAD_HISTORY_SOURCE_CACHE = "cache"
 THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
 THREAD_HISTORY_SOURCE_STALE_CACHE = "stale_cache"
 THREAD_HISTORY_ERROR_DIAGNOSTIC = "thread_read_error"

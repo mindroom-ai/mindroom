@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -34,6 +35,9 @@ class BotRuntimeView(Protocol):
     @property
     def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator: ...  # noqa: D102
 
+    @property
+    def runtime_started_at(self) -> float: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
@@ -45,3 +49,4 @@ class BotRuntimeState:
     orchestrator: MultiAgentOrchestrator | None
     event_cache: ConversationEventCache | None
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
+    runtime_started_at: float = field(default_factory=time.time)

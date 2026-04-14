@@ -26,7 +26,8 @@ from mindroom.matrix.cache.write_coordinator import (
     _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
 )
 from mindroom.matrix.client import (
-    refresh_thread_history_from_source,
+    fetch_thread_history,
+    fetch_thread_snapshot,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
@@ -254,6 +255,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
+            fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
         )
 
     def _require_client(self) -> nio.AsyncClient:
@@ -333,11 +335,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
-        return await refresh_thread_history_from_source(
+        return await fetch_thread_history(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
+            runtime_started_at=self.runtime.runtime_started_at,
+        )
+
+    async def _fetch_thread_snapshot_from_client(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult:
+        return await fetch_thread_snapshot(
+            self._require_client(),
+            room_id,
+            thread_id,
+            event_cache=self.runtime.event_cache,
+            runtime_started_at=self.runtime.runtime_started_at,
         )
 
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
