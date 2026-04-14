@@ -5,12 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.conversation_cache import (
-    EventCache as _EventCache,
-)
-from mindroom.matrix.conversation_cache import (
-    EventCacheWriteCoordinator as _EventCacheWriteCoordinator,
-)
+from mindroom.matrix.conversation_cache import EventCache as _EventCache
+from mindroom.matrix.conversation_cache import EventCacheWriteCoordinator as _EventCacheWriteCoordinator
 
 if TYPE_CHECKING:
     import structlog
@@ -27,14 +23,14 @@ class StandaloneRuntimeSupport:
     event_cache_write_coordinator: _EventCacheWriteCoordinator
 
 
-def build_standalone_runtime_support(
+def _build_standalone_runtime_support(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     logger: structlog.stdlib.BoundLogger,
     background_task_owner: object,
 ) -> StandaloneRuntimeSupport:
-    """Build the standalone runtime support services for one direct bot runtime."""
+    """Build standalone runtime support without initializing the event cache."""
     return StandaloneRuntimeSupport(
         event_cache=_EventCache(config.cache.resolve_db_path(runtime_paths)),
         event_cache_write_coordinator=_EventCacheWriteCoordinator(
@@ -68,7 +64,7 @@ async def create_standalone_runtime_support(
     background_task_owner: object,
 ) -> StandaloneRuntimeSupport:
     """Build and initialize the standalone runtime support services for one direct bot runtime."""
-    support = build_standalone_runtime_support(
+    support = _build_standalone_runtime_support(
         config=config,
         runtime_paths=runtime_paths,
         logger=logger,

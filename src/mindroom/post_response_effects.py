@@ -253,21 +253,6 @@ class PostResponseEffectsSupport:
             record_handled_turn=record_handled_turn,
         )
 
-
-def matrix_run_metadata_for_handled_turn(
-    handled_turn: HandledTurnState,
-) -> dict[str, Any] | None:
-    """Build persisted run metadata for one handled turn."""
-    if not handled_turn.is_coalesced:
-        return None
-    metadata: dict[str, Any] = {
-        constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(handled_turn.source_event_ids),
-    }
-    if handled_turn.source_event_prompts:
-        metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
-    return metadata
-
-
 def clear_tracked_response_message(
     stop_manager: StopManager,
     client: nio.AsyncClient,

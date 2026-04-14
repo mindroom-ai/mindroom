@@ -46,6 +46,6 @@ class BotRuntimeState:
     config: Config
     enable_streaming: bool
     orchestrator: MultiAgentOrchestrator | None
-    event_cache: ConversationEventCache
-    event_cache_write_coordinator: EventCacheWriteCoordinator
+    event_cache: ConversationEventCache | None
+    event_cache_write_coordinator: EventCacheWriteCoordinator | None
     last_sync_activity_monotonic: float | None = None

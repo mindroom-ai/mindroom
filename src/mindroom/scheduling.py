@@ -513,15 +513,18 @@ async def _save_scheduled_task(
     room_id: str,
     task_id: str,
     workflow: ScheduledWorkflow,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
+    config: Config | None = None,
+    runtime_paths: RuntimePaths | None = None,
+    event_cache: ConversationEventCache | None = None,
     status: str = "pending",
     created_at: datetime | str | None = None,
     restart_task: bool = True,
 ) -> None:
     """Persist scheduled task state and optionally restart its in-memory task runner."""
     if restart_task:
+        if config is None or runtime_paths is None or event_cache is None:
+            msg = "Scheduled task runtime context is required when restart_task=True"
+            raise ValueError(msg)
         _cancel_running_task(task_id)
 
     if isinstance(created_at, datetime):
@@ -545,6 +548,9 @@ async def _save_scheduled_task(
     )
 
     if restart_task and status == "pending":
+        assert config is not None
+        assert runtime_paths is not None
+        assert event_cache is not None
         _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache)
 
 
@@ -555,7 +561,7 @@ async def save_edited_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
+    event_cache: ConversationEventCache | None,
     existing_task: ScheduledTaskRecord,
     restart_task: bool = False,
 ) -> ScheduledTaskRecord:

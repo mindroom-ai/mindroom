@@ -33,7 +33,6 @@ from mindroom.bot import (
     AgentBot,
     MultiKnowledgeVectorDb,
     TeamBot,
-    _thread_summary_message_count_hint,
 )
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -96,6 +95,7 @@ from mindroom.response_runner import ResponseRequest, ResponseRunner, _merge_res
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
@@ -3672,10 +3672,6 @@ class TestAgentBot:
             patch(
                 "mindroom.post_response_effects.PostResponseEffectsSupport.queue_thread_summary",
             ) as mock_queue_thread_summary,
-            patch(
-                "mindroom.bot._thread_summary_message_count_hint",
-                new=MagicMock(return_value=99),
-            ),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
@@ -3691,12 +3687,7 @@ class TestAgentBot:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        mock_queue_thread_summary.assert_called_once()
-        assert mock_queue_thread_summary.call_args.kwargs == {
-            "room_id": "!test:localhost",
-            "thread_id": "$thread",
-            "message_count_hint": 99,
-        }
+        mock_queue_thread_summary.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_team_generate_response_redacts_suppressed_streaming_reply(
@@ -3832,7 +3823,7 @@ class TestAgentBot:
             ),
         )
 
-        assert _thread_summary_message_count_hint(thread_history) == 5
+        assert thread_summary_message_count_hint(thread_history) == 5
 
     @pytest.mark.asyncio
     async def test_generate_team_response_streams_into_placeholder_event(
@@ -4124,6 +4115,30 @@ class TestAgentBot:
 
         assert context is not None
         assert context.event_cache is bot.event_cache
+
+    def test_agent_bot_init_does_not_resolve_cache_path_eagerly(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """AgentBot construction should not build standalone cache support before startup."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        config.cache = MagicMock()
+        config.cache.resolve_db_path.side_effect = AssertionError("cache path resolution should be lazy")
+
+        AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        config.cache.resolve_db_path.assert_not_called()
 
     def test_build_tool_runtime_context_returns_none_when_client_unavailable(
         self,

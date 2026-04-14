@@ -1241,6 +1241,51 @@ async def test_save_edited_scheduled_task_preserves_created_at() -> None:
 
 
 @pytest.mark.asyncio
+async def test_save_edited_scheduled_task_allows_persist_only_without_event_cache() -> None:
+    """State-only edits should not require a runtime event cache."""
+    client = AsyncMock()
+    created_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    existing_task = ScheduledTaskRecord(
+        task_id="task123",
+        room_id="!test:server",
+        status="pending",
+        created_at=created_at,
+        workflow=ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime(2026, 2, 1, 10, 0, tzinfo=UTC),
+            message="original message",
+            description="original description",
+            thread_id="$thread1",
+            room_id="!test:server",
+        ),
+    )
+    updated_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 2, 1, 11, 0, tzinfo=UTC),
+        message="updated message",
+        description="updated description",
+        thread_id="$thread1",
+        room_id="!test:server",
+    )
+
+    updated_task = await save_edited_scheduled_task(
+        client=client,
+        room_id="!test:server",
+        task_id="task123",
+        workflow=updated_workflow,
+        config=MagicMock(),
+        runtime_paths=_runtime_paths(),
+        event_cache=None,
+        existing_task=existing_task,
+        restart_task=False,
+    )
+
+    assert updated_task.created_at == created_at
+    assert updated_task.workflow == updated_workflow
+    client.room_put_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_save_edited_scheduled_task_rejects_schedule_type_change() -> None:
     """Editing should reject switching between once and cron schedule types."""
     client = AsyncMock()
