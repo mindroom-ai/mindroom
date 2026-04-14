@@ -9,6 +9,7 @@ This test verifies that:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ import nio
 import pytest
 import pytest_asyncio
 
+import mindroom.matrix.client as matrix_client_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -51,6 +53,8 @@ from mindroom.matrix.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     thread_history_result,
 )
+from mindroom.matrix.thread_reads import ThreadReadPolicy
+from mindroom.matrix.thread_writes import ThreadWritePolicy
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1972,7 +1976,7 @@ class TestThreadingBehavior:
         access._resolved_thread_cache.bump_version("!test:localhost", "$thread")
         finalize_started = asyncio.Event()
         allow_finalize = asyncio.Event()
-        original_finalize = access._finalize_thread_cache_mutation
+        original_finalize = access._writes._finalize_thread_cache_mutation
         refreshed_history = ThreadHistoryResult(
             [
                 _message(event_id="$thread", body="Root"),
@@ -2001,7 +2005,11 @@ class TestThreadingBehavior:
             await original_finalize(*args, **kwargs)
 
         with (
-            patch.object(access, "_finalize_thread_cache_mutation", new=AsyncMock(side_effect=delayed_finalize)),
+            patch.object(
+                access._writes,
+                "_finalize_thread_cache_mutation",
+                new=AsyncMock(side_effect=delayed_finalize),
+            ),
             patch(
                 "mindroom.matrix.conversation_cache.fetch_thread_history",
                 new=AsyncMock(return_value=refreshed_history),
@@ -3490,12 +3498,12 @@ class TestThreadingBehavior:
 
         with (
             patch.object(
-                access,
+                access._reads,
                 "get_thread_snapshot",
                 new=AsyncMock(side_effect=AssertionError("should not use snapshot fallback")),
             ),
             patch.object(
-                access,
+                access._reads,
                 "get_thread_history",
                 new=AsyncMock(return_value=full_history),
             ) as mock_get_thread_history,
@@ -5947,3 +5955,74 @@ class TestThreadingBehavior:
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$complex_msg:localhost"
+
+
+def test_matrix_conversation_cache_does_not_keep_wrapper_only_read_helpers() -> None:
+    """The facade should not keep read/write helper stubs after extraction."""
+    wrapper_only_helpers = {
+        "_record_thread_change",
+        "_mark_thread_refresh_required",
+        "_finalize_thread_cache_mutation",
+        "_seconds_since_last_sync_activity",
+        "_should_refresh_cached_thread_history",
+        "_event_id_from_event_source",
+        "_sort_thread_history_root_first",
+        "_resolved_cache_diagnostics",
+        "_log_resolved_thread_cache",
+        "_wait_for_pending_room_cache_updates",
+        "_history_event_ids",
+        "_latest_visible_thread_event_id",
+        "_invalidate_resolved_threads_for_event_ids",
+        "_cached_thread_event_sources",
+        "_cached_thread_source_event_ids",
+        "_should_store_resolved_thread_cache_entry",
+        "_repair_history_is_authoritative",
+        "_repair_history_durably_refilled",
+        "_invalidate_raw_thread_before_repair",
+        "_incrementally_refresh_resolved_thread_cache",
+        "_maybe_use_resolved_thread_cache",
+        "_fetch_full_thread_history_from_source",
+        "_read_full_thread_history",
+        "_read_snapshot_thread",
+        "_snapshot_result",
+        "_full_history_result",
+        "_read_thread",
+    }
+
+    assert wrapper_only_helpers.isdisjoint(MatrixConversationCache.__dict__)
+
+
+def test_thread_write_policy_does_not_reach_into_thread_read_policy_internals() -> None:
+    """Thread-write policy should not reach into thread-read policy internals."""
+    thread_writes_source = inspect.getsource(ThreadWritePolicy)
+
+    assert "self.cache._reads." not in thread_writes_source
+
+
+def test_matrix_client_does_not_keep_parallel_latest_thread_authority_helpers() -> None:
+    """The deleted client-side latest-thread authority helpers should stay gone."""
+    assert "_latest_thread_event_id" not in matrix_client_module.__dict__
+    assert "_latest_thread_history_event_id" not in matrix_client_module.__dict__
+
+
+def test_matrix_client_does_not_keep_dead_compatibility_wrappers() -> None:
+    """Dead Matrix client compatibility helpers should stay deleted once callers migrate."""
+    deleted_names = {
+        "_create_dm_room",
+        "_event_server_timestamp",
+        "_history_message_sort_key",
+        "_latest_thread_edit_event_id",
+        "edit_message",
+        "send_message",
+    }
+
+    assert deleted_names.isdisjoint(matrix_client_module.__dict__)
+
+
+def test_thread_policies_do_not_depend_on_matrix_conversation_cache_as_service_locator() -> None:
+    """Extracted policy modules should depend on explicit collaborators, not self.cache."""
+    thread_reads_source = inspect.getsource(ThreadReadPolicy)
+    thread_writes_source = inspect.getsource(ThreadWritePolicy)
+
+    assert "self.cache." not in thread_reads_source
+    assert "self.cache." not in thread_writes_source

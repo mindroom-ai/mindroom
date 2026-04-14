@@ -6,7 +6,14 @@ import time
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_cache import ResolvedThreadCacheEntry, resolved_thread_cache_entry
+from mindroom.matrix.thread_cache import resolved_thread_cache_entry
+from mindroom.matrix.thread_cache_helpers import (
+    event_id_from_event_source,
+    latest_visible_thread_event_id,
+    log_resolved_thread_cache,
+    resolved_cache_diagnostics,
+    sort_thread_history_root_first,
+)
 from mindroom.matrix.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     ThreadHistoryResult,
@@ -19,8 +26,11 @@ from mindroom.matrix.thread_history_result import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import structlog
+
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
+    from mindroom.matrix.thread_cache import ResolvedThreadCache, ResolvedThreadCacheEntry
 
 
 _SYNC_FRESHNESS_WINDOW_SECONDS = 30.0
@@ -35,17 +45,34 @@ class ThreadReadPolicy:
     """Own thread-history read, reuse, and repair policy for one cache facade."""
 
     def __init__(self, cache: MatrixConversationCache) -> None:
-        self.cache = cache
+        self._get_logger = lambda: cache.logger
+        self.runtime = cache.runtime
+        self._get_resolved_thread_cache = lambda: cache._resolved_thread_cache
+        self.thread_version = cache.thread_version
+        self.thread_requires_refresh = cache._thread_requires_refresh
+        self.clear_thread_refresh_required = cache._clear_thread_refresh_required
+        self.adopt_room_lookup_repairs_locked = cache._adopt_room_lookup_repairs_locked
+        self.fetch_thread_history_from_client = cache._fetch_thread_history_from_client
+        self.fetch_thread_snapshot_from_client = cache._fetch_thread_snapshot_from_client
+        self.resolve_thread_history_delta_from_client = cache._resolve_thread_history_delta_from_client
+
+    @property
+    def logger(self) -> structlog.stdlib.BoundLogger:
+        """Return the facade-bound logger so collaborator rebinding stays visible."""
+        return self._get_logger()
+
+    def _resolved_thread_cache(self) -> ResolvedThreadCache:
+        return self._get_resolved_thread_cache()
 
     def _seconds_since_last_sync_activity(self) -> float | None:
-        last_sync_activity_monotonic = self.cache.runtime.last_sync_activity_monotonic
+        last_sync_activity_monotonic = self.runtime.last_sync_activity_monotonic
         if last_sync_activity_monotonic is None:
             return None
         return max(time.monotonic() - last_sync_activity_monotonic, 0.0)
 
     async def _should_refresh_cached_thread_history(self, room_id: str, thread_id: str) -> bool:
-        if await self.cache._thread_requires_refresh(room_id, thread_id):
-            self.cache.logger.debug(
+        if await self.thread_requires_refresh(room_id, thread_id):
+            self.logger.debug(
                 "Forcing Matrix thread refresh because local cache repair is required",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -54,7 +81,7 @@ class ThreadReadPolicy:
         sync_age_seconds = self._seconds_since_last_sync_activity()
         if sync_age_seconds is None or sync_age_seconds >= _SYNC_FRESHNESS_WINDOW_SECONDS:
             return True
-        self.cache.logger.debug(
+        self.logger.debug(
             "Skipping incremental Matrix thread refresh because sync is fresh",
             room_id=room_id,
             thread_id=thread_id,
@@ -62,78 +89,15 @@ class ThreadReadPolicy:
         )
         return False
 
-    @staticmethod
-    def _event_id_from_event_source(event_source: dict[str, object]) -> str | None:
-        event_id = event_source.get("event_id")
-        return event_id if isinstance(event_id, str) else None
-
-    @staticmethod
-    def _sort_thread_history_root_first(
-        history: list[ResolvedVisibleMessage],
-        *,
-        thread_id: str,
-    ) -> None:
-        history.sort(key=lambda message: (message.timestamp, message.event_id))
-        root_index = next(
-            (index for index, message in enumerate(history) if message.event_id == thread_id),
-            None,
-        )
-        if root_index not in (None, 0):
-            history.insert(0, history.pop(root_index))
-
-    @staticmethod
-    def _resolved_cache_diagnostics(
-        *,
-        cache_read_ms: float,
-        incremental_refresh_ms: float = 0.0,
-        resolution_ms: float = 0.0,
-        sidecar_hydration_ms: float = 0.0,
-    ) -> dict[str, float]:
-        return {
-            "cache_read_ms": cache_read_ms,
-            "incremental_refresh_ms": incremental_refresh_ms,
-            "resolution_ms": resolution_ms,
-            "sidecar_hydration_ms": sidecar_hydration_ms,
-        }
-
-    def _log_resolved_thread_cache(
-        self,
-        event: str,
-        *,
-        room_id: str,
-        thread_id: str,
-        reason: str | None = None,
-        thread_version: int | None = None,
-    ) -> None:
-        event_data: dict[str, str | int] = {
-            "room_id": room_id,
-            "thread_id": thread_id,
-        }
-        if reason is not None:
-            event_data["reason"] = reason
-        if thread_version is not None:
-            event_data["thread_version"] = thread_version
-        self.cache.logger.debug(event, **event_data)
-
     async def _wait_for_pending_room_cache_updates(self, room_id: str) -> None:
-        await self.cache.runtime.event_cache_write_coordinator.wait_for_room_idle(room_id)
-
-    @staticmethod
-    def _history_event_ids(history: Sequence[ResolvedVisibleMessage]) -> frozenset[str]:
-        return frozenset(message.event_id for message in history if message.event_id)
-
-    @staticmethod
-    def _latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) -> str | None:
-        if not history:
-            return None
-        return history[-1].visible_event_id or history[-1].event_id or None
+        await self.runtime.event_cache_write_coordinator.wait_for_room_idle(room_id)
 
     async def _cached_thread_event_sources(
         self,
         room_id: str,
         thread_id: str,
     ) -> Sequence[dict[str, object]] | None:
-        return await self.cache.runtime.event_cache.get_thread_events(room_id, thread_id)
+        return await self.runtime.event_cache.get_thread_events(room_id, thread_id)
 
     async def _cached_thread_source_event_ids(
         self,
@@ -143,7 +107,7 @@ class ThreadReadPolicy:
         try:
             cached_event_sources = await self._cached_thread_event_sources(room_id, thread_id)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to read raw thread events for resolved cache",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -155,7 +119,7 @@ class ThreadReadPolicy:
         return frozenset(
             event_id
             for event_source in cached_event_sources
-            if (event_id := self._event_id_from_event_source(event_source)) is not None
+            if (event_id := event_id_from_event_source(event_source)) is not None
         )
 
     async def _store_resolved_thread_cache_entry(
@@ -166,10 +130,12 @@ class ThreadReadPolicy:
         history: Sequence[ResolvedVisibleMessage],
         thread_version: int,
     ) -> frozenset[str]:
+        resolved_thread_cache = self._resolved_thread_cache()
         source_event_ids = await self._cached_thread_source_event_ids(room_id, thread_id)
         if history and not source_event_ids:
-            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
-            self._log_resolved_thread_cache(
+            resolved_thread_cache.invalidate(room_id, thread_id)
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_skip_store",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -177,7 +143,7 @@ class ThreadReadPolicy:
                 thread_version=thread_version,
             )
             return source_event_ids
-        self.cache._resolved_thread_cache.store(
+        resolved_thread_cache.store(
             room_id,
             thread_id,
             resolved_thread_cache_entry(
@@ -186,7 +152,8 @@ class ThreadReadPolicy:
                 thread_version=thread_version,
             ),
         )
-        self._log_resolved_thread_cache(
+        log_resolved_thread_cache(
+            self.logger,
             "resolved_thread_cache_store",
             room_id=room_id,
             thread_id=thread_id,
@@ -211,9 +178,9 @@ class ThreadReadPolicy:
 
     async def _invalidate_raw_thread_before_repair(self, room_id: str, thread_id: str) -> None:
         try:
-            await self.cache.runtime.event_cache.invalidate_thread(room_id, thread_id)
+            await self.runtime.event_cache.invalidate_thread(room_id, thread_id)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to invalidate stale raw thread cache before repair",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -229,8 +196,10 @@ class ThreadReadPolicy:
         entry_version: int,
         current_thread_version: int,
     ) -> ThreadHistoryResult | None:
-        if await self.cache._thread_requires_refresh(room_id, thread_id):
-            self._log_resolved_thread_cache(
+        resolved_thread_cache = self._resolved_thread_cache()
+        if await self.thread_requires_refresh(room_id, thread_id):
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_invalidate",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -243,7 +212,7 @@ class ThreadReadPolicy:
         try:
             cached_event_sources = await self._cached_thread_event_sources(room_id, thread_id)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Resolved thread cache refresh could not read raw thread events",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -259,7 +228,7 @@ class ThreadReadPolicy:
             current_event_ids = frozenset(
                 event_id
                 for event_source in cached_event_sources
-                if (event_id := self._event_id_from_event_source(event_source)) is not None
+                if (event_id := event_id_from_event_source(event_source)) is not None
             )
             if not entry.source_event_ids.issubset(current_event_ids):
                 invalidation_reason = "redaction_or_missing_source"
@@ -267,7 +236,7 @@ class ThreadReadPolicy:
                 new_event_sources = [
                     event_source
                     for event_source in cached_event_sources
-                    if (event_id := self._event_id_from_event_source(event_source)) is not None
+                    if (event_id := event_id_from_event_source(event_source)) is not None
                     and event_id not in entry.source_event_ids
                 ]
                 if not new_event_sources:
@@ -278,7 +247,8 @@ class ThreadReadPolicy:
                     invalidation_reason = "edit_delta"
 
         if invalidation_reason is not None:
-            self._log_resolved_thread_cache(
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_invalidate",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -287,7 +257,7 @@ class ThreadReadPolicy:
             )
             return None
 
-        delta_history = await self.cache._resolve_thread_history_delta_from_client(
+        delta_history = await self.resolve_thread_history_delta_from_client(
             thread_id=thread_id,
             event_sources=new_event_sources,
         )
@@ -295,8 +265,8 @@ class ThreadReadPolicy:
         for message in delta_history:
             merged_history_by_event_id[message.event_id] = message
         merged_history = list(merged_history_by_event_id.values())
-        self._sort_thread_history_root_first(merged_history, thread_id=thread_id)
-        self.cache._resolved_thread_cache.store(
+        sort_thread_history_root_first(merged_history, thread_id=thread_id)
+        resolved_thread_cache.store(
             room_id,
             thread_id,
             resolved_thread_cache_entry(
@@ -305,7 +275,8 @@ class ThreadReadPolicy:
                 thread_version=current_thread_version,
             ),
         )
-        self._log_resolved_thread_cache(
+        log_resolved_thread_cache(
+            self.logger,
             "resolved_thread_cache_incremental_refresh",
             room_id=room_id,
             thread_id=thread_id,
@@ -316,7 +287,7 @@ class ThreadReadPolicy:
             merged_history,
             is_full_history=True,
             thread_version=current_thread_version,
-            diagnostics=self._resolved_cache_diagnostics(
+            diagnostics=resolved_cache_diagnostics(
                 cache_read_ms=cache_read_ms,
                 incremental_refresh_ms=delta_history.diagnostics.get("resolution_ms", 0.0),
                 resolution_ms=delta_history.diagnostics.get("resolution_ms", 0.0),
@@ -332,13 +303,15 @@ class ThreadReadPolicy:
         current_thread_version: int,
         repair_required: bool,
     ) -> ThreadHistoryResult | None:
+        resolved_thread_cache = self._resolved_thread_cache()
         lookup_started = time.perf_counter()
-        cache_lookup = self.cache._resolved_thread_cache.lookup(room_id, thread_id)
+        cache_lookup = resolved_thread_cache.lookup(room_id, thread_id)
         cache_read_ms = round((time.perf_counter() - lookup_started) * 1000, 1)
         entry = cache_lookup.entry
 
         if cache_lookup.expired:
-            self._log_resolved_thread_cache(
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_invalidate",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -348,14 +321,16 @@ class ThreadReadPolicy:
             entry = None
 
         if entry is None:
-            self._log_resolved_thread_cache(
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_miss",
                 room_id=room_id,
                 thread_id=thread_id,
                 thread_version=current_thread_version,
             )
             if repair_required:
-                self._log_resolved_thread_cache(
+                log_resolved_thread_cache(
+                    self.logger,
                     "resolved_thread_cache_invalidate",
                     room_id=room_id,
                     thread_id=thread_id,
@@ -363,16 +338,18 @@ class ThreadReadPolicy:
                     thread_version=current_thread_version,
                 )
         elif not entry.source_event_ids:
-            self._log_resolved_thread_cache(
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_invalidate",
                 room_id=room_id,
                 thread_id=thread_id,
                 reason="missing_source_event_ids",
                 thread_version=current_thread_version,
             )
-            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
+            resolved_thread_cache.invalidate(room_id, thread_id)
         elif entry.thread_version == current_thread_version and not repair_required:
-            self._log_resolved_thread_cache(
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_hit",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -382,7 +359,7 @@ class ThreadReadPolicy:
                 entry.clone_history(),
                 is_full_history=True,
                 thread_version=current_thread_version,
-                diagnostics=self._resolved_cache_diagnostics(cache_read_ms=cache_read_ms),
+                diagnostics=resolved_cache_diagnostics(cache_read_ms=cache_read_ms),
             )
         elif entry.thread_version != current_thread_version:
             incrementally_refreshed = await self._incrementally_refresh_resolved_thread_cache(
@@ -394,16 +371,17 @@ class ThreadReadPolicy:
             )
             if incrementally_refreshed is not None:
                 return incrementally_refreshed
-            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
+            resolved_thread_cache.invalidate(room_id, thread_id)
         elif repair_required:
-            self._log_resolved_thread_cache(
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_invalidate",
                 room_id=room_id,
                 thread_id=thread_id,
                 reason="repair_required",
                 thread_version=current_thread_version,
             )
-            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
+            resolved_thread_cache.invalidate(room_id, thread_id)
         return None
 
     async def _fetch_full_thread_history_from_source(
@@ -417,7 +395,7 @@ class ThreadReadPolicy:
         if repair_required:
             await self._invalidate_raw_thread_before_repair(room_id, thread_id)
         history = self._full_history_result(
-            await self.cache._fetch_thread_history_from_client(
+            await self.fetch_thread_history_from_client(
                 room_id,
                 thread_id,
                 refresh_cache=await self._should_refresh_cached_thread_history(room_id, thread_id),
@@ -435,15 +413,15 @@ class ThreadReadPolicy:
                 thread_version=current_thread_version,
             )
         if repair_required and self._repair_history_durably_refilled(history):
-            await self.cache._clear_thread_refresh_required(room_id, thread_id)
+            await self.clear_thread_refresh_required(room_id, thread_id)
         return history
 
     async def _read_full_thread_history(self, room_id: str, thread_id: str) -> ThreadHistoryResult:
         await self._wait_for_pending_room_cache_updates(room_id)
-        async with self.cache._resolved_thread_cache.entry_lock(room_id, thread_id):
-            await self.cache._adopt_room_lookup_repairs_locked(room_id, thread_id)
-            current_thread_version = self.cache.thread_version(room_id, thread_id)
-            repair_required = await self.cache._thread_requires_refresh(room_id, thread_id)
+        async with self._resolved_thread_cache().entry_lock(room_id, thread_id):
+            await self.adopt_room_lookup_repairs_locked(room_id, thread_id)
+            current_thread_version = self.thread_version(room_id, thread_id)
+            repair_required = await self.thread_requires_refresh(room_id, thread_id)
             cached_history = await self._maybe_use_resolved_thread_cache(
                 room_id,
                 thread_id,
@@ -461,10 +439,10 @@ class ThreadReadPolicy:
 
     async def _read_snapshot_thread(self, room_id: str, thread_id: str) -> ThreadHistoryResult:
         await self._wait_for_pending_room_cache_updates(room_id)
-        async with self.cache._resolved_thread_cache.entry_lock(room_id, thread_id):
-            await self.cache._adopt_room_lookup_repairs_locked(room_id, thread_id)
-            current_thread_version = self.cache.thread_version(room_id, thread_id)
-            repair_required = await self.cache._thread_requires_refresh(room_id, thread_id)
+        async with self._resolved_thread_cache().entry_lock(room_id, thread_id):
+            await self.adopt_room_lookup_repairs_locked(room_id, thread_id)
+            current_thread_version = self.thread_version(room_id, thread_id)
+            repair_required = await self.thread_requires_refresh(room_id, thread_id)
             if repair_required:
                 return await self._fetch_full_thread_history_from_source(
                     room_id,
@@ -473,7 +451,7 @@ class ThreadReadPolicy:
                     repair_required=repair_required,
                 )
             return self._snapshot_result(
-                await self.cache._fetch_thread_snapshot_from_client(room_id, thread_id),
+                await self.fetch_thread_snapshot_from_client(room_id, thread_id),
                 thread_version=current_thread_version,
             )
 
@@ -545,7 +523,7 @@ class ThreadReadPolicy:
         if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
             return None
         try:
-            thread_history = await self.cache.get_thread_history(room_id, thread_id)
+            thread_history = await self.get_thread_history(room_id, thread_id)
         except Exception:
             return thread_id
-        return self._latest_visible_thread_event_id(thread_history) or thread_id
+        return latest_visible_thread_event_id(thread_history) or thread_id

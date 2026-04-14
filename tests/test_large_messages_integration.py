@@ -12,7 +12,7 @@ from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, resolve_runtime_paths
-from mindroom.matrix.client import edit_message, send_message
+from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_message
 from mindroom.streaming import (
     ReplacementStreamingResponse,
@@ -84,7 +84,7 @@ async def test_regular_message_under_limit() -> None:
     content = {"body": "Hello world", "msgtype": "m.text"}
 
     # Should pass through unchanged
-    await send_message(client, "!room:server", content)
+    await send_message_result(client, "!room:server", content)
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -101,7 +101,7 @@ async def test_regular_message_over_limit() -> None:
     large_text = "x" * 100000
     content = {"body": large_text, "msgtype": "m.text"}
 
-    await send_message(client, "!room:server", content)
+    await send_message_result(client, "!room:server", content)
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -133,7 +133,7 @@ async def test_edit_message_with_lower_threshold() -> None:
     text = "y" * 30000
     content = {"body": text, "msgtype": "m.text", "formatted_body": f"<p>{text}</p>"}
 
-    await edit_message(client, "!room:server", "$original", content, text)
+    await edit_message_result(client, "!room:server", "$original", content, text)
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -157,7 +157,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
     }
     content = {"body": text, "msgtype": "m.text", "formatted_body": f"<p>{text}</p>"}
 
-    await edit_message(
+    await edit_message_result(
         client,
         "!room:server",
         "$original",

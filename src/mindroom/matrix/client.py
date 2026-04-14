@@ -851,40 +851,6 @@ async def add_room_to_space(
     return False
 
 
-async def _create_dm_room(
-    client: nio.AsyncClient,
-    invite_user_ids: list[str],
-    name: str | None = None,
-) -> str | None:
-    """Create a Direct Message room with specific users.
-
-    Args:
-        client: Authenticated Matrix client
-        invite_user_ids: List of user IDs to invite to the DM
-        name: Optional room name (defaults to "Direct Message")
-
-    Returns:
-        Room ID if successful, None otherwise
-
-    """
-    room_config: dict[str, Any] = {
-        "preset": "trusted_private_chat",  # DM preset - no need to invite, they can join
-        "is_direct": True,  # Mark as DM
-        "invite": invite_user_ids,
-    }
-
-    if name:
-        room_config["name"] = name
-
-    response = await client.room_create(**room_config)
-    if isinstance(response, nio.RoomCreateResponse):
-        logger.info("matrix_dm_room_created", room_id=str(response.room_id))
-        return str(response.room_id)
-
-    logger.error("matrix_dm_room_creation_failed", error=str(response))
-    return None
-
-
 async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Join a Matrix room.
 
@@ -1047,12 +1013,6 @@ async def send_message_result(
     return None
 
 
-async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
-    """Send a message to a Matrix room and return its event id."""
-    delivered = await send_message_result(client, room_id, content)
-    return delivered.event_id if delivered is not None else None
-
-
 def _guess_mimetype(file_path: Path) -> str:
     guessed_mimetype, _ = mimetypes.guess_type(file_path.name)
     return guessed_mimetype or "application/octet-stream"
@@ -1207,11 +1167,6 @@ async def send_file_message(
     return delivered.event_id if delivered is not None else None
 
 
-def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
-    """Sort thread history messages by timestamp and event ID."""
-    return (message.timestamp, message.event_id)
-
-
 def _is_room_message_event(event: nio.Event) -> bool:
     """Return whether one nio event is a readable Matrix room message."""
     event_source = event.source if isinstance(event.source, dict) else {}
@@ -1315,15 +1270,6 @@ def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
     """Return one Matrix event ID from a raw event source when present."""
     event_id = event_source.get("event_id")
     return event_id if isinstance(event_id, str) else None
-
-
-def _event_server_timestamp(event: nio.Event) -> int:
-    """Return one event timestamp suitable for incremental timeline scans."""
-    server_timestamp = event.server_timestamp
-    if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool):
-        return server_timestamp
-    origin_server_ts = event.source.get("origin_server_ts")
-    return origin_server_ts if isinstance(origin_server_ts, int) and not isinstance(origin_server_ts, bool) else 0
 
 
 async def _resolve_thread_history_from_event_sources(
@@ -2294,106 +2240,6 @@ async def get_room_threads_page(
     return response.thread_roots, response.next_batch
 
 
-async def _latest_thread_event_id(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    *,
-    event_cache: ConversationEventCache,
-) -> str:
-    """Get the latest visible event ID in a thread for MSC3440 fallback compliance."""
-    latest_history_event_id = await _latest_thread_history_event_id(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-    )
-    if latest_history_event_id:
-        return latest_history_event_id
-
-    try:
-        relation_events = await _collect_related_events(
-            client,
-            room_id,
-            thread_id,
-            rel_type=RelationshipType.thread,
-            event_type="m.room.message",
-        )
-    except _ThreadHistoryFastPathUnavailableError:
-        return thread_id
-
-    return _latest_thread_edit_event_id(relation_events, thread_id) or thread_id
-
-
-def _last_visible_event_id(messages: Sequence[ResolvedVisibleMessage] | None) -> str | None:
-    """Return the last visible event ID from one resolved thread history."""
-    if not messages:
-        return None
-    return messages[-1].visible_event_id or None
-
-
-async def _latest_thread_history_event_id(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-) -> str | None:
-    """Read the latest visible thread event from cache or history fetches."""
-    cached_history = await _load_cached_thread_history(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        hydrate_sidecars=False,
-        refresh_cache=True,
-    )
-    cached_event_id = _last_visible_event_id(cached_history)
-    if cached_event_id is not None:
-        return cached_event_id
-    if cached_history is not None:
-        # The refresh above already consulted homeserver deltas for this cache entry.
-        return None
-
-    try:
-        thread_messages = await fetch_thread_history(
-            client,
-            room_id,
-            thread_id,
-            event_cache=event_cache,
-        )
-    except Exception:
-        return None
-    return _last_visible_event_id(thread_messages)
-
-
-def _latest_thread_edit_event_id(
-    relation_events: Sequence[nio.Event],
-    thread_id: str,
-) -> str | None:
-    """Return the newest edit event ID attached to one thread root."""
-    latest_thread_edit: nio.RoomMessageText | nio.RoomMessageNotice | None = None
-    for event in relation_events:
-        if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-            continue
-        event_info = EventInfo.from_event(event.source)
-        if not event_info.is_edit or event_info.thread_id_from_edit != thread_id:
-            continue
-        candidate_key = (
-            event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
-            event.event_id,
-        )
-        latest_key = (
-            latest_thread_edit.server_timestamp
-            if latest_thread_edit and isinstance(latest_thread_edit.server_timestamp, int)
-            else 0,
-            latest_thread_edit.event_id if latest_thread_edit is not None else "",
-        )
-        if latest_thread_edit is None or candidate_key > latest_key:
-            latest_thread_edit = event
-    return latest_thread_edit.event_id if latest_thread_edit is not None else None
-
-
 def build_threaded_edit_content(
     *,
     new_text: str,
@@ -2478,23 +2324,3 @@ async def edit_message_result(
     )
 
     return await send_message_result(client, room_id, edit_content)
-
-
-async def edit_message(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
-    new_content: dict[str, Any],
-    new_text: str,
-    extra_content: dict[str, Any] | None = None,
-) -> str | None:
-    """Edit an existing Matrix message and return the edit event id."""
-    delivered = await edit_message_result(
-        client,
-        room_id,
-        event_id,
-        new_content,
-        new_text,
-        extra_content=extra_content,
-    )
-    return delivered.event_id if delivered is not None else None

@@ -11,7 +11,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.client import _create_dm_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -36,54 +35,6 @@ def _bind_runtime_paths(config: Config, path: Path) -> Config:
 
 def _config(path: Path, **kwargs: object) -> Config:
     return _bind_runtime_paths(Config(**kwargs), path)
-
-
-@pytest.mark.asyncio
-class TestDMRoomCreation:
-    """Test DM room creation utilities."""
-
-    async def test_create_dm_room_single_agent(self) -> None:
-        """Test creating a DM room with a single agent."""
-        client = AsyncMock()
-        client.room_create = AsyncMock(return_value=nio.RoomCreateResponse(room_id="!test_dm:localhost"))
-
-        room_id = await _create_dm_room(
-            client,
-            invite_user_ids=["@user:localhost", "@agent:localhost"],
-            name="DM with agent",
-        )
-
-        assert room_id == "!test_dm:localhost"
-        client.room_create.assert_called_once()
-
-        # Check the room config
-        call_args = client.room_create.call_args
-        assert call_args.kwargs["preset"] == "trusted_private_chat"
-        assert call_args.kwargs["is_direct"] is True
-        assert "@user:localhost" in call_args.kwargs["invite"]
-        assert "@agent:localhost" in call_args.kwargs["invite"]
-
-    async def test_create_dm_room_multiple_agents(self) -> None:
-        """Test creating a DM room with multiple agents."""
-        client = AsyncMock()
-        client.room_create = AsyncMock(return_value=nio.RoomCreateResponse(room_id="!group_dm:localhost"))
-
-        room_id = await _create_dm_room(
-            client,
-            invite_user_ids=["@user:localhost", "@agent1:localhost", "@agent2:localhost"],
-            name="Group DM",
-        )
-
-        assert room_id == "!group_dm:localhost"
-        assert len(client.room_create.call_args.kwargs["invite"]) == 3
-
-    async def test_create_dm_room_failure(self) -> None:
-        """Test handling DM room creation failure."""
-        client = AsyncMock()
-        client.room_create = AsyncMock(return_value=nio.RoomCreateError(message="Failed"))
-
-        room_id = await _create_dm_room(client, ["@user:localhost"], "Test DM")
-        assert room_id is None
 
 
 class TestDMResponseLogic:

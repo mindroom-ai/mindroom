@@ -9,12 +9,16 @@ import nio
 
 from mindroom.matrix._event_cache import normalize_event_source_for_cache
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_cache_helpers import event_id_from_event_source, log_resolved_thread_cache
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import structlog
+
     from mindroom.matrix._event_cache import ConversationEventCache
     from mindroom.matrix.conversation_cache import MatrixConversationCache
+    from mindroom.matrix.thread_cache import ResolvedThreadCache
 
 
 def _collect_sync_timeline_cache_updates(
@@ -123,7 +127,24 @@ class ThreadWritePolicy:
     """Own thread-affecting cache mutations and outbound write-through."""
 
     def __init__(self, cache: MatrixConversationCache) -> None:
-        self.cache = cache
+        self._get_logger = lambda: cache.logger
+        self.runtime = cache.runtime
+        self._get_resolved_thread_cache = lambda: cache._resolved_thread_cache
+        self.thread_version = cache.thread_version
+        self.bump_thread_version = cache._bump_thread_version
+        self.queue_room_cache_update = cache._queue_room_cache_update
+        self.require_client = cache._require_client
+        self.invalidate_reply_chain = cache._invalidate_reply_chain
+        self.reply_chain_invalidation_ids_for_redaction = cache._reply_chain_invalidation_ids_for_redaction
+        self.reply_chain_invalidation_ids_for_sync_redaction = cache._reply_chain_invalidation_ids_for_sync_redaction
+
+    @property
+    def logger(self) -> structlog.stdlib.BoundLogger:
+        """Return the facade-bound logger so collaborator rebinding stays visible."""
+        return self._get_logger()
+
+    def _resolved_thread_cache(self) -> ResolvedThreadCache:
+        return self._get_resolved_thread_cache()
 
     async def _mark_lookup_repair_pending(
         self,
@@ -135,7 +156,7 @@ class ThreadWritePolicy:
         if not isinstance(event_id, str) or not event_id:
             return
 
-        await self.cache._queue_room_cache_update(
+        await self.queue_room_cache_update(
             room_id,
             lambda: self._mark_lookup_repair_pending_locked(room_id, event_id, reason=reason),
             name="matrix_cache_mark_lookup_repair_pending",
@@ -150,8 +171,8 @@ class ThreadWritePolicy:
     ) -> None:
         if not isinstance(event_id, str) or not event_id:
             return
-        await self.cache.runtime.event_cache.mark_pending_lookup_repair(room_id, event_id)
-        self.cache.logger.debug(
+        await self.runtime.event_cache.mark_pending_lookup_repair(room_id, event_id)
+        self.logger.debug(
             "Marked Matrix thread lookup repair pending",
             room_id=room_id,
             event_id=event_id,
@@ -167,17 +188,19 @@ class ThreadWritePolicy:
         reason: str = "lookup_repair_required",
     ) -> frozenset[str]:
         if promoted_event_ids is None:
-            promoted_event_ids = await self.cache.runtime.event_cache.matching_pending_lookup_repairs(
+            promoted_event_ids = await self.runtime.event_cache.matching_pending_lookup_repairs(
                 room_id,
                 thread_id,
             )
         if not promoted_event_ids:
             return frozenset()
-        await self.cache.runtime.event_cache.consume_pending_lookup_repairs(room_id, promoted_event_ids)
-        thread_version = self.cache._bump_thread_version(room_id, thread_id)
-        await self.cache.runtime.event_cache.mark_thread_repair_required(room_id, thread_id)
-        self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
-        self.cache._reads._log_resolved_thread_cache(
+        resolved_thread_cache = self._resolved_thread_cache()
+        await self.runtime.event_cache.consume_pending_lookup_repairs(room_id, promoted_event_ids)
+        thread_version = self.bump_thread_version(room_id, thread_id)
+        await self.runtime.event_cache.mark_thread_repair_required(room_id, thread_id)
+        resolved_thread_cache.invalidate(room_id, thread_id)
+        log_resolved_thread_cache(
+            self.logger,
             "resolved_thread_cache_invalidate",
             room_id=room_id,
             thread_id=thread_id,
@@ -200,10 +223,11 @@ class ThreadWritePolicy:
         *,
         invalidate_resolved: bool,
     ) -> int:
-        async with self.cache._resolved_thread_cache.entry_lock(room_id, thread_id):
-            thread_version = self.cache._bump_thread_version(room_id, thread_id)
+        resolved_thread_cache = self._resolved_thread_cache()
+        async with resolved_thread_cache.entry_lock(room_id, thread_id):
+            thread_version = self.bump_thread_version(room_id, thread_id)
             if invalidate_resolved:
-                self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
+                resolved_thread_cache.invalidate(room_id, thread_id)
             return thread_version
 
     async def _mark_thread_refresh_required(
@@ -214,13 +238,15 @@ class ThreadWritePolicy:
         reason: str,
         bump_version: bool = True,
     ) -> int:
-        async with self.cache._resolved_thread_cache.entry_lock(room_id, thread_id):
-            thread_version = self.cache.thread_version(room_id, thread_id)
+        resolved_thread_cache = self._resolved_thread_cache()
+        async with resolved_thread_cache.entry_lock(room_id, thread_id):
+            thread_version = self.thread_version(room_id, thread_id)
             if bump_version:
-                thread_version = self.cache._bump_thread_version(room_id, thread_id)
-            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
-            await self.cache.runtime.event_cache.mark_thread_repair_required(room_id, thread_id)
-            self.cache._reads._log_resolved_thread_cache(
+                thread_version = self.bump_thread_version(room_id, thread_id)
+            resolved_thread_cache.invalidate(room_id, thread_id)
+            await self.runtime.event_cache.mark_thread_repair_required(room_id, thread_id)
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_invalidate",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -262,11 +288,13 @@ class ThreadWritePolicy:
         candidate_event_ids = frozenset(event_id for event_id in event_ids if isinstance(event_id, str) and event_id)
         if not candidate_event_ids:
             return
-        matching_thread_ids = self.cache._resolved_thread_cache.matching_thread_ids(room_id, candidate_event_ids)
+        resolved_thread_cache = self._resolved_thread_cache()
+        matching_thread_ids = resolved_thread_cache.matching_thread_ids(room_id, candidate_event_ids)
         for thread_id in matching_thread_ids:
-            thread_version = self.cache._bump_thread_version(room_id, thread_id)
-            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
-            self.cache._reads._log_resolved_thread_cache(
+            thread_version = self.bump_thread_version(room_id, thread_id)
+            resolved_thread_cache.invalidate(room_id, thread_id)
+            log_resolved_thread_cache(
+                self.logger,
                 "resolved_thread_cache_invalidate",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -285,10 +313,10 @@ class ThreadWritePolicy:
             thread_id = await _resolve_thread_id_for_cached_event_append(
                 room_id,
                 event_info=event_info,
-                event_cache=self.cache.runtime.event_cache,
+                event_cache=self.runtime.event_cache,
             )
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to resolve outbound threaded event for cache write-through",
                 room_id=room_id,
                 event_id=event_id,
@@ -333,9 +361,9 @@ class ThreadWritePolicy:
         event_source: dict[str, Any],
     ) -> bool:
         try:
-            return bool(await self.cache.runtime.event_cache.append_event(room_id, thread_id, event_source))
+            return bool(await self.runtime.event_cache.append_event(room_id, thread_id, event_source))
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to write outbound threaded event through to cache",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -362,7 +390,7 @@ class ThreadWritePolicy:
             event_source,
         )
         try:
-            await self.cache._finalize_thread_cache_mutation(
+            await self._finalize_thread_cache_mutation(
                 room_id,
                 thread_id,
                 persisted=appended,
@@ -370,7 +398,7 @@ class ThreadWritePolicy:
                 failure_reason="outbound_append_failed",
             )
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Ignoring outbound threaded message cache finalization failure after successful send",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -388,7 +416,7 @@ class ThreadWritePolicy:
         if not isinstance(event_id, str) or not event_id:
             return
 
-        client = self.cache._require_client()
+        client = self.require_client()
         sender = client.user_id if isinstance(client.user_id, str) else None
         origin_server_ts = int(time.time() * 1000)
         event_source = normalize_event_source_for_cache(
@@ -412,20 +440,20 @@ class ThreadWritePolicy:
         if not is_thread_candidate:
             return
         if event_info.is_edit:
-            self.cache._invalidate_reply_chain(
+            self.invalidate_reply_chain(
                 room_id,
                 event_id,
                 event_info.original_event_id,
             )
 
         try:
-            await self.cache._queue_room_cache_update(
+            await self.queue_room_cache_update(
                 room_id,
                 lambda: self._record_outbound_message_update(room_id, event_id, event_source, event_info),
                 name="matrix_cache_record_outbound_message",
             )
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Ignoring outbound threaded message cache write-through failure after successful send",
                 room_id=room_id,
                 event_id=event_id,
@@ -439,15 +467,15 @@ class ThreadWritePolicy:
     ) -> None:
         thread_id: str | None = None
         try:
-            reply_chain_invalidation_ids = await self.cache._reply_chain_invalidation_ids_for_redaction(
+            reply_chain_invalidation_ids = await self.reply_chain_invalidation_ids_for_redaction(
                 room_id,
                 redacted_event_id,
-                event_cache=self.cache.runtime.event_cache,
+                event_cache=self.runtime.event_cache,
             )
-            self.cache._invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
-            thread_id = await self.cache.runtime.event_cache.get_thread_id_for_event(room_id, redacted_event_id)
+            self.invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
+            thread_id = await self.runtime.event_cache.get_thread_id_for_event(room_id, redacted_event_id)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Ignoring outbound Matrix redaction cache write-through failure after successful redact",
                 room_id=room_id,
                 redacted_event_id=redacted_event_id,
@@ -467,9 +495,9 @@ class ThreadWritePolicy:
                 )
 
         try:
-            redacted = await self.cache.runtime.event_cache.redact_event(room_id, redacted_event_id)
+            redacted = await self.runtime.event_cache.redact_event(room_id, redacted_event_id)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Ignoring outbound Matrix redaction cache write-through failure after successful redact",
                 room_id=room_id,
                 redacted_event_id=redacted_event_id,
@@ -478,7 +506,7 @@ class ThreadWritePolicy:
             )
             redacted = False
         try:
-            await self.cache._finalize_thread_cache_mutation(
+            await self._finalize_thread_cache_mutation(
                 room_id,
                 thread_id,
                 persisted=bool(redacted),
@@ -486,7 +514,7 @@ class ThreadWritePolicy:
                 failure_reason="outbound_redaction_failed",
             )
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Ignoring outbound Matrix redaction cache finalization failure after successful redact",
                 room_id=room_id,
                 redacted_event_id=redacted_event_id,
@@ -503,13 +531,13 @@ class ThreadWritePolicy:
         if not redacted_event_id:
             return
         try:
-            await self.cache._queue_room_cache_update(
+            await self.queue_room_cache_update(
                 room_id,
                 lambda: self._record_outbound_redaction_update(room_id, redacted_event_id),
                 name="matrix_cache_record_outbound_redaction",
             )
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Ignoring outbound Matrix redaction cache write-through failure after successful redact",
                 room_id=room_id,
                 redacted_event_id=redacted_event_id,
@@ -525,12 +553,12 @@ class ThreadWritePolicy:
     ) -> None:
         """Append one live threaded event into the advisory cache when the thread is known."""
         if event_info.is_edit:
-            self.cache._invalidate_reply_chain(
+            self.invalidate_reply_chain(
                 room_id,
                 event.event_id,
                 event_info.original_event_id,
             )
-        event_cache = self.cache.runtime.event_cache
+        event_cache = self.runtime.event_cache
         has_explicit_thread_relation = _has_explicit_thread_relation(event_info)
 
         try:
@@ -540,7 +568,7 @@ class ThreadWritePolicy:
                 event_cache=event_cache,
             )
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to resolve cached thread for live event",
                 room_id=room_id,
                 event_id=event.event_id,
@@ -588,7 +616,7 @@ class ThreadWritePolicy:
             try:
                 appended = await event_cache.append_event(room_id, thread_id, event_source)
             except Exception as exc:
-                self.cache.logger.warning(
+                self.logger.warning(
                     "Failed to append live thread event to cache",
                     room_id=room_id,
                     thread_id=thread_id,
@@ -596,7 +624,7 @@ class ThreadWritePolicy:
                     error=str(exc),
                 )
                 appended = False
-            await self.cache._finalize_thread_cache_mutation(
+            await self._finalize_thread_cache_mutation(
                 room_id,
                 thread_id,
                 persisted=bool(appended),
@@ -605,7 +633,7 @@ class ThreadWritePolicy:
             )
             return bool(appended)
 
-        await self.cache._queue_room_cache_update(
+        await self.queue_room_cache_update(
             room_id,
             append_and_finalize,
             name="matrix_cache_append_live_event",
@@ -613,19 +641,19 @@ class ThreadWritePolicy:
 
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
-        event_cache = self.cache.runtime.event_cache
-        invalidation_ids = await self.cache._reply_chain_invalidation_ids_for_redaction(
+        event_cache = self.runtime.event_cache
+        invalidation_ids = await self.reply_chain_invalidation_ids_for_redaction(
             room_id,
             event.redacts,
             event_cache=event_cache,
         )
-        self.cache._invalidate_reply_chain(room_id, *invalidation_ids)
+        self.invalidate_reply_chain(room_id, *invalidation_ids)
 
         thread_id: str | None = None
         try:
             thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to resolve cached thread for redaction",
                 room_id=room_id,
                 event_id=event.event_id,
@@ -649,7 +677,7 @@ class ThreadWritePolicy:
             try:
                 redacted = await event_cache.redact_event(room_id, event.redacts)
             except Exception as exc:
-                self.cache.logger.warning(
+                self.logger.warning(
                     "Failed to apply live redaction to cache",
                     room_id=room_id,
                     thread_id=thread_id,
@@ -657,7 +685,7 @@ class ThreadWritePolicy:
                     error=str(exc),
                 )
                 redacted = False
-            await self.cache._finalize_thread_cache_mutation(
+            await self._finalize_thread_cache_mutation(
                 room_id,
                 thread_id,
                 persisted=bool(redacted),
@@ -666,7 +694,7 @@ class ThreadWritePolicy:
             )
             return bool(redacted)
 
-        await self.cache._queue_room_cache_update(
+        await self.queue_room_cache_update(
             room_id,
             redact_and_finalize,
             name="matrix_cache_apply_redaction",
@@ -689,7 +717,7 @@ class ThreadWritePolicy:
                 event_cache=event_cache,
             )
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to resolve cached thread for sync event",
                 room_id=room_id,
                 event_id=event_id,
@@ -743,7 +771,7 @@ class ThreadWritePolicy:
         try:
             appended = await event_cache.append_thread_event(room_id, thread_id, event_source)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to append sync thread event to cache",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -752,7 +780,7 @@ class ThreadWritePolicy:
             )
             return thread_id, False
         if not appended:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to append sync thread event because raw thread cache is missing",
                 room_id=room_id,
                 thread_id=thread_id,
@@ -775,7 +803,7 @@ class ThreadWritePolicy:
             if thread_id is None:
                 continue
             event_info = EventInfo.from_event(event_source)
-            await self.cache._finalize_thread_cache_mutation(
+            await self._finalize_thread_cache_mutation(
                 room_id,
                 thread_id,
                 persisted=appended,
@@ -810,18 +838,18 @@ class ThreadWritePolicy:
         redacted_event_ids: Sequence[str],
     ) -> None:
         for redacted_event_id in redacted_event_ids:
-            reply_chain_invalidation_ids = await self.cache._reply_chain_invalidation_ids_for_sync_redaction(
+            reply_chain_invalidation_ids = await self.reply_chain_invalidation_ids_for_sync_redaction(
                 room_id,
                 redacted_event_id,
                 event_cache=event_cache,
                 event_source=None,
             )
-            self.cache._invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
+            self.invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
             thread_id: str | None = None
             try:
                 thread_id = await event_cache.get_thread_id_for_event(room_id, redacted_event_id)
             except Exception as exc:
-                self.cache.logger.warning(
+                self.logger.warning(
                     "Failed to resolve cached thread for sync redaction",
                     room_id=room_id,
                     redacted_event_id=redacted_event_id,
@@ -843,7 +871,7 @@ class ThreadWritePolicy:
             try:
                 redacted = await event_cache.redact_event(room_id, redacted_event_id)
             except Exception as exc:
-                self.cache.logger.warning(
+                self.logger.warning(
                     "Failed to apply sync redaction to cache",
                     room_id=room_id,
                     redacted_event_id=redacted_event_id,
@@ -851,7 +879,7 @@ class ThreadWritePolicy:
                     error=str(exc),
                 )
                 redacted = False
-            await self.cache._finalize_thread_cache_mutation(
+            await self._finalize_thread_cache_mutation(
                 room_id,
                 thread_id,
                 persisted=bool(redacted),
@@ -866,7 +894,7 @@ class ThreadWritePolicy:
         threaded_events: Sequence[dict[str, object]],
         redacted_event_ids: Sequence[str],
     ) -> None:
-        event_cache = self.cache.runtime.event_cache
+        event_cache = self.runtime.event_cache
         plain_batch = [
             (event_id, room_id, event_source)
             for event_source in plain_events
@@ -881,7 +909,7 @@ class ThreadWritePolicy:
             if plain_batch:
                 await event_cache.store_events_batch(plain_batch)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to persist sync events to cache",
                 room_id=room_id,
                 event_count=len(plain_batch),
@@ -891,7 +919,7 @@ class ThreadWritePolicy:
             if threaded_batch:
                 await event_cache.store_events_batch(threaded_batch)
         except Exception as exc:
-            self.cache.logger.warning(
+            self.logger.warning(
                 "Failed to persist sync threaded events to cache",
                 room_id=room_id,
                 event_count=len(threaded_batch),
@@ -921,10 +949,10 @@ class ThreadWritePolicy:
     ) -> None:
         event_info = EventInfo.from_event(event_source)
         if event_info.is_edit:
-            self.cache._invalidate_reply_chain(
+            self.invalidate_reply_chain(
                 room_id,
                 event_info.original_event_id,
-                self.cache._reads._event_id_from_event_source(event_source),
+                event_id_from_event_source(event_source),
             )
 
     def _group_sync_timeline_updates(
@@ -965,7 +993,7 @@ class ThreadWritePolicy:
             plain_events = room_plain_events.get(room_id, ())
             threaded_events = room_threaded_events.get(room_id, ())
             redacted_event_ids = room_redactions.get(room_id, ())
-            self.cache._queue_room_cache_update(
+            self.queue_room_cache_update(
                 room_id,
                 lambda room_id=room_id,
                 plain_events=plain_events,

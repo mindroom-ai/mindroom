@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.matrix.client import get_joined_rooms, get_room_name, matrix_client, send_message
+from mindroom.matrix.client import get_joined_rooms, get_room_name, matrix_client, send_message_result
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 
@@ -88,7 +88,8 @@ Features tested:
 
         content = {"body": short_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(short_text):,} bytes")
-        event_id = await send_message(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content)
+        event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")
             print("👁️ Should appear as: Normal message, NO attachment")
@@ -111,7 +112,8 @@ This represents a typical long AI response that fits within Matrix limits.
 
         content = {"body": medium_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(medium_text):,} bytes")
-        event_id = await send_message(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content)
+        event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")
             print("👁️ Should appear as: Normal message, NO attachment")
@@ -134,7 +136,8 @@ The attachment contains the full message content.
 
         content = {"body": over_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(over_text):,} bytes")
-        event_id = await send_message(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content)
+        event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")
             print("👁️ Should appear as: Preview text + 📎 message.txt attachment")
@@ -166,7 +169,8 @@ Key points about large messages:
 
         content = {"body": large_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(large_text):,} bytes")
-        event_id = await send_message(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content)
+        event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")
             print("👁️ Should appear as: Preview text + 📎 message.txt attachment")
