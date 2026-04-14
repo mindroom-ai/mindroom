@@ -77,6 +77,7 @@ from mindroom.matrix.client import (
     ThreadHistoryResult,
     _ThreadHistoryFastPathUnavailableError,
 )
+from mindroom.matrix.conversation_cache import ThreadRepairRequiredError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -4217,6 +4218,32 @@ class TestAgentBot:
 
         assert context is None
 
+    def test_build_tool_runtime_context_returns_none_when_event_cache_unavailable(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Runtime context should be None until Matrix runtime support is initialized."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot._runtime_view.event_cache = None
+
+        target = MessageTarget.resolve(room_id="!test:localhost", thread_id="$thread", reply_to_event_id="$event")
+        context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
+
+        assert context is None
+
     def test_build_tool_runtime_context_sets_attachment_scope_and_thread_root(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -7502,6 +7529,73 @@ class TestAgentBot:
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
             thread_mode_override=None,
             target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_text_message_handles_repair_required_prepare_failure(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Repair-required dispatch preparation failures should become handled terminal replies."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        bot.logger = MagicMock()
+        mock_send_response = AsyncMock(return_value="$error")
+        install_send_response_mock(bot, mock_send_response)
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "hello",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": "$thread_root"},
+                    },
+                },
+            },
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+                new=AsyncMock(return_value=event),
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(side_effect=ThreadRepairRequiredError("repair required")),
+            ),
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
+
+        mock_send_response.assert_awaited_once()
+        send_args = mock_send_response.await_args
+        assert send_args.args[:4] == (
+            "!test:localhost",
+            "$event",
+            "[calculator] ⚠️ Error: repair required",
+            "$thread_root",
+        )
+        assert send_args.kwargs["extra_content"] == {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
+        tracker.record_handled_turn.assert_called_once_with(
+            HandledTurnState.from_source_event_id("$event", response_event_id="$error"),
         )
 
     @pytest.mark.asyncio

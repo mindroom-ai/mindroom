@@ -60,6 +60,7 @@ from mindroom.inbound_turn_normalizer import (
     VoiceNormalizationRequest,
 )
 from mindroom.logging_config import bound_log_context
+from mindroom.matrix.conversation_cache import ThreadRepairRequiredError
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
@@ -1210,7 +1211,7 @@ class TurnController:
                 coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
             )
 
-    async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
+    async def _dispatch_text_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         event: _TextDispatchEvent | _PrecheckedTextDispatchEvent,
@@ -1244,13 +1245,24 @@ class TurnController:
 
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
-            dispatch = await self._prepare_dispatch(
-                room,
-                event,
-                requester_user_id,
-                event_label="message",
-                handled_turn=handled_turn,
-            )
+            try:
+                dispatch = await self._prepare_dispatch(
+                    room,
+                    event,
+                    requester_user_id,
+                    event_label="message",
+                    handled_turn=handled_turn,
+                )
+            except ThreadRepairRequiredError as error:
+                response_event_id = await self._finalize_dispatch_failure(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.event_id,
+                    thread_id=EventInfo.from_event(event.source).thread_id,
+                    error=error,
+                )
+                if response_event_id is not None:
+                    self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+                return
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
             if dispatch is None:

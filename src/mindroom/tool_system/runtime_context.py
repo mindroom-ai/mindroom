@@ -128,6 +128,9 @@ class ToolRuntimeSupport:
         client = self.runtime.client
         if client is None:
             return None
+        event_cache = self.runtime.event_cache
+        if event_cache is None:
+            return None
         target_room_id = target.room_id
         target_thread_id = target.thread_id
         target_resolved_thread_id = target.resolved_thread_id
@@ -142,7 +145,7 @@ class ToolRuntimeSupport:
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
             conversation_cache=self.resolver.deps.conversation_cache,
-            event_cache=self.runtime.event_cache,
+            event_cache=event_cache,
             active_model_name=active_model_name,
             session_id=session_id,
             room=self.resolver.cached_room(target_room_id),
