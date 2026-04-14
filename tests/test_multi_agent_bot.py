@@ -3503,6 +3503,107 @@ class TestAgentBot:
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
     @pytest.mark.asyncio
+    async def test_generate_response_keeps_first_turn_follow_up_effects_in_new_thread(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """First-turn threaded replies should keep compaction notices and summaries in the resolved thread."""
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            kwargs["compaction_outcomes_collector"].append(_make_compaction_outcome())
+            return "ok"
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+        scheduled_names: list[str] = []
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+            owner: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            scheduled_names.append(name)
+            return task
+
+        config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 1
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
+        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        root_event_id = "$root_event"
+        resolved_target = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id=root_event_id,
+        ).with_thread_root(root_event_id)
+        response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)
+
+        with (
+            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, side_effect=fake_ai_response),
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+            ),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
+            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+            patch(
+                "mindroom.response_runner.store_conversation_memory",
+                side_effect=fake_store_conversation_memory,
+            ),
+            patch(
+                "mindroom.post_response_effects.maybe_generate_thread_summary",
+                new_callable=AsyncMock,
+            ) as mock_thread_summary,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.send_compaction_notice",
+                new=AsyncMock(return_value="$notice"),
+            ) as mock_send_compaction_notice,
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Start a thread here",
+                reply_to_event_id=root_event_id,
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+                target=resolved_target,
+                response_envelope=response_envelope,
+            )
+
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+        mock_thread_summary.assert_awaited_once_with(
+            client=bot.client,
+            room_id="!test:localhost",
+            thread_id=root_event_id,
+            config=config,
+            runtime_paths=bot.runtime_paths,
+            conversation_cache=bot._conversation_cache,
+            message_count_hint=1,
+        )
+        mock_send_compaction_notice.assert_awaited_once()
+        compaction_request = mock_send_compaction_notice.await_args.args[0]
+        assert compaction_request.target.resolved_thread_id == root_event_id
+        assert compaction_request.target.reply_to_event_id == root_event_id
+        assert "thread_summary_!test:localhost_$root_event" in scheduled_names
+
+    @pytest.mark.asyncio
     async def test_generate_response_runs_post_effects_after_cancellable_wrapper(
         self,
         mock_agent_user: AgentMatrixUser,

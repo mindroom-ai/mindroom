@@ -2789,6 +2789,66 @@ class TestThreadingBehavior:
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_extract_context_edit_of_plain_root_message_degrades_when_thread_lookup_fails(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Advisory thread-id lookup failures should not break plain edit context resolution."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$room_message:localhost"},
+                },
+                "event_id": "$edit_event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567897,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Room message",
+                        "msgtype": "m.text",
+                    },
+                    "event_id": "$room_message:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567896,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+        bot.event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("sqlite boom"))
+
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_history",
+            AsyncMock(),
+        ) as mock_fetch:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
+
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_message:localhost")
+        bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$room_message:localhost")
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_extract_context_plain_reply_to_threaded_message_stays_plain_reply(self, bot: AgentBot) -> None:
         """Plain replies should not inherit thread context from earlier threaded messages."""
         room = MagicMock(spec=nio.MatrixRoom)

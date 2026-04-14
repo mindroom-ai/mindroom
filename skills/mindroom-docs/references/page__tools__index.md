@@ -39,7 +39,7 @@ defaults:
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/index.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/index.md) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/index.md) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/index.md) - Matrix-native messaging, thread summaries and resolution, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/index.md) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/index.md) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/index.md) - Git hosting, issue trackers, docs platforms, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/index.md) - Calendar APIs and MindRoom scheduling tools.

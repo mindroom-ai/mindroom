@@ -422,7 +422,16 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
-        return await self.runtime.event_cache.get_thread_id_for_event(room_id, event_id)
+        try:
+            return await self.runtime.event_cache.get_thread_id_for_event(room_id, event_id)
+        except Exception as error:
+            logger.warning(
+                "Conversation cache thread lookup failed; continuing without cached thread id",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(error),
+            )
+            return None
 
     async def get_latest_thread_event_id_if_needed(
         self,

@@ -11,6 +11,7 @@ This page documents the built-in tools in the `matrix-and-attachments` group. Us
 - \[`matrix_message`\] - Send, reply, react, read, edit, or inspect Matrix conversation context.
 - \[`thread_tags`\] - Add, remove, and inspect shared tags on a Matrix thread.
 - \[`thread_summary`\] - Set or update a Matrix thread summary from the current room and thread context.
+- \[`matrix_api`\] - Use a low-level Matrix event and state API with explicit room and event IDs.
 - \[`attachments`\] - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
 ## Common Setup Notes
@@ -63,7 +64,7 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ### What It Does
 
-`thread_tags` exposes `tag_thread()`, `untag_thread()`, and `list_thread_tags()`. All three operations default to the current room and active explicit thread context. When there is no active explicit thread, pass `thread_id` explicitly. The tool normalizes the supplied event into the canonical thread root before reading or writing state. Tags are stored as `io.mindroom.thread_tags` room state keyed by the canonical thread root event ID. Writes fail unless both the running Matrix client and the human requester have enough power to send that state event in the target room. When the requester differs from the bot account, the requester must also be joined to the target room.
+`thread_tags` exposes `tag_thread()`, `untag_thread()`, and `list_thread_tags()`. All three operations default to the current room and active explicit thread context. When there is no active explicit thread, pass `thread_id` explicitly. The tool normalizes the supplied event into the canonical thread root before reading or writing state. Tags are stored as `com.mindroom.thread.tags` room state. Each `(thread_root_id, tag)` pair uses its own state event, and the state key is the JSON array `[thread_root_id, tag]`. Writes fail unless both the running Matrix client and the human requester have enough power to send that state event in the target room. When the requester differs from the bot account, the requester must also be joined to the target room.
 
 ### Configuration
 
@@ -125,6 +126,45 @@ set_thread_summary(
 - `summary` must be a non-empty string up to 500 characters after whitespace normalization.
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
+
+## \[`matrix_api`\]
+
+`matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations.
+
+### What It Does
+
+`matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, and `get_event`. It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there. It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations. `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs. Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+### Example
+
+```
+agents:
+  assistant:
+    tools:
+      - matrix_api
+```
+
+```
+matrix_api(action="get_event", event_id="$event123")
+matrix_api(action="get_state", event_type="m.room.topic")
+matrix_api(
+    action="put_state",
+    event_type="com.example.marker",
+    state_key="status",
+    content={"value": "ready"},
+)
+matrix_api(action="redact", event_id="$event123", reason="Cleanup")
+```
+
+### Notes
+
+- Use this tool when you need exact Matrix event or state control rather than the higher-level `matrix_message` convenience actions.
+- The tool returns structured JSON payloads for both success and error cases.
+- Because it is intentionally low-level, it requires explicit IDs instead of deriving them from reply or thread context.
 
 ## \[`attachments`\]
 
