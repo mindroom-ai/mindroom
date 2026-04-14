@@ -3,11 +3,12 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `MatrixConversationCache` a thinner public facade by extracting thread read policy and thread write policy without changing the current ownership model or user-visible behavior.
+**Goal:** Make `MatrixConversationCache` a thinner public facade by extracting thread read policy and thread write policy while finishing the remaining authoritative read and local write-through invariants.
 
 **Architecture:** `_event_cache.py` remains the durable owner of persisted event truth and durable repair obligations.
 `thread_cache.py` remains the process-local owner of resolved-thread reuse, generation tokens, and per-thread locks.
 `conversation_cache.py` becomes a coordinator that delegates read policy to `thread_reads.py` and mutation policy to `thread_writes.py` instead of owning every detail directly.
+The split also closes the remaining bypasses so authoritative thread reads, local threaded sends, and local redactions all go through one repair-aware cache contract.
 
 **Tech Stack:** Python 3.13, asyncio, SQLite, matrix-nio, pytest, Ruff, pre-commit.
 
@@ -18,7 +19,7 @@
 This plan intentionally replaces the earlier umbrella plan and the completed boundary-retention cleanup plan.
 The remaining work is narrower than those older documents described.
 The current code already has the corrected ownership model for durable repair state, process-local reuse state, outbound fallback ownership, and restart cleanup.
-What is still missing is the decomposition step that makes `conversation_cache.py` materially easier to reason about.
+What is still missing is the decomposition step that makes `conversation_cache.py` materially easier to reason about and removes the last correctness bypasses that the review cycle surfaced.
 
 ## Non-Goals
 
@@ -27,12 +28,17 @@ What is still missing is the decomposition step that makes `conversation_cache.p
 - Do not change raw versus visible point-event semantics.
 - Do not introduce new public APIs outside the current `MatrixConversationCache` facade unless a rename is strictly needed for clarity.
 - Do not split files just to increase file count.
+- Do not add compatibility behavior for old on-disk Matrix event cache schemas.
+  If a future schema change needs it, the stale cache should be discarded and rebuilt through normal usage rather than migrated.
 
 ## Success Criteria
 
 - `conversation_cache.py` gets materially smaller.
 - `thread_reads.py` owns thread read, reuse, and repair policy.
 - `thread_writes.py` owns live and sync thread mutation policy.
+- Local threaded sends and local redactions use one write-through contract.
+- Ordinary room-mode edits and redactions do not create durable thread-repair garbage.
+- Post-send advisory cache failures do not turn successful Matrix delivery into a raised failure.
 - No new mutable state owner is introduced.
 - Existing tests keep the current behavior stable.
 - Net `src/` LOC stays roughly flat.
@@ -58,6 +64,10 @@ What is still missing is the decomposition step that makes `conversation_cache.p
 - Modify: `tests/test_thread_history.py`
 - Modify: `tests/test_threading_error.py`
 - Modify: `tests/test_matrix_sync_tokens.py`
+- Modify: `tests/test_matrix_api_tool.py`
+- Modify: `tests/test_thread_summary.py`
+- Modify: `tests/test_send_file_message.py`
+- Modify: `tests/test_multi_agent_bot.py`
 
 ## Task 1: Lock Read Behavior Before Extraction
 
@@ -77,7 +87,8 @@ The tests should lock in:
 - cached reuse versus authoritative repair behavior,
 - promotion of durable lookup-repair obligations from `_event_cache.py`,
 - repair clearing only after an authoritative refill,
-- post-lock currentness checks that do not trust stale pre-lock state.
+- post-lock currentness checks that do not trust stale pre-lock state,
+- latest-thread fallback reads using the same repair-aware thread-history path.
 
 - [ ] **Step 2: Run the focused read tests**
 
@@ -149,6 +160,10 @@ git commit -m "refactor: extract conversation cache thread read policy"
 **Files:**
 - Modify: `tests/test_threading_error.py`
 - Modify: `tests/test_matrix_sync_tokens.py`
+- Modify: `tests/test_matrix_api_tool.py`
+- Modify: `tests/test_thread_summary.py`
+- Modify: `tests/test_send_file_message.py`
+- Modify: `tests/test_multi_agent_bot.py`
 
 - [ ] **Step 1: Add or tighten characterization tests for thread-affecting mutations**
 
@@ -162,7 +177,11 @@ The tests should lock in:
 - successful writes bump or invalidate state coherently,
 - degraded or failed writes mark the thread repair-required,
 - successful repair clears the durable repair flag,
-- sync errors do not mark cached data fresher.
+- sync errors do not mark cached data fresher,
+- local redactions invalidate cached thread state through the conversation cache,
+- tool-authored room-mode edits are allowed without a conversation cache,
+- local summary sends and threaded tool sends write through to the cache,
+- advisory cache failures after a successful Matrix send are fail-open.
 
 - [ ] **Step 2: Run the focused mutation tests**
 
@@ -190,6 +209,7 @@ git commit -m "test: lock conversation cache mutation behavior before extraction
 Create `thread_writes.py` with one internal owner for:
 - live append handling,
 - live redaction handling,
+- local outbound send and redaction write-through handling,
 - sync thread-event persistence,
 - sync redaction handling,
 - mutation outcome classification,
@@ -202,6 +222,7 @@ Move the helpers around:
 - thread change recording,
 - repair-required marking,
 - shared mutation finalization,
+- fail-open post-send advisory cache handling,
 - sync thread resolution,
 - room timeline persistence for thread-affecting updates.
 
@@ -213,9 +234,17 @@ Do not create a separate side-effect abstraction unless the extraction clearly n
 Leave `_group_sync_timeline_updates()` and `cache_sync_timeline()` in `conversation_cache.py` unless the write extraction makes a smaller pure helper obviously worthwhile.
 Do not create `sync_timeline.py` just because earlier docs mentioned it.
 
+- [ ] **Step 3a: Fold the remaining local write-through fixes into the extraction**
+
+While moving the write policy:
+- make local redactions use the same cache mutation contract as live sync redactions,
+- stop classifying ordinary room-mode edits as requiring a conversation cache,
+- keep threaded send/edit write-through under the public facade,
+- make post-send advisory cache failures log and continue instead of turning delivered messages into raised failures.
+
 - [ ] **Step 4: Re-run the focused mutation tests**
 
-Run: `uv run pytest tests/test_threading_error.py tests/test_matrix_sync_tokens.py -x -n 0 --no-cov -v`
+Run: `uv run pytest tests/test_threading_error.py tests/test_matrix_sync_tokens.py tests/test_matrix_api_tool.py tests/test_thread_summary.py tests/test_send_file_message.py tests/test_multi_agent_bot.py -x -n 0 --no-cov -v`
 
 Expected: PASS.
 

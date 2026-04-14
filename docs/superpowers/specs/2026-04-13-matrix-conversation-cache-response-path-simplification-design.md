@@ -157,10 +157,19 @@ Where tests need a conversation cache, they should install the real required run
 
 ## Relationship To The Existing Plan
 
-This design intentionally narrows and partly supersedes the current extraction-first plan in `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`.
-The earlier plan optimizes for decomposition without changing behavior.
-This design prioritizes simplifying the reply-path invariant first.
-If the code still needs decomposition after this simplification lands, that extraction can happen later on a cleaner behavioral foundation.
+This design intentionally narrowed and partly superseded the earlier extraction-first plan in `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`.
+The reply-path simplification has now landed.
+The remaining work is to decompose `conversation_cache.py` on top of that simplified reply contract and to close the last write-through gaps that the review cycle exposed.
+
+The decomposition step should preserve the reply-path invariant from this spec.
+- Normal reply generation trusts one authoritative post-lock `get_thread_history(...)` read.
+- Any authoritative thread question must go through one repair-aware read path.
+- Any local thread-affecting send or edit must go through one cache write-through path.
+- Local redactions must also go through that same cache-consistent mutation contract.
+- Non-authoritative or degraded reads may be returned as one-shot fallbacks, but must never be stored as reusable authoritative cache entries.
+
+That means the file split is not a purely cosmetic extraction.
+It is the point where the remaining bypasses must be removed so future changes cannot reintroduce the same architectural smell.
 
 ## Recommendation
 

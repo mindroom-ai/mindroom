@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 import typing
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -31,15 +30,10 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
-from mindroom.matrix.thread_cache import ResolvedThreadCache, ResolvedThreadCacheEntry, resolved_thread_cache_entry
-from mindroom.matrix.thread_history_result import (
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    ThreadHistoryResult,
-    thread_history_cache_refilled,
-    thread_history_is_authoritative_refill,
-    thread_history_read_source,
-    thread_history_result,
-)
+from mindroom.matrix.thread_cache import ResolvedThreadCache, ResolvedThreadCacheEntry
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.thread_reads import ThreadReadPolicy, ThreadRepairRequiredError
+from mindroom.matrix.thread_writes import ThreadWritePolicy
 
 if TYPE_CHECKING:
     import asyncio
@@ -54,8 +48,6 @@ if TYPE_CHECKING:
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
 
-_SYNC_FRESHNESS_WINDOW_SECONDS = 30.0
-_INCREMENTAL_RESOLVED_CACHE_EVENT_LIMIT = 1
 logger = get_logger(__name__)
 
 __all__ = [
@@ -99,9 +91,8 @@ class ConversationCacheProtocol(Protocol):
     ) -> None:
         """Write one locally sent threaded message or edit through to the cache."""
 
-
-class ThreadRepairRequiredError(RuntimeError):
-    """Raised when a repair-required thread cannot be authoritatively refilled."""
+    async def record_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
+        """Write one locally redacted threaded message through to the cache."""
 
 
 async def _apply_cached_latest_edit(
@@ -249,134 +240,6 @@ async def _cached_room_get_event(
     return response
 
 
-def _collect_sync_timeline_cache_updates(
-    response: nio.SyncResponse,
-) -> tuple[
-    list[tuple[str, str, dict[str, object]]],
-    list[tuple[str, str]],
-    list[tuple[str, dict[str, object]]],
-    dict[tuple[str, str], dict[str, object]],
-]:
-    """Extract cacheable timeline events and redactions from one sync response."""
-    cached_events: list[tuple[str, str, dict[str, object]]] = []
-    redacted_events: list[tuple[str, str]] = []
-    threaded_events: list[tuple[str, dict[str, object]]] = []
-    redacted_event_ids_by_room: dict[str, set[str]] = {}
-
-    for room_id, room_info in response.rooms.join.items():
-        for event in room_info.timeline.events:
-            _collect_sync_event_cache_update(
-                room_id=room_id,
-                event=event,
-                cached_events=cached_events,
-                redacted_events=redacted_events,
-                threaded_events=threaded_events,
-                redacted_event_ids_by_room=redacted_event_ids_by_room,
-            )
-
-    filtered_cached_events = [
-        (event_id, room_id, event_source)
-        for event_id, room_id, event_source in cached_events
-        if event_id not in redacted_event_ids_by_room.get(room_id, set())
-    ]
-    filtered_threaded_events = [
-        (room_id, event_source)
-        for room_id, event_source in threaded_events
-        if event_source.get("event_id") not in redacted_event_ids_by_room.get(room_id, set())
-    ]
-    redacted_event_sources = {
-        (room_id, event_id): event_source
-        for event_id, room_id, event_source in cached_events
-        if event_id in redacted_event_ids_by_room.get(room_id, set())
-    }
-    return filtered_cached_events, redacted_events, filtered_threaded_events, redacted_event_sources
-
-
-def _collect_sync_event_cache_update(
-    *,
-    room_id: str,
-    event: nio.Event | object,
-    cached_events: list[tuple[str, str, dict[str, object]]],
-    redacted_events: list[tuple[str, str]],
-    threaded_events: list[tuple[str, dict[str, object]]],
-    redacted_event_ids_by_room: dict[str, set[str]],
-) -> None:
-    """Collect cache updates for one sync timeline event."""
-    if not isinstance(event, nio.Event):
-        return
-    if not isinstance(event.source, dict):
-        return
-    if not isinstance(event.event_id, str):
-        return
-    if isinstance(event, nio.RedactionEvent):
-        if not isinstance(event.redacts, str):
-            return
-        redacted_events.append((room_id, event.redacts))
-        redacted_event_ids_by_room.setdefault(room_id, set()).add(event.redacts)
-        return
-
-    event_source = normalize_event_source_for_cache(
-        event.source,
-        event_id=event.event_id,
-        sender=event.sender if isinstance(event.sender, str) else None,
-        origin_server_ts=_sync_event_origin_server_ts(event),
-    )
-    cached_events.append((event.event_id, room_id, event_source))
-
-    threaded_event = _threaded_sync_event_cache_update(room_id, event_source)
-    if threaded_event is not None:
-        threaded_events.append(threaded_event)
-
-
-def _sync_event_origin_server_ts(event: nio.Event) -> int | None:
-    """Return a cacheable integer origin_server_ts from one Matrix event."""
-    server_timestamp = event.server_timestamp
-    if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool):
-        return server_timestamp
-    return None
-
-
-def _threaded_sync_event_cache_update(
-    room_id: str,
-    event_source: dict[str, object],
-) -> tuple[str, dict[str, object]] | None:
-    """Return one candidate thread append entry when the event may belong to a thread."""
-    event_info = EventInfo.from_event(event_source)
-    if isinstance(event_info.thread_id, str):
-        return room_id, event_source
-    if not event_info.is_edit:
-        return None
-    if not isinstance(event_info.thread_id_from_edit, str) and not isinstance(
-        event_info.original_event_id,
-        str,
-    ):
-        return None
-    return room_id, event_source
-
-
-def _has_explicit_thread_relation(event_info: EventInfo) -> bool:
-    """Return whether one event explicitly carries thread membership in its own content."""
-    return isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str)
-
-
-async def _resolve_thread_id_for_cached_event_append(
-    room_id: str,
-    *,
-    event_info: EventInfo,
-    event_cache: ConversationEventCache,
-) -> str | None:
-    """Resolve the thread root for one cached event append."""
-    if isinstance(event_info.thread_id, str):
-        return event_info.thread_id
-    if not event_info.is_edit:
-        return None
-    if isinstance(event_info.thread_id_from_edit, str):
-        return event_info.thread_id_from_edit
-    if not isinstance(event_info.original_event_id, str):
-        return None
-    return await event_cache.get_thread_id_for_event(room_id, event_info.original_event_id)
-
-
 @dataclass
 class MatrixConversationCache(ConversationCacheProtocol):
     """Own Matrix conversation reads and advisory cache writes for one bot."""
@@ -392,6 +255,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         init=False,
         repr=False,
     )
+    _reads: ThreadReadPolicy = field(init=False, repr=False)
+    _writes: ThreadWritePolicy = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Bind extracted read/write policy collaborators to this facade."""
+        self._reads = ThreadReadPolicy(self)
+        self._writes = ThreadWritePolicy(self)
 
     def _require_client(self) -> nio.AsyncClient:
         client = self.runtime.client
@@ -520,6 +390,45 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Drop in-memory conversation state tied to one runtime lifetime."""
         self._resolved_thread_cache.clear()
 
+    async def _fetch_thread_history_from_client(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        refresh_cache: bool,
+    ) -> ThreadHistoryResult:
+        return await fetch_thread_history(
+            self._require_client(),
+            room_id,
+            thread_id,
+            event_cache=self.runtime.event_cache,
+            refresh_cache=refresh_cache,
+        )
+
+    async def _fetch_thread_snapshot_from_client(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult:
+        return await fetch_thread_snapshot(
+            self._require_client(),
+            room_id,
+            thread_id,
+            event_cache=self.runtime.event_cache,
+        )
+
+    async def _resolve_thread_history_delta_from_client(
+        self,
+        *,
+        thread_id: str,
+        event_sources: Sequence[dict[str, Any]],
+    ) -> ThreadHistoryResult:
+        return await resolve_thread_history_delta(
+            self._require_client(),
+            thread_id=thread_id,
+            event_sources=event_sources,
+        )
+
     async def _mark_lookup_repair_pending(
         self,
         room_id: str,
@@ -528,26 +437,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         reason: str,
         queue_write: bool = True,
     ) -> None:
-        if not isinstance(event_id, str) or not event_id:
-            return
-
-        async def persist_lookup_repair() -> None:
-            await self.runtime.event_cache.mark_pending_lookup_repair(room_id, event_id)
-            self.logger.debug(
-                "Marked Matrix thread lookup repair pending",
-                room_id=room_id,
-                event_id=event_id,
-                reason=reason,
-            )
-
-        if queue_write:
-            await self._queue_room_cache_update(
-                room_id,
-                persist_lookup_repair,
-                name="matrix_cache_mark_lookup_repair_pending",
-            )
-            return
-        await persist_lookup_repair()
+        await self._writes._mark_lookup_repair_pending(
+            room_id,
+            event_id,
+            reason=reason,
+            queue_write=queue_write,
+        )
 
     async def _promote_lookup_repairs_locked(
         self,
@@ -557,32 +452,19 @@ class MatrixConversationCache(ConversationCacheProtocol):
         promoted_event_ids: frozenset[str] | None = None,
         reason: str = "lookup_repair_required",
     ) -> frozenset[str]:
-        if promoted_event_ids is None:
-            promoted_event_ids = await self.runtime.event_cache.matching_pending_lookup_repairs(
-                room_id,
-                thread_id,
-            )
-        if not promoted_event_ids:
-            return frozenset()
-        await self.runtime.event_cache.consume_pending_lookup_repairs(room_id, promoted_event_ids)
-        thread_version = self._bump_thread_version(room_id, thread_id)
-        await self.runtime.event_cache.mark_thread_repair_required(room_id, thread_id)
-        self._resolved_thread_cache.invalidate(room_id, thread_id)
-        self._log_resolved_thread_cache(
-            "resolved_thread_cache_invalidate",
-            room_id=room_id,
-            thread_id=thread_id,
+        return await self._writes._promote_lookup_repairs_locked(
+            room_id,
+            thread_id,
+            promoted_event_ids=promoted_event_ids,
             reason=reason,
-            thread_version=thread_version,
         )
-        return promoted_event_ids
 
     async def _adopt_room_lookup_repairs_locked(
         self,
         room_id: str,
         thread_id: str,
     ) -> frozenset[str]:
-        return await self._promote_lookup_repairs_locked(room_id, thread_id)
+        return await self._writes._adopt_room_lookup_repairs_locked(room_id, thread_id)
 
     async def _record_thread_change(
         self,
@@ -591,11 +473,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         invalidate_resolved: bool,
     ) -> int:
-        async with self._resolved_thread_cache.entry_lock(room_id, thread_id):
-            thread_version = self._bump_thread_version(room_id, thread_id)
-            if invalidate_resolved:
-                self._resolved_thread_cache.invalidate(room_id, thread_id)
-            return thread_version
+        return await self._writes._record_thread_change(
+            room_id,
+            thread_id,
+            invalidate_resolved=invalidate_resolved,
+        )
 
     async def _mark_thread_refresh_required(
         self,
@@ -605,20 +487,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         reason: str,
         bump_version: bool = True,
     ) -> int:
-        async with self._resolved_thread_cache.entry_lock(room_id, thread_id):
-            thread_version = self.thread_version(room_id, thread_id)
-            if bump_version:
-                thread_version = self._bump_thread_version(room_id, thread_id)
-            self._resolved_thread_cache.invalidate(room_id, thread_id)
-            await self.runtime.event_cache.mark_thread_repair_required(room_id, thread_id)
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=reason,
-                thread_version=thread_version,
-            )
-            return thread_version
+        return await self._writes._mark_thread_refresh_required(
+            room_id,
+            thread_id,
+            reason=reason,
+            bump_version=bump_version,
+        )
 
     async def _finalize_thread_cache_mutation(
         self,
@@ -629,50 +503,22 @@ class MatrixConversationCache(ConversationCacheProtocol):
         invalidate_resolved: bool,
         failure_reason: str,
     ) -> None:
-        """Apply the shared version and repair policy for one thread-affecting cache mutation."""
-        if thread_id is None:
-            return
-        if persisted:
-            await self._record_thread_change(
-                room_id,
-                thread_id,
-                invalidate_resolved=invalidate_resolved,
-            )
-            return
-        await self._mark_thread_refresh_required(
+        await self._writes._finalize_thread_cache_mutation(
             room_id,
             thread_id,
-            reason=failure_reason,
+            persisted=persisted,
+            invalidate_resolved=invalidate_resolved,
+            failure_reason=failure_reason,
         )
 
     def _seconds_since_last_sync_activity(self) -> float | None:
-        last_sync_activity_monotonic = self.runtime.last_sync_activity_monotonic
-        if last_sync_activity_monotonic is None:
-            return None
-        return max(time.monotonic() - last_sync_activity_monotonic, 0.0)
+        return self._reads._seconds_since_last_sync_activity()
 
     async def _should_refresh_cached_thread_history(self, room_id: str, thread_id: str) -> bool:
-        if await self._thread_requires_refresh(room_id, thread_id):
-            self.logger.debug(
-                "Forcing Matrix thread refresh because local cache repair is required",
-                room_id=room_id,
-                thread_id=thread_id,
-            )
-            return True
-        sync_age_seconds = self._seconds_since_last_sync_activity()
-        if sync_age_seconds is None or sync_age_seconds >= _SYNC_FRESHNESS_WINDOW_SECONDS:
-            return True
-        self.logger.debug(
-            "Skipping incremental Matrix thread refresh because sync is fresh",
-            room_id=room_id,
-            thread_id=thread_id,
-            sync_age_ms=round(sync_age_seconds * 1000, 1),
-        )
-        return False
+        return await self._reads._should_refresh_cached_thread_history(room_id, thread_id)
 
     def _event_id_from_event_source(self, event_source: dict[str, object]) -> str | None:
-        event_id = event_source.get("event_id")
-        return event_id if isinstance(event_id, str) else None
+        return self._reads._event_id_from_event_source(event_source)
 
     def _sort_thread_history_root_first(
         self,
@@ -680,10 +526,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         thread_id: str,
     ) -> None:
-        history.sort(key=lambda message: (message.timestamp, message.event_id))
-        root_index = next((index for index, message in enumerate(history) if message.event_id == thread_id), None)
-        if root_index not in (None, 0):
-            history.insert(0, history.pop(root_index))
+        self._reads._sort_thread_history_root_first(history, thread_id=thread_id)
 
     def _resolved_cache_diagnostics(
         self,
@@ -693,12 +536,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         resolution_ms: float = 0.0,
         sidecar_hydration_ms: float = 0.0,
     ) -> dict[str, float]:
-        return {
-            "cache_read_ms": cache_read_ms,
-            "incremental_refresh_ms": incremental_refresh_ms,
-            "resolution_ms": resolution_ms,
-            "sidecar_hydration_ms": sidecar_hydration_ms,
-        }
+        return self._reads._resolved_cache_diagnostics(
+            cache_read_ms=cache_read_ms,
+            incremental_refresh_ms=incremental_refresh_ms,
+            resolution_ms=resolution_ms,
+            sidecar_hydration_ms=sidecar_hydration_ms,
+        )
 
     def _log_resolved_thread_cache(
         self,
@@ -709,29 +552,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
         reason: str | None = None,
         thread_version: int | None = None,
     ) -> None:
-        event_data: dict[str, str | int] = {
-            "room_id": room_id,
-            "thread_id": thread_id,
-        }
-        if reason is not None:
-            event_data["reason"] = reason
-        if thread_version is not None:
-            event_data["thread_version"] = thread_version
-        self.logger.debug(event, **event_data)
+        self._reads._log_resolved_thread_cache(
+            event,
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=reason,
+            thread_version=thread_version,
+        )
 
     async def _wait_for_pending_room_cache_updates(self, room_id: str) -> None:
-        await self.runtime.event_cache_write_coordinator.wait_for_room_idle(room_id)
+        await self._reads._wait_for_pending_room_cache_updates(room_id)
 
     def _history_event_ids(self, history: Sequence[ResolvedVisibleMessage]) -> frozenset[str]:
-        return frozenset(message.event_id for message in history if message.event_id)
+        return self._reads._history_event_ids(history)
 
     def _latest_visible_thread_event_id(
         self,
         history: Sequence[ResolvedVisibleMessage],
     ) -> str | None:
-        if not history:
-            return None
-        return history[-1].visible_event_id or history[-1].event_id or None
+        return self._reads._latest_visible_thread_event_id(history)
 
     async def _invalidate_resolved_threads_for_event_ids(
         self,
@@ -739,50 +578,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *event_ids: str | None,
         reason: str,
     ) -> None:
-        candidate_event_ids = frozenset(event_id for event_id in event_ids if isinstance(event_id, str) and event_id)
-        if not candidate_event_ids:
-            return
-        matching_thread_ids = self._resolved_thread_cache.matching_thread_ids(room_id, candidate_event_ids)
-        for thread_id in matching_thread_ids:
-            thread_version = self._bump_thread_version(room_id, thread_id)
-            self._resolved_thread_cache.invalidate(room_id, thread_id)
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=reason,
-                thread_version=thread_version,
-            )
+        await self._writes._invalidate_resolved_threads_for_event_ids(
+            room_id,
+            *event_ids,
+            reason=reason,
+        )
 
     async def _cached_thread_event_sources(
         self,
         room_id: str,
         thread_id: str,
     ) -> Sequence[dict[str, object]] | None:
-        return await self.runtime.event_cache.get_thread_events(room_id, thread_id)
+        return await self._reads._cached_thread_event_sources(room_id, thread_id)
 
     async def _cached_thread_source_event_ids(
         self,
         room_id: str,
         thread_id: str,
     ) -> frozenset[str]:
-        try:
-            cached_event_sources = await self._cached_thread_event_sources(room_id, thread_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to read raw thread events for resolved cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return frozenset()
-        if cached_event_sources is None:
-            return frozenset()
-        return frozenset(
-            event_id
-            for event_source in cached_event_sources
-            if (event_id := self._event_id_from_event_source(event_source)) is not None
-        )
+        return await self._reads._cached_thread_source_event_ids(room_id, thread_id)
 
     async def _store_resolved_thread_cache_entry(
         self,
@@ -792,51 +606,24 @@ class MatrixConversationCache(ConversationCacheProtocol):
         history: Sequence[ResolvedVisibleMessage],
         thread_version: int,
     ) -> frozenset[str]:
-        source_event_ids = await self._cached_thread_source_event_ids(room_id, thread_id)
-        self._resolved_thread_cache.store(
+        return await self._reads._store_resolved_thread_cache_entry(
             room_id,
             thread_id,
-            resolved_thread_cache_entry(
-                history=history,
-                source_event_ids=source_event_ids,
-                thread_version=thread_version,
-            ),
-        )
-        self._log_resolved_thread_cache(
-            "resolved_thread_cache_store",
-            room_id=room_id,
-            thread_id=thread_id,
+            history=history,
             thread_version=thread_version,
         )
-        return source_event_ids
 
     def _should_store_resolved_thread_cache_entry(self, history: ThreadHistoryResult) -> bool:
-        """Return whether one full-history result is authoritative enough for resolved-cache reuse."""
-        if thread_history_read_source(history) != THREAD_HISTORY_SOURCE_HOMESERVER:
-            return True
-        return thread_history_is_authoritative_refill(history)
+        return self._reads._should_store_resolved_thread_cache_entry(history)
 
     def _repair_history_is_authoritative(self, history: ThreadHistoryResult) -> bool:
-        """Return whether one repair read came from an authoritative homeserver refill."""
-        return thread_history_read_source(
-            history,
-        ) == THREAD_HISTORY_SOURCE_HOMESERVER and thread_history_is_authoritative_refill(history)
+        return self._reads._repair_history_is_authoritative(history)
 
     def _repair_history_durably_refilled(self, history: ThreadHistoryResult) -> bool:
-        """Return whether one repair read also repopulated the raw cache durably."""
-        return self._repair_history_is_authoritative(history) and thread_history_cache_refilled(history)
+        return self._reads._repair_history_durably_refilled(history)
 
     async def _invalidate_raw_thread_before_repair(self, room_id: str, thread_id: str) -> None:
-        """Best-effort raw-cache invalidation before a forced repair read."""
-        try:
-            await self.runtime.event_cache.invalidate_thread(room_id, thread_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to invalidate stale raw thread cache before repair",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
+        await self._reads._invalidate_raw_thread_before_repair(room_id, thread_id)
 
     async def _incrementally_refresh_resolved_thread_cache(
         self,
@@ -847,100 +634,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         entry_version: int,
         current_thread_version: int,
     ) -> ThreadReadResult | None:
-        if await self._thread_requires_refresh(room_id, thread_id):
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason="repair_required",
-                thread_version=current_thread_version,
-            )
-            return None
-        cache_read_started = time.perf_counter()
-        invalidation_reason: str | None = None
-        try:
-            cached_event_sources = await self._cached_thread_event_sources(room_id, thread_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Resolved thread cache refresh could not read raw thread events",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return None
-        cache_read_ms = round((time.perf_counter() - cache_read_started) * 1000, 1)
-        current_event_ids: frozenset[str] = frozenset()
-        new_event_sources: list[dict[str, object]] = []
-        if cached_event_sources is None:
-            invalidation_reason = "missing_raw_cache"
-        else:
-            current_event_ids = frozenset(
-                event_id
-                for event_source in cached_event_sources
-                if (event_id := self._event_id_from_event_source(event_source)) is not None
-            )
-            if not entry.source_event_ids.issubset(current_event_ids):
-                invalidation_reason = "redaction_or_missing_source"
-            else:
-                new_event_sources = [
-                    event_source
-                    for event_source in cached_event_sources
-                    if (event_id := self._event_id_from_event_source(event_source)) is not None
-                    and event_id not in entry.source_event_ids
-                ]
-                if not new_event_sources:
-                    invalidation_reason = "version_changed_without_raw_delta"
-                elif len(new_event_sources) > _INCREMENTAL_RESOLVED_CACHE_EVENT_LIMIT:
-                    invalidation_reason = "multi_event_delta"
-                elif EventInfo.from_event(new_event_sources[0]).is_edit:
-                    invalidation_reason = "edit_delta"
-
-        if invalidation_reason is not None:
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=invalidation_reason,
-                thread_version=current_thread_version,
-            )
-            return None
-
-        delta_history = await resolve_thread_history_delta(
-            self._require_client(),
-            thread_id=thread_id,
-            event_sources=new_event_sources,
-        )
-        merged_history_by_event_id = {message.event_id: message for message in entry.clone_history()}
-        for message in delta_history:
-            merged_history_by_event_id[message.event_id] = message
-        merged_history = list(merged_history_by_event_id.values())
-        self._sort_thread_history_root_first(merged_history, thread_id=thread_id)
-        self._resolved_thread_cache.store(
+        return await self._reads._incrementally_refresh_resolved_thread_cache(
             room_id,
             thread_id,
-            resolved_thread_cache_entry(
-                history=merged_history,
-                source_event_ids=current_event_ids,
-                thread_version=current_thread_version,
-            ),
-        )
-        self._log_resolved_thread_cache(
-            "resolved_thread_cache_incremental_refresh",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=f"{entry_version}->{current_thread_version}",
-            thread_version=current_thread_version,
-        )
-        return thread_history_result(
-            merged_history,
-            is_full_history=True,
-            thread_version=current_thread_version,
-            diagnostics=self._resolved_cache_diagnostics(
-                cache_read_ms=cache_read_ms,
-                incremental_refresh_ms=delta_history.diagnostics.get("resolution_ms", 0.0),
-                resolution_ms=delta_history.diagnostics.get("resolution_ms", 0.0),
-                sidecar_hydration_ms=delta_history.diagnostics.get("sidecar_hydration_ms", 0.0),
-            ),
+            entry=entry,
+            entry_version=entry_version,
+            current_thread_version=current_thread_version,
         )
 
     async def _maybe_use_resolved_thread_cache(
@@ -951,71 +650,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         current_thread_version: int,
         repair_required: bool,
     ) -> ThreadReadResult | None:
-        """Return a reusable resolved-thread entry when it is still valid."""
-        lookup_started = time.perf_counter()
-        cache_lookup = self._resolved_thread_cache.lookup(room_id, thread_id)
-        cache_read_ms = round((time.perf_counter() - lookup_started) * 1000, 1)
-        entry = cache_lookup.entry
-
-        if cache_lookup.expired:
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason="ttl_expired",
-                thread_version=current_thread_version,
-            )
-            entry = None
-
-        if entry is None:
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_miss",
-                room_id=room_id,
-                thread_id=thread_id,
-                thread_version=current_thread_version,
-            )
-            if repair_required:
-                self._log_resolved_thread_cache(
-                    "resolved_thread_cache_invalidate",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reason="repair_required",
-                    thread_version=current_thread_version,
-                )
-        elif entry.thread_version == current_thread_version and not repair_required:
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_hit",
-                room_id=room_id,
-                thread_id=thread_id,
-                thread_version=current_thread_version,
-            )
-            return thread_history_result(
-                entry.clone_history(),
-                is_full_history=True,
-                thread_version=current_thread_version,
-                diagnostics=self._resolved_cache_diagnostics(cache_read_ms=cache_read_ms),
-            )
-        elif entry.thread_version != current_thread_version:
-            incrementally_refreshed = await self._incrementally_refresh_resolved_thread_cache(
-                room_id,
-                thread_id,
-                entry=entry,
-                entry_version=entry.thread_version,
-                current_thread_version=current_thread_version,
-            )
-            if incrementally_refreshed is not None:
-                return incrementally_refreshed
-            self._resolved_thread_cache.invalidate(room_id, thread_id)
-        elif repair_required:
-            self._log_resolved_thread_cache(
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason="repair_required",
-                thread_version=current_thread_version,
-            )
-            self._resolved_thread_cache.invalidate(room_id, thread_id)
-        return None
+        return await self._reads._maybe_use_resolved_thread_cache(
+            room_id,
+            thread_id,
+            current_thread_version=current_thread_version,
+            repair_required=repair_required,
+        )
 
     async def _fetch_full_thread_history_from_source(
         self,
@@ -1025,76 +665,18 @@ class MatrixConversationCache(ConversationCacheProtocol):
         current_thread_version: int,
         repair_required: bool,
     ) -> ThreadReadResult:
-        """Fetch, validate, and store one full thread history under the entry lock."""
-        if repair_required:
-            await self._invalidate_raw_thread_before_repair(room_id, thread_id)
-        history = self._full_history_result(
-            await fetch_thread_history(
-                self._require_client(),
-                room_id,
-                thread_id,
-                event_cache=self.runtime.event_cache,
-                refresh_cache=await self._should_refresh_cached_thread_history(room_id, thread_id),
-            ),
-            thread_version=current_thread_version,
+        return await self._reads._fetch_full_thread_history_from_source(
+            room_id,
+            thread_id,
+            current_thread_version=current_thread_version,
+            repair_required=repair_required,
         )
-        if repair_required and not self._repair_history_is_authoritative(history):
-            msg = "Repair-required Matrix thread history could not be authoritatively refilled"
-            raise ThreadRepairRequiredError(msg)
-        if self._should_store_resolved_thread_cache_entry(history):
-            await self._store_resolved_thread_cache_entry(
-                room_id,
-                thread_id,
-                history=history,
-                thread_version=current_thread_version,
-            )
-        if repair_required and self._repair_history_durably_refilled(history):
-            await self._clear_thread_refresh_required(room_id, thread_id)
-        return history
 
     async def _read_full_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
-        await self._wait_for_pending_room_cache_updates(room_id)
-        async with self._resolved_thread_cache.entry_lock(room_id, thread_id):
-            await self._adopt_room_lookup_repairs_locked(room_id, thread_id)
-            current_thread_version = self.thread_version(room_id, thread_id)
-            repair_required = await self._thread_requires_refresh(room_id, thread_id)
-            cached_history = await self._maybe_use_resolved_thread_cache(
-                room_id,
-                thread_id,
-                current_thread_version=current_thread_version,
-                repair_required=repair_required,
-            )
-            if cached_history is not None:
-                return cached_history
-            return await self._fetch_full_thread_history_from_source(
-                room_id,
-                thread_id,
-                current_thread_version=current_thread_version,
-                repair_required=repair_required,
-            )
+        return await self._reads._read_full_thread_history(room_id, thread_id)
 
     async def _read_snapshot_thread(self, room_id: str, thread_id: str) -> ThreadReadResult:
-        await self._wait_for_pending_room_cache_updates(room_id)
-        async with self._resolved_thread_cache.entry_lock(room_id, thread_id):
-            await self._adopt_room_lookup_repairs_locked(room_id, thread_id)
-            current_thread_version = self.thread_version(room_id, thread_id)
-            repair_required = await self._thread_requires_refresh(room_id, thread_id)
-            if repair_required:
-                return await self._fetch_full_thread_history_from_source(
-                    room_id,
-                    thread_id,
-                    current_thread_version=current_thread_version,
-                    repair_required=repair_required,
-                )
-            return self._snapshot_result(
-                await fetch_thread_snapshot(
-                    self._require_client(),
-                    room_id,
-                    thread_id,
-                    event_cache=self.runtime.event_cache,
-                ),
-                thread_version=current_thread_version,
-            )
+        return await self._reads._read_snapshot_thread(room_id, thread_id)
 
     def _snapshot_result(
         self,
@@ -1102,19 +684,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         thread_version: int,
     ) -> ThreadReadResult:
-        """Normalize snapshot reads into the shared thread-history result type."""
-        if isinstance(history, ThreadHistoryResult):
-            return thread_history_result(
-                history,
-                is_full_history=history.is_full_history,
-                thread_version=thread_version,
-                diagnostics=history.diagnostics,
-            )
-        return thread_history_result(
-            list(history),
-            is_full_history=False,
-            thread_version=thread_version,
-        )
+        return self._reads._snapshot_result(history, thread_version=thread_version)
 
     def _full_history_result(
         self,
@@ -1122,19 +692,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         thread_version: int,
     ) -> ThreadReadResult:
-        """Normalize full-history reads into the shared thread-history result type."""
-        if isinstance(history, ThreadHistoryResult):
-            return thread_history_result(
-                history,
-                is_full_history=True,
-                thread_version=thread_version,
-                diagnostics=history.diagnostics,
-            )
-        return thread_history_result(
-            list(history),
-            is_full_history=True,
-            thread_version=thread_version,
-        )
+        return self._reads._full_history_result(history, thread_version=thread_version)
 
     async def _read_thread(
         self,
@@ -1143,18 +701,19 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         require_full_history: bool,
     ) -> ThreadReadResult:
-        """Resolve one thread through the snapshot or full-history access policy."""
-        if require_full_history:
-            return await self._read_full_thread_history(room_id, thread_id)
-        return await self._read_snapshot_thread(room_id, thread_id)
+        return await self._reads._read_thread(
+            room_id,
+            thread_id,
+            require_full_history=require_full_history,
+        )
 
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
-        """Resolve thread snapshot using one explicit access policy."""
-        return await self._read_thread(room_id, thread_id, require_full_history=False)
+        """Resolve lightweight thread context for dispatch."""
+        return await self._reads.get_thread_snapshot(room_id, thread_id)
 
     async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
-        """Resolve full thread history using one explicit access policy."""
-        return await self._read_thread(room_id, thread_id, require_full_history=True)
+        """Resolve full thread history for one conversation root."""
+        return await self._reads.get_thread_history(room_id, thread_id)
 
     async def get_latest_thread_event_id_if_needed(
         self,
@@ -1164,113 +723,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         existing_event_id: str | None = None,
     ) -> str | None:
         """Resolve the latest visible thread event when MSC3440 fallback needs it."""
-        if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
-            return None
-        try:
-            thread_history = await self.get_thread_history(room_id, thread_id)
-        except Exception:
-            return thread_id
-        return self._latest_visible_thread_event_id(thread_history) or thread_id
-
-    async def _resolve_outbound_thread_id_for_write_through(
-        self,
-        room_id: str,
-        event_id: str,
-        event_info: EventInfo,
-    ) -> str | None:
-        """Resolve one locally sent thread candidate to a thread root for cache write-through."""
-        has_explicit_thread_relation = _has_explicit_thread_relation(event_info)
-        try:
-            thread_id = await _resolve_thread_id_for_cached_event_append(
-                room_id,
-                event_info=event_info,
-                event_cache=self.runtime.event_cache,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to resolve outbound threaded event for cache write-through",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
-            thread_id = None
-            if has_explicit_thread_relation:
-                await self._mark_lookup_repair_pending(
-                    room_id,
-                    event_info.original_event_id or event_id,
-                    reason="outbound_lookup_failed",
-                    queue_write=False,
-                )
-            else:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="outbound_lookup_non_thread_edit",
-                )
-            return None
-
-        if thread_id is not None:
-            return thread_id
-
-        if has_explicit_thread_relation:
-            await self._mark_lookup_repair_pending(
-                room_id,
-                event_info.original_event_id or event_id,
-                reason="outbound_lookup_missing",
-                queue_write=False,
-            )
-        else:
-            await self._invalidate_resolved_threads_for_event_ids(
-                room_id,
-                event_info.original_event_id,
-                reason="outbound_lookup_non_thread_edit",
-            )
-        return None
-
-    async def _append_outbound_thread_event_to_cache(
-        self,
-        room_id: str,
-        thread_id: str,
-        event_id: str,
-        event_source: dict[str, Any],
-    ) -> bool:
-        """Persist one locally sent threaded event into the durable room cache."""
-        try:
-            return bool(await self.runtime.event_cache.append_event(room_id, thread_id, event_source))
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to write outbound threaded event through to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event_id,
-                error=str(exc),
-            )
-            return False
-
-    async def _record_outbound_message_update(
-        self,
-        room_id: str,
-        event_id: str,
-        event_source: dict[str, Any],
-        event_info: EventInfo,
-    ) -> None:
-        """Apply one outbound threaded send/edit to durable cache state."""
-        thread_id = await self._resolve_outbound_thread_id_for_write_through(room_id, event_id, event_info)
-        if thread_id is None:
-            return
-
-        appended = await self._append_outbound_thread_event_to_cache(
+        return await self._reads.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
-            event_id,
-            event_source,
-        )
-        await self._finalize_thread_cache_mutation(
-            room_id,
-            thread_id,
-            persisted=appended,
-            invalidate_resolved=event_info.is_edit,
-            failure_reason="outbound_append_failed",
+            reply_to_event_id=reply_to_event_id,
+            existing_event_id=existing_event_id,
         )
 
     async def record_outbound_message(
@@ -1280,201 +737,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
         content: dict[str, Any],
     ) -> None:
         """Write one locally sent threaded message or edit through to the cache."""
-        if not isinstance(event_id, str) or not event_id:
-            return
+        await self._writes.record_outbound_message(room_id, event_id, content)
 
-        client = self._require_client()
-        sender = client.user_id if isinstance(client.user_id, str) else None
-        origin_server_ts = int(time.time() * 1000)
-        event_source = normalize_event_source_for_cache(
-            {
-                "type": "m.room.message",
-                "room_id": room_id,
-                "event_id": event_id,
-                "sender": sender,
-                "origin_server_ts": origin_server_ts,
-                "content": dict(content),
-            },
-            event_id=event_id,
-            sender=sender,
-            origin_server_ts=origin_server_ts,
-        )
-        event_info = EventInfo.from_event(event_source)
-        is_thread_candidate = isinstance(event_info.thread_id, str) or (
-            event_info.is_edit
-            and (isinstance(event_info.thread_id_from_edit, str) or isinstance(event_info.original_event_id, str))
-        )
-        if not is_thread_candidate:
-            return
-        if event_info.is_edit:
-            self._invalidate_reply_chain(
-                room_id,
-                event_id,
-                event_info.original_event_id,
-            )
-
-        await self._queue_room_cache_update(
-            room_id,
-            lambda: self._record_outbound_message_update(room_id, event_id, event_source, event_info),
-            name="matrix_cache_record_outbound_message",
-        )
+    async def record_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
+        """Write one locally redacted threaded message through to the cache."""
+        await self._writes.record_outbound_redaction(room_id, redacted_event_id)
 
     async def append_live_event(
         self,
         room_id: str,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessage,
         *,
         event_info: EventInfo,
     ) -> None:
-        """Append one live thread event into the advisory cache when the thread is known."""
-        if event_info.is_edit:
-            self._invalidate_reply_chain(
-                room_id,
-                event.event_id,
-                event_info.original_event_id,
-            )
-        event_cache = self.runtime.event_cache
-        has_explicit_thread_relation = _has_explicit_thread_relation(event_info)
-
-        try:
-            thread_id = await _resolve_thread_id_for_cached_event_append(
-                room_id,
-                event_info=event_info,
-                event_cache=event_cache,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to resolve cached thread for live event",
-                room_id=room_id,
-                event_id=event.event_id,
-                original_event_id=event_info.original_event_id,
-                error=str(exc),
-            )
-            if has_explicit_thread_relation:
-                await self._mark_lookup_repair_pending(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="live_append_lookup_failed",
-                )
-            else:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="live_lookup_non_thread_edit",
-                )
-            return
-        if thread_id is None:
-            if has_explicit_thread_relation:
-                await self._mark_lookup_repair_pending(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="live_append_lookup_missing",
-                )
-            else:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="live_lookup_non_thread_edit",
-                )
-            return
-
-        server_timestamp = event.server_timestamp
-        event_source = normalize_event_source_for_cache(
-            event.source,
-            event_id=event.event_id,
-            sender=event.sender,
-            origin_server_ts=server_timestamp
-            if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-            else None,
-        )
-
-        async def append_and_finalize() -> bool:
-            try:
-                appended = await event_cache.append_event(room_id, thread_id, event_source)
-            except Exception as exc:
-                self.logger.warning(
-                    "Failed to append live thread event to cache",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    event_id=event.event_id,
-                    error=str(exc),
-                )
-                appended = False
-            await self._finalize_thread_cache_mutation(
-                room_id,
-                thread_id,
-                persisted=bool(appended),
-                invalidate_resolved=event_info.is_edit,
-                failure_reason="live_append_failed",
-            )
-            return bool(appended)
-
-        await self._queue_room_cache_update(
-            room_id,
-            append_and_finalize,
-            name="matrix_cache_append_live_event",
-        )
+        """Append one live threaded event into the advisory cache when the thread is known."""
+        await self._writes.append_live_event(room_id, event, event_info=event_info)
 
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
-        event_cache = self.runtime.event_cache
-        invalidation_ids = await self._reply_chain_invalidation_ids_for_redaction(
-            room_id,
-            event.redacts,
-            event_cache=event_cache,
-        )
-        self._invalidate_reply_chain(room_id, *invalidation_ids)
-
-        try:
-            thread_id = await event_cache.get_thread_id_for_event(room_id, event.redacts)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to resolve cached thread for redaction",
-                room_id=room_id,
-                event_id=event.event_id,
-                redacted_event_id=event.redacts,
-                error=str(exc),
-            )
-            thread_id = None
-            await self._mark_lookup_repair_pending(
-                room_id,
-                event.redacts,
-                reason="live_redaction_lookup_failed",
-            )
-        else:
-            if thread_id is None:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event.redacts,
-                    reason="live_redaction_without_thread_mapping",
-                )
-
-        async def redact_and_finalize() -> bool:
-            try:
-                redacted = await event_cache.redact_event(room_id, event.redacts)
-            except Exception as exc:
-                self.logger.warning(
-                    "Failed to apply live redaction to cache",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    redacted_event_id=event.redacts,
-                    error=str(exc),
-                )
-                redacted = False
-            await self._finalize_thread_cache_mutation(
-                room_id,
-                thread_id,
-                persisted=bool(redacted),
-                invalidate_resolved=True,
-                failure_reason="live_redaction_failed",
-            )
-            return bool(redacted)
-
-        await self._queue_room_cache_update(
-            room_id,
-            redact_and_finalize,
-            name="matrix_cache_apply_redaction",
-        )
+        await self._writes.apply_redaction(room_id, event)
 
     async def _resolve_sync_thread_id(
         self,
@@ -1483,38 +764,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_source: dict[str, object],
     ) -> str | None:
-        """Resolve the thread root for one sync event."""
-        event_info = EventInfo.from_event(event_source)
-        event_id = event_source.get("event_id")
-        has_explicit_thread_relation = _has_explicit_thread_relation(event_info)
-        try:
-            return await _resolve_thread_id_for_cached_event_append(
-                room_id,
-                event_info=event_info,
-                event_cache=event_cache,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to resolve cached thread for sync event",
-                room_id=room_id,
-                event_id=event_id,
-                original_event_id=event_info.original_event_id,
-                error=str(exc),
-            )
-            if has_explicit_thread_relation:
-                await self._mark_lookup_repair_pending(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="sync_thread_lookup_failed",
-                    queue_write=False,
-                )
-            else:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="sync_lookup_non_thread_edit",
-                )
-            return None
+        return await self._writes._resolve_sync_thread_id(
+            event_cache,
+            room_id=room_id,
+            event_source=event_source,
+        )
 
     async def _append_sync_thread_event(
         self,
@@ -1523,50 +777,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_source: dict[str, object],
     ) -> tuple[str | None, bool]:
-        """Append one sync event to cached thread history when its root can be resolved."""
-        thread_id = await self._resolve_sync_thread_id(
+        return await self._writes._append_sync_thread_event(
             event_cache,
             room_id=room_id,
             event_source=event_source,
         )
-
-        if thread_id is None:
-            event_info = EventInfo.from_event(event_source)
-            if _has_explicit_thread_relation(event_info):
-                await self._mark_lookup_repair_pending(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="sync_thread_lookup_missing",
-                    queue_write=False,
-                )
-            else:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="sync_lookup_non_thread_edit",
-                )
-            return None, False
-
-        event_id = event_source.get("event_id")
-        try:
-            appended = await event_cache.append_thread_event(room_id, thread_id, event_source)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to append sync thread event to cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event_id,
-                error=str(exc),
-            )
-            return thread_id, False
-        if not appended:
-            self.logger.warning(
-                "Failed to append sync thread event because raw thread cache is missing",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event_id,
-            )
-        return thread_id, appended
 
     async def _persist_threaded_sync_events(
         self,
@@ -1574,23 +789,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         threaded_events: Sequence[dict[str, object]],
     ) -> None:
-        """Persist sync thread appends and apply the shared mutation contract."""
-        for event_source in threaded_events:
-            thread_id, appended = await self._append_sync_thread_event(
-                event_cache,
-                room_id=room_id,
-                event_source=event_source,
-            )
-            if thread_id is None:
-                continue
-            event_info = EventInfo.from_event(event_source)
-            await self._finalize_thread_cache_mutation(
-                room_id,
-                thread_id,
-                persisted=appended,
-                invalidate_resolved=event_info.is_edit,
-                failure_reason="sync_thread_append_failed",
-            )
+        await self._writes._persist_threaded_sync_events(event_cache, room_id, threaded_events)
 
     async def _mark_failed_sync_thread_store(
         self,
@@ -1598,20 +797,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         threaded_events: Sequence[dict[str, object]],
     ) -> None:
-        """Mark affected threads repair-required when sync point-lookups could not be stored."""
-        for event_source in threaded_events:
-            thread_id = await self._resolve_sync_thread_id(
-                event_cache,
-                room_id=room_id,
-                event_source=event_source,
-            )
-            if thread_id is None:
-                continue
-            await self._mark_thread_refresh_required(
-                room_id,
-                thread_id,
-                reason="sync_store_failed",
-            )
+        await self._writes._mark_failed_sync_thread_store(
+            event_cache,
+            room_id,
+            threaded_events,
+        )
 
     async def _apply_sync_redactions(
         self,
@@ -1619,89 +809,30 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         redacted_event_ids: Sequence[str],
     ) -> None:
-        """Apply sync redactions through the shared mutation contract."""
-        for redacted_event_id in redacted_event_ids:
-            reply_chain_invalidation_ids = await self._reply_chain_invalidation_ids_for_redaction(
-                room_id,
-                redacted_event_id,
-                event_cache=event_cache,
-            )
-            self._invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
-            thread_id: str | None = None
-            try:
-                thread_id = await event_cache.get_thread_id_for_event(
-                    room_id,
-                    redacted_event_id,
-                )
-                redacted = await event_cache.redact_event(room_id, redacted_event_id)
-            except Exception as exc:
-                self.logger.warning(
-                    "Failed to apply sync redaction to cache",
-                    room_id=room_id,
-                    redacted_event_id=redacted_event_id,
-                    error=str(exc),
-                )
-                await self._mark_lookup_repair_pending(
-                    room_id,
-                    redacted_event_id,
-                    reason="sync_redaction_lookup_failed",
-                    queue_write=False,
-                )
-                redacted = False
-            else:
-                if thread_id is None:
-                    await self._invalidate_resolved_threads_for_event_ids(
-                        room_id,
-                        redacted_event_id,
-                        reason="sync_redaction_without_thread_mapping",
-                    )
-            await self._finalize_thread_cache_mutation(
-                room_id,
-                thread_id,
-                persisted=bool(redacted),
-                invalidate_resolved=True,
-                failure_reason="sync_redaction_failed",
-            )
+        await self._writes._apply_sync_redactions(event_cache, room_id, redacted_event_ids)
 
     async def _persist_room_sync_timeline_updates(
         self,
-        event_cache: ConversationEventCache,
+        _event_cache: ConversationEventCache,
         room_id: str,
-        cached_events: list[tuple[str, str, dict[str, object]]],
-        redacted_event_ids: list[str],
-        threaded_events: list[dict[str, object]],
+        cached_events: Sequence[tuple[str, str, dict[str, object]]],
+        redacted_event_ids: Sequence[str],
+        room_threaded_events: Sequence[dict[str, object]],
     ) -> None:
-        """Persist one room's prepared sync timeline updates."""
-        stored_events = True
-        if cached_events:
-            try:
-                await event_cache.store_events_batch(cached_events)
-            except Exception as exc:
-                stored_events = False
-                self.logger.warning(
-                    "Failed to cache sync timeline events",
-                    room_id=room_id,
-                    error=str(exc),
-                    events=len(cached_events),
-                    thread_appends=len(threaded_events),
-                    redactions=len(redacted_event_ids),
-                )
-        if stored_events:
-            # append_thread_event relies on the point-lookup rows written above.
-            await self._persist_threaded_sync_events(
-                event_cache,
-                room_id,
-                threaded_events,
-            )
-        else:
-            await self._mark_failed_sync_thread_store(
-                event_cache,
-                room_id,
-                threaded_events,
-            )
-        await self._apply_sync_redactions(
-            event_cache,
+        threaded_event_ids = {
+            event_id
+            for event_source in room_threaded_events
+            if isinstance((event_id := event_source.get("event_id")), str) and event_id
+        }
+        plain_events = [
+            event_source
+            for event_id, _cached_room_id, event_source in cached_events
+            if event_id not in threaded_event_ids
+        ]
+        await self._writes._persist_room_sync_timeline_updates(
             room_id,
+            plain_events,
+            room_threaded_events,
             redacted_event_ids,
         )
 
@@ -1710,70 +841,18 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_source: dict[str, object],
     ) -> None:
-        event_info = EventInfo.from_event(event_source)
-        if event_info.is_edit:
-            self._invalidate_reply_chain(
-                room_id,
-                self._event_id_from_event_source(event_source),
-                event_info.original_event_id,
-            )
+        self._writes._track_sync_cached_event(room_id, event_source)
 
     def _group_sync_timeline_updates(
         self,
-        filtered_cached_events: list[tuple[str, str, dict[str, object]]],
-        redacted_events: list[tuple[str, str]],
-        threaded_events: list[tuple[str, dict[str, object]]],
-        redacted_event_sources: dict[tuple[str, str], dict[str, object]],
-    ) -> dict[str, tuple[list[tuple[str, str, dict[str, object]]], list[str], list[dict[str, object]]]]:
-        updates_by_room: dict[
-            str,
-            tuple[list[tuple[str, str, dict[str, object]]], list[str], list[dict[str, object]]],
-        ] = {}
-        for event_id, room_id, event_source in filtered_cached_events:
-            self._track_sync_cached_event(room_id, event_source)
-            room_events, _room_redactions, _room_threaded_events = updates_by_room.setdefault(room_id, ([], [], []))
-            room_events.append((event_id, room_id, event_source))
-        for room_id, redacted_event_id in redacted_events:
-            invalidation_ids = self._reply_chain_invalidation_ids_for_sync_redaction(
-                room_id,
-                redacted_event_id,
-                event_source=redacted_event_sources.get((room_id, redacted_event_id)),
-            )
-            self._invalidate_reply_chain(room_id, *invalidation_ids)
-            _room_events, room_redactions, _room_threaded_events = updates_by_room.setdefault(room_id, ([], [], []))
-            room_redactions.append(redacted_event_id)
-        for room_id, event_source in threaded_events:
-            _room_events, _room_redactions, room_threaded_events = updates_by_room.setdefault(room_id, ([], [], []))
-            room_threaded_events.append(event_source)
-        return updates_by_room
+        response: nio.SyncResponse,
+    ) -> tuple[
+        dict[str, list[dict[str, object]]],
+        dict[str, list[dict[str, object]]],
+        dict[str, list[str]],
+    ]:
+        return self._writes._group_sync_timeline_updates(response)
 
     def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
-        """Schedule sync timeline persistence so sync callbacks do not wait on SQLite."""
-        filtered_cached_events, redacted_events, threaded_events, redacted_event_sources = (
-            _collect_sync_timeline_cache_updates(response)
-        )
-        if not filtered_cached_events and not redacted_events and not threaded_events:
-            return
-        updates_by_room = self._group_sync_timeline_updates(
-            filtered_cached_events,
-            redacted_events,
-            threaded_events,
-            redacted_event_sources,
-        )
-        event_cache = self.runtime.event_cache
-
-        for room_id, (room_events, room_redactions, room_threaded_events) in updates_by_room.items():
-            self._queue_room_cache_update(
-                room_id,
-                lambda room_events=room_events,
-                room_id=room_id,
-                room_redactions=room_redactions,
-                room_threaded_events=room_threaded_events: self._persist_room_sync_timeline_updates(
-                    event_cache,
-                    room_id,
-                    room_events,
-                    room_redactions,
-                    room_threaded_events,
-                ),
-                name="matrix_cache_sync_timeline",
-            )
+        """Queue sync timeline persistence through the room-ordered cache barrier."""
+        self._writes.cache_sync_timeline(response)

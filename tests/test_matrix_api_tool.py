@@ -257,6 +257,46 @@ async def test_matrix_api_send_event_rejects_threaded_room_message_without_conve
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_allows_room_mode_edit_without_conversation_cache() -> None:
+    """Room-mode edits should not require the threaded conversation-cache seam."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    content = {
+        "body": "* updated",
+        "msgtype": "m.text",
+        "m.new_content": {"body": "updated", "msgtype": "m.text"},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message"},
+    }
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$send:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload == {
+        "action": "send_event",
+        "event_id": "$send:localhost",
+        "event_type": "m.room.message",
+        "room_id": ctx.room_id,
+        "status": "ok",
+        "tool": "matrix_api",
+    }
+    ctx.client.room_send.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        message_type="m.room.message",
+        content=content,
+    )
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_get_state_happy_path() -> None:
     """get_state should return the fetched content."""
     tool = MatrixApiTools()
@@ -361,6 +401,10 @@ async def test_matrix_api_redact_happy_path() -> None:
         room_id=ctx.room_id,
         event_id="$target:localhost",
         reason="cleanup",
+    )
+    ctx.conversation_cache.record_outbound_redaction.assert_awaited_once_with(
+        ctx.room_id,
+        "$target:localhost",
     )
 
 

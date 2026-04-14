@@ -391,10 +391,7 @@ class MatrixApiTools(Toolkit):
         if event_type != "m.room.message":
             return False
         event_info = EventInfo.from_event({"type": event_type, "content": content})
-        return isinstance(event_info.thread_id, str) or (
-            event_info.is_edit
-            and (isinstance(event_info.thread_id_from_edit, str) or isinstance(event_info.original_event_id, str))
-        )
+        return isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str)
 
     async def _send_event(  # noqa: PLR0911
         self,
@@ -825,6 +822,11 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomRedactResponse):
+            if context.conversation_cache is not None:
+                await context.conversation_cache.record_outbound_redaction(
+                    room_id,
+                    normalized_event_id,
+                )
             self._audit_write(
                 context=context,
                 room_id=room_id,

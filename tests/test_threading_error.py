@@ -1547,6 +1547,33 @@ class TestThreadingBehavior:
         assert reply_chain.roots.get("!test:localhost", "$reply:localhost") is None
 
     @pytest.mark.asyncio
+    async def test_outbound_write_through_ignores_advisory_cache_failure_after_successful_send(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Successful sends must not raise just because advisory cache finalization failed."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread:localhost")
+        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.mark_thread_repair_required = AsyncMock(side_effect=RuntimeError("cache repair write failed"))
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        await bot._conversation_cache.record_outbound_message(
+            "!test:localhost",
+            "$edit:localhost",
+            {
+                "body": "* updated",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread:localhost"},
+            },
+        )
+
+        event_cache.append_event.assert_awaited_once()
+        event_cache.mark_thread_repair_required.assert_awaited_once_with("!test:localhost", "$thread:localhost")
+
+    @pytest.mark.asyncio
     async def test_live_edit_false_write_marks_thread_repair_required(self, bot: AgentBot) -> None:
         """A degraded live append result should still mark the thread repair-required."""
         event_cache = _runtime_event_cache()
@@ -1720,6 +1747,35 @@ class TestThreadingBehavior:
         await bot._conversation_cache.apply_redaction("!test:localhost", redaction_event)
 
         assert await bot._conversation_cache._thread_requires_refresh("!test:localhost", "$thread_msg:localhost")
+
+    @pytest.mark.asyncio
+    async def test_local_bot_redaction_records_outbound_cache_update(self, bot: AgentBot) -> None:
+        """Successful local redactions should write through to the conversation cache immediately."""
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.room_redact = AsyncMock(
+            return_value=nio.RoomRedactResponse(
+                event_id="$redaction:localhost",
+                room_id="!test:localhost",
+            ),
+        )
+        bot._conversation_cache.record_outbound_redaction = AsyncMock()
+
+        result = await bot._redact_message_event(
+            room_id="!test:localhost",
+            event_id="$target:localhost",
+            reason="cleanup",
+        )
+
+        assert result is True
+        bot.client.room_redact.assert_awaited_once_with(
+            "!test:localhost",
+            "$target:localhost",
+            reason="cleanup",
+        )
+        bot._conversation_cache.record_outbound_redaction.assert_awaited_once_with(
+            "!test:localhost",
+            "$target:localhost",
+        )
 
     @pytest.mark.asyncio
     async def test_wait_for_room_idle_returns_after_completed_tail_task(self) -> None:
