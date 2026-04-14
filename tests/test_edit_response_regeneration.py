@@ -33,6 +33,7 @@ from mindroom.conversation_state_writer import ConversationStateWriter
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.history.types import HistoryScope
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.message_content import _clear_mxc_cache
@@ -376,8 +377,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         assert edit_args[1] == room.room_id
         assert edit_args[2] == response_event_id
         assert edit_args[4] == "The answer is 6"
-        assert edit_args[3]["m.relates_to"]["event_id"] == stored_target.resolved_thread_id
-        assert edit_args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == original_event.event_id
+        assert "m.relates_to" not in edit_args[3]
 
         # Verify that the response tracker still maps to the same response
         assert _response_event_id(bot, original_event.event_id) == response_event_id
@@ -1293,13 +1293,13 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             [
                 call(
                     mock_create_storage.return_value,
-                    "!test:example.com:$primary:example.com",
+                    "!test:example.com",
                     "$first:example.com",
                     session_type=SessionType.AGENT,
                 ),
                 call(
                     mock_create_storage.return_value,
-                    "!test:example.com:$primary:example.com",
+                    "!test:example.com",
                     "$primary:example.com",
                     session_type=SessionType.AGENT,
                 ),
@@ -1691,13 +1691,13 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             [
                 call(
                     storage,
-                    "!test:example.com:$primary:example.com",
+                    "!test:example.com",
                     "$first:example.com",
                     session_type=SessionType.AGENT,
                 ),
                 call(
                     storage,
-                    "!test:example.com:$primary:example.com",
+                    "!test:example.com",
                     "$primary:example.com",
                     session_type=SessionType.AGENT,
                 ),
@@ -3546,6 +3546,10 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
+        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_handle_voice.return_value = "This is the transcribed message from voice"
 
@@ -3651,6 +3655,10 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
+        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_handle_voice.return_value = None  # No transcription
 

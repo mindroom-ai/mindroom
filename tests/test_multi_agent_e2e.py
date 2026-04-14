@@ -14,6 +14,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -117,6 +118,10 @@ async def test_agent_processes_direct_mention(
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         bot.client = mock_client
         install_runtime_cache_support(bot)
+        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
         bot.running = True
 
         # Create a message mentioning the calculator agent
@@ -344,7 +349,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(
@@ -407,7 +412,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
             bot.client.room_send.side_effect = [
                 nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
                 nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
@@ -484,7 +489,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(

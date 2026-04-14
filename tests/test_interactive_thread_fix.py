@@ -306,7 +306,4 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         registered_event_id = call_args[0]
         registered_thread_id = call_args[2]
         assert registered_event_id == "$standalone_message"
-        assert registered_thread_id is not None, (
-            "When not in a thread, thread_id should not be None. "
-            "It should be the agent's message ID for proper thread creation."
-        )
+        assert registered_thread_id is None

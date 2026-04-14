@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
@@ -115,6 +116,10 @@ def mock_agent_bot() -> AgentBot:
     bot._send_response = AsyncMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, bot._send_response)
+    bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
     return bot
 
 
@@ -531,6 +536,10 @@ class TestCommandHandling:
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
             bot._turn_controller._execute_command = AsyncMock()
+            bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+            bot._conversation_cache.get_thread_snapshot = AsyncMock(
+                return_value=thread_history_result([], is_full_history=False),
+            )
 
             # Create a room and event with thread info
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)

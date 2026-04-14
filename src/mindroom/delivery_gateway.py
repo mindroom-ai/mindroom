@@ -304,7 +304,7 @@ class DeliveryGateway:
                 request.response_text,
                 sender_domain=self.deps.sender_domain,
                 thread_event_id=None,
-                reply_to_event_id=None,
+                reply_to_event_id=resolved_target.reply_to_event_id,
                 latest_thread_event_id=None,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,

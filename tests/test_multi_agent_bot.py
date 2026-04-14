@@ -70,6 +70,7 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import (
     DeliveredMatrixEvent,
     PermanentMatrixStartupError,
@@ -1362,7 +1363,7 @@ class TestAgentBot:
         model_prompt = mock_ai.call_args.kwargs["prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: $event123" in model_prompt
+        assert "thread_id: none" in model_prompt
         assert "reply_to_event_id: $event123" in model_prompt
 
     @pytest.mark.asyncio
@@ -1409,7 +1410,7 @@ class TestAgentBot:
         model_prompt = mock_ai.call_args.kwargs["prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: $event123" in model_prompt
+        assert "thread_id: none" in model_prompt
         assert "reply_to_event_id: $event123" in model_prompt
 
     @pytest.mark.asyncio
@@ -1465,7 +1466,7 @@ class TestAgentBot:
         model_prompt = mock_stream_agent_response.call_args.kwargs["prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: $event456" in model_prompt
+        assert "thread_id: none" in model_prompt
         assert "reply_to_event_id: $event456" in model_prompt
 
     @pytest.mark.asyncio
@@ -2605,7 +2606,7 @@ class TestAgentBot:
         mock_register.assert_called_once()
         assert mock_register.call_args.args[0] == "$team"
         assert mock_register.call_args.args[1] == "!test:localhost"
-        assert mock_register.call_args.args[2] == "$team-root"
+        assert mock_register.call_args.args[2] is None
         assert mock_register.call_args.args[4] == bot.agent_name
         assert mock_register.call_args.args[4] != "team"
         mock_add_buttons.assert_awaited_once()
@@ -4301,7 +4302,7 @@ class TestAgentBot:
 
         assert context is not None
         assert context.thread_id is None
-        assert context.resolved_thread_id == "$root_event"
+        assert context.resolved_thread_id is None
         assert context.attachment_ids == ("att_1",)
 
     def test_response_lifecycle_lock_uses_resolved_thread_root(
@@ -4327,12 +4328,12 @@ class TestAgentBot:
             room_id="!test:localhost",
             thread_id=None,
             reply_to_event_id="$root_a",
-        )
+        ).with_thread_root("$root_a")
         second = MessageTarget.resolve(
             room_id="!test:localhost",
             thread_id=None,
             reply_to_event_id="$root_b",
-        )
+        ).with_thread_root("$root_b")
 
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         assert coordinator._response_lifecycle_lock(first) is coordinator._response_lifecycle_lock(first)
@@ -4541,14 +4542,23 @@ class TestAgentBot:
         assert list(media.files) == []
         assert list(media.videos) == []
         assert generate_kwargs["attachment_ids"] == [attachment_id]
-        tracker.record_handled_turn.assert_called_once_with(
-            _agent_response_handled_turn(
-                agent_name=mock_agent_user.agent_name,
+        expected_handled_turn = _agent_response_handled_turn(
+            agent_name=mock_agent_user.agent_name,
+            room_id=room.room_id,
+            event_id="$img_event",
+            response_event_id="$response",
+            source_event_prompts={"$img_event": "[Attached image]"},
+        )
+        expected_handled_turn = replace(
+            expected_handled_turn,
+            conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
-                event_id="$img_event",
-                response_event_id="$response",
-                source_event_prompts={"$img_event": "[Attached image]"},
-            ),
+                thread_id=None,
+                reply_to_event_id="$img_event",
+            ).with_thread_root("$img_event"),
+        )
+        tracker.record_handled_turn.assert_called_once_with(
+            expected_handled_turn,
         )
 
     @pytest.mark.asyncio
@@ -4904,6 +4914,14 @@ class TestAgentBot:
                 event_id="$file_event",
                 response_event_id="$response",
                 source_event_prompts={"$file_event": "[Attached file]"},
+            ).with_response_context(
+                response_owner=mock_agent_user.agent_name,
+                history_scope=HistoryScope(kind="agent", scope_id=mock_agent_user.agent_name),
+                conversation_target=MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id="$file_event",
+                ).with_thread_root("$file_event"),
             ),
         )
 
@@ -7518,14 +7536,23 @@ class TestAgentBot:
         assert send_args[0] == room.room_id
         assert send_args[1] == "$img_event_fail"
         assert "Failed to download image" in send_args[2]
-        tracker.record_handled_turn.assert_called_once_with(
-            _agent_response_handled_turn(
-                agent_name=mock_agent_user.agent_name,
+        expected_handled_turn = _agent_response_handled_turn(
+            agent_name=mock_agent_user.agent_name,
+            room_id=room.room_id,
+            event_id="$img_event_fail",
+            response_event_id="$error",
+            source_event_prompts={"$img_event_fail": "[Attached image]"},
+        )
+        expected_handled_turn = replace(
+            expected_handled_turn,
+            conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
-                event_id="$img_event_fail",
-                response_event_id="$error",
-                source_event_prompts={"$img_event_fail": "[Attached image]"},
-            ),
+                thread_id=None,
+                reply_to_event_id="$img_event_fail",
+            ).with_thread_root("$img_event_fail"),
+        )
+        tracker.record_handled_turn.assert_called_once_with(
+            expected_handled_turn,
         )
 
     @pytest.mark.asyncio
@@ -8083,7 +8110,7 @@ class TestAgentBot:
             ),
         ]
         mock_fetch_history.return_value = test1_history
-        mock_fetch_snapshot.return_value = test1_history
+        mock_fetch_snapshot.return_value = thread_history_result(test1_history, is_full_history=False)
 
         # Mock streaming response - return an async generator
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
@@ -8174,7 +8201,7 @@ class TestAgentBot:
             ),
         ]
         mock_fetch_history.return_value = test2_history
-        mock_fetch_snapshot.return_value = test2_history
+        mock_fetch_snapshot.return_value = thread_history_result(test2_history, is_full_history=False)
 
         # Create a new event with a different ID for Test 2
         mock_event_2 = MagicMock()

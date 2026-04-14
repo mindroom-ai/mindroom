@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, normalize_nio_event_for_cache
-from mindroom.matrix.cache.thread_cache_helpers import event_id_from_event_source
 from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
@@ -601,7 +600,6 @@ class ThreadWritePolicy:
 
     async def _apply_sync_redactions(
         self,
-        event_cache: ConversationEventCache,
         room_id: str,
         redacted_event_ids: Sequence[str],
     ) -> None:
@@ -665,7 +663,7 @@ class ThreadWritePolicy:
                 error=str(exc),
             )
         await self._persist_threaded_sync_events(room_id, threaded_events)
-        await self._apply_sync_redactions(event_cache, room_id, redacted_event_ids)
+        await self._apply_sync_redactions(room_id, redacted_event_ids)
 
     def _group_sync_timeline_updates(
         self,

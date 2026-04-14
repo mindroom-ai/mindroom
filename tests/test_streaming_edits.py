@@ -13,6 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import HandledTurnState
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -69,6 +70,10 @@ def setup_test_bot(
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_cache_support(bot)
+    bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
 
     # Mock orchestrator
     mock_orchestrator = MagicMock()

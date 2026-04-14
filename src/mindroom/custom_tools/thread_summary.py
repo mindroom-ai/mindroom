@@ -110,7 +110,6 @@ class ThreadSummaryTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            room_timeline_fallback_event_id=context.reply_to_event_id,
         )
         if effective_thread_id is None:
             error_message = "thread_id is required when no active thread context is available for the target room."
@@ -120,7 +119,6 @@ class ThreadSummaryTools(Toolkit):
                     context.client,
                     resolved_room_id,
                     effective_thread_id,
-                    access=conversation_cache,
                 )
             except Exception:
                 error_thread_id = effective_thread_id

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import typing
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -58,7 +57,7 @@ __all__ = [
 
 
 class ConversationCacheProtocol(Protocol):
-    """Conversation-data reads available to resolver and reply-chain code."""
+    """Conversation-data reads available to resolver and related callers."""
 
     def turn_scope(self) -> AbstractAsyncContextManager[None]:
         """Provide per-turn memoization for event lookups."""
@@ -322,7 +321,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def reset_runtime_state(self) -> None:
         """Drop in-memory conversation state tied to one runtime lifetime."""
-        return None
+        return
 
     async def _fetch_thread_history_from_client(
         self,

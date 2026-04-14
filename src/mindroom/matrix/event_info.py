@@ -157,14 +157,9 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
 
     # Determine safe thread root for creating new threads
     safe_thread_root = None
-    if not can_be_thread_root:
-        # This event has relations, so it cannot be a thread root
-        # Try to use the target of the relation as the thread root
-
-        if relation_type in ("m.replace", "m.annotation", "m.reference"):
-            # For edits, reactions, and references, use the target event
-            if relates_to_event_id:
-                safe_thread_root = str(relates_to_event_id)
+    if not can_be_thread_root and relation_type in ("m.replace", "m.annotation", "m.reference") and relates_to_event_id:
+        # For edits, reactions, and references, use the target event.
+        safe_thread_root = str(relates_to_event_id)
     return EventInfo(
         # Thread info
         is_thread=is_thread,

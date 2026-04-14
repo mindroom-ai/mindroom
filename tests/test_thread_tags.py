@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import json
 import math
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
 
-import mindroom.thread_tags as thread_tags_module
-from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.reply_chain import canonicalize_related_event_id
 from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
     ThreadTagsError,
@@ -23,20 +19,9 @@ from mindroom.thread_tags import (
     remove_thread_tag,
     set_thread_tag,
 )
-from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
-
-
-def _conversation_cache(client: AsyncMock) -> MatrixConversationCache:
-    """Build one explicit conversation-cache seam for thread-tag tests."""
-    runtime = SimpleNamespace(
-        client=client,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
-    )
-    return MatrixConversationCache(logger=MagicMock(), runtime=runtime)
 
 
 def _message_event_response(
@@ -1424,7 +1409,6 @@ async def test_normalize_thread_root_event_id_returns_root_for_root_event() -> N
         client,
         "!room:localhost",
         "$thread-root:localhost",
-        access=_conversation_cache(client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -1447,10 +1431,6 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_thread_rep
                     },
                 },
             ),
-            _message_event_response(
-                "$thread-root:localhost",
-                content={"body": "Root", "msgtype": "m.text"},
-            ),
         ],
     )
 
@@ -1458,10 +1438,10 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_thread_rep
         client,
         "!room:localhost",
         "$thread-reply:localhost",
-        access=_conversation_cache(client),
     )
 
     assert normalized == "$thread-root:localhost"
+    client.room_get_event.assert_awaited_once_with("!room:localhost", "$thread-reply:localhost")
 
 
 @pytest.mark.asyncio
@@ -1474,7 +1454,6 @@ async def test_normalize_thread_root_event_id_returns_none_for_blank_input(event
         client,
         "!room:localhost",
         event_id,
-        access=_conversation_cache(client),
     )
 
     assert normalized is None
@@ -1482,194 +1461,76 @@ async def test_normalize_thread_root_event_id_returns_none_for_blank_input(event
 
 
 @pytest.mark.asyncio
-async def test_canonicalize_related_event_id_returns_none_for_blank_input() -> None:
-    """The shared relation walker should reject blank event IDs directly."""
-    client = AsyncMock()
-    access = AsyncMock()
-
-    normalized = await canonicalize_related_event_id(
-        client,
-        "!room:localhost",
-        "   ",
-        access=access,
-    )
-
-    assert normalized is None
-    client.room_get_event.assert_not_awaited()
-    access.get_event.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_walks_plain_reply_chain() -> None:
-    """Plain replies should collapse to the conversation root."""
+async def test_normalize_thread_root_event_id_returns_none_for_plain_reply() -> None:
+    """Plain replies should no longer be promoted into synthetic thread roots."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$reply-two:localhost",
-                content={
-                    "body": "Reply two",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-one:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$reply-one:localhost",
-                content={
-                    "body": "Reply one",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-root:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$thread-root:localhost",
-                content={"body": "Root", "msgtype": "m.text"},
-            ),
-        ],
+        return_value=_message_event_response(
+            "$reply-two:localhost",
+            content={
+                "body": "Reply two",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-one:localhost"}},
+            },
+        ),
     )
 
     normalized = await normalize_thread_root_event_id(
         client,
         "!room:localhost",
         "$reply-two:localhost",
-        access=_conversation_cache(client),
     )
 
-    assert normalized == "$thread-root:localhost"
+    assert normalized is None
+    client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply-two:localhost")
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_none_for_cycle() -> None:
-    """Reply cycles should terminate without looping forever."""
+async def test_normalize_thread_root_event_id_returns_none_when_lookup_fails() -> None:
+    """Missing or unreadable events should not guess a thread root."""
     client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$reply-one:localhost",
-                content={
-                    "body": "Reply one",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-two:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$reply-two:localhost",
-                content={
-                    "body": "Reply two",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-one:localhost"}},
-                },
-            ),
-        ],
-    )
+    client.room_get_event = AsyncMock(return_value=object())
 
     normalized = await normalize_thread_root_event_id(
         client,
         "!room:localhost",
         "$reply-one:localhost",
-        access=_conversation_cache(client),
     )
-
     assert normalized is None
-    assert client.room_get_event.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_none_when_depth_limit_is_hit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Overly deep reply chains should stop at the configured traversal limit."""
-    monkeypatch.setattr(thread_tags_module, "MAX_THREAD_ROOT_NORMALIZATION_DEPTH", 2)
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$reply-two:localhost",
-                content={
-                    "body": "Reply two",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-one:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$reply-one:localhost",
-                content={
-                    "body": "Reply one",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-root:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$thread-root:localhost",
-                content={"body": "Root", "msgtype": "m.text"},
-            ),
-        ],
-    )
-
-    normalized = await normalize_thread_root_event_id(
-        client,
-        "!room:localhost",
-        "$reply-two:localhost",
-        access=_conversation_cache(client),
-    )
-
-    assert normalized is None
-    assert client.room_get_event.await_count == 2
+    client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply-one:localhost")
 
 
 @pytest.mark.asyncio
 async def test_normalize_thread_root_event_id_resolves_thread_edit_via_original_event() -> None:
-    """Thread edits should normalize by fetching the edited event first."""
+    """Thread edits should normalize directly from explicit thread metadata."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$edit:localhost",
-                content={
-                    "body": "* edited",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "edited",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": "$thread-root:localhost",
-                        },
-                    },
-                    "m.relates_to": {
-                        "rel_type": "m.replace",
-                        "event_id": "$thread-reply:localhost",
-                    },
-                },
-            ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply in thread",
+        return_value=_message_event_response(
+            "$edit:localhost",
+            content={
+                "body": "* edited",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "edited",
                     "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread-root:localhost",
                     },
                 },
-            ),
-            _message_event_response(
-                "$thread-root:localhost",
-                content={"body": "Root", "msgtype": "m.text"},
-            ),
-        ],
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread-reply:localhost",
+                },
+            },
+        ),
     )
 
     normalized = await normalize_thread_root_event_id(
         client,
         "!room:localhost",
         "$edit:localhost",
-        access=_conversation_cache(client),
     )
 
     assert normalized == "$thread-root:localhost"
-    assert client.room_get_event.await_args_list == [
-        call("!room:localhost", "$edit:localhost"),
-        call("!room:localhost", "$thread-reply:localhost"),
-        call("!room:localhost", "$thread-root:localhost"),
-    ]
+    client.room_get_event.assert_awaited_once_with("!room:localhost", "$edit:localhost")

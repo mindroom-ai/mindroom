@@ -151,7 +151,6 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_cache,
     )
     context.conversation_cache.get_thread_history.assert_awaited_once_with(
         context.room_id,
@@ -242,50 +241,24 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
-        access=context.conversation_cache,
     )
 
 
 @pytest.mark.asyncio
-async def test_set_thread_summary_falls_back_to_reply_to_event_id_for_room_timeline_root() -> None:
-    """Room-level replies with no active thread context should target the replied-to thread root."""
+async def test_set_thread_summary_requires_explicit_thread_context_for_room_reply() -> None:
+    """Room-level replies should not invent a thread target from plain reply context."""
     tool = ThreadSummaryTools()
     context = _make_context(
         thread_id=None,
         reply_to_event_id="$root-event:localhost",
     )
-    context.conversation_cache.get_thread_history.return_value = _thread_history(3)
 
-    with (
-        patch(
-            "mindroom.custom_tools.thread_summary.normalize_thread_root_event_id",
-            new=AsyncMock(return_value="$root-event:localhost"),
-        ) as mock_normalize,
-        patch(
-            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
-            new=AsyncMock(return_value="$summary-event:localhost"),
-        ) as mock_send,
-        tool_runtime_context(context),
-    ):
+    with tool_runtime_context(context):
         payload = json.loads(await tool.set_thread_summary("done"))
 
-    assert payload["status"] == "ok"
-    assert payload["thread_id"] == "$root-event:localhost"
-    mock_normalize.assert_awaited_once_with(
-        context.client,
-        context.room_id,
-        "$root-event:localhost",
-        access=context.conversation_cache,
-    )
-    mock_send.assert_awaited_once_with(
-        context.client,
-        context.room_id,
-        "$root-event:localhost",
-        "done",
-        3,
-        "manual",
-        context.conversation_cache,
-    )
+    assert payload["status"] == "error"
+    assert payload["thread_id"] is None
+    assert "thread_id is required" in payload["message"]
 
 
 @pytest.mark.asyncio

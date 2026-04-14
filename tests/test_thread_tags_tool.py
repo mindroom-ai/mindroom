@@ -140,7 +140,6 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -178,7 +177,6 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -216,7 +214,6 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -256,7 +253,6 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -292,7 +288,6 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -328,7 +323,6 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -366,7 +360,6 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -401,7 +394,6 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -483,7 +475,6 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
-        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -542,8 +533,8 @@ async def test_tag_thread_surfaces_write_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_thread_tags_falls_back_to_reply_to_event_id_for_room_timeline_root() -> None:
-    """Room-level messages with no thread context should use reply_to_event_id as the fallback root."""
+async def test_list_thread_tags_uses_room_wide_listing_without_thread_context() -> None:
+    """Room-level replies without thread context should not infer a synthetic thread root."""
     tool = ThreadTagsTools()
     context = _make_context(
         thread_id=None,
@@ -552,29 +543,22 @@ async def test_list_thread_tags_falls_back_to_reply_to_event_id_for_room_timelin
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.normalize_thread_root_event_id",
-            new=AsyncMock(return_value="$root-event:localhost"),
-        ) as mock_normalize,
-        patch(
-            "mindroom.custom_tools.thread_tags.get_thread_tags",
-            new=AsyncMock(return_value=_state("$root-event:localhost", resolved=_record())),
-        ) as mock_get,
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value={"$thread-one:localhost": _state("$thread-one:localhost", resolved=_record())}),
+        ) as mock_list,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.list_thread_tags())
 
     assert payload["status"] == "ok"
-    assert payload["thread_id"] == "$root-event:localhost"
-    mock_normalize.assert_awaited_once_with(
+    assert payload["room_wide"] is True
+    assert payload["threads"]["$thread-one:localhost"]["resolved"]["data"] == {}
+    assert payload["threads"]["$thread-one:localhost"]["resolved"]["set_by"] == "@user:localhost"
+    assert payload["threads"]["$thread-one:localhost"]["resolved"]["set_at"].startswith("2026-03-21T19:02:03")
+    mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
-        "$root-event:localhost",
-        access=context.conversation_cache,
-    )
-    mock_get.assert_awaited_once_with(
-        context.client,
-        context.room_id,
-        "$root-event:localhost",
+        tag=None,
     )
 
 

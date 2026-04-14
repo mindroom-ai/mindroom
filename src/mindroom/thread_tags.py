@@ -7,21 +7,17 @@ import math
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from mindroom.matrix.reply_chain import canonicalize_related_event_id
-
-if TYPE_CHECKING:
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.event_info import EventInfo
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 DEFAULT_USER_POWER_LEVEL = 0
-MAX_THREAD_ROOT_NORMALIZATION_DEPTH = 500
 MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
@@ -754,21 +750,24 @@ async def normalize_thread_root_event_id(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
-    *,
-    access: ConversationCacheProtocol,
 ) -> str | None:
-    """Resolve a room event or related reply into the canonical thread root ID."""
+    """Resolve one event ID to an explicit thread root when possible."""
     normalized_event_id = _normalize_non_empty_string(event_id)
     if not normalized_event_id:
         return None
 
-    return await canonicalize_related_event_id(
-        client,
-        room_id,
-        normalized_event_id,
-        access=access,
-        traversal_limit=MAX_THREAD_ROOT_NORMALIZATION_DEPTH,
-    )
+    response = await client.room_get_event(room_id, normalized_event_id)
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+
+    event_info = EventInfo.from_event(response.event.source)
+    if event_info.thread_id is not None:
+        return event_info.thread_id
+    if event_info.thread_id_from_edit is not None:
+        return event_info.thread_id_from_edit
+    if event_info.can_be_thread_root:
+        return normalized_event_id
+    return None
 
 
 async def get_thread_tags(

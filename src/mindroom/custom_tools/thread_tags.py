@@ -37,7 +37,6 @@ def _resolve_target_thread_reference(
         room_id=room_id,
         thread_id=thread_id,
         allow_context_fallback=allow_context_fallback,
-        room_timeline_fallback_event_id=context.reply_to_event_id,
     )
 
 
@@ -107,9 +106,6 @@ class ThreadTagsTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_cache = context.conversation_cache
-        if conversation_cache is None:
-            return self._context_error()
 
         resolved_room_id = room_id or context.room_id
         if not room_access_allowed(context, resolved_room_id):
@@ -148,7 +144,6 @@ class ThreadTagsTools(Toolkit):
             context.client,
             resolved_room_id,
             effective_thread_id,
-            access=conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(
@@ -200,9 +195,6 @@ class ThreadTagsTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_cache = context.conversation_cache
-        if conversation_cache is None:
-            return self._context_error()
 
         resolved_room_id = room_id or context.room_id
         if not room_access_allowed(context, resolved_room_id):
@@ -244,7 +236,6 @@ class ThreadTagsTools(Toolkit):
                 context.client,
                 resolved_room_id,
                 effective_thread_id,
-                access=conversation_cache,
             )
             if target_thread_id is None:
                 return self._payload(
@@ -294,9 +285,6 @@ class ThreadTagsTools(Toolkit):
         """List tags for one thread or all tagged threads in one room, with optional tag filters."""
         context = get_tool_runtime_context()
         if context is None:
-            return self._context_error()
-        conversation_cache = context.conversation_cache
-        if conversation_cache is None:
             return self._context_error()
 
         resolved_room_id = room_id or context.room_id
@@ -371,7 +359,6 @@ class ThreadTagsTools(Toolkit):
             context.client,
             resolved_room_id,
             effective_thread_id,
-            access=conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(

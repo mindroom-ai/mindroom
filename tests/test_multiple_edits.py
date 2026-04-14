@@ -13,6 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import HandledTurnState
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -66,6 +67,10 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
     install_runtime_cache_support(bot)
+    bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
 
     # Mock room send to return a response event ID
     mock_send_response = MagicMock()

@@ -384,7 +384,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     mock_register.assert_called_once_with(
         event_id="$preview",
         room_id="!room:example.org",
-        thread_id="$event",
+        thread_id=None,
         config_path="defaults.markdown",
         old_value=True,
         new_value=False,

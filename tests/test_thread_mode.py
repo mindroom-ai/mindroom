@@ -23,6 +23,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -457,7 +458,7 @@ class TestRouterHandoffThreadMode:
                 requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_not_called()
-        assert "m.relates_to" not in captured_content
+        assert captured_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$user_event"}}
 
     @pytest.mark.asyncio
     async def test_router_handoff_uses_suggested_thread_mode(
@@ -1480,8 +1481,16 @@ class TestExtractedModuleLoggerRebinding:
         )
         preview_snapshot = ThreadHistoryResult(
             [
-                _message(event_id="$thread-root:localhost", body="Root"),
-                _message(event_id="$thread-msg:localhost", body="Earlier reply"),
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="Root",
+                    event_id="$thread-root:localhost",
+                ),
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="Earlier reply",
+                    event_id="$thread-msg:localhost",
+                ),
             ],
             is_full_history=False,
         )
@@ -1522,7 +1531,6 @@ class TestConversationCacheArchitecture:
         for relative_path in (
             "src/mindroom/conversation_resolver.py",
             "src/mindroom/turn_policy.py",
-            "src/mindroom/matrix/reply_chain.py",
             "src/mindroom/response_runner.py",
         ):
             file_text = (repo_root / relative_path).read_text()
@@ -1539,7 +1547,6 @@ class TestConversationCacheArchitecture:
         for relative_path in (
             "src/mindroom/conversation_resolver.py",
             "src/mindroom/turn_policy.py",
-            "src/mindroom/matrix/reply_chain.py",
             "src/mindroom/response_runner.py",
         ):
             file_text = (repo_root / relative_path).read_text()
