@@ -199,6 +199,7 @@ git commit -m "refactor: make dispatch cache reads explicit"
 **Files:**
 - Modify: `src/mindroom/matrix/conversation_cache.py`
 - Modify: `src/mindroom/matrix/cache/thread_writes.py`
+- Modify: `src/mindroom/matrix/client.py`
 - Modify: `src/mindroom/hooks/sender.py`
 - Modify: `src/mindroom/delivery_gateway.py`
 - Modify: `src/mindroom/streaming.py`
@@ -216,6 +217,7 @@ git commit -m "refactor: make dispatch cache reads explicit"
 - Modify: `tests/test_scheduling.py`
 - Modify: `tests/test_workflow_scheduling.py`
 - Modify: `tests/test_thread_summary.py`
+- Modify: `tests/test_streaming_behavior.py`
 - Modify: `tests/test_large_messages_integration.py`
 - Modify: `tests/test_skip_mentions.py`
 - Modify: `tests/test_stale_stream_cleanup.py`
@@ -255,21 +257,21 @@ Assert the outward send/edit/redact result still succeeds.
 
 - [ ] **Step 6: Run focused advisory-bookkeeping tests**
 
-Run: `uv run pytest tests/test_threading_error.py tests/test_hook_sender.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_large_messages_integration.py tests/test_skip_mentions.py tests/test_stale_stream_cleanup.py tests/test_restore_dedup.py tests/test_hook_schedule.py -k 'cancelled or fail open or outbound message or outbound redaction' -x -n 0 --no-cov -q`
+Run: `uv run pytest tests/test_threading_error.py tests/test_hook_sender.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_streaming_behavior.py tests/test_large_messages_integration.py tests/test_skip_mentions.py tests/test_stale_stream_cleanup.py tests/test_restore_dedup.py tests/test_hook_schedule.py -k 'cancelled or fail open or outbound message or outbound redaction' -x -n 0 --no-cov -q`
 
 Expected: PASS
 
 - [ ] **Step 7: Commit the advisory-bookkeeping checkpoint**
 
 ```bash
-git add src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thread_writes.py src/mindroom/hooks/sender.py src/mindroom/delivery_gateway.py src/mindroom/streaming.py src/mindroom/custom_tools/matrix_api.py src/mindroom/custom_tools/matrix_message.py src/mindroom/custom_tools/subagents.py src/mindroom/scheduling.py src/mindroom/thread_summary.py src/mindroom/matrix/stale_stream_cleanup.py src/mindroom/bot.py tests/test_threading_error.py tests/test_hook_sender.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_large_messages_integration.py tests/test_skip_mentions.py tests/test_stale_stream_cleanup.py tests/test_restore_dedup.py tests/test_hook_schedule.py
+git add src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thread_writes.py src/mindroom/matrix/client.py src/mindroom/hooks/sender.py src/mindroom/delivery_gateway.py src/mindroom/streaming.py src/mindroom/custom_tools/matrix_api.py src/mindroom/custom_tools/matrix_message.py src/mindroom/custom_tools/subagents.py src/mindroom/scheduling.py src/mindroom/thread_summary.py src/mindroom/matrix/stale_stream_cleanup.py src/mindroom/bot.py tests/test_threading_error.py tests/test_hook_sender.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_streaming_behavior.py tests/test_large_messages_integration.py tests/test_skip_mentions.py tests/test_stale_stream_cleanup.py tests/test_restore_dedup.py tests/test_hook_schedule.py
 git commit -m "refactor: detach advisory matrix cache bookkeeping"
 ```
 
 ### Task 5: Remove Dead Names, Flags, And Branches
 
 **Files:**
-- Modify: all files touched above
+- Modify: exact files touched while deleting dead names, flags, and stale branches
 
 - [ ] **Step 1: Delete dead names and compatibility leftovers**
 
@@ -284,16 +286,16 @@ Run: `rg -n "safe_thread_root|allow_durable_cache|record_outbound_message|record
 
 Update any stale names, comments, and docstrings.
 
-- [ ] **Step 3: Run the full targeted matrix conversation suite**
+- [ ] **Step 3: Run the full targeted matrix conversation suite for the files changed in Tasks 2 through 5**
 
-Run: `uv run pytest tests/test_threading_error.py tests/test_thread_mode.py tests/test_multi_agent_bot.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_queued_message_notify.py -x -n 0 --no-cov -q`
+Run: `uv run pytest tests/test_event_relations.py tests/test_hook_sender.py tests/test_workloop_thread_scope.py tests/test_dm_functionality.py tests/test_streaming_behavior.py tests/test_threading_error.py tests/test_thread_mode.py tests/test_multi_agent_bot.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_queued_message_notify.py tests/test_large_messages_integration.py tests/test_skip_mentions.py tests/test_stale_stream_cleanup.py tests/test_restore_dedup.py tests/test_hook_schedule.py -x -n 0 --no-cov -q`
 
 Expected: PASS
 
-- [ ] **Step 4: Commit the cleanup checkpoint**
+- [ ] **Step 4: Commit the cleanup checkpoint with the exact files changed in this task**
 
 ```bash
-git add src/mindroom/matrix/event_info.py src/mindroom/message_target.py src/mindroom/conversation_resolver.py src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thread_reads.py src/mindroom/matrix/client.py src/mindroom/matrix/cache/thread_writes.py src/mindroom/delivery_gateway.py src/mindroom/streaming.py src/mindroom/custom_tools/matrix_api.py src/mindroom/scheduling.py src/mindroom/thread_summary.py src/mindroom/response_runner.py tests/test_threading_error.py tests/test_thread_mode.py tests/test_multi_agent_bot.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_queued_message_notify.py
+git add <exact files changed in this task>
 git commit -m "cleanup: remove overloaded matrix conversation contracts"
 ```
 
