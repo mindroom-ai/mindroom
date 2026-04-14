@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, normalize_nio_event_for_cache
-from mindroom.matrix.cache.thread_cache_helpers import event_id_from_event_source, log_resolved_thread_cache
+from mindroom.matrix.cache.thread_cache_helpers import event_id_from_event_source
 from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.cache.event_cache import ConversationEventCache
-    from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
     from mindroom.matrix.reply_chain import ReplyChainCaches
 
 
@@ -106,13 +105,11 @@ class ThreadWritePolicy:
         *,
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        resolved_thread_cache_getter: typing.Callable[[], ResolvedThreadCache],
         reply_chain_caches_getter: typing.Callable[[], ReplyChainCaches | None],
         require_client: typing.Callable[[], nio.AsyncClient],
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
-        self._resolved_thread_cache_getter = resolved_thread_cache_getter
         self._reply_chain_caches_getter = reply_chain_caches_getter
         self.require_client = require_client
 
@@ -120,9 +117,6 @@ class ThreadWritePolicy:
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
         return self._logger_getter()
-
-    def _resolved_thread_cache(self) -> ResolvedThreadCache:
-        return self._resolved_thread_cache_getter()
 
     def _reply_chain_caches(self) -> ReplyChainCaches | None:
         return self._reply_chain_caches_getter()
@@ -217,7 +211,6 @@ class ThreadWritePolicy:
     ) -> None:
         try:
             await self.runtime.event_cache.invalidate_thread(room_id, thread_id)
-            return
         except Exception as invalidate_exc:
             self.logger.warning(
                 "Failed to delete cached thread rows after stale-marker failure; disabling cache",
@@ -227,6 +220,8 @@ class ThreadWritePolicy:
                 stale_marker_error=str(stale_marker_error),
                 error=str(invalidate_exc),
             )
+        else:
+            return
         self._disable_cache_after_fail_closed_invalidation(
             room_id=room_id,
             reason=reason,
@@ -242,7 +237,6 @@ class ThreadWritePolicy:
     ) -> None:
         try:
             await self.runtime.event_cache.invalidate_room_threads(room_id)
-            return
         except Exception as invalidate_exc:
             self.logger.warning(
                 "Failed to delete cached room thread rows after stale-marker failure; disabling cache",
@@ -251,6 +245,8 @@ class ThreadWritePolicy:
                 stale_marker_error=str(stale_marker_error),
                 error=str(invalidate_exc),
             )
+        else:
+            return
         self._disable_cache_after_fail_closed_invalidation(
             room_id=room_id,
             reason=reason,
@@ -323,8 +319,6 @@ class ThreadWritePolicy:
         *,
         reason: str,
     ) -> None:
-        async with self._resolved_thread_cache().entry_lock(room_id, thread_id):
-            self._resolved_thread_cache().invalidate(room_id, thread_id)
         try:
             await self.runtime.event_cache.mark_thread_stale(room_id, thread_id, reason=reason)
         except Exception as exc:
@@ -341,13 +335,6 @@ class ThreadWritePolicy:
                 reason=reason,
                 stale_marker_error=exc,
             )
-        log_resolved_thread_cache(
-            self.logger,
-            "resolved_thread_cache_invalidate",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=reason,
-        )
 
     async def _invalidate_room_threads(
         self,
@@ -355,15 +342,6 @@ class ThreadWritePolicy:
         *,
         reason: str,
     ) -> None:
-        thread_ids = self._resolved_thread_cache().invalidate_room(room_id)
-        for thread_id in thread_ids:
-            log_resolved_thread_cache(
-                self.logger,
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=reason,
-            )
         try:
             await self.runtime.event_cache.mark_room_threads_stale(room_id, reason=reason)
         except Exception as exc:

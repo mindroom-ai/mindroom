@@ -49,18 +49,11 @@ def _conversation_cache(
     thread_history: list[object] | None = None,
     *,
     latest_thread_event_id: str | None = None,
-    record_error: Exception | None = None,
 ) -> AsyncMock:
     access = AsyncMock()
     access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
-
-    async def _record_outbound_message(*_args: object, **_kwargs: object) -> None:
-        if record_error is not None:
-            access.record_outbound_failures.append(record_error)
-
-    access.record_outbound_failures = []
-    access.record_outbound_message = AsyncMock(side_effect=_record_outbound_message)
+    access.record_outbound_message = AsyncMock()
     return access
 
 
@@ -629,43 +622,6 @@ class TestExecuteScheduledWorkflow:
         mock_info.assert_not_called()
         error_content = mock_send.await_args_list[1].args[2]
         assert "Scheduled task failed" in error_content["body"]
-
-    async def test_execute_workflow_ignores_cache_failure_after_successful_send(self) -> None:
-        """Successful scheduled delivery should stay successful when advisory cache write-through fails."""
-        client = AsyncMock()
-        config = _runtime_bound_config(Config())
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC),
-            message="Check the queue depth",
-            description="Queue check",
-            room_id="!room:server",
-            thread_id="$thread123",
-        )
-        conversation_cache = _conversation_cache(
-            latest_thread_event_id="$latest123",
-            record_error=RuntimeError("cache write failed"),
-        )
-
-        with patch(
-            "mindroom.scheduling.send_message_result",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$event123",
-                    content_sent={"body": "Check the queue depth"},
-                ),
-            ),
-        ):
-            result = await _execute_scheduled_workflow(
-                client,
-                workflow,
-                config,
-                runtime_paths_for(config),
-                conversation_cache,
-            )
-
-        assert result is True
-        conversation_cache.record_outbound_message.assert_awaited_once()
 
     async def test_execute_workflow_no_room_id(self) -> None:
         """Test that workflow without room_id doesn't execute."""

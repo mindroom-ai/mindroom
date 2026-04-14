@@ -1252,7 +1252,18 @@ def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, An
     replacement = relations.get("m.replace")
     if not isinstance(replacement, Mapping):
         return None
-    return {key: value for key, value in replacement.items() if isinstance(key, str)}
+    candidates: tuple[object, ...] = (
+        replacement,
+        replacement.get("event"),
+        replacement.get("latest_event"),
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
+        if _parse_visible_text_message_event(normalized_candidate) is not None:
+            return normalized_candidate
+    return None
 
 
 async def _resolve_thread_history_from_event_sources(

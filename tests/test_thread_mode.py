@@ -1255,12 +1255,12 @@ class TestExtractedModuleLoggerRebinding:
         )
 
     @pytest.mark.asyncio
-    async def test_conversation_cache_reuses_authoritative_snapshot_for_history(
+    async def test_conversation_cache_uses_authoritative_refresh_for_snapshot_and_history(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Snapshot and history reads should share one authoritative refresh path."""
+        """Snapshot and history reads should both use the authoritative refresh path."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1306,7 +1306,7 @@ class TestExtractedModuleLoggerRebinding:
         assert snapshot_history is hydrated_history
         assert full_history == hydrated_history
         assert full_history.is_full_history is True
-        refresh_mock.assert_awaited_once()
+        assert refresh_mock.await_count == 2
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_uses_canonical_relation_walk(

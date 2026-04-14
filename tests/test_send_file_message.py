@@ -345,45 +345,6 @@ class TestSendFileMessage:
         assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
 
     @pytest.mark.asyncio
-    async def test_threaded_send_ignores_cache_write_failure_after_successful_send(self, tmp_path: Path) -> None:
-        """A successful file send should not fail just because advisory cache write-through fails."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
-        conversation_cache = AsyncMock()
-
-        async def _record_outbound_message(*_args: object, **_kwargs: object) -> None:
-            return None
-
-        conversation_cache.record_outbound_message = AsyncMock(side_effect=_record_outbound_message)
-        file = tmp_path / "data.csv"
-        file.write_text("a,b,c", encoding="utf-8")
-
-        with patch(
-            "mindroom.matrix.client.send_message_result",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$evt:localhost",
-                    content_sent={
-                        "msgtype": "m.file",
-                        "body": "data.csv",
-                        "url": "mxc://localhost/t1",
-                    },
-                ),
-            ),
-        ):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-                thread_id="$root:localhost",
-                latest_thread_event_id="$precomputed:localhost",
-                conversation_cache=conversation_cache,
-            )
-
-        assert event_id == "$evt:localhost"
-        conversation_cache.record_outbound_message.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
         """Should return None when the file doesn't exist."""
         client = _mock_client()

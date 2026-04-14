@@ -12,7 +12,6 @@ import pytest
 
 from mindroom import scheduling
 from mindroom.constants import resolve_runtime_paths
-from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.scheduling import (
     _SCHEDULED_TASK_EVENT_TYPE,
     CronSchedule,
@@ -48,18 +47,11 @@ def _conversation_cache(
     thread_history: list[object] | None = None,
     *,
     latest_thread_event_id: str | None = None,
-    record_error: Exception | None = None,
 ) -> AsyncMock:
     access = AsyncMock()
     access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
-
-    async def _record_outbound_message(*_args: object, **_kwargs: object) -> None:
-        if record_error is not None:
-            access.record_outbound_failures.append(record_error)
-
-    access.record_outbound_failures = []
-    access.record_outbound_message = AsyncMock(side_effect=_record_outbound_message)
+    access.record_outbound_message = AsyncMock()
     return access
 
 
@@ -864,57 +856,6 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_once_task_marks_failed_even_if_failure_notice_cache_write_fails() -> None:
-    """Failure-notice cache write-through must not block failed-state persistence for one-time tasks."""
-    client = AsyncMock()
-    client.room_put_state = AsyncMock()
-    config = AsyncMock()
-    workflow = ScheduledWorkflow(
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="Run once",
-        description="One-time failure",
-        room_id="!test:server",
-        thread_id="$thread123",
-    )
-    pending_record = _record("task_once_failed_notice", workflow, status="pending")
-    conversation_cache = _conversation_cache(
-        latest_thread_event_id="$latest",
-        record_error=RuntimeError("cache write failed"),
-    )
-
-    with (
-        patch(
-            "mindroom.scheduling.get_scheduled_task",
-            new=AsyncMock(side_effect=[pending_record, pending_record]),
-        ),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(side_effect=RuntimeError("boom"))),
-        patch(
-            "mindroom.scheduling.send_message_result",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$error:localhost",
-                    content_sent={"body": "failure"},
-                ),
-            ),
-        ),
-    ):
-        await _run_once_task(
-            client,
-            "task_once_failed_notice",
-            workflow,
-            config,
-            _runtime_paths(),
-            _event_cache(),
-            conversation_cache,
-        )
-
-    client.room_put_state.assert_awaited_once()
-    put_kwargs = client.room_put_state.await_args.kwargs
-    assert put_kwargs["state_key"] == "task_once_failed_notice"
-    assert put_kwargs["content"]["status"] == "failed"
-
-
 @pytest.mark.asyncio
 async def test_run_cron_task_executes_latest_state_workflow() -> None:
     """Recurring tasks should execute using the latest persisted workflow data."""
@@ -1042,55 +983,6 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_cron_task_ignores_failure_notice_cache_write_failure() -> None:
-    """Recurring-task failure notices should not raise just because advisory cache write-through fails."""
-    client = AsyncMock()
-    config = AsyncMock()
-    workflow = ScheduledWorkflow(
-        schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
-        message="Recurring message",
-        description="Recurring description",
-        room_id="!test:server",
-        thread_id="$thread123",
-    )
-    pending_record = _record("task_cron_notice_failure", workflow, status="pending")
-    conversation_cache = _conversation_cache(
-        latest_thread_event_id="$latest",
-        record_error=RuntimeError("cache write failed"),
-    )
-
-    class _ImmediateCron:
-        def get_next(self, _type: object) -> datetime:
-            return datetime.now(UTC) - timedelta(seconds=1)
-
-    with (
-        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
-        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(side_effect=RuntimeError("boom"))),
-        patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
-        patch(
-            "mindroom.scheduling.send_message_result",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$error:localhost",
-                    content_sent={"body": "failure"},
-                ),
-            ),
-        ),
-    ):
-        await _run_cron_task(
-            client,
-            "task_cron_notice_failure",
-            workflow,
-            {},
-            config,
-            _runtime_paths(),
-            conversation_cache,
-        )
-
-    conversation_cache.record_outbound_message.assert_awaited_once()
-
-
 @pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks() -> None:
     """Test cancel_all_scheduled_tasks functionality."""

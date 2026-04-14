@@ -19,7 +19,6 @@ from mindroom.matrix.cache.event_cache import (
 from mindroom.matrix.cache.event_cache import (
     _EventCache as EventCache,
 )
-from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
 from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
@@ -235,7 +234,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _turn_event_cache: ContextVar[dict[tuple[str, str], EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
-    _resolved_thread_cache: ResolvedThreadCache = field(default_factory=ResolvedThreadCache, init=False)
     _reply_chain_caches_getter: typing.Callable[[], ReplyChainCaches | None] | None = field(
         default=None,
         init=False,
@@ -249,14 +247,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self._writes = ThreadWritePolicy(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
-            resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
             reply_chain_caches_getter=self._reply_chain_caches,
             require_client=self._require_client,
         )
         self._reads = ThreadReadPolicy(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
-            resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
         )
 
@@ -328,7 +324,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def reset_runtime_state(self) -> None:
         """Drop in-memory conversation state tied to one runtime lifetime."""
-        self._resolved_thread_cache.clear()
         reply_chain_caches = self._reply_chain_caches()
         if reply_chain_caches is not None:
             reply_chain_caches.clear()
