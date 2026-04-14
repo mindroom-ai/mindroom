@@ -1179,6 +1179,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
         if not is_thread_candidate:
             return
+        if event_info.is_edit:
+            self._invalidate_reply_chain(
+                room_id,
+                event_id,
+                event_info.original_event_id,
+            )
 
         event_cache = self.runtime.event_cache
 

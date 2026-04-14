@@ -6509,12 +6509,12 @@ class TestAgentBot:
         mock_snapshot_fallback.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(
+    async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(  # noqa: PLR0915
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Normal replies should derive history-dependent payload inputs after the lock refresh."""
+        """Planning and payload preparation should both see full history when snapshots are incomplete."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -6573,9 +6573,18 @@ class TestAgentBot:
         ]
         call_order: list[str] = []
 
+        async def fake_hydrate_dispatch_context(
+            _room: object,
+            _event: object,
+            context: MessageContext,
+        ) -> None:
+            call_order.append("hydrate")
+            context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
+            context.requires_full_thread_history = False
+
         async def fake_plan(*_args: object, **_kwargs: object) -> DispatchPlan:
             call_order.append("action")
-            assert dispatch.context.thread_history == snapshot_history
+            assert list(dispatch.context.thread_history) == full_history
             return DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(kind="individual"),
@@ -6613,6 +6622,11 @@ class TestAgentBot:
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
+            patch.object(
+                bot._conversation_resolver,
+                "hydrate_dispatch_context",
+                new=AsyncMock(side_effect=fake_hydrate_dispatch_context),
+            ) as mock_hydrate_dispatch_context,
             patch.object(
                 ResponseRunner,
                 "_refresh_thread_history_after_lock",
@@ -6652,22 +6666,27 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
+        mock_hydrate_dispatch_context.assert_awaited_once()
+        hydrate_call = mock_hydrate_dispatch_context.await_args
+        assert hydrate_call is not None
+        assert hydrate_call.args[0] is room
+        assert hydrate_call.args[2] is dispatch.context
         mock_refresh_thread_history.assert_awaited_once()
         mock_build_payload.assert_awaited_once()
         process_request = mock_process.await_args.args[0]
         assert list(process_request.thread_history) == full_history
         assert process_request.attachment_ids == ("att_older",)
-        assert call_order == ["action", "payload", "generate"]
+        assert call_order == ["hydrate", "action", "payload", "generate"]
         assert dispatch.context.thread_history == full_history
         assert dispatch.context.requires_full_thread_history is False
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_skip_path_does_not_hydrate_full_history(
+    async def test_dispatch_text_message_skip_path_hydrates_full_history_before_planning(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Skip paths should avoid both payload work and pre-lock full-history hydration."""
+        """Planning should see full history before deciding to ignore a turn."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -6700,13 +6719,42 @@ class TestAgentBot:
             correlation_id="corr-no-action",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
+        full_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="Hydrated root",
+                event_id="$thread_root",
+                timestamp=1,
+                content={"body": "Hydrated root"},
+            ),
+        ]
+
+        async def fake_hydrate_dispatch_context(
+            _room: object,
+            _event: object,
+            context: MessageContext,
+        ) -> None:
+            context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
+            context.requires_full_thread_history = False
+
+        async def fake_plan(
+            *_args: object,
+            **_kwargs: object,
+        ) -> DispatchPlan:
+            assert list(dispatch.context.thread_history) == full_history
+            return DispatchPlan(kind="ignore")
 
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
             patch.object(
+                bot._conversation_resolver,
+                "hydrate_dispatch_context",
+                new=AsyncMock(side_effect=fake_hydrate_dispatch_context),
+            ) as mock_hydrate_dispatch_context,
+            patch.object(
                 bot._turn_policy,
                 "plan_turn",
-                new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
+                new=AsyncMock(side_effect=fake_plan),
             ),
             patch.object(
                 bot._inbound_turn_normalizer,
@@ -6720,6 +6768,11 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
+        mock_hydrate_dispatch_context.assert_awaited_once()
+        hydrate_call = mock_hydrate_dispatch_context.await_args
+        assert hydrate_call is not None
+        assert hydrate_call.args[0] is room
+        assert hydrate_call.args[2] is dispatch.context
         mock_build_payload.assert_not_awaited()
         mock_execute.assert_not_awaited()
 

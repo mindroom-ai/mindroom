@@ -1500,6 +1500,53 @@ class TestThreadingBehavior:
         assert reply_chain.roots.get("!test:localhost", "$reply:localhost") is None
 
     @pytest.mark.asyncio
+    async def test_outbound_edit_invalidates_cached_reply_chain_for_edited_event(self, bot: AgentBot) -> None:
+        """A locally sent edit should evict stale reply-chain nodes before sync catches up."""
+        reply_chain = bot._conversation_resolver.reply_chain
+        reply_chain.nodes.put(
+            "!test:localhost",
+            "$original:localhost",
+            _ReplyChainNode(
+                message=_message(event_id="$original:localhost", body="original"),
+                parent_event_id=None,
+                thread_root_id=None,
+                has_relations=False,
+            ),
+        )
+        reply_chain.nodes.put(
+            "!test:localhost",
+            "$reply:localhost",
+            _ReplyChainNode(
+                message=_message(event_id="$reply:localhost", body="reply"),
+                parent_event_id="$original:localhost",
+                thread_root_id=None,
+                has_relations=True,
+            ),
+        )
+        reply_chain.roots.put(
+            "!test:localhost",
+            "$reply:localhost",
+            _ReplyChainRoot(root_event_id="$original:localhost", points_to_thread=False),
+        )
+        bot.event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread:localhost")
+        bot.event_cache.append_event = AsyncMock(return_value=True)
+
+        await bot._conversation_cache.record_outbound_message(
+            "!test:localhost",
+            "$edit:localhost",
+            {
+                "body": "* updated",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original:localhost"},
+            },
+        )
+
+        assert reply_chain.nodes.get("!test:localhost", "$original:localhost") is None
+        assert reply_chain.nodes.get("!test:localhost", "$reply:localhost") is None
+        assert reply_chain.roots.get("!test:localhost", "$reply:localhost") is None
+
+    @pytest.mark.asyncio
     async def test_live_edit_false_write_marks_thread_repair_required(self, bot: AgentBot) -> None:
         """A degraded live append result should still mark the thread repair-required."""
         event_cache = _runtime_event_cache()

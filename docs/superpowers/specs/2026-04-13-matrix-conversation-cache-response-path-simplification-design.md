@@ -56,6 +56,7 @@ It also creates race surface whenever writes, sync persistence, repairs, or look
 
 For response generation, stop treating pre-lock thread history as authoritative.
 Before the per-thread lifecycle lock, resolve only the conversation identity needed for routing, targeting, and reply-chain handling.
+If the lightweight planning snapshot declares itself incomplete, hydrate full history before responder or team policy runs so planning does not decide from weaker thread state.
 After the lifecycle lock is acquired, fetch full thread history exactly once through `MatrixConversationCache`.
 Use that single post-lock result for the rest of the reply.
 
@@ -89,10 +90,11 @@ What changes is the reply-path contract.
 ### After
 
 1. Extract routing and targeting context before the lifecycle lock.
-2. Do not attach authoritative thread history to the request for reply generation.
-3. Acquire the lifecycle lock.
-4. Fetch full thread history once through `MatrixConversationCache.get_thread_history(...)`.
-5. Use that single post-lock history for prompt preparation, memory context, and response generation.
+2. If the planning snapshot is incomplete, hydrate full history before responder or team policy runs.
+3. Do not attach pre-lock thread history as authoritative reply context.
+4. Acquire the lifecycle lock.
+5. Fetch full thread history once through `MatrixConversationCache.get_thread_history(...)`.
+6. Use that single post-lock history for prompt preparation, memory context, and response generation.
 
 ## Practical Performance Expectations
 
@@ -144,6 +146,7 @@ This simplification makes it explicit.
 ## Testing Strategy
 
 Add or adjust tests to prove the following behaviors.
+- Incomplete planning snapshots are hydrated before policy decisions run.
 - Response generation performs one authoritative post-lock thread-history read.
 - Stale pre-lock history on the request is ignored.
 - Warm-thread replies still read through `MatrixConversationCache` without forcing Matrix network fetches.

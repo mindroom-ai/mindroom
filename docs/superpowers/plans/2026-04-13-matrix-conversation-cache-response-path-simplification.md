@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Finish the Matrix conversation-cache simplification so reply generation uses one authoritative post-lock thread-history read, durable cache truth stays atomic and non-resurrecting, and latest-thread fallback is resolved through one authoritative cache path.
+**Goal:** Finish the Matrix conversation-cache simplification so reply generation uses one authoritative post-lock thread-history read, incomplete planning snapshots are hydrated before policy decisions, durable cache truth stays atomic and non-resurrecting, and latest-thread fallback is resolved through one authoritative cache path.
 
 **Architecture:** `MatrixConversationCache` remains the one public conversation-data boundary.
 `_event_cache.py` remains the durable owner of event truth, redaction truth, derived indexes, and repair obligations, and those durable writes must be atomic.

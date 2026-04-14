@@ -1295,6 +1295,7 @@ class TurnController:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+            await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_plan_start")
             plan = await self.deps.turn_policy.plan_turn(
