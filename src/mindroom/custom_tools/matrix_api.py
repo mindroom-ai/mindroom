@@ -13,7 +13,6 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import send_message_result
 from mindroom.matrix.event_info import EventInfo
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -450,7 +449,7 @@ class MatrixApiTools(Toolkit):
             content,
         )
 
-    async def _send_event(  # noqa: C901,PLR0911
+    async def _send_event(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -521,26 +520,11 @@ class MatrixApiTools(Toolkit):
             )
 
         try:
-            if normalized_event_type == "m.room.message":
-                delivered = await send_message_result(
-                    context.client,
-                    room_id,
-                    dict(normalized_content),
-                )
-                if delivered is None:
-                    response: object = None
-                else:
-                    normalized_content = delivered.content_sent
-                    response = nio.RoomSendResponse(
-                        event_id=delivered.event_id,
-                        room_id=room_id,
-                    )
-            else:
-                response = await context.client.room_send(
-                    room_id=room_id,
-                    message_type=normalized_event_type,
-                    content=normalized_content,
-                )
+            response = await context.client.room_send(
+                room_id=room_id,
+                message_type=normalized_event_type,
+                content=normalized_content,
+            )
         except Exception as exc:
             self._audit_write(
                 context=context,

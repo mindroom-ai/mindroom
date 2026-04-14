@@ -51,7 +51,7 @@ class ThreadReadPolicy:
         self.thread_version = cache.thread_version
         self.thread_requires_refresh = cache._thread_requires_refresh
         self.clear_thread_refresh_required = cache._clear_thread_refresh_required
-        self.adopt_room_lookup_repairs_locked = cache._adopt_room_lookup_repairs_locked
+        self.adopt_room_lookup_repairs_locked = cache._writes._adopt_room_lookup_repairs_locked
         self.fetch_thread_history_from_client = cache._fetch_thread_history_from_client
         self.fetch_thread_snapshot_from_client = cache._fetch_thread_snapshot_from_client
         self.resolve_thread_history_delta_from_client = cache._resolve_thread_history_delta_from_client
@@ -175,6 +175,10 @@ class ThreadReadPolicy:
 
     def _repair_history_durably_refilled(self, history: ThreadHistoryResult) -> bool:
         return self._repair_history_is_authoritative(history) and thread_history_cache_refilled(history)
+
+    @staticmethod
+    def _raise_thread_repair_required(thread_id: str) -> None:
+        raise ThreadRepairRequiredError(thread_id)
 
     async def _invalidate_raw_thread_before_repair(self, room_id: str, thread_id: str) -> None:
         try:
@@ -519,11 +523,42 @@ class ThreadReadPolicy:
         reply_to_event_id: str | None = None,
         existing_event_id: str | None = None,
     ) -> str | None:
-        """Resolve the latest visible thread event when MSC3440 fallback needs it."""
+        """Resolve the latest visible thread event when MSC3440 fallback needs it.
+
+        This path intentionally bypasses resolved-thread cache reuse and the
+        sync-fresh shortcut used for normal thread-history reads. MSC3440
+        fallback must prefer a fresh authoritative view of the thread tail.
+        """
         if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
             return None
+        await self._wait_for_pending_room_cache_updates(room_id)
         try:
-            thread_history = await self.get_thread_history(room_id, thread_id)
+            async with self._resolved_thread_cache().entry_lock(room_id, thread_id):
+                await self.adopt_room_lookup_repairs_locked(room_id, thread_id)
+                current_thread_version = self.thread_version(room_id, thread_id)
+                repair_required = await self.thread_requires_refresh(room_id, thread_id)
+                if repair_required:
+                    await self._invalidate_raw_thread_before_repair(room_id, thread_id)
+                thread_history = self._full_history_result(
+                    await self.fetch_thread_history_from_client(
+                        room_id,
+                        thread_id,
+                        refresh_cache=True,
+                    ),
+                    thread_version=current_thread_version,
+                )
+                if repair_required:
+                    if not self._repair_history_is_authoritative(thread_history):
+                        self._raise_thread_repair_required(thread_id)
+                    if self._repair_history_durably_refilled(thread_history):
+                        await self.clear_thread_refresh_required(room_id, thread_id)
+                if self._should_store_resolved_thread_cache_entry(thread_history):
+                    await self._store_resolved_thread_cache_entry(
+                        room_id,
+                        thread_id,
+                        history=thread_history,
+                        thread_version=current_thread_version,
+                    )
         except Exception:
             return thread_id
         return latest_visible_thread_event_id(thread_history) or thread_id

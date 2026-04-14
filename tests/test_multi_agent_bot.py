@@ -4497,6 +4497,55 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
+    async def test_media_dispatch_appends_live_event_before_enqueue(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Image/file media dispatch should update the live cache before enqueueing dispatch."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
+        prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
+        bot._conversation_cache.append_live_event = AsyncMock()
+        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
+        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+
+        await bot._turn_controller._handle_media_message_inner(room, event)
+
+        bot._conversation_cache.append_live_event.assert_awaited_once()
+        append_args = bot._conversation_cache.append_live_event.await_args
+        assert append_args.args == ("!test:localhost", event)
+        assert append_args.kwargs["event_info"].is_edit is False
+        bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_audio_dispatch_appends_live_event_before_special_media_handling(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Audio dispatch should update live cache before special-media short-circuiting."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
+        prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
+        bot._conversation_cache.append_live_event = AsyncMock()
+        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
+        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+
+        await bot._turn_controller._handle_media_message_inner(room, event)
+
+        bot._conversation_cache.append_live_event.assert_awaited_once()
+        bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_media_message_merges_thread_history_attachment_ids(
         self,
         mock_agent_user: AgentMatrixUser,

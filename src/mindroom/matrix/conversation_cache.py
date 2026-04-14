@@ -23,7 +23,6 @@ from mindroom.matrix._event_cache_write_coordinator import (
     _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
 )
 from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
     fetch_thread_history,
     fetch_thread_snapshot,
     resolve_thread_history_delta,
@@ -36,7 +35,6 @@ from mindroom.matrix.thread_reads import ThreadReadPolicy, ThreadRepairRequiredE
 from mindroom.matrix.thread_writes import ThreadWritePolicy
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import AsyncIterator, Sequence
 
     import structlog
@@ -162,17 +160,6 @@ async def _cached_room_get_event_response(
     return cached_response if isinstance(cached_response, nio.RoomGetEventResponse) else None
 
 
-def _cached_rooms(client: nio.AsyncClient) -> dict[str, nio.MatrixRoom]:
-    """Return the client room cache when nio has initialized it."""
-    rooms = client.rooms
-    return rooms if isinstance(rooms, dict) else {}
-
-
-def _cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
-    """Return one cached room when it is available."""
-    return _cached_rooms(client).get(room_id)
-
-
 async def _cached_room_get_event(
     client: nio.AsyncClient,
     event_cache: ConversationEventCache,
@@ -252,8 +239,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def __post_init__(self) -> None:
         """Bind extracted read/write policy collaborators to this facade."""
-        self._reads = ThreadReadPolicy(self)
         self._writes = ThreadWritePolicy(self)
+        self._reads = ThreadReadPolicy(self)
 
     def _require_client(self) -> nio.AsyncClient:
         client = self.runtime.client
@@ -270,76 +257,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if self._reply_chain_caches_getter is None:
             return None
         return self._reply_chain_caches_getter()
-
-    def _invalidate_reply_chain(self, room_id: str, *event_ids: str | None) -> None:
-        reply_chain_caches = self._reply_chain_caches()
-        if reply_chain_caches is None:
-            return
-        reply_chain_caches.invalidate(room_id, event_ids)
-
-    async def _reply_chain_invalidation_ids_for_redaction(
-        self,
-        room_id: str,
-        redacted_event_id: str,
-        *,
-        event_cache: ConversationEventCache,
-    ) -> set[str]:
-        invalidation_ids = {redacted_event_id}
-        try:
-            cached_event = await event_cache.get_event(room_id, redacted_event_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to inspect cached redacted event for reply-chain invalidation",
-                room_id=room_id,
-                redacted_event_id=redacted_event_id,
-                error=str(exc),
-            )
-            return invalidation_ids
-        if not isinstance(cached_event, dict):
-            return invalidation_ids
-        original_event_id = EventInfo.from_event(cached_event).original_event_id
-        if isinstance(original_event_id, str):
-            invalidation_ids.add(original_event_id)
-        return invalidation_ids
-
-    async def _reply_chain_invalidation_ids_for_sync_redaction(
-        self,
-        room_id: str,
-        redacted_event_id: str,
-        *,
-        event_cache: ConversationEventCache,
-        event_source: dict[str, object] | None,
-    ) -> set[str]:
-        invalidation_ids = {redacted_event_id}
-        candidate_event_source = event_source
-        if candidate_event_source is None:
-            reply_chain_caches = self._reply_chain_caches()
-            if reply_chain_caches is not None:
-                cached_node = reply_chain_caches.nodes.get(room_id, redacted_event_id)
-                if cached_node is not None and isinstance(cached_node.event_source, dict):
-                    candidate_event_source = cached_node.event_source
-        if candidate_event_source is None:
-            return await self._reply_chain_invalidation_ids_for_redaction(
-                room_id,
-                redacted_event_id,
-                event_cache=event_cache,
-            )
-        if not isinstance(candidate_event_source, dict):
-            return invalidation_ids
-        original_event_id = EventInfo.from_event(candidate_event_source).original_event_id
-        if isinstance(original_event_id, str):
-            invalidation_ids.add(original_event_id)
-        return invalidation_ids
-
-    def _queue_room_cache_update(
-        self,
-        room_id: str,
-        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
-        *,
-        name: str,
-    ) -> asyncio.Task[object]:
-        coordinator = self.runtime.event_cache_write_coordinator
-        return coordinator.queue_room_update(room_id, update_coro_factory, name=name)
 
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
@@ -375,7 +292,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 await self.runtime.event_cache.store_event(normalized_event_id, room_id, fetched_event_source)
 
             try:
-                await self._queue_room_cache_update(
+                await self.runtime.event_cache_write_coordinator.queue_room_update(
                     room_id,
                     persist_lookup_event,
                     name="matrix_cache_store_room_get_event",
@@ -450,69 +367,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             event_sources=event_sources,
         )
 
-    async def _mark_lookup_repair_pending(
-        self,
-        room_id: str,
-        event_id: str | None,
-        *,
-        reason: str,
-    ) -> None:
-        await self._writes._mark_lookup_repair_pending(
-            room_id,
-            event_id,
-            reason=reason,
-        )
-
-    async def _mark_lookup_repair_pending_locked(
-        self,
-        room_id: str,
-        event_id: str | None,
-        *,
-        reason: str,
-    ) -> None:
-        await self._writes._mark_lookup_repair_pending_locked(
-            room_id,
-            event_id,
-            reason=reason,
-        )
-
-    async def _promote_lookup_repairs_locked(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        promoted_event_ids: frozenset[str] | None = None,
-        reason: str = "lookup_repair_required",
-    ) -> frozenset[str]:
-        return await self._writes._promote_lookup_repairs_locked(
-            room_id,
-            thread_id,
-            promoted_event_ids=promoted_event_ids,
-            reason=reason,
-        )
-
-    async def _adopt_room_lookup_repairs_locked(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> frozenset[str]:
-        return await self._writes._adopt_room_lookup_repairs_locked(room_id, thread_id)
-
-    async def _store_resolved_thread_cache_entry(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        history: Sequence[ResolvedVisibleMessage],
-        thread_version: int,
-    ) -> frozenset[str]:
-        return await self._reads._store_resolved_thread_cache_entry(
-            room_id,
-            thread_id,
-            history=history,
-            thread_version=thread_version,
-        )
-
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
         """Resolve lightweight thread context for dispatch."""
         return await self._reads.get_thread_snapshot(room_id, thread_id)
@@ -578,23 +432,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._writes.apply_redaction(room_id, event)
-
-    def _track_sync_cached_event(
-        self,
-        room_id: str,
-        event_source: dict[str, object],
-    ) -> None:
-        self._writes._track_sync_cached_event(room_id, event_source)
-
-    def _group_sync_timeline_updates(
-        self,
-        response: nio.SyncResponse,
-    ) -> tuple[
-        dict[str, list[dict[str, object]]],
-        dict[str, list[dict[str, object]]],
-        dict[str, list[str]],
-    ]:
-        return self._writes._group_sync_timeline_updates(response)
 
     def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
         """Queue sync timeline persistence through the room-ordered cache barrier."""

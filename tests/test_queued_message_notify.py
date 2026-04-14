@@ -661,7 +661,7 @@ async def test_refresh_thread_history_after_lock_refreshes_when_lookup_repair_is
         if (room_id, event_id) == ("!room:localhost", "$reply-1")
         else None,
     )
-    await access._mark_lookup_repair_pending(
+    await access._writes._mark_lookup_repair_pending(
         "!room:localhost",
         "$reply-1",
         reason="live_edit_lookup_failed",
@@ -713,7 +713,7 @@ async def test_refresh_thread_history_after_lock_refreshes_when_redaction_candid
         is_full_history=True,
         thread_version=0,
     )
-    await access._mark_lookup_repair_pending(
+    await access._writes._mark_lookup_repair_pending(
         "!room:localhost",
         "$reply-1",
         reason="sync_redaction_lookup_missing",

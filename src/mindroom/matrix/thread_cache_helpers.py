@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    import structlog
 
     from mindroom.matrix.client import ResolvedVisibleMessage
 
@@ -48,7 +50,7 @@ def resolved_cache_diagnostics(
 
 
 def log_resolved_thread_cache(
-    logger: Any,
+    logger: structlog.stdlib.BoundLogger,
     event: str,
     *,
     room_id: str,

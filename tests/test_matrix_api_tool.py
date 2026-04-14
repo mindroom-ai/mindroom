@@ -221,6 +221,37 @@ async def test_matrix_api_send_event_records_threaded_room_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> None:
+    """Low-level m.room.message sends should use raw room_send payloads without MindRoom rewrites."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    content = {
+        "msgtype": "m.notice",
+        "com.example.payload": "x" * 20000,
+    }
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$send:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.client.room_send.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        message_type="m.room.message",
+        content=content,
+    )
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_send_event_rejects_threaded_room_message_without_conversation_cache() -> None:
     """Threaded room messages should fail fast when the conversation cache seam is unavailable."""
     tool = MatrixApiTools()
@@ -292,6 +323,31 @@ async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send
         "$send:localhost",
         content,
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_send_event_room_message_preserves_matrix_error_details() -> None:
+    """Low-level m.room.message send errors should surface the actual homeserver failure."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client.room_send.return_value = nio.RoomSendError(
+        "forbidden",
+        status_code="M_FORBIDDEN",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content={"body": "hello", "msgtype": "m.text"},
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["status_code"] == "M_FORBIDDEN"
+    assert payload["response"] == "RoomSendError: M_FORBIDDEN forbidden"
 
 
 @pytest.mark.asyncio

@@ -47,9 +47,9 @@ The remaining work is to make the current boundaries true in behavior, not just 
 - Modify: `tests/test_threading_error.py`
 - Modify: `tests/test_multi_agent_bot.py`
 - Modify: `docs/superpowers/specs/2026-04-13-matrix-conversation-cache-architecture-closure-design.md`
-- Modify: `docs/superpowers/specs/2026-04-13-matrix-conversation-cache-response-path-simplification-design.md`
-- Modify: `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`
-- Modify: `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-response-path-simplification.md`
+- Delete: `docs/superpowers/specs/2026-04-13-matrix-conversation-cache-response-path-simplification-design.md`
+- Delete: `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`
+- Delete: `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-response-path-simplification.md`
 
 ## Task 1: Lock The Remaining Seams With Failing Tests
 
@@ -98,7 +98,7 @@ The remaining work is to make the current boundaries true in behavior, not just 
 ## Task 6: Finish The Room-Ordered Visibility Contract
 
 - [ ] Decide point-lookup semantics explicitly in `_cached_room_get_event()`.
-- [ ] Implement the chosen rule so point lookups do not mutate authoritative thread/edit/repair indexes outside the room barrier.
+- [ ] Implement the chosen rule so point lookups only persist through the room barrier and never bypass visibility ordering.
 - [ ] If schema or cache layout changes are needed, make stale cache reset explicit in comments and code instead of migrating.
 - [ ] Re-run focused event-cache and thread-history tests with `uv run pytest -n auto --no-cov tests/test_event_cache.py tests/test_thread_history.py tests/test_threading_error.py -q`.
 
@@ -111,7 +111,7 @@ The remaining work is to make the current boundaries true in behavior, not just 
 
 ## Task 8: Align The Docs
 
-- [ ] Update the older response-path and architecture docs to say they are historical/partly landed and point to the closure spec.
+- [ ] Delete the superseded response-path and extraction-history docs once the closure doc is accurate.
 - [ ] Keep one sentence per line.
 - [ ] Make the no-migration cache policy explicit in the closure spec and any schema/version comments.
 

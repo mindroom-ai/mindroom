@@ -1,6 +1,6 @@
 # Matrix Conversation Cache Architecture Closure Design
 
-**Status:** Proposed.
+**Status:** Implemented.
 **Date:** 2026-04-13.
 **Owner:** Codex.
 
@@ -94,8 +94,8 @@ or
 - be explicitly classified as non-authoritative and prevented from mutating those indexes.
 
 Point-event lookups are the current ambiguity.
-They should not update authoritative thread or repair indexes outside the barrier.
-They may cache raw event blobs, but not mutate thread-membership or repair-state truth opportunistically.
+They may persist normalized event data, including derived thread or edit indexes, but only through the room-ordered barrier.
+They must not mutate durable truth opportunistically outside that visibility contract.
 
 ### 5. One Post-Lock Failure Boundary
 
@@ -117,8 +117,8 @@ That includes:
 - durable repair obligations,
 - no silent expiry of correctness obligations.
 
-Point lookups may populate event blobs.
-They must not create or mutate authoritative thread/edit/repair indexes outside the room barrier.
+Point lookups may populate normalized event rows and derived indexes.
+They must do so only through the same room-ordered barrier used for other freshness-affecting writes.
 
 ### `thread_reads.py`
 
@@ -187,7 +187,7 @@ Add direct coverage for the remaining seams.
 - room-idle waits do not inherit advisory post-send failures,
 - post-lock thread-refresh failures route through `_finalize_dispatch_failure()`,
 - runtime reset clears reply-chain caches as well as resolved-thread state,
-- point event lookups do not mutate authoritative thread/relation indexes outside the barrier.
+- point event lookups persist through the room barrier and never bypass visibility ordering.
 
 Use `pytest -n auto --no-cov`.
 
@@ -202,11 +202,5 @@ This should be stated plainly in comments near the schema/version handling so fu
 
 ## Relationship To Existing Docs
 
-This design supersedes the remaining “closure” work implied by:
-
-- `docs/superpowers/specs/2026-04-13-matrix-conversation-cache-response-path-simplification-design.md`
-- `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`
-- `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-response-path-simplification.md`
-
-Those documents describe earlier phases that have partly landed.
-This document is the authority for the final seam-closing pass.
+Older response-path and extraction-history docs were removed once the closure pass landed.
+This document is the remaining authority for the Matrix conversation-cache refactor area.

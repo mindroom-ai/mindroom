@@ -1439,6 +1439,12 @@ class TurnController:
         prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return
+        event_info = EventInfo.from_event(prechecked_event.event.source)
+        await self.deps.conversation_cache.append_live_event(
+            room.room_id,
+            prechecked_event.event,
+            event_info=event_info,
+        )
 
         if await self._dispatch_special_media_as_text(room, prechecked_event):
             return
