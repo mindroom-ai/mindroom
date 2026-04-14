@@ -357,8 +357,6 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
-            runtime_started_at=time.time(),
-            last_sync_activity_monotonic=None,
         )
         self._deferred_overdue_task_drain_task = None
         self._init_runtime_components()
@@ -880,7 +878,6 @@ class AgentBot:
     def reset_watchdog_clock(self) -> None:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
-        self._runtime_view.last_sync_activity_monotonic = None
 
     def _restore_saved_sync_token(self) -> None:
         """Restore the saved Matrix sync token onto the current client."""
@@ -921,7 +918,6 @@ class AgentBot:
         first_sync_response = not self._first_sync_done
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
-        self._runtime_view.last_sync_activity_monotonic = self._last_sync_monotonic
 
         if self._sync_shutting_down:
             return
@@ -1162,7 +1158,6 @@ class AgentBot:
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
-        self._runtime_view.last_sync_activity_monotonic = None
         self._first_sync_done = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)

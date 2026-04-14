@@ -90,11 +90,6 @@ def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> Re
     )
 
 
-def _sync_batch_marker(index: int) -> str:
-    """Return one deterministic sync batch marker for thread freshness tests."""
-    return f"sync_batch_{index}"
-
-
 def resolved_thread_cache_entry(
     *,
     history: Sequence[ResolvedVisibleMessage],
@@ -459,17 +454,14 @@ class TestMatrixConversationCacheThreadReads:
 
     @pytest.mark.asyncio
     async def test_get_thread_history_revalidates_resolved_cache_against_durable_state(self) -> None:
-        """A stale durable state must force a refetch instead of serving the in-memory resolved cache."""
+        """A durably invalidated thread must force a refetch instead of serving the in-memory resolved cache."""
         client = _make_client_mock()
-        client.next_batch = _sync_batch_marker(2)
-        cached_sync_token = _sync_batch_marker(1)
         event_cache = _runtime_event_cache()
         event_cache.get_thread_cache_state = AsyncMock(
             return_value=ThreadCacheState(
                 validated_at=time.time(),
-                validated_sync_token=cached_sync_token,
-                invalidated_at=None,
-                invalidation_reason=None,
+                invalidated_at=time.time(),
+                invalidation_reason="test_invalidated",
                 room_invalidated_at=None,
                 room_invalidation_reason=None,
             ),
@@ -479,7 +471,6 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(client=client, event_cache=event_cache),
         )
-        access.runtime.last_sync_activity_monotonic = 100.0
         _prime_resolved_thread_history(
             access,
             room_id="!room:localhost",
@@ -618,15 +609,12 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(client=outbound_client, event_cache=event_cache),
         )
-        first_access.runtime.last_sync_activity_monotonic = 100.0
 
         try:
-            sync_token = _sync_batch_marker(1)
             await event_cache.replace_thread(
                 "!test:localhost",
                 "$thread:localhost",
                 [root_event, stale_reply_event],
-                validated_sync_token=sync_token,
                 validated_at=time.time(),
             )
             await first_access.record_outbound_message(
@@ -645,7 +633,6 @@ class TestMatrixConversationCacheThreadReads:
                 logger=MagicMock(),
                 runtime=_conversation_runtime(client=reader_client, event_cache=event_cache),
             )
-            second_access.runtime.last_sync_activity_monotonic = 101.0
 
             history = await second_access.get_thread_history("!test:localhost", "$thread:localhost")
         finally:
@@ -853,7 +840,10 @@ class TestThreadingBehavior:
 
         assert bot._standalone_runtime_support is not None
         assert bot._runtime_view.event_cache is bot._standalone_runtime_support.event_cache
-        assert bot._runtime_view.event_cache_write_coordinator is bot._standalone_runtime_support.event_cache_write_coordinator
+        assert (
+            bot._runtime_view.event_cache_write_coordinator
+            is bot._standalone_runtime_support.event_cache_write_coordinator
+        )
         assert bot.event_cache.is_initialized is False
 
     @pytest.mark.asyncio
@@ -869,7 +859,10 @@ class TestThreadingBehavior:
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()),
             patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
-            patch("mindroom.runtime_support._EventCache.initialize", AsyncMock(side_effect=RuntimeError("cache init failed"))),
+            patch(
+                "mindroom.runtime_support._EventCache.initialize",
+                AsyncMock(side_effect=RuntimeError("cache init failed")),
+            ),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
@@ -993,8 +986,8 @@ class TestThreadingBehavior:
         assert cached_event["content"]["body"] == "Thread reply"
 
     @pytest.mark.asyncio
-    async def test_sync_error_does_not_advance_cache_freshness_clock(self, bot: AgentBot) -> None:
-        """Sync errors should keep the watchdog alive without suppressing cache repair reads."""
+    async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
+        """Sync errors should keep the watchdog alive using the latest observed sync activity."""
         sync_response = MagicMock()
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock(join={})
@@ -1006,7 +999,6 @@ class TestThreadingBehavior:
             await bot._on_sync_error(sync_error)
 
         assert bot._last_sync_monotonic == 200.0
-        assert bot._runtime_view.last_sync_activity_monotonic == 100.0
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_schedules_background_write(self, bot: AgentBot) -> None:
@@ -1173,7 +1165,6 @@ class TestThreadingBehavior:
                         },
                     },
                 ],
-                validated_sync_token=None,
             )
 
             edit_event = nio.RoomMessageText.from_dict(
@@ -1519,7 +1510,6 @@ class TestThreadingBehavior:
                         "content": {"body": "Root message", "msgtype": "m.text"},
                     },
                 ],
-                validated_sync_token=None,
             )
             message_event = nio.RoomMessageText.from_dict(
                 {
@@ -2294,7 +2284,7 @@ class TestThreadingBehavior:
             cached_client.next_batch = "s_after_edit"
             cached_client.room_get_event = AsyncMock(side_effect=AssertionError("expected cached second read"))
             cached_client.room_get_event_relations = MagicMock(
-                side_effect=AssertionError("expected cached second read")
+                side_effect=AssertionError("expected cached second read"),
             )
             cached_access = MatrixConversationCache(
                 logger=MagicMock(),
@@ -2386,7 +2376,7 @@ class TestThreadingBehavior:
             cached_client.next_batch = "s_refetch"
             cached_client.room_get_event = AsyncMock(side_effect=AssertionError("expected cached second read"))
             cached_client.room_get_event_relations = MagicMock(
-                side_effect=AssertionError("expected cached second read")
+                side_effect=AssertionError("expected cached second read"),
             )
             cached_access = MatrixConversationCache(
                 logger=MagicMock(),
@@ -2470,7 +2460,6 @@ class TestThreadingBehavior:
         thread_state: dict[str, ThreadCacheState] = {
             "value": ThreadCacheState(
                 validated_at=time.time(),
-                validated_sync_token=None,
                 invalidated_at=None,
                 invalidation_reason=None,
                 room_invalidated_at=None,
@@ -2492,7 +2481,6 @@ class TestThreadingBehavior:
         async def mark_thread_stale(_room_id: str, _thread_id: str, *, reason: str) -> None:
             thread_state["value"] = ThreadCacheState(
                 validated_at=thread_state["value"].validated_at,
-                validated_sync_token=None,
                 invalidated_at=time.time(),
                 invalidation_reason=reason,
                 room_invalidated_at=None,
@@ -2511,7 +2499,6 @@ class TestThreadingBehavior:
         async def fetch_fresh_history(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
             thread_state["value"] = ThreadCacheState(
                 validated_at=time.time(),
-                validated_sync_token=None,
                 invalidated_at=None,
                 invalidation_reason=None,
                 room_invalidated_at=None,

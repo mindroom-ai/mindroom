@@ -26,7 +26,7 @@ from mindroom.matrix.cache.event_cache import (
     ConversationEventCache,
     normalize_nio_event_for_cache,
 )
-from mindroom.matrix.cache.thread_cache_helpers import ThreadCacheFreshnessContext, thread_cache_state_is_fresh
+from mindroom.matrix.cache.thread_cache_helpers import thread_cache_state_is_fresh
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
@@ -1312,7 +1312,6 @@ async def _load_cached_thread_history(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    freshness_context: ThreadCacheFreshnessContext,
     hydrate_sidecars: bool = True,
 ) -> ThreadHistoryResult | None:
     """Return cached thread history when it can be resolved safely."""
@@ -1326,7 +1325,7 @@ async def _load_cached_thread_history(
             error=str(exc),
         )
         return None
-    if not thread_cache_state_is_fresh(cache_state, context=freshness_context):
+    if not thread_cache_state_is_fresh(cache_state):
         return None
 
     cache_read_started = time.perf_counter()
@@ -1507,7 +1506,6 @@ async def _mark_thread_stale_fail_closed(
     """Fail closed when a durable stale marker cannot be written."""
     try:
         await event_cache.mark_thread_stale(room_id, thread_id, reason=reason)
-        return
     except Exception as exc:
         logger.warning(
             failure_log,
@@ -1516,9 +1514,10 @@ async def _mark_thread_stale_fail_closed(
             reason=reason,
             error=str(exc),
         )
+    else:
+        return
     try:
         await event_cache.invalidate_thread(room_id, thread_id)
-        return
     except Exception as invalidate_exc:
         logger.warning(
             "Failed to delete thread cache rows after stale-marker failure; disabling cache",
@@ -1527,6 +1526,8 @@ async def _mark_thread_stale_fail_closed(
             reason=reason,
             error=str(invalidate_exc),
         )
+    else:
+        return
     event_cache.disable(f"thread_stale_marker_failed:{room_id}:{thread_id}:{reason}")
 
 
@@ -1553,10 +1554,8 @@ async def refresh_thread_history_from_source(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    freshness_context: ThreadCacheFreshnessContext | None = None,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
-    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
     try:
         fetch_result = await _fetch_thread_history_with_events(client, room_id, thread_id)
     except Exception as exc:
@@ -1576,7 +1575,6 @@ async def refresh_thread_history_from_source(
             room_id=room_id,
             thread_id=thread_id,
             event_sources=fetch_result.event_sources,
-            validated_sync_token=effective_freshness_context.current_sync_token,
         )
     return _thread_history_result(
         fetch_result.history,
@@ -1587,15 +1585,6 @@ async def refresh_thread_history_from_source(
             "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
         },
-    )
-
-
-def _default_thread_cache_freshness_context() -> ThreadCacheFreshnessContext:
-    """Return a default freshness context for direct helper callers outside the facade."""
-    return ThreadCacheFreshnessContext(
-        runtime_started_at=0.0,
-        last_sync_activity_monotonic=None,
-        current_sync_token=None,
     )
 
 
@@ -1652,7 +1641,6 @@ async def _store_thread_history_cache(
     room_id: str,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
-    validated_sync_token: str | None,
 ) -> bool:
     """Best-effort replacement of one cached thread snapshot."""
     try:
@@ -1660,7 +1648,6 @@ async def _store_thread_history_cache(
             room_id,
             thread_id,
             list(event_sources),
-            validated_sync_token=validated_sync_token,
         )
     except Exception as exc:
         logger.warning(
@@ -1966,16 +1953,13 @@ async def fetch_thread_history(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    freshness_context: ThreadCacheFreshnessContext | None = None,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
-    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
     cached_history = await _load_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
-        freshness_context=effective_freshness_context,
     )
     if cached_history is not None:
         return cached_history
@@ -1984,7 +1968,6 @@ async def fetch_thread_history(
         room_id,
         thread_id,
         event_cache,
-        freshness_context=effective_freshness_context,
     )
 
 
@@ -1993,18 +1976,15 @@ async def load_cached_thread_history(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    freshness_context: ThreadCacheFreshnessContext | None = None,
     *,
     hydrate_sidecars: bool = True,
 ) -> ThreadHistoryResult | None:
     """Return only the fresh cached thread payload when available."""
-    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
     return await _load_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
-        freshness_context=effective_freshness_context,
         hydrate_sidecars=hydrate_sidecars,
     )
 
@@ -2116,7 +2096,7 @@ async def _fetch_thread_event_sources_via_room_messages(
         if not isinstance(response, nio.RoomMessagesResponse):
             msg = f"room scan failed for {thread_id}: {response}"
             logger.error("Failed to fetch thread history", room_id=room_id, thread_id=thread_id, error=str(response))
-            raise RuntimeError(msg)
+            raise RuntimeError(msg)  # noqa: TRY004
 
         if not response.chunk:
             break
@@ -2170,16 +2150,13 @@ async def fetch_thread_snapshot(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    freshness_context: ThreadCacheFreshnessContext | None = None,
 ) -> ThreadHistoryResult:
     """Fetch thread context for dispatch decisions, preferring cached snapshots."""
-    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
     cached_snapshot = await _load_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
-        freshness_context=effective_freshness_context,
         hydrate_sidecars=False,
     )
     if cached_snapshot is not None:
@@ -2190,7 +2167,6 @@ async def fetch_thread_snapshot(
         room_id,
         thread_id,
         event_cache,
-        freshness_context=effective_freshness_context,
     )
 
 

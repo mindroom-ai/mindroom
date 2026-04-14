@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 import aiosqlite
-import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
@@ -20,11 +19,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
     from pathlib import Path
 
+    import nio
+
 
 _RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
-_EVENT_CACHE_SCHEMA_VERSION = 6
+_EVENT_CACHE_SCHEMA_VERSION = 7
 _EVENT_CACHE_TABLES = (
     "thread_events",
     "events",
@@ -52,7 +53,6 @@ class ThreadCacheState:
     """Durable freshness and invalidation metadata for one cached thread."""
 
     validated_at: float | None
-    validated_sync_token: str | None
     invalidated_at: float | None
     invalidation_reason: str | None
     room_invalidated_at: float | None
@@ -102,7 +102,6 @@ class ConversationEventCache(Protocol):
         thread_id: str,
         events: list[dict[str, Any]],
         *,
-        validated_sync_token: str | None,
         validated_at: float | None = None,
     ) -> None:
         """Atomically replace one cached thread snapshot."""
@@ -310,7 +309,6 @@ class _EventCache:
                         room_id TEXT NOT NULL,
                         thread_id TEXT NOT NULL,
                         validated_at REAL,
-                        validated_sync_token TEXT,
                         invalidated_at REAL,
                         invalidation_reason TEXT,
                         PRIMARY KEY (room_id, thread_id)
@@ -385,7 +383,6 @@ class _EventCache:
                 """
                 SELECT
                     thread_cache_state.validated_at,
-                    thread_cache_state.validated_sync_token,
                     thread_cache_state.invalidated_at,
                     thread_cache_state.invalidation_reason,
                     room_cache_state.invalidated_at,
@@ -405,11 +402,10 @@ class _EventCache:
                 return None
             return ThreadCacheState(
                 validated_at=None if row[0] is None else float(row[0]),
-                validated_sync_token=row[1] if isinstance(row[1], str) else None,
-                invalidated_at=None if row[2] is None else float(row[2]),
-                invalidation_reason=row[3] if isinstance(row[3], str) else None,
-                room_invalidated_at=None if row[4] is None else float(row[4]),
-                room_invalidation_reason=row[5] if isinstance(row[5], str) else None,
+                invalidated_at=None if row[1] is None else float(row[1]),
+                invalidation_reason=row[2] if isinstance(row[2], str) else None,
+                room_invalidated_at=None if row[3] is None else float(row[3]),
+                room_invalidation_reason=row[4] if isinstance(row[4], str) else None,
             )
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
@@ -492,7 +488,6 @@ class _EventCache:
         room_id: str,
         thread_id: str,
         events: list[dict[str, Any]],
-        validated_sync_token: str | None,
         validated_at: float,
     ) -> None:
         """Persist one authoritative thread snapshot within an existing DB transaction."""
@@ -503,18 +498,16 @@ class _EventCache:
                     room_id,
                     thread_id,
                     validated_at,
-                    validated_sync_token,
                     invalidated_at,
                     invalidation_reason
                 )
-                VALUES (?, ?, ?, ?, NULL, NULL)
+                VALUES (?, ?, ?, NULL, NULL)
                 ON CONFLICT(room_id, thread_id) DO UPDATE SET
                     validated_at = excluded.validated_at,
-                    validated_sync_token = excluded.validated_sync_token,
                     invalidated_at = NULL,
                     invalidation_reason = NULL
                 """,
-                (room_id, thread_id, validated_at, validated_sync_token),
+                (room_id, thread_id, validated_at),
             )
             return
 
@@ -556,18 +549,16 @@ class _EventCache:
                 room_id,
                 thread_id,
                 validated_at,
-                validated_sync_token,
                 invalidated_at,
                 invalidation_reason
             )
-            VALUES (?, ?, ?, ?, NULL, NULL)
+            VALUES (?, ?, ?, NULL, NULL)
             ON CONFLICT(room_id, thread_id) DO UPDATE SET
                 validated_at = excluded.validated_at,
-                validated_sync_token = excluded.validated_sync_token,
                 invalidated_at = NULL,
                 invalidation_reason = NULL
             """,
-            (room_id, thread_id, validated_at, validated_sync_token),
+            (room_id, thread_id, validated_at),
         )
 
     async def _replace_thread_locked(
@@ -577,7 +568,6 @@ class _EventCache:
         room_id: str,
         thread_id: str,
         events: list[dict[str, Any]],
-        validated_sync_token: str | None,
         validated_at: float,
     ) -> None:
         """Replace one thread snapshot atomically within an existing DB transaction."""
@@ -607,7 +597,6 @@ class _EventCache:
             room_id=room_id,
             thread_id=thread_id,
             events=events,
-            validated_sync_token=validated_sync_token,
             validated_at=validated_at,
         )
 
@@ -617,7 +606,6 @@ class _EventCache:
         thread_id: str,
         events: list[dict[str, Any]],
         *,
-        validated_sync_token: str | None,
         validated_at: float | None = None,
     ) -> None:
         """Atomically replace one cached thread snapshot."""
@@ -630,7 +618,6 @@ class _EventCache:
                     room_id=room_id,
                     thread_id=thread_id,
                     events=events,
-                    validated_sync_token=validated_sync_token,
                     validated_at=time.time() if validated_at is None else validated_at,
                 )
                 await db.commit()
@@ -1078,9 +1065,7 @@ async def _write_lookup_index_rows(
         ],
     )
     edit_rows = [
-        row
-        for row in (_edit_cache_row(room_id, event.event) for event in serialized_events)
-        if row is not None
+        row for row in (_edit_cache_row(room_id, event.event) for event in serialized_events) if row is not None
     ]
     if edit_rows:
         await db.executemany(
@@ -1094,9 +1079,7 @@ async def _write_lookup_index_rows(
         [(room_id, event.event_id, thread_id) for event in serialized_events]
         if thread_id is not None
         else [
-            row
-            for row in (_event_thread_row(room_id, event.event) for event in serialized_events)
-            if row is not None
+            row for row in (_event_thread_row(room_id, event.event) for event in serialized_events) if row is not None
         ]
     )
     if thread_rows:
@@ -1123,11 +1106,10 @@ async def _mark_thread_stale_locked(
             room_id,
             thread_id,
             validated_at,
-            validated_sync_token,
             invalidated_at,
             invalidation_reason
         )
-        VALUES (?, ?, NULL, NULL, ?, ?)
+        VALUES (?, ?, NULL, ?, ?)
         ON CONFLICT(room_id, thread_id) DO UPDATE SET
             invalidated_at = excluded.invalidated_at,
             invalidation_reason = excluded.invalidation_reason
@@ -1296,12 +1278,13 @@ async def _redacted_event_ids_for_candidates(
     if not event_ids:
         return frozenset()
     placeholders = ",".join("?" for _ in event_ids)
-    cursor = await db.execute(
-        f"""
+    query = f"""
         SELECT event_id
         FROM redacted_events
         WHERE room_id = ? AND event_id IN ({placeholders})
-        """,
+        """  # noqa: S608
+    cursor = await db.execute(
+        query,
         (room_id, *sorted(event_ids)),
     )
     rows = await cursor.fetchall()

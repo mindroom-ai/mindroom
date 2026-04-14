@@ -14,7 +14,6 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 from mindroom.matrix.cache.event_cache import _EventCache
-from mindroom.matrix.cache.thread_cache_helpers import ThreadCacheFreshnessContext
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
@@ -50,11 +49,6 @@ if TYPE_CHECKING:
 
 def _event_cache() -> AsyncMock:
     return make_event_cache_mock()
-
-
-def _sync_batch_marker(index: int) -> str:
-    """Return one deterministic sync batch marker for freshness tests."""
-    return f"sync_batch_{index}"
 
 
 async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistoryResult:
@@ -234,7 +228,6 @@ class TestThreadHistory:
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[{"event_id": "$thread_root"}],
-            validated_sync_token=None,
         )
 
     @pytest.mark.asyncio
@@ -1711,7 +1704,7 @@ class TestThreadHistoryCache:
         thread_id: str,
         events: list[dict[str, object]],
     ) -> None:
-        await cache.replace_thread(room_id, thread_id, events, validated_sync_token=None)
+        await cache.replace_thread(room_id, thread_id, events)
 
     @staticmethod
     def _make_redaction_event(
@@ -1970,12 +1963,10 @@ class TestThreadHistoryCache:
         )
 
         try:
-            sync_token = _sync_batch_marker(1)
             await cache.replace_thread(
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
-                validated_sync_token=sync_token,
                 validated_at=time.time(),
             )
             await cache.mark_room_threads_stale("!room:localhost", reason="sync_lookup_missing")
@@ -1985,11 +1976,6 @@ class TestThreadHistoryCache:
                 "!room:localhost",
                 "$thread_root",
                 event_cache=cache,
-                freshness_context=ThreadCacheFreshnessContext(
-                    runtime_started_at=0.0,
-                    last_sync_activity_monotonic=1.0,
-                    current_sync_token=sync_token,
-                ),
             )
             client.room_get_event = AsyncMock(side_effect=AssertionError("expected cached second read"))
             client.room_get_event_relations = MagicMock(side_effect=AssertionError("expected cached second read"))
@@ -1998,11 +1984,6 @@ class TestThreadHistoryCache:
                 "!room:localhost",
                 "$thread_root",
                 event_cache=cache,
-                freshness_context=ThreadCacheFreshnessContext(
-                    runtime_started_at=0.0,
-                    last_sync_activity_monotonic=1.0,
-                    current_sync_token=sync_token,
-                ),
             )
         finally:
             await cache.close()
@@ -2062,37 +2043,25 @@ class TestThreadHistoryCache:
         )
 
         try:
-            cached_sync_token = _sync_batch_marker(1)
-            current_sync_token = _sync_batch_marker(2)
             await cache.replace_thread(
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
-                validated_sync_token=cached_sync_token,
                 validated_at=time.time(),
             )
+            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="force_refetch")
 
             history = await fetch_thread_history(
                 client,
                 "!room:localhost",
                 "$thread_root",
                 event_cache=cache,
-                freshness_context=ThreadCacheFreshnessContext(
-                    runtime_started_at=0.0,
-                    last_sync_activity_monotonic=1.0,
-                    current_sync_token=current_sync_token,
-                ),
             )
             recovered_history = await fetch_thread_history(
                 recovered_client,
                 "!room:localhost",
                 "$thread_root",
                 event_cache=cache,
-                freshness_context=ThreadCacheFreshnessContext(
-                    runtime_started_at=0.0,
-                    last_sync_activity_monotonic=1.0,
-                    current_sync_token=current_sync_token,
-                ),
             )
         finally:
             await cache.close()

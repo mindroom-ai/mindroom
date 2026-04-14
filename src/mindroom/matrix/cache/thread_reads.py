@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache.thread_cache import resolved_thread_cache_entry
 from mindroom.matrix.cache.thread_cache_helpers import (
-    ThreadCacheFreshnessContext,
     event_id_from_event_source,
     latest_visible_thread_event_id,
     log_resolved_thread_cache,
@@ -41,7 +40,6 @@ class ThreadReadPolicy:
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
         resolved_thread_cache_getter: typing.Callable[[], ResolvedThreadCache],
-        freshness_context_getter: typing.Callable[[], ThreadCacheFreshnessContext],
         load_cached_thread_history_from_client: typing.Callable[
             [str, str],
             typing.Awaitable[ThreadHistoryResult | None],
@@ -52,7 +50,6 @@ class ThreadReadPolicy:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self._resolved_thread_cache_getter = resolved_thread_cache_getter
-        self._freshness_context_getter = freshness_context_getter
         self.load_cached_thread_history_from_client = load_cached_thread_history_from_client
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
         self.fetch_thread_snapshot_from_client = fetch_thread_snapshot_from_client
@@ -79,10 +76,7 @@ class ThreadReadPolicy:
                 error=str(exc),
             )
             return False
-        return thread_cache_state_is_fresh(
-            cache_state,
-            context=self._freshness_context_getter(),
-        )
+        return thread_cache_state_is_fresh(cache_state)
 
     async def _cached_thread_source_event_ids(
         self,

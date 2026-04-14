@@ -119,7 +119,7 @@ async def _seed_thread_cache(
     events: list[dict[str, object]],
 ) -> None:
     """Seed one authoritative cached thread snapshot for tests."""
-    await cache.replace_thread(room_id, thread_id, events, validated_sync_token=None)
+    await cache.replace_thread(room_id, thread_id, events)
 
 
 @pytest.mark.asyncio
@@ -387,12 +387,14 @@ async def test_event_cache_initialize_clears_half_initialized_connection_on_fail
     broken_connection.close = AsyncMock()
     broken_connection.execute = AsyncMock(side_effect=[MagicMock(), RuntimeError("pragma boom")])
 
-    with patch(
-        "mindroom.matrix.cache.event_cache.aiosqlite.connect",
-        AsyncMock(return_value=broken_connection),
+    with (
+        patch(
+            "mindroom.matrix.cache.event_cache.aiosqlite.connect",
+            AsyncMock(return_value=broken_connection),
+        ),
+        pytest.raises(RuntimeError, match="pragma boom"),
     ):
-        with pytest.raises(RuntimeError, match="pragma boom"):
-            await cache.initialize()
+        await cache.initialize()
 
     broken_connection.close.assert_awaited_once()
     assert cache._db is None

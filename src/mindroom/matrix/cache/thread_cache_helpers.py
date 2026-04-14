@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,15 +17,6 @@ if TYPE_CHECKING:
 _RAW_THREAD_CACHE_TTL_SECONDS = 300.0
 
 
-@dataclass(frozen=True, slots=True)
-class ThreadCacheFreshnessContext:
-    """Runtime freshness inputs used to decide whether raw SQLite thread rows are reusable."""
-
-    runtime_started_at: float
-    last_sync_activity_monotonic: float | None
-    current_sync_token: str | None
-
-
 def event_id_from_event_source(event_source: dict[str, object]) -> str | None:
     """Return the event ID when one cached event source contains it."""
     event_id = event_source.get("event_id")
@@ -35,8 +25,6 @@ def event_id_from_event_source(event_source: dict[str, object]) -> str | None:
 
 def thread_cache_state_is_fresh(
     state: ThreadCacheState | None,
-    *,
-    context: ThreadCacheFreshnessContext,
     ttl_seconds: float = _RAW_THREAD_CACHE_TTL_SECONDS,
 ) -> bool:
     """Return whether one raw thread cache entry is still trustworthy for reads."""
@@ -44,11 +32,7 @@ def thread_cache_state_is_fresh(
         return False
     if state.room_invalidated_at is not None and state.validated_at <= state.room_invalidated_at:
         return False
-    if (time.time() - state.validated_at) >= ttl_seconds:
-        return False
-    if context.last_sync_activity_monotonic is None or context.current_sync_token is None:
-        return state.validated_at >= context.runtime_started_at
-    return state.validated_sync_token == context.current_sync_token
+    return (time.time() - state.validated_at) < ttl_seconds
 
 
 def resolved_cache_diagnostics(

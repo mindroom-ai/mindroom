@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -1240,7 +1240,6 @@ class TestExtractedModuleLoggerRebinding:
             "!room:localhost",
             "$threadroot",
             event_cache=bot.event_cache,
-            freshness_context=ANY,
         )
 
     @pytest.mark.asyncio
