@@ -15,6 +15,7 @@ from mindroom.matrix.client import (
     login,
     matrix_client,
     matrix_startup_error,
+    restore_login,
 )
 from mindroom.matrix.identity import MatrixID, agent_username_localpart, extract_server_name_from_homeserver
 from mindroom.matrix.state import MatrixState
@@ -51,6 +52,7 @@ class AgentMatrixUser:
     user_id: str
     display_name: str
     password: str
+    device_id: str | None = None
     access_token: str | None = None
 
     @cached_property
@@ -62,7 +64,7 @@ class AgentMatrixUser:
 def _get_agent_credentials(
     agent_name: str,
     runtime_paths: RuntimePaths,
-) -> dict[str, str] | None:
+) -> dict[str, str | None] | None:
     """Get credentials for a specific agent from matrix_state.yaml.
 
     Args:
@@ -77,7 +79,12 @@ def _get_agent_credentials(
     agent_key = _account_key_for_agent(agent_name)
     account = state.get_account(agent_key)
     if account:
-        return {"username": account.username, "password": account.password}
+        return {
+            "username": account.username,
+            "password": account.password,
+            "device_id": account.device_id,
+            "access_token": account.access_token,
+        }
     return None
 
 
@@ -86,6 +93,9 @@ def _save_agent_credentials(
     username: str,
     password: str,
     runtime_paths: RuntimePaths,
+    *,
+    device_id: str | None = None,
+    access_token: str | None = None,
 ) -> None:
     """Save credentials for a specific agent to matrix_state.yaml.
 
@@ -98,9 +108,41 @@ def _save_agent_credentials(
     """
     state = MatrixState.load(runtime_paths=runtime_paths)
     agent_key = _account_key_for_agent(agent_name)
-    state.add_account(agent_key, username, password)
+    state.add_account(
+        agent_key,
+        username,
+        password,
+        device_id=device_id,
+        access_token=access_token,
+    )
     state.save(runtime_paths=runtime_paths)
     logger.info("agent_credentials_saved", agent=agent_name)
+
+
+def _persist_agent_session(
+    agent_name: str,
+    username: str,
+    password: str,
+    *,
+    device_id: str | None,
+    access_token: str | None,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Persist one agent session so restarts can reuse the same Matrix device."""
+    _save_agent_credentials(
+        agent_name,
+        username,
+        password,
+        runtime_paths,
+        device_id=device_id,
+        access_token=access_token,
+    )
+    logger.info(
+        "agent_session_persisted",
+        agent=agent_name,
+        device_id=device_id,
+        has_access_token=bool(access_token),
+    )
 
 
 async def _homeserver_requires_registration_token(
@@ -614,14 +656,23 @@ async def create_agent_user(
         raise matrix_startup_error(msg, permanent=True)
 
     if existing_creds and (preferred_username is None or existing_creds["username"] == preferred_username):
-        matrix_username = existing_creds["username"]
-        password = existing_creds["password"]
+        username_value = existing_creds["username"]
+        password_value = existing_creds["password"]
+        if username_value is None or password_value is None:
+            msg = f"Stored Matrix credentials for {agent_name} are incomplete"
+            raise matrix_startup_error(msg, permanent=True)
+        matrix_username = username_value
+        password = password_value
+        existing_device_id = existing_creds["device_id"]
+        existing_access_token = existing_creds["access_token"]
         logger.info("agent_credentials_loaded", agent=agent_name)
         registration_needed = False
     else:
         # Generate new credentials
         matrix_username = preferred_username or agent_username_localpart(agent_name, runtime_paths=runtime_paths)
         password = secrets.token_urlsafe(24)
+        existing_device_id = None
+        existing_access_token = None
         logger.info("agent_credentials_generated", agent=agent_name)
         registration_needed = True
 
@@ -637,27 +688,6 @@ async def create_agent_user(
             display_name=agent_display_name,
             runtime_paths=runtime_paths,
         )
-    else:
-        login_response = await _login_existing_user(
-            homeserver=homeserver,
-            user_id=user_id,
-            password=password,
-            display_name=agent_display_name,
-            runtime_paths=runtime_paths,
-        )
-        if not isinstance(login_response, nio.LoginResponse):
-            logger.info(
-                "Existing Matrix credentials failed login; attempting registration to recover account",
-                agent_name=agent_name,
-                user_id=user_id,
-            )
-            await _register_user(
-                homeserver=homeserver,
-                username=matrix_username,
-                password=password,
-                display_name=agent_display_name,
-                runtime_paths=runtime_paths,
-            )
 
     # Save credentials only after registration/verification succeeds.
     if registration_needed:
@@ -669,6 +699,8 @@ async def create_agent_user(
         user_id=user_id,
         display_name=agent_display_name,
         password=password,
+        device_id=existing_device_id,
+        access_token=existing_access_token,
     )
 
 
@@ -691,12 +723,39 @@ async def login_agent_user(
         ValueError: If login fails
 
     """
+    if agent_user.access_token and agent_user.device_id:
+        try:
+            client = await restore_login(
+                homeserver,
+                agent_user.user_id,
+                agent_user.device_id,
+                agent_user.access_token,
+                runtime_paths=runtime_paths,
+            )
+            return client
+        except ValueError:
+            logger.warning(
+                "matrix_login_restore_failed_falling_back_to_password",
+                agent=agent_user.agent_name,
+                user_id=agent_user.user_id,
+                device_id=agent_user.device_id,
+            )
+
     client = await login(
         homeserver,
         agent_user.user_id,
         agent_user.password,
         runtime_paths=runtime_paths,
     )
+    _persist_agent_session(
+        agent_user.agent_name,
+        agent_user.matrix_id.localpart,
+        agent_user.password,
+        device_id=client.device_id,
+        access_token=client.access_token,
+        runtime_paths=runtime_paths,
+    )
+    agent_user.device_id = client.device_id
     agent_user.access_token = client.access_token
     return client
 

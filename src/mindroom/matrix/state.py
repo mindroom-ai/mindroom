@@ -14,6 +14,8 @@ class _MatrixAccount(BaseModel):
 
     username: str
     password: str
+    device_id: str | None = None
+    access_token: str | None = None
 
 
 class MatrixRoom(BaseModel):
@@ -63,9 +65,22 @@ class MatrixState(BaseModel):
         """Get an account by key."""
         return self.accounts.get(key)
 
-    def add_account(self, key: str, username: str, password: str) -> None:
+    def add_account(
+        self,
+        key: str,
+        username: str,
+        password: str,
+        *,
+        device_id: str | None = None,
+        access_token: str | None = None,
+    ) -> None:
         """Add or update an account."""
-        self.accounts[key] = _MatrixAccount(username=username, password=password)
+        self.accounts[key] = _MatrixAccount(
+            username=username,
+            password=password,
+            device_id=device_id,
+            access_token=access_token,
+        )
 
     def get_room(self, key: str) -> MatrixRoom | None:
         """Get a room by key."""

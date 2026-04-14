@@ -383,6 +383,28 @@ async def login(
     raise matrix_startup_error(msg, response=response)
 
 
+async def restore_login(
+    homeserver: str,
+    user_id: str,
+    device_id: str,
+    access_token: str,
+    runtime_paths: RuntimePaths,
+) -> nio.AsyncClient:
+    """Restore one authenticated Matrix session without creating a new device."""
+    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
+    client.restore_login(user_id, device_id, access_token)
+
+    response = await client.whoami()
+    if isinstance(response, nio.WhoamiResponse):
+        logger.info("matrix_login_restored", user_id=user_id, device_id=device_id)
+        return client
+
+    await client.close()
+    msg = f"Failed to restore Matrix login for {user_id}: {response}"
+    raise matrix_startup_error(msg, response=response)
+
+
 async def invite_to_room(
     client: nio.AsyncClient,
     room_id: str,
