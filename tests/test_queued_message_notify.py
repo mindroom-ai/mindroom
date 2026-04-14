@@ -56,6 +56,7 @@ from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
     runtime_paths_for,
@@ -91,6 +92,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -657,6 +659,58 @@ async def test_refresh_thread_history_after_lock_refreshes_when_lookup_repair_is
     )
 
     refreshed_history = [SimpleNamespace(event_id="$reply", body="updated")]
+    with patch.object(
+        resolver,
+        "fetch_thread_history",
+        new=AsyncMock(return_value=refreshed_history),
+    ) as mock_fetch_thread_history:
+        request = await coordinator._refresh_thread_history_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=cached_history,
+                prompt="hello",
+                user_id="@user:localhost",
+            ),
+        )
+
+    mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
+    assert request.thread_history == refreshed_history
+
+
+@pytest.mark.asyncio
+async def test_refresh_thread_history_after_lock_refreshes_when_redaction_candidate_only_matches_request_history(
+    tmp_path: Path,
+) -> None:
+    """Post-lock refresh should not trust generation equality when only the request history still names the redacted event."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    access = bot._conversation_cache
+    cached_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="Root",
+                event_id="$thread",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@agent:localhost",
+                body="Reply 1",
+                event_id="$reply-1",
+            ),
+        ],
+        is_full_history=True,
+        thread_version=0,
+    )
+    access._mark_lookup_repair_pending(
+        "!room:localhost",
+        "$reply-1",
+        reason="sync_redaction_lookup_missing",
+    )
+
+    refreshed_history = [SimpleNamespace(event_id="$thread", body="Root")]
     with patch.object(
         resolver,
         "fetch_thread_history",

@@ -59,19 +59,43 @@ class ThreadFreshnessState:
     pending_lookup_event_ids: set[str] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
+    def is_prunable(self) -> bool:
+        """Return whether this clean thread state can be safely evicted."""
+        return not self.repair_required and not self.pending_lookup_event_ids and not self.lock.locked()
+
 
 @dataclass(slots=True)
 class ResolvedThreadCache:
     """Bounded LRU cache of resolved histories plus per-thread freshness state."""
 
     max_entries: int = 200
+    max_states: int = 800
     ttl_seconds: float = 300.0
     _entries: OrderedDict[ThreadCacheKey, ResolvedThreadCacheEntry] = field(default_factory=OrderedDict, init=False)
-    _states: dict[ThreadCacheKey, ThreadFreshnessState] = field(default_factory=dict, init=False)
+    _states: OrderedDict[ThreadCacheKey, ThreadFreshnessState] = field(default_factory=OrderedDict, init=False)
     _next_generation: int = field(default=1, init=False)
 
     def _state(self, key: ThreadCacheKey) -> ThreadFreshnessState:
-        return self._states.setdefault(key, ThreadFreshnessState())
+        state = self._states.get(key)
+        if state is None:
+            state = ThreadFreshnessState()
+            self._states[key] = state
+        else:
+            self._states.move_to_end(key)
+        self._prune_states()
+        return state
+
+    def _prune_states(self) -> None:
+        while len(self._states) > self.max_states:
+            evicted_key: ThreadCacheKey | None = None
+            for key, state in self._states.items():
+                if key in self._entries or not state.is_prunable():
+                    continue
+                evicted_key = key
+                break
+            if evicted_key is None:
+                return
+            self._states.pop(evicted_key, None)
 
     def version(self, room_id: str, thread_id: str) -> int:
         """Return the current in-memory generation for one thread."""
@@ -138,13 +162,17 @@ class ResolvedThreadCache:
         key = (room_id, thread_id)
         self._entries[key] = entry
         self._entries.move_to_end(key)
+        self._state(key)
         while len(self._entries) > self.max_entries:
             self._entries.popitem(last=False)
+        self._prune_states()
 
     def invalidate(self, room_id: str, thread_id: str) -> ResolvedThreadCacheEntry | None:
         """Drop one cache entry if it exists."""
         key = (room_id, thread_id)
-        return self._entries.pop(key, None)
+        entry = self._entries.pop(key, None)
+        self._prune_states()
+        return entry
 
     def _is_expired(self, entry: ResolvedThreadCacheEntry) -> bool:
         return (time.monotonic() - entry.cached_at_monotonic) >= self.ttl_seconds
@@ -158,6 +186,12 @@ class ResolvedThreadCache:
             yield
         finally:
             lock.release()
+            self._prune_states()
+
+    def clear(self) -> None:
+        """Drop all cached resolved histories and freshness metadata."""
+        self._entries.clear()
+        self._states.clear()
 
 
 def resolved_thread_cache_entry(

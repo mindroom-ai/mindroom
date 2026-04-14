@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import typing
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
 
 _SYNC_FRESHNESS_WINDOW_SECONDS = 30.0
 _INCREMENTAL_RESOLVED_CACHE_EVENT_LIMIT = 1
+_MAX_PENDING_LOOKUP_CANDIDATES_PER_ROOM = 256
 logger = get_logger(__name__)
 
 __all__ = [
@@ -66,6 +68,7 @@ __all__ = [
     "EventLookupResult",
     "MatrixConversationCache",
     "ThreadReadResult",
+    "ThreadRepairRequiredError",
 ]
 
 
@@ -88,6 +91,10 @@ class ConversationCacheProtocol(Protocol):
         history: ThreadReadResult,
     ) -> bool:
         """Return whether one previously fetched history is still current for this thread."""
+
+
+class ThreadRepairRequiredError(RuntimeError):
+    """Raised when a repair-required thread cannot be authoritatively refilled."""
 
 
 async def _apply_cached_latest_edit(
@@ -368,7 +375,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
     _resolved_thread_cache: ResolvedThreadCache = field(default_factory=ResolvedThreadCache, init=False)
-    _room_pending_lookup_candidates: dict[str, set[str]] = field(default_factory=dict, init=False)
+    _room_pending_lookup_candidates: dict[str, OrderedDict[str, None]] = field(default_factory=dict, init=False)
     _reply_chain_caches_getter: typing.Callable[[], ReplyChainCaches | None] | None = field(
         default=None,
         init=False,
@@ -498,8 +505,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
     def _clear_thread_refresh_required(self, room_id: str, thread_id: str) -> None:
         self._resolved_thread_cache.clear_repair_required(room_id, thread_id)
 
-    def _room_lookup_candidates(self, room_id: str) -> set[str]:
-        return self._room_pending_lookup_candidates.setdefault(room_id, set())
+    def reset_runtime_state(self) -> None:
+        """Drop in-memory conversation state tied to one runtime lifetime."""
+        self._resolved_thread_cache.clear()
+        self._room_pending_lookup_candidates.clear()
+
+    def _room_lookup_candidates(self, room_id: str) -> OrderedDict[str, None]:
+        return self._room_pending_lookup_candidates.setdefault(room_id, OrderedDict())
 
     def _room_has_pending_lookup_candidates(self, room_id: str) -> bool:
         return bool(self._room_pending_lookup_candidates.get(room_id))
@@ -512,7 +524,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_candidates = self._room_pending_lookup_candidates.get(room_id)
         if room_candidates is None or not event_ids:
             return
-        room_candidates.difference_update(event_ids)
+        for event_id in event_ids:
+            room_candidates.pop(event_id, None)
         if not room_candidates:
             self._room_pending_lookup_candidates.pop(room_id, None)
 
@@ -524,7 +537,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_candidates = self._room_pending_lookup_candidates.get(room_id)
         if not room_candidates or not source_event_ids:
             return frozenset()
-        return frozenset(room_candidates.intersection(source_event_ids))
+        return frozenset(event_id for event_id in room_candidates if event_id in source_event_ids)
 
     def _mark_lookup_repair_pending(
         self,
@@ -535,7 +548,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> None:
         if not isinstance(event_id, str) or not event_id:
             return
-        self._room_lookup_candidates(room_id).add(event_id)
+        room_candidates = self._room_lookup_candidates(room_id)
+        room_candidates[event_id] = None
+        room_candidates.move_to_end(event_id)
+        while len(room_candidates) > _MAX_PENDING_LOOKUP_CANDIDATES_PER_ROOM:
+            room_candidates.popitem(last=False)
         self.logger.debug(
             "Marked Matrix thread lookup repair pending",
             room_id=room_id,
@@ -553,6 +570,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if not promoted_event_ids:
             return frozenset()
         self._consume_room_lookup_candidates(room_id, promoted_event_ids)
+        thread_version = self._bump_thread_version(room_id, thread_id)
         self._resolved_thread_cache.mark_pending_lookup_repairs(room_id, thread_id, promoted_event_ids)
         self._resolved_thread_cache.mark_repair_required(room_id, thread_id)
         self._resolved_thread_cache.invalidate(room_id, thread_id)
@@ -561,7 +579,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id=room_id,
             thread_id=thread_id,
             reason="lookup_repair_required",
-            thread_version=self.thread_version(room_id, thread_id),
+            thread_version=thread_version,
         )
         return promoted_event_ids
 
@@ -724,6 +742,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     async def _wait_for_pending_room_cache_updates(self, room_id: str) -> None:
         await self.runtime.event_cache_write_coordinator.wait_for_room_idle(room_id)
+
+    def _history_event_ids(self, history: Sequence[ResolvedVisibleMessage]) -> frozenset[str]:
+        return frozenset(message.event_id for message in history if message.event_id)
 
     async def _cached_thread_event_sources(
         self,
@@ -1004,7 +1025,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_version=current_thread_version,
         )
         if repair_required and not self._repair_history_is_authoritative(history):
-            return history
+            msg = "Repair-required Matrix thread history could not be authoritatively refilled"
+            raise ThreadRepairRequiredError(msg)
         await self._store_resolved_thread_cache_entry(
             room_id,
             thread_id,
@@ -1121,7 +1143,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Return whether one previously fetched history is still current for this thread."""
         if history.thread_version is None:
             return False
+        await self._wait_for_pending_room_cache_updates(room_id)
         async with self._resolved_thread_cache.entry_lock(room_id, thread_id):
+            await self._promote_lookup_repairs_locked(
+                room_id,
+                thread_id,
+                self._history_event_ids(history),
+            )
             await self._adopt_room_lookup_repairs_locked(room_id, thread_id)
             if self._thread_requires_refresh(room_id, thread_id):
                 return False

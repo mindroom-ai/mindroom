@@ -994,6 +994,7 @@ class AgentBot:
         support = self._standalone_runtime_support
         assert support is not None
         await close_standalone_runtime_support(support, logger=self.logger)
+        self._conversation_cache.reset_runtime_state()
         self.event_cache = None
         self.event_cache_write_coordinator = None
         self._standalone_runtime_support = None

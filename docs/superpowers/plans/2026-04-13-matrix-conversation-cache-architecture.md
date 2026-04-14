@@ -4,7 +4,7 @@
 
 **Goal:** Make `mindroom.matrix.conversation_cache` the required read-through owner of Matrix conversation data, enforce the thread-cache boundary uniformly, and eliminate stale-read and duplicate-summary regressions.
 
-**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, and repair policy. This enforcement pass finishes that architecture at the thread-cache seam by moving generation, repair-required state, promoted lookup repairs, and the read/write lock into one thread-scoped freshness state, using non-reused generation tokens, and turning room-level lookup failures into thread-specific repairs only when a read proves they intersect that thread.
+**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, and repair policy. This enforcement pass finishes that architecture at the thread-cache seam by moving generation, repair-required state, promoted lookup repairs, and the read/write lock into one thread-scoped freshness state, using non-reused generation tokens, bounding disposable in-memory freshness metadata, and turning room-level lookup failures into thread-specific repairs only when a read proves they intersect that thread.
 
 **Tech Stack:** Python, asyncio, aiosqlite, matrix-nio, pytest, AsyncMock, existing Matrix cache and bot runtime abstractions.
 
@@ -78,6 +78,7 @@ Implement:
 - one thread-scoped freshness state that owns generation, repair-required state, promoted lookup repairs, and the async lock,
 - non-reused generation tokens that survive resolved-entry LRU churn,
 - room-scoped lookup candidates that are promoted only when a concrete thread read proves an intersection,
+- bounded cleanup for disposable freshness metadata and runtime-reset clearing on standalone restart,
 - a conversation-cache freshness check that ResponseRunner uses instead of raw generation equality.
 
 - [ ] **Step 4: Run the focused tests to verify they pass**

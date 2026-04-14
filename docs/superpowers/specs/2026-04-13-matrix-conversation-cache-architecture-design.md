@@ -122,6 +122,7 @@ Team and single-agent responses go through the same summary gate.
 
 The in-memory layer is disposable.
 It must be safe to invalidate aggressively and rebuild.
+The per-thread freshness store and unresolved room-candidate index are bounded.
 
 ## Thread Freshness State
 
@@ -214,6 +215,7 @@ Only threads whose cached source events intersect a candidate are promoted to re
 ### Invariant 12
 
 Closing standalone runtime support discards the concrete support object and detaches it from the bot runtime so same-process restart rebuilds from the current config.
+It also clears in-memory conversation-cache accelerators so no resolved thread history or pending lookup metadata crosses the restart boundary.
 
 ## Read Path
 
@@ -245,6 +247,7 @@ Sync processing collects candidate updates.
 Per-thread version bumps and invalidations happen after successful persistence.
 If persistence fails for a thread-affecting update, that thread is marked repair-required so the next read bypasses freshness shortcuts and repairs from the homeserver.
 If a mutation cannot resolve the thread at all, the affected event ID is recorded only as a room-scoped lookup candidate until a concrete thread read proves which thread it belongs to.
+That room-scoped candidate metadata is bounded and only protects immediate follow-up reads until it is promoted or pruned.
 
 ## Error Handling
 
