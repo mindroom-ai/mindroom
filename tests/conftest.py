@@ -155,20 +155,12 @@ def _install_event_cache_pending_lookup_tracking(
                 matching_event_ids.add(event_id)
         return frozenset(matching_event_ids)
 
-    async def pending_lookup_repairs_for_event_ids(room_id: str, event_ids: frozenset[str]) -> frozenset[str]:
-        return frozenset(
-            event_id
-            for candidate_room_id, event_id in pending_lookup_repairs
-            if candidate_room_id == room_id and event_id in event_ids
-        )
-
     async def consume_pending_lookup_repairs(room_id: str, event_ids: frozenset[str]) -> None:
         for event_id in event_ids:
             pending_lookup_repairs.discard((room_id, event_id))
 
     event_cache.mark_pending_lookup_repair.side_effect = mark_pending_lookup_repair
     event_cache.matching_pending_lookup_repairs.side_effect = matching_pending_lookup_repairs
-    event_cache.pending_lookup_repairs_for_event_ids.side_effect = pending_lookup_repairs_for_event_ids
     event_cache.consume_pending_lookup_repairs.side_effect = consume_pending_lookup_repairs
 
 

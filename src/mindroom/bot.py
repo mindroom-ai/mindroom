@@ -1039,75 +1039,96 @@ class AgentBot:
             self.agent_user,
             runtime_paths=self.runtime_paths,
         )
-        self._restore_saved_sync_token()
-        await self._initialize_runtime_support_services()
-        await self._set_avatar_if_available()
-        await self._set_presence_with_model_info()
-        interactive.init_persistence(self.runtime_paths.storage_root)
-        client = self.client
-        assert client is not None
+        try:
+            self._restore_saved_sync_token()
+            await self._initialize_runtime_support_services()
+            await self._set_avatar_if_available()
+            await self._set_presence_with_model_info()
+            interactive.init_persistence(self.runtime_paths.storage_root)
+            client = self.client
+            assert client is not None
 
-        # Register event callbacks - wrap them to run as background tasks
-        # This ensures the sync loop is never blocked, allowing stop reactions to work
-        client.add_event_callback(
-            _create_task_wrapper(self._on_invite, owner=self._runtime_view),
-            nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
-        )
-        client.add_event_callback(_create_task_wrapper(self._on_message, owner=self._runtime_view), nio.RoomMessageText)
-        client.add_event_callback(
-            _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
-            nio.RedactionEvent,
-        )
-        client.add_event_callback(_create_task_wrapper(self._on_reaction, owner=self._runtime_view), nio.ReactionEvent)
+            # Register event callbacks - wrap them to run as background tasks
+            # This ensures the sync loop is never blocked, allowing stop reactions to work
+            client.add_event_callback(
+                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+                nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_message, owner=self._runtime_view),
+                nio.RoomMessageText,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
+                nio.RedactionEvent,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
+                nio.ReactionEvent,
+            )
 
-        # Register media callbacks on all agents (each agent handles its own routing)
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageImage,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedImage,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageFile,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedFile,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageVideo,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedVideo,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageAudio,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedAudio,
-        )
-        client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
-        client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
+            # Register media callbacks on all agents (each agent handles its own routing)
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomMessageImage,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomEncryptedImage,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomMessageFile,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomEncryptedFile,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomMessageVideo,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomEncryptedVideo,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomMessageAudio,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+                nio.RoomEncryptedAudio,
+            )
+            client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+            client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
-        self.running = True
+            self.running = True
 
-        # Router bot has additional responsibilities
-        if self.agent_name == ROUTER_AGENT_NAME:
+            # Router bot has additional responsibilities
+            if self.agent_name == ROUTER_AGENT_NAME:
+                try:
+                    await cleanup_all_orphaned_bots(client, self.config, self.runtime_paths)
+                except Exception as e:
+                    self.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
+
+            # Note: Room joining is deferred until after invitations are handled
+            self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
+            await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+        except Exception:
+            client = self.client
+            self.running = False
             try:
-                await cleanup_all_orphaned_bots(client, self.config, self.runtime_paths)
-            except Exception as e:
-                self.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
-
-        # Note: Room joining is deferred until after invitations are handled
-        self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
-        await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+                await self._close_runtime_support_services()
+            except Exception:
+                self.logger.warning("Failed to clean up runtime support after startup failure", exc_info=True)
+            self.client = None
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
+            raise
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.

@@ -927,6 +927,7 @@ class TurnController:
             if dispatch_timing is not None:
                 dispatch_timing.mark("response_payload_start")
             context_ready_monotonic = time.monotonic()
+            await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             payload = await payload_builder(dispatch.context)
             prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
                 dispatch,

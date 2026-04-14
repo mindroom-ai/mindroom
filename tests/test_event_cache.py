@@ -883,50 +883,6 @@ async def test_initialize_backfills_event_edit_index_from_old_schema(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_pending_lookup_repairs_retain_unmatched_entries_until_explicit_resolution(tmp_path: Path) -> None:
-    """Unmatched lookup repairs must remain durable until they are explicitly resolved."""
-    db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
-    await cache.initialize()
-    try:
-        with sqlite3.connect(db_path) as db:
-            db.executemany(
-                """
-                INSERT INTO pending_lookup_repairs(room_id, event_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                [
-                    ("!room:localhost", "$old_unmatched", 1.0),
-                    ("!room:localhost", "$new_unmatched", 2.0),
-                ],
-            )
-            db.commit()
-
-        pending = await cache.pending_lookup_repairs_for_event_ids(
-            "!room:localhost",
-            frozenset({"$old_unmatched", "$new_unmatched"}),
-        )
-
-        with sqlite3.connect(db_path) as db:
-            remaining_repairs = {
-                str(row[0])
-                for row in db.execute(
-                    """
-                    SELECT event_id
-                    FROM pending_lookup_repairs
-                    WHERE room_id = ?
-                    """,
-                    ("!room:localhost",),
-                ).fetchall()
-            }
-    finally:
-        await cache.close()
-
-    assert pending == frozenset({"$old_unmatched", "$new_unmatched"})
-    assert remaining_repairs == {"$old_unmatched", "$new_unmatched"}
-
-
-@pytest.mark.asyncio
 async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(tmp_path: Path) -> None:
     """Cache hits should bypass the full root-plus-relations fetch path."""
     cache = _EventCache(tmp_path / "event_cache.db")

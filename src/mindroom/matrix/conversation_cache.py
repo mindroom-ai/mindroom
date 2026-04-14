@@ -91,14 +91,6 @@ class ConversationCacheProtocol(Protocol):
     ) -> str | None:
         """Resolve the latest visible thread event when MSC3440 fallback needs it."""
 
-    async def is_thread_history_current(
-        self,
-        room_id: str,
-        thread_id: str,
-        history: ThreadReadResult,
-    ) -> bool:
-        """Return whether one previously fetched history is still current for this thread."""
-
 
 class ThreadRepairRequiredError(RuntimeError):
     """Raised when a repair-required thread cannot be authoritatively refilled."""
@@ -578,28 +570,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
     ) -> frozenset[str]:
         return await self._promote_lookup_repairs_locked(room_id, thread_id)
-
-    async def _adopt_history_lookup_repairs_locked(
-        self,
-        room_id: str,
-        thread_id: str,
-        history: ThreadReadResult,
-    ) -> frozenset[str]:
-        history_event_ids = frozenset(
-            event_id for message in history if isinstance((event_id := message.event_id), str) and event_id
-        )
-        if not history_event_ids:
-            return frozenset()
-        promoted_event_ids = await self.runtime.event_cache.pending_lookup_repairs_for_event_ids(
-            room_id,
-            history_event_ids,
-        )
-        return await self._promote_lookup_repairs_locked(
-            room_id,
-            thread_id,
-            promoted_event_ids=promoted_event_ids,
-            reason="lookup_repair_required_from_request_history",
-        )
 
     async def _record_thread_change(
         self,
@@ -1136,23 +1106,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if require_full_history:
             return await self._read_full_thread_history(room_id, thread_id)
         return await self._read_snapshot_thread(room_id, thread_id)
-
-    async def is_thread_history_current(
-        self,
-        room_id: str,
-        thread_id: str,
-        history: ThreadReadResult,
-    ) -> bool:
-        """Return whether one previously fetched history is still current for this thread."""
-        if history.thread_version is None:
-            return False
-        await self._wait_for_pending_room_cache_updates(room_id)
-        async with self._resolved_thread_cache.entry_lock(room_id, thread_id):
-            await self._adopt_room_lookup_repairs_locked(room_id, thread_id)
-            await self._adopt_history_lookup_repairs_locked(room_id, thread_id, history)
-            if await self._thread_requires_refresh(room_id, thread_id):
-                return False
-            return history.thread_version == self.thread_version(room_id, thread_id)
 
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
         """Resolve thread snapshot using one explicit access policy."""

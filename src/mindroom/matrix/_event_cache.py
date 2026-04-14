@@ -89,13 +89,6 @@ class ConversationEventCache(Protocol):
     async def matching_pending_lookup_repairs(self, room_id: str, thread_id: str) -> frozenset[str]:
         """Return unresolved repair event IDs whose durable thread mapping now matches one thread."""
 
-    async def pending_lookup_repairs_for_event_ids(
-        self,
-        room_id: str,
-        event_ids: frozenset[str],
-    ) -> frozenset[str]:
-        """Return unresolved repair event IDs that intersect one candidate event-id set."""
-
     async def consume_pending_lookup_repairs(self, room_id: str, event_ids: frozenset[str]) -> None:
         """Clear unresolved repair obligations that have been promoted to one thread."""
 
@@ -701,28 +694,6 @@ class _EventCache:
                 WHERE pending_lookup_repairs.room_id = ? AND event_threads.thread_id = ?
                 """,
                 (room_id, thread_id),
-            )
-            rows = await cursor.fetchall()
-            await cursor.close()
-            return frozenset(str(row[0]) for row in rows)
-
-    async def pending_lookup_repairs_for_event_ids(
-        self,
-        room_id: str,
-        event_ids: frozenset[str],
-    ) -> frozenset[str]:
-        """Return unresolved repair event IDs that intersect one candidate event-id set."""
-        if not event_ids:
-            return frozenset()
-        async with self._acquire_db_operation(room_id, operation="pending_lookup_repairs_for_event_ids") as db:
-            cursor = await db.execute(
-                """
-                SELECT event_id
-                FROM pending_lookup_repairs
-                WHERE room_id = ?
-                  AND event_id IN (SELECT value FROM json_each(?))
-                """,
-                (room_id, json.dumps(sorted(event_ids))),
             )
             rows = await cursor.fetchall()
             await cursor.close()
