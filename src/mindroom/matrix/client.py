@@ -1183,7 +1183,15 @@ async def send_file_message(
 
     event_id = await send_message(client, room_id, content)
     if event_id is not None and conversation_cache is not None:
-        await conversation_cache.record_outbound_message(room_id, event_id, content)
+        try:
+            await conversation_cache.record_outbound_message(room_id, event_id, content)
+        except Exception as exc:
+            logger.warning(
+                "Ignoring outbound Matrix file-message cache write-through failure after successful send",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
     return event_id
 
 

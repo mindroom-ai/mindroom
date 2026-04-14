@@ -1131,6 +1131,27 @@ class TestSendSummaryEvent:
         assert len(content["body"]) == THREAD_SUMMARY_MAX_LENGTH
         assert content["io.mindroom.thread_summary"]["summary"] == truncated_summary
 
+    async def test_send_success_ignores_cache_write_failure(self) -> None:
+        """A successful summary send should not fail just because advisory cache write-through fails."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
+        conversation_cache.record_outbound_message.side_effect = RuntimeError("cache write failed")
+
+        result = await send_thread_summary_event(
+            client,
+            room_id="!room:x",
+            thread_id="$root1",
+            summary="Discussed deployment plan",
+            message_count=15,
+            model_name="haiku",
+            conversation_cache=conversation_cache,
+        )
+
+        assert result == "$s1"
+        conversation_cache.record_outbound_message.assert_awaited_once()
+
     async def test_send_failure_returns_none(self) -> None:
         """Return None when room_send fails."""
         client = AsyncMock(spec=nio.AsyncClient)

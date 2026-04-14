@@ -1778,6 +1778,37 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
+    async def test_local_bot_redaction_ignores_cache_failure_after_successful_redact(self, bot: AgentBot) -> None:
+        """A successful local redact should not fail just because advisory cache write-through fails."""
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.room_redact = AsyncMock(
+            return_value=nio.RoomRedactResponse(
+                event_id="$redaction:localhost",
+                room_id="!test:localhost",
+            ),
+        )
+        bot._conversation_cache.record_outbound_redaction = AsyncMock(
+            side_effect=RuntimeError("cache write failed"),
+        )
+
+        result = await bot._redact_message_event(
+            room_id="!test:localhost",
+            event_id="$target:localhost",
+            reason="cleanup",
+        )
+
+        assert result is True
+        bot.client.room_redact.assert_awaited_once_with(
+            "!test:localhost",
+            "$target:localhost",
+            reason="cleanup",
+        )
+        bot._conversation_cache.record_outbound_redaction.assert_awaited_once_with(
+            "!test:localhost",
+            "$target:localhost",
+        )
+
+    @pytest.mark.asyncio
     async def test_wait_for_room_idle_returns_after_completed_tail_task(self) -> None:
         """Room-idle waiting should not livelock on a tail task that already finished."""
         coordinator = _EventCacheWriteCoordinator(

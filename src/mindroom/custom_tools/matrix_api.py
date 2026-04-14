@@ -393,6 +393,33 @@ class MatrixApiTools(Toolkit):
         event_info = EventInfo.from_event({"type": event_type, "content": content})
         return isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str)
 
+    @staticmethod
+    async def _record_send_event_outbound_cache_write(
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        event_type: str,
+        event_id: str,
+        content: dict[str, object],
+    ) -> None:
+        """Record a successful threaded room-message send in the local conversation cache."""
+        if event_type != "m.room.message" or context.conversation_cache is None:
+            return
+        try:
+            await context.conversation_cache.record_outbound_message(
+                room_id,
+                event_id,
+                content,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring matrix_api send_event cache write-through failure after successful send",
+                room_id=room_id,
+                event_id=event_id,
+                event_type=event_type,
+                error=str(exc),
+            )
+
     async def _send_event(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
@@ -486,12 +513,13 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomSendResponse):
-            if normalized_event_type == "m.room.message" and context.conversation_cache is not None:
-                await context.conversation_cache.record_outbound_message(
-                    room_id,
-                    response.event_id,
-                    normalized_content,
-                )
+            await self._record_send_event_outbound_cache_write(
+                context,
+                room_id=room_id,
+                event_type=normalized_event_type,
+                event_id=response.event_id,
+                content=normalized_content,
+            )
             self._audit_write(
                 context=context,
                 room_id=room_id,
@@ -823,10 +851,18 @@ class MatrixApiTools(Toolkit):
 
         if isinstance(response, nio.RoomRedactResponse):
             if context.conversation_cache is not None:
-                await context.conversation_cache.record_outbound_redaction(
-                    room_id,
-                    normalized_event_id,
-                )
+                try:
+                    await context.conversation_cache.record_outbound_redaction(
+                        room_id,
+                        normalized_event_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Ignoring matrix_api redact cache write-through failure after successful redact",
+                        room_id=room_id,
+                        target_event_id=normalized_event_id,
+                        error=str(exc),
+                    )
             self._audit_write(
                 context=context,
                 room_id=room_id,

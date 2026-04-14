@@ -963,7 +963,11 @@ class ThreadWritePolicy:
             ]
             self.cache._queue_room_cache_update(
                 room_id,
-                lambda event_cache=event_cache, room_id=room_id, cached_events=cached_events, redacted_event_ids=redacted_event_ids, threaded_events=threaded_events: self.cache._persist_room_sync_timeline_updates(
+                lambda event_cache=event_cache,
+                room_id=room_id,
+                cached_events=cached_events,
+                redacted_event_ids=redacted_event_ids,
+                threaded_events=threaded_events: self.cache._persist_room_sync_timeline_updates(
                     event_cache,
                     room_id,
                     cached_events,

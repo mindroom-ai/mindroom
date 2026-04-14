@@ -347,11 +347,20 @@ async def send_thread_summary_event(
     )
     event_id = await send_message(client, room_id, content)
     if event_id is not None:
-        await conversation_cache.record_outbound_message(
-            room_id,
-            event_id,
-            content,
-        )
+        try:
+            await conversation_cache.record_outbound_message(
+                room_id,
+                event_id,
+                content,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring thread summary cache write-through failure after successful send",
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event_id,
+                error=str(exc),
+            )
         logger.info(
             "Sent thread summary",
             room_id=room_id,

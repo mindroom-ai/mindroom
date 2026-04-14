@@ -1687,7 +1687,15 @@ class AgentBot:
         if isinstance(response, nio.RoomRedactError):
             self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
             return False
-        await self._conversation_cache.record_outbound_redaction(room_id, event_id)
+        try:
+            await self._conversation_cache.record_outbound_redaction(room_id, event_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Ignoring local redaction cache write-through failure after successful redact",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
         return True
 
 

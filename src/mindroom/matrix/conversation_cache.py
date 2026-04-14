@@ -89,10 +89,17 @@ class ConversationCacheProtocol(Protocol):
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Write one locally sent threaded message or edit through to the cache."""
+        """Write one locally sent threaded message or edit through to the cache.
+
+        This is advisory post-send bookkeeping and must fail open.
+        Callers should be able to treat the Matrix delivery as successful even if cache repair state cannot be updated.
+        """
 
     async def record_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Write one locally redacted threaded message through to the cache."""
+        """Write one locally redacted threaded message through to the cache.
+
+        This is advisory post-redaction bookkeeping and must fail open.
+        """
 
 
 async def _apply_cached_latest_edit(
