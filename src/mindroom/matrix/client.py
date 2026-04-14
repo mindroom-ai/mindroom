@@ -1208,26 +1208,6 @@ def _snapshot_message_dict(event: nio.Event) -> ResolvedVisibleMessage:
     return message
 
 
-async def _fetch_thread_context_via_relations(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch a lightweight thread snapshot from relations when supported."""
-    event_sources = await _fetch_thread_event_sources_via_relations(
-        client,
-        room_id,
-        thread_id,
-        include_latest_edits=True,
-    )
-    return await _resolve_thread_history_from_event_sources(
-        client,
-        thread_id=thread_id,
-        event_sources=event_sources,
-        hydrate_sidecars=False,
-    )
-
-
 def _sort_thread_history_root_first(
     messages: list[ResolvedVisibleMessage],
     *,
@@ -2192,7 +2172,7 @@ async def fetch_thread_snapshot(
     event_cache: ConversationEventCache,
     freshness_context: ThreadCacheFreshnessContext | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch lightweight thread context for dispatch decisions."""
+    """Fetch thread context for dispatch decisions, preferring cached snapshots."""
     effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
     cached_snapshot = await _load_cached_thread_history(
         client,
@@ -2205,16 +2185,13 @@ async def fetch_thread_snapshot(
     if cached_snapshot is not None:
         return cached_snapshot
 
-    try:
-        return _thread_history_result(
-            await _fetch_thread_context_via_relations(client, room_id, thread_id),
-            is_full_history=False,
-        )
-    except _ThreadHistoryFastPathUnavailableError:
-        return _thread_history_result(
-            await _fetch_thread_history_via_room_messages(client, room_id, thread_id),
-            is_full_history=True,
-        )
+    return await refresh_thread_history_from_source(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        freshness_context=effective_freshness_context,
+    )
 
 
 async def get_room_threads_page(

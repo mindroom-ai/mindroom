@@ -75,7 +75,6 @@ from mindroom.matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
     ThreadHistoryResult,
-    _ThreadHistoryFastPathUnavailableError,
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -6566,7 +6565,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Fallback snapshots should not trigger a second full-history fetch during dispatch extraction."""
+        """Authoritative snapshot refresh should not trigger a second full-history fetch during dispatch extraction."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_cache_support(bot)
@@ -6607,23 +6606,17 @@ class TestAgentBot:
             is_full_history=True,
         )
 
-        with (
-            patch(
-                "mindroom.matrix.client._fetch_thread_context_via_relations",
-                new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
-            ),
-            patch(
-                "mindroom.matrix.client._fetch_thread_history_via_room_messages",
-                new=AsyncMock(return_value=full_history),
-            ) as mock_snapshot_fallback,
-        ):
+        with patch(
+            "mindroom.matrix.client.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=full_history),
+        ) as mock_refresh:
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert context.thread_history == full_history
         assert context.requires_full_thread_history is False
-        mock_snapshot_fallback.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
+        assert mock_refresh.await_count == 1
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(  # noqa: PLR0915

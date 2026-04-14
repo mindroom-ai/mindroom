@@ -30,7 +30,6 @@ from mindroom.matrix.client import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages,
     _resolve_thread_history_from_event_sources,
-    _ThreadHistoryFastPathUnavailableError,
     get_room_threads_page,
 )
 from mindroom.matrix.client import (
@@ -561,170 +560,68 @@ class TestThreadHistory:
         mock_store.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_marks_room_scan_fallback_as_full_history(self) -> None:
-        """Snapshot fallback should go straight to the room-scan helper."""
-        fallback_history = [
-            ResolvedVisibleMessage.synthetic(
-                sender="@user:localhost",
-                body="fallback",
-                event_id="$thread_root",
-                content={"body": "fallback"},
-            ),
-        ]
+    async def test_fetch_thread_snapshot_miss_uses_authoritative_refresh_path(self) -> None:
+        """Snapshot misses should reuse the authoritative refresh path instead of a separate fast path."""
+        refreshed_history = ThreadHistoryResult(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="refreshed",
+                    event_id="$thread_root",
+                    content={"body": "refreshed"},
+                ),
+            ],
+            is_full_history=True,
+        )
         client = AsyncMock()
 
-        with (
-            patch(
-                "mindroom.matrix.client._fetch_thread_context_via_relations",
-                new=AsyncMock(side_effect=_ThreadHistoryFastPathUnavailableError("unsupported")),
-            ),
-            patch(
-                "mindroom.matrix.client._fetch_thread_history_via_room_messages",
-                new=AsyncMock(return_value=fallback_history),
-            ) as mock_room_scan,
-            patch(
-                "mindroom.matrix.client.fetch_thread_history",
-                new=AsyncMock(side_effect=AssertionError("should skip fetch_thread_history")),
-            ) as mock_fetch_history,
-        ):
+        with patch(
+            "mindroom.matrix.client.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=refreshed_history),
+        ) as mock_refresh:
             snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
 
         assert isinstance(snapshot, ThreadHistoryResult)
         assert snapshot.is_full_history is True
         assert [message.event_id for message in snapshot] == ["$thread_root"]
-        assert snapshot[0].body == "fallback"
-        mock_room_scan.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
-        mock_fetch_history.assert_not_awaited()
+        assert snapshot[0].body == "refreshed"
+        mock_refresh.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_relations_fast_path_uses_typed_sorting(self) -> None:
-        """Snapshot fast path should sort typed visible messages without dict indexing."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
+    async def test_fetch_thread_snapshot_miss_preserves_authoritative_non_text_children(self) -> None:
+        """Snapshot misses should accept authoritative histories with non-text thread children."""
+        refreshed_history = ThreadHistoryResult(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="voice-note.ogg",
+                    event_id="$thread_root",
+                    timestamp=1000,
+                    content={"body": "voice-note.ogg", "msgtype": "m.audio"},
+                ),
+                ResolvedVisibleMessage.synthetic(
+                    sender="@agent:localhost",
+                    body="agent-reply.ogg",
+                    event_id="$reply_audio",
+                    timestamp=2000,
+                    content={"body": "agent-reply.ogg", "msgtype": "m.audio"},
+                    thread_id="$thread_root",
+                ),
+            ],
+            is_full_history=True,
         )
-        later_reply = self._make_text_event(
-            event_id="$reply_b",
-            sender="@agent:localhost",
-            body="Later reply",
-            server_timestamp=3000,
-            source_content={
-                "body": "Later reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        earlier_reply = self._make_text_event(
-            event_id="$reply_a",
-            sender="@agent:localhost",
-            body="Earlier reply",
-            server_timestamp=2000,
-            source_content={
-                "body": "Earlier reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [later_reply, earlier_reply],
-            },
-        )
+        client = AsyncMock()
 
-        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
+        with patch(
+            "mindroom.matrix.client.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=refreshed_history),
+        ):
+            snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
 
         assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply_a", "$reply_b"]
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_relations_fast_path_accepts_audio_root(self) -> None:
-        """Snapshot fast path should keep non-text room-message roots without room-scan fallback."""
-        root_event = TestThreadHistory._make_audio_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="voice-note.ogg",
-            server_timestamp=1000,
-            source_content={"url": "mxc://localhost/voice-note"},
-        )
-        reply_event = self._make_text_event(
-            event_id="$reply",
-            sender="@agent:localhost",
-            body="transcribed reply",
-            server_timestamp=2000,
-            source_content={
-                "body": "transcribed reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [reply_event],
-            },
-        )
-
-        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply"]
-        assert snapshot[0].body == "voice-note.ogg"
-        assert snapshot[0].to_dict()["msgtype"] == "m.audio"
-        client.room_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_relations_fast_path_applies_latest_edits(self) -> None:
-        """Snapshot fast path should reflect the latest visible edited reply state."""
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        reply_event = self._make_text_event(
-            event_id="$reply",
-            sender="@agent:localhost",
-            body="Draft reply",
-            server_timestamp=2000,
-            source_content={
-                "body": "Draft reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        reply_edit = self._make_text_event(
-            event_id="$reply_edit",
-            sender="@agent:localhost",
-            body="* Final reply @mindroom_code:localhost",
-            server_timestamp=2100,
-            source_content={
-                "body": "* Final reply @mindroom_code:localhost",
-                "m.new_content": {
-                    "body": "Final reply @mindroom_code:localhost",
-                    "msgtype": "m.text",
-                    "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
-                },
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-            },
-        )
-        client = self._make_relations_client(
-            root_event=root_event,
-            relations={
-                self._relation_key("$thread_root", RelationshipType.thread): [reply_event],
-                self._relation_key("$reply", RelationshipType.replacement): [reply_edit],
-            },
-        )
-
-        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply"]
-        assert snapshot[1].body == "Final reply @mindroom_code:localhost"
-        assert snapshot[1].visible_event_id == "$reply_edit"
+        assert snapshot.is_full_history is True
+        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply_audio"]
+        assert snapshot[1].content["msgtype"] == "m.audio"
 
     @pytest.mark.asyncio
     async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
