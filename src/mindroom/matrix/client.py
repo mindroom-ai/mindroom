@@ -1471,7 +1471,7 @@ async def _refresh_cached_thread_event_sources(
             cached_event_ids=cached_event_ids,
         )
         if new_event_sources:
-            await event_cache.store_thread_events(room_id, thread_id, new_event_sources)
+            await event_cache.store_events(room_id, thread_id, new_event_sources)
         for redacted_event_id, _ in redactions:
             await event_cache.redact_event(room_id, redacted_event_id)
         if not new_event_sources and not redactions:
@@ -1612,7 +1612,7 @@ async def _store_thread_history_cache(
     """Best-effort replacement of one cached thread snapshot."""
     try:
         await event_cache.invalidate_thread(room_id, thread_id)
-        await event_cache.store_thread_events(room_id, thread_id, list(event_sources))
+        await event_cache.store_events(room_id, thread_id, list(event_sources))
     except Exception as exc:
         logger.warning(
             "Event cache write failed; continuing without cache",

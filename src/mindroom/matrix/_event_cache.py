@@ -78,12 +78,6 @@ class ConversationEventCache(Protocol):
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
 
-    async def get_latest_timestamp(self, room_id: str, thread_id: str) -> int | None:
-        """Compatibility wrapper for older cache call sites."""
-
-    async def store_thread_events(self, room_id: str, thread_id: str, events: list[dict[str, Any]]) -> None:
-        """Compatibility wrapper for older cache call sites."""
-
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""
 
@@ -595,14 +589,6 @@ class _EventCache:
             except Exception:
                 await db.rollback()
                 raise
-
-    async def get_latest_timestamp(self, room_id: str, thread_id: str) -> int | None:
-        """Compatibility wrapper for older cache call sites."""
-        return await self.get_latest_ts(room_id, thread_id)
-
-    async def store_thread_events(self, room_id: str, thread_id: str, events: list[dict[str, Any]]) -> None:
-        """Compatibility wrapper for older cache call sites."""
-        await self.store_events(room_id, thread_id, events)
 
     async def _append_existing_thread_event(
         self,

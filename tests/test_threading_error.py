@@ -20,6 +20,7 @@ import nio
 import pytest
 import pytest_asyncio
 
+import mindroom.matrix._event_cache as event_cache_module
 import mindroom.matrix.client as matrix_client_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -860,7 +861,7 @@ class TestThreadingBehavior:
         assert bot.event_cache
 
         try:
-            await bot.event_cache.store_thread_events(
+            await bot.event_cache.store_events(
                 "!test:localhost",
                 "$thread_root:localhost",
                 [
@@ -1215,7 +1216,7 @@ class TestThreadingBehavior:
         assert bot.event_cache
 
         try:
-            await bot.event_cache.store_thread_events(
+            await bot.event_cache.store_events(
                 "!test:localhost",
                 "$thread_root:localhost",
                 [
@@ -2579,7 +2580,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -2661,7 +2662,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -2772,7 +2773,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -2872,7 +2873,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -2969,7 +2970,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -3087,7 +3088,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -3145,7 +3146,7 @@ class TestThreadingBehavior:
                 assert thread_id == "$thread"
                 assert event_cache is runtime.event_cache
                 assert refresh_cache is True
-                await event_cache.store_thread_events(
+                await event_cache.store_events(
                     room_id,
                     thread_id,
                     [
@@ -3216,7 +3217,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -3545,7 +3546,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, reply_event])
+        await cache.store_events("!room:localhost", "$thread", [root_event, reply_event])
         await cache.mark_thread_repair_required("!room:localhost", "$thread")
 
         stale_history = thread_history_result(
@@ -4184,7 +4185,7 @@ class TestThreadingBehavior:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
             },
         }
-        await cache.store_thread_events("!room:localhost", "$thread", [root_event, first_reply])
+        await cache.store_events("!room:localhost", "$thread", [root_event, first_reply])
 
         try:
             async with access.turn_scope():
@@ -6147,6 +6148,17 @@ def test_matrix_client_does_not_keep_dead_compatibility_wrappers() -> None:
     }
 
     assert deleted_names.isdisjoint(matrix_client_module.__dict__)
+
+
+def test_event_cache_does_not_keep_dead_compatibility_wrappers() -> None:
+    """Dead event-cache compatibility wrappers should stay deleted once callers migrate."""
+    deleted_names = {
+        "get_latest_timestamp",
+        "store_thread_events",
+    }
+
+    assert deleted_names.isdisjoint(event_cache_module.ConversationEventCache.__dict__)
+    assert deleted_names.isdisjoint(event_cache_module._EventCache.__dict__)
 
 
 def test_thread_policies_do_not_depend_on_matrix_conversation_cache_as_service_locator() -> None:

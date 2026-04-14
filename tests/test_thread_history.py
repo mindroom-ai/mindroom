@@ -1796,7 +1796,7 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_thread_events(
+        await cache.store_events(
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -1842,7 +1842,7 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_thread_events(
+        await cache.store_events(
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -1891,7 +1891,7 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_thread_events(
+        await cache.store_events(
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -1995,7 +1995,7 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_thread_events(
+        await cache.store_events(
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -2053,7 +2053,7 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_thread_events(
+        await cache.store_events(
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(cached_reply_event)],
@@ -2120,7 +2120,7 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
             },
         )
-        await cache.store_thread_events(
+        await cache.store_events(
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -2173,7 +2173,7 @@ class TestThreadHistoryCache:
             redacts="$reply",
             server_timestamp=3000,
         )
-        await cache.store_thread_events(
+        await cache.store_events(
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -2225,7 +2225,7 @@ class TestThreadHistoryCache:
 
         cache = MagicMock(spec=_EventCache)
         cache.get_thread_events = AsyncMock(return_value=cached_event_sources)
-        cache.store_thread_events = AsyncMock()
+        cache.store_events = AsyncMock()
         cache.redact_event = AsyncMock()
         cache.invalidate_thread = AsyncMock()
 
@@ -2236,7 +2236,7 @@ class TestThreadHistoryCache:
         client.room_get_event.assert_not_called()
         client.room_get_event_relations.assert_not_called()
         cache.invalidate_thread.assert_not_awaited()
-        cache.store_thread_events.assert_not_awaited()
+        cache.store_events.assert_not_awaited()
         cache.redact_event.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2269,11 +2269,10 @@ class TestThreadHistoryCache:
         )
         broken_cache = MagicMock(spec=_EventCache)
         broken_cache.get_thread_events = AsyncMock(side_effect=RuntimeError("db broken"))
-        broken_cache.get_latest_timestamp = AsyncMock()
         broken_cache.invalidate_thread = AsyncMock()
-        broken_cache.store_thread_events = AsyncMock()
+        broken_cache.store_events = AsyncMock()
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         broken_cache.get_thread_events.assert_awaited_once_with("!room:localhost", "$thread_root")
         assert broken_cache.invalidate_thread.await_count >= 1
-        broken_cache.store_thread_events.assert_awaited_once()
+        broken_cache.store_events.assert_awaited_once()
