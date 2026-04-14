@@ -34,7 +34,6 @@ from mindroom.matrix.cache.thread_cache import (
     resolved_thread_cache_entry as _resolved_thread_cache_entry_impl,
 )
 from mindroom.matrix.cache.thread_history_result import (
-    THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
@@ -192,7 +191,7 @@ def _relations_client(
     user_id: str = "@mindroom_general:localhost",
     next_batch: str = "s_test_token",
 ) -> AsyncMock:
-    """Return one AsyncClient mock serving thread and replacement relations."""
+    """Return one AsyncClient mock serving thread events through room history."""
     client = _make_client_mock(user_id=user_id)
     client.next_batch = next_batch
     replacement_map = replacements_by_event_id or {}
@@ -221,8 +220,13 @@ def _relations_client(
         return _event_iter(relation_events(event_id, rel_type))
 
     client.room_get_event_relations = MagicMock(side_effect=room_get_event_relations)
+    room_scan_chunk = [
+        *[event for events in replacement_map.values() for event in events],
+        *thread_events,
+        root_event,
+    ]
     client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(room_id="!test:localhost", chunk=[], start="", end=None),
+        return_value=nio.RoomMessagesResponse(room_id="!test:localhost", chunk=room_scan_chunk, start="", end=None),
     )
     return client
 
@@ -453,19 +457,10 @@ class TestMatrixConversationCacheThreadReads:
     """Targeted read-path tests for invalidate-and-refetch behavior."""
 
     @pytest.mark.asyncio
-    async def test_get_thread_history_revalidates_resolved_cache_against_durable_state(self) -> None:
-        """A durably invalidated thread must force a refetch instead of serving the in-memory resolved cache."""
+    async def test_get_thread_history_reuses_resolved_cache_within_runtime(self) -> None:
+        """Hot same-runtime reads should reuse the in-memory resolved cache without refetching."""
         client = _make_client_mock()
         event_cache = _runtime_event_cache()
-        event_cache.get_thread_cache_state = AsyncMock(
-            return_value=ThreadCacheState(
-                validated_at=time.time(),
-                invalidated_at=time.time(),
-                invalidation_reason="test_invalidated",
-                room_invalidated_at=None,
-                room_invalidation_reason=None,
-            ),
-        )
         event_cache.get_thread_events = AsyncMock(return_value=[{"event_id": "$thread"}, {"event_id": "$reply"}])
         access = MatrixConversationCache(
             logger=MagicMock(),
@@ -488,8 +483,23 @@ class TestMatrixConversationCacheThreadReads:
 
         history = await access.get_thread_history("!room:localhost", "$thread")
 
-        assert [message.body for message in history] == ["fresh root", "fresh reply"]
-        access._reads.fetch_thread_history_from_client.assert_awaited_once_with("!room:localhost", "$thread")
+        assert [message.body for message in history] == ["stale root", "stale reply"]
+        access._reads.fetch_thread_history_from_client.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_record_outbound_message_swallows_internal_write_failure(self) -> None:
+        """The public outbound write-through boundary must fail open."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+        access._writes.record_outbound_message = AsyncMock(side_effect=RuntimeError("cache write failed"))
+
+        await access.record_outbound_message(
+            "!room:localhost",
+            "$event:localhost",
+            {"body": "hello", "msgtype": "m.text"},
+        )
 
     @pytest.mark.asyncio
     async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:
@@ -604,6 +614,39 @@ class TestMatrixConversationCacheThreadReads:
             ),
         )
         reader_client.room_get_event_relations = MagicMock(side_effect=room_get_event_relations)
+        reader_client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id="!test:localhost",
+                chunk=[
+                    nio.RoomMessageText.from_dict(
+                        {
+                            "content": {
+                                "body": "Fresh reply",
+                                "msgtype": "m.text",
+                                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
+                            },
+                            "event_id": "$reply:localhost",
+                            "sender": "@agent:localhost",
+                            "origin_server_ts": 3000,
+                            "room_id": "!test:localhost",
+                            "type": "m.room.message",
+                        },
+                    ),
+                    nio.RoomMessageText.from_dict(
+                        {
+                            "content": {"body": "Root", "msgtype": "m.text"},
+                            "event_id": "$thread:localhost",
+                            "sender": "@user:localhost",
+                            "origin_server_ts": 1000,
+                            "room_id": "!test:localhost",
+                            "type": "m.room.message",
+                        },
+                    ),
+                ],
+                start="",
+                end=None,
+            ),
+        )
 
         first_access = MatrixConversationCache(
             logger=MagicMock(),
@@ -639,7 +682,7 @@ class TestMatrixConversationCacheThreadReads:
             await event_cache.close()
 
         assert [message.body for message in history] == ["Root", "Fresh reply"]
-        reader_client.room_get_event.assert_awaited_once_with("!test:localhost", "$thread:localhost")
+        reader_client.room_messages.assert_awaited_once()
 
 
 class TestThreadingBehavior:
@@ -2279,27 +2322,16 @@ class TestThreadingBehavior:
                 runtime=_conversation_runtime(client=restarted_client, event_cache=event_cache),
             )
             refreshed_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
-            event_cache = await _reopen_event_cache(event_cache)
-            cached_client = _make_client_mock(user_id="@mindroom_general:localhost")
-            cached_client.next_batch = "s_after_edit"
-            cached_client.room_get_event = AsyncMock(side_effect=AssertionError("expected cached second read"))
-            cached_client.room_get_event_relations = MagicMock(
-                side_effect=AssertionError("expected cached second read"),
-            )
-            cached_access = MatrixConversationCache(
-                logger=MagicMock(),
-                runtime=_conversation_runtime(client=cached_client, event_cache=event_cache),
-            )
-            cached_history = await cached_access.get_thread_history("!test:localhost", "$thread_root:localhost")
+            restarted_client.room_messages.reset_mock()
+            cached_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
         finally:
             await event_cache.close()
 
         assert [message.body for message in initial_history] == ["Root", "Original reply"]
         assert [message.body for message in refreshed_history] == ["Root", "Edited reply"]
         assert [message.body for message in cached_history] == ["Root", "Edited reply"]
-        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
-        assert restarted_client.room_get_event.await_count >= 1
-        assert restarted_client.room_get_event_relations.call_count >= 1
+        assert THREAD_HISTORY_SOURCE_DIAGNOSTIC not in cached_history.diagnostics
+        restarted_client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_lookup_miss_sync_edit_marks_room_stale_durably_and_forces_refetch(
@@ -2371,18 +2403,8 @@ class TestThreadingBehavior:
                 runtime=_conversation_runtime(client=restarted_client, event_cache=event_cache),
             )
             refreshed_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
-            event_cache = await _reopen_event_cache(event_cache)
-            cached_client = _make_client_mock(user_id="@mindroom_general:localhost")
-            cached_client.next_batch = "s_refetch"
-            cached_client.room_get_event = AsyncMock(side_effect=AssertionError("expected cached second read"))
-            cached_client.room_get_event_relations = MagicMock(
-                side_effect=AssertionError("expected cached second read"),
-            )
-            cached_access = MatrixConversationCache(
-                logger=MagicMock(),
-                runtime=_conversation_runtime(client=cached_client, event_cache=event_cache),
-            )
-            cached_history = await cached_access.get_thread_history("!test:localhost", "$thread_root:localhost")
+            restarted_client.room_messages.reset_mock()
+            cached_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
         finally:
             await event_cache.close()
 
@@ -2390,8 +2412,8 @@ class TestThreadingBehavior:
         assert cache_state.room_invalidation_reason == "sync_lookup_missing"
         assert [message.body for message in refreshed_history] == ["Root", "Refetched reply"]
         assert [message.body for message in cached_history] == ["Root", "Refetched reply"]
-        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
-        assert restarted_client.room_get_event.await_count >= 1
+        assert THREAD_HISTORY_SOURCE_DIAGNOSTIC not in cached_history.diagnostics
+        restarted_client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_get_thread_history_raises_when_refresh_fails(self) -> None:
@@ -2400,7 +2422,6 @@ class TestThreadingBehavior:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=RuntimeError("boom"))
 
         with pytest.raises(RuntimeError, match="boom"):
@@ -2433,6 +2454,47 @@ class TestThreadingBehavior:
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=slow_refresh)
 
         refresh_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$thread:localhost"))
+        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
+
+        access.runtime.event_cache_write_coordinator.queue_room_update(
+            "!test:localhost",
+            lambda: queued_update(),
+            name="matrix_cache_follow_up_update",
+        )
+        await asyncio.sleep(0)
+        assert queued_update_started.is_set() is False
+
+        allow_refresh.set()
+        await refresh_task
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+
+        assert queued_update_started.is_set()
+
+    @pytest.mark.asyncio
+    async def test_get_thread_snapshot_refresh_runs_under_room_write_barrier(self) -> None:
+        """Snapshot refreshes should occupy the same room-scoped barrier used by mutations."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+        refresh_started = asyncio.Event()
+        allow_refresh = asyncio.Event()
+        queued_update_started = asyncio.Event()
+
+        async def slow_refresh(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+            refresh_started.set()
+            await allow_refresh.wait()
+            return thread_history_result(
+                [_message(event_id="$thread:localhost", body="Root")],
+                is_full_history=True,
+            )
+
+        async def queued_update() -> None:
+            queued_update_started.set()
+
+        access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=slow_refresh)
+
+        refresh_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$thread:localhost"))
         await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
 
         access.runtime.event_cache_write_coordinator.queue_room_update(
@@ -2625,7 +2687,7 @@ class TestThreadingBehavior:
             await event_cache.close()
 
         assert latest_event_id == "$reply_new:localhost"
-        assert refreshed_client.room_get_event.await_count >= 1
+        assert refreshed_client.room_messages.await_count >= 1
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_lookup_falls_back_to_thread_root_on_refresh_failure(self) -> None:
@@ -2634,7 +2696,6 @@ class TestThreadingBehavior:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=RuntimeError("boom"))
 
         latest_event_id = await access.get_latest_thread_event_id_if_needed("!test:localhost", "$thread:localhost")
@@ -2648,7 +2709,6 @@ class TestThreadingBehavior:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
         access._reads.fetch_thread_history_from_client = AsyncMock(
             return_value=thread_history_result(
                 [

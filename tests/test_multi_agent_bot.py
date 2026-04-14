@@ -6607,7 +6607,7 @@ class TestAgentBot:
         )
 
         with patch(
-            "mindroom.matrix.client.refresh_thread_history_from_source",
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
             new=AsyncMock(return_value=full_history),
         ) as mock_refresh:
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)

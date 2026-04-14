@@ -84,7 +84,6 @@ def _make_relations_client(
 ) -> MagicMock:
     client = MagicMock()
     client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(root_event))
-    client.room_messages = AsyncMock()
 
     def room_get_event_relations(
         _room_id: str,
@@ -108,6 +107,25 @@ def _make_relations_client(
         return iterator()
 
     client.room_get_event_relations = MagicMock(side_effect=room_get_event_relations)
+    room_scan_chunk: list[nio.Event] = [root_event]
+    seen_event_ids = {getattr(root_event, "event_id", None)}
+    for value in relations.values():
+        if isinstance(value, Exception):
+            continue
+        for event in value:
+            event_id = getattr(event, "event_id", None)
+            if event_id in seen_event_ids:
+                continue
+            seen_event_ids.add(event_id)
+            room_scan_chunk.insert(-1, event)
+    client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!room:localhost",
+            chunk=room_scan_chunk,
+            start="",
+            end=None,
+        ),
+    )
     return client
 
 
@@ -1139,7 +1157,7 @@ async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -> None:
-    """Cache misses should fetch from the homeserver and populate the cache."""
+    """Cache misses should scan room history and populate the cache."""
     cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
@@ -1178,8 +1196,8 @@ async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -
     assert [message.event_id for message in history] == ["$thread_root", "$reply"]
     assert cached_events is not None
     assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$thread_root")
-    client.room_messages.assert_not_awaited()
+    client.room_get_event.assert_not_awaited()
+    client.room_messages.assert_awaited_once()
 
 
 def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
@@ -1188,42 +1206,3 @@ def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
 
     assert cache._room_lock("!room:localhost") is cache._room_lock("!room:localhost")
     assert cache._room_lock("!room:localhost") is not cache._room_lock("!other:localhost")
-
-
-@pytest.mark.asyncio
-async def test_fetch_thread_history_gracefully_falls_back_on_db_error() -> None:
-    """Database errors should fall back to the homeserver fetch path."""
-    root_event = _make_text_event(
-        event_id="$thread_root",
-        sender="@user:localhost",
-        body="Root message",
-        server_timestamp=1000,
-        source_content={"body": "Root message"},
-    )
-    reply_event = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Reply in thread",
-        server_timestamp=2000,
-        source_content={
-            "body": "Reply in thread",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-        },
-    )
-    client = _make_relations_client(
-        root_event=root_event,
-        relations={
-            _relation_key("$thread_root", RelationshipType.thread): [reply_event],
-            _relation_key("$thread_root", RelationshipType.replacement): [],
-            _relation_key("$reply", RelationshipType.replacement): [],
-        },
-    )
-    broken_cache = MagicMock(spec=_EventCache)
-    broken_cache.get_thread_cache_state = AsyncMock(side_effect=RuntimeError("db broken"))
-    broken_cache.replace_thread = AsyncMock()
-
-    history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
-
-    assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-    broken_cache.get_thread_cache_state.assert_awaited_once_with("!room:localhost", "$thread_root")
-    broken_cache.replace_thread.assert_awaited_once()

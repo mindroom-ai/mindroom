@@ -92,16 +92,13 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
-@patch("mindroom.matrix.conversation_cache.fetch_thread_snapshot")
 @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
 async def test_agent_processes_direct_mention(
-    mock_fetch_snapshot: AsyncMock,
     mock_fetch_history: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
 ) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
-    mock_fetch_snapshot.return_value = []
     mock_fetch_history.return_value = []
     test_room_id = "!test:localhost"
     test_user_id = "@alice:localhost"

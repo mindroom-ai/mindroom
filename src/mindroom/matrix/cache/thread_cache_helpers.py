@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,29 +9,13 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.matrix.cache.event_cache import ThreadCacheState
     from mindroom.matrix.client import ResolvedVisibleMessage
-
-
-_RAW_THREAD_CACHE_TTL_SECONDS = 300.0
 
 
 def event_id_from_event_source(event_source: dict[str, object]) -> str | None:
     """Return the event ID when one cached event source contains it."""
     event_id = event_source.get("event_id")
     return event_id if isinstance(event_id, str) else None
-
-
-def thread_cache_state_is_fresh(
-    state: ThreadCacheState | None,
-    ttl_seconds: float = _RAW_THREAD_CACHE_TTL_SECONDS,
-) -> bool:
-    """Return whether one raw thread cache entry is still trustworthy for reads."""
-    if state is None or state.invalidated_at is not None or state.validated_at is None:
-        return False
-    if state.room_invalidated_at is not None and state.validated_at <= state.room_invalidated_at:
-        return False
-    return (time.time() - state.validated_at) < ttl_seconds
 
 
 def resolved_cache_diagnostics(

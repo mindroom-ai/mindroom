@@ -1222,6 +1222,18 @@ class TestExtractedModuleLoggerRebinding:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = make_event_cache_mock()
+        bot.event_cache.get_thread_events = AsyncMock(
+            return_value=[
+                {"event_id": "$threadroot", "content": {"body": "Root"}},
+                {
+                    "event_id": "$reply",
+                    "content": {
+                        "body": "Reply",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
+                    },
+                },
+            ],
+        )
         sync_bot_runtime_state(bot)
 
         client = AsyncMock()
@@ -1243,12 +1255,12 @@ class TestExtractedModuleLoggerRebinding:
         )
 
     @pytest.mark.asyncio
-    async def test_conversation_cache_reloads_non_full_snapshot_for_history(
+    async def test_conversation_cache_reuses_authoritative_snapshot_for_history(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Preview snapshots should not suppress a later hydrated history read."""
+        """Snapshot and history reads should share one authoritative refresh path."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1262,19 +1274,24 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
+        bot.event_cache.get_thread_events = AsyncMock(
+            return_value=[
+                {"event_id": "$threadroot", "content": {"body": "Root"}},
+                {
+                    "event_id": "$reply",
+                    "content": {
+                        "body": "Reply",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
+                    },
+                },
+            ],
+        )
 
-        preview_snapshot = ThreadHistoryResult([], is_full_history=False)
         hydrated_history = ThreadHistoryResult([], is_full_history=True)
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache.fetch_thread_snapshot",
-                new=AsyncMock(return_value=preview_snapshot),
-            ) as fetch_thread_snapshot_mock,
-            patch(
-                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-                new=AsyncMock(return_value=hydrated_history),
-            ) as refresh_mock,
-        ):
+        with patch(
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=hydrated_history),
+        ) as refresh_mock:
             bot.client = AsyncMock()
             async with bot._conversation_cache.turn_scope():
                 snapshot_history = await bot._conversation_cache.get_thread_snapshot(
@@ -1286,9 +1303,9 @@ class TestExtractedModuleLoggerRebinding:
                     "$threadroot",
                 )
 
-        assert snapshot_history is preview_snapshot
-        assert full_history is hydrated_history
-        fetch_thread_snapshot_mock.assert_awaited_once()
+        assert snapshot_history is hydrated_history
+        assert full_history == hydrated_history
+        assert full_history.is_full_history is True
         refresh_mock.assert_awaited_once()
 
     @pytest.mark.asyncio

@@ -12,7 +12,6 @@ from mindroom.matrix.cache.thread_cache_helpers import (
     latest_visible_thread_event_id,
     log_resolved_thread_cache,
     resolved_cache_diagnostics,
-    thread_cache_state_is_fresh,
 )
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
@@ -40,19 +39,12 @@ class ThreadReadPolicy:
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
         resolved_thread_cache_getter: typing.Callable[[], ResolvedThreadCache],
-        load_cached_thread_history_from_client: typing.Callable[
-            [str, str],
-            typing.Awaitable[ThreadHistoryResult | None],
-        ],
         fetch_thread_history_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
-        fetch_thread_snapshot_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self._resolved_thread_cache_getter = resolved_thread_cache_getter
-        self.load_cached_thread_history_from_client = load_cached_thread_history_from_client
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
-        self.fetch_thread_snapshot_from_client = fetch_thread_snapshot_from_client
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
@@ -64,19 +56,6 @@ class ThreadReadPolicy:
 
     async def _wait_for_pending_room_cache_updates(self, room_id: str) -> None:
         await self.runtime.event_cache_write_coordinator.wait_for_room_idle(room_id)
-
-    async def _raw_thread_cache_is_fresh(self, room_id: str, thread_id: str) -> bool:
-        try:
-            cache_state = await self.runtime.event_cache.get_thread_cache_state(room_id, thread_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to read thread cache freshness state",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return False
-        return thread_cache_state_is_fresh(cache_state)
 
     async def _cached_thread_source_event_ids(
         self,
@@ -146,18 +125,6 @@ class ThreadReadPolicy:
             )
         return thread_history_result(list(history), is_full_history=True)
 
-    def _snapshot_result(
-        self,
-        history: Sequence[ResolvedVisibleMessage],
-    ) -> ThreadHistoryResult:
-        if isinstance(history, ThreadHistoryResult):
-            return thread_history_result(
-                history,
-                is_full_history=history.is_full_history,
-                diagnostics=history.diagnostics,
-            )
-        return thread_history_result(list(history), is_full_history=False)
-
     async def _maybe_use_resolved_thread_cache(
         self,
         room_id: str,
@@ -182,16 +149,6 @@ class ThreadReadPolicy:
                 room_id=room_id,
                 thread_id=thread_id,
                 reason="missing_source_event_ids",
-            )
-            return None
-        if not await self._raw_thread_cache_is_fresh(room_id, thread_id):
-            self._resolved_thread_cache().invalidate(room_id, thread_id)
-            log_resolved_thread_cache(
-                self.logger,
-                "resolved_thread_cache_invalidate",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason="stale_raw_thread_cache",
             )
             return None
         log_resolved_thread_cache(
@@ -248,36 +205,9 @@ class ThreadReadPolicy:
             )
             return history
 
-    async def _maybe_use_raw_thread_cache(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult | None:
-        cached_history = await self.load_cached_thread_history_from_client(room_id, thread_id)
-        if cached_history is None:
-            return None
-        return await self._store_resolved_thread_history_if_fresh(
-            room_id,
-            thread_id,
-            cached_history,
-        )
-
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadHistoryResult:
-        """Resolve lightweight snapshot history for one thread."""
-        await self._wait_for_pending_room_cache_updates(room_id)
-        async with self._resolved_thread_cache().entry_lock(room_id, thread_id):
-            cached_history = await self._maybe_use_resolved_thread_cache(room_id, thread_id)
-            if cached_history is not None:
-                return cached_history
-        raw_cached_history = await self._maybe_use_raw_thread_cache(room_id, thread_id)
-        if raw_cached_history is not None:
-            return raw_cached_history
-        snapshot = self._snapshot_result(
-            await self.fetch_thread_snapshot_from_client(room_id, thread_id),
-        )
-        if not snapshot.is_full_history:
-            return snapshot
-        return await self._store_resolved_thread_history_if_fresh(room_id, thread_id, snapshot)
+        """Resolve thread context for one thread using the same authoritative path as full history."""
+        return await self.get_thread_history(room_id, thread_id)
 
     async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadHistoryResult:
         """Resolve full thread history for one conversation root."""
@@ -286,9 +216,6 @@ class ThreadReadPolicy:
             cached_history = await self._maybe_use_resolved_thread_cache(room_id, thread_id)
             if cached_history is not None:
                 return cached_history
-        raw_cached_history = await self._maybe_use_raw_thread_cache(room_id, thread_id)
-        if raw_cached_history is not None:
-            return raw_cached_history
         return await self._store_resolved_thread_history_if_fresh(
             room_id,
             thread_id,

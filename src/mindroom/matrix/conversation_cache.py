@@ -27,8 +27,6 @@ from mindroom.matrix.cache.write_coordinator import (
     _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
 )
 from mindroom.matrix.client import (
-    fetch_thread_snapshot,
-    load_cached_thread_history,
     refresh_thread_history_from_source,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -70,7 +68,7 @@ class ConversationCacheProtocol(Protocol):
         """Resolve one Matrix event by ID."""
 
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
-        """Resolve lightweight thread context for dispatch."""
+        """Resolve thread context for dispatch."""
 
     async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
         """Resolve full thread history for one conversation root."""
@@ -259,9 +257,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
-            load_cached_thread_history_from_client=self._load_cached_thread_history_from_client,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
-            fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
         )
 
     def _require_client(self) -> nio.AsyncClient:
@@ -337,21 +333,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if reply_chain_caches is not None:
             reply_chain_caches.clear()
 
-    async def _load_cached_thread_history_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult | None:
-        client = self.runtime.client
-        if client is None:
-            return None
-        return await load_cached_thread_history(
-            client,
-            room_id,
-            thread_id,
-            event_cache=self.runtime.event_cache,
-        )
-
     async def _fetch_thread_history_from_client(
         self,
         room_id: str,
@@ -364,20 +345,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
             event_cache=self.runtime.event_cache,
         )
 
-    async def _fetch_thread_snapshot_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult:
-        return await fetch_thread_snapshot(
-            self._require_client(),
-            room_id,
-            thread_id,
-            event_cache=self.runtime.event_cache,
-        )
-
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
-        """Resolve lightweight thread context for dispatch."""
+        """Resolve thread context for dispatch."""
         return await self._reads.get_thread_snapshot(room_id, thread_id)
 
     async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
