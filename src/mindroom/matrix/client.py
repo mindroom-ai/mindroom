@@ -1131,7 +1131,6 @@ async def send_file_message(
     *,
     thread_id: str | None = None,
     caption: str | None = None,
-    event_cache: ConversationEventCache,
     latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
@@ -1166,19 +1165,14 @@ async def send_file_message(
         content["url"] = mxc_uri
 
     if thread_id:
-        resolved_latest_thread_event_id = latest_thread_event_id
-        if resolved_latest_thread_event_id is None:
-            resolved_latest_thread_event_id = await _latest_thread_event_id(
-                client,
-                room_id,
-                thread_id,
-                event_cache=event_cache,
-            )
+        if latest_thread_event_id is None:
+            msg = "latest_thread_event_id is required for thread fallback"
+            raise ValueError(msg)
         content["m.relates_to"] = {
             "rel_type": "m.thread",
             "event_id": thread_id,
             "is_falling_back": True,
-            "m.in_reply_to": {"event_id": resolved_latest_thread_event_id},
+            "m.in_reply_to": {"event_id": latest_thread_event_id},
         }
 
     return await send_message(client, room_id, content)
@@ -2371,46 +2365,8 @@ def _latest_thread_edit_event_id(
     return latest_thread_edit.event_id if latest_thread_edit is not None else None
 
 
-async def get_latest_thread_event_id_if_needed(
-    client: nio.AsyncClient | None,
-    room_id: str,
-    thread_id: str | None,
-    reply_to_event_id: str | None = None,
-    existing_event_id: str | None = None,
+def build_threaded_edit_content(
     *,
-    event_cache: ConversationEventCache,
-) -> str | None:
-    """Get the latest thread event ID only when needed for MSC3440 compliance.
-
-    This helper encapsulates the common pattern of conditionally fetching
-    the latest thread event ID based on various conditions.
-
-    Args:
-        client: Matrix client (can be None)
-        room_id: Room ID
-        thread_id: Thread root event ID (can be None)
-        reply_to_event_id: Event ID being replied to (if any)
-        existing_event_id: Existing event ID being edited (if any)
-        event_cache: Advisory thread event cache used to avoid homeserver reads
-
-    Returns:
-        The latest event ID in the thread if needed, None otherwise
-
-    """
-    # Only fetch latest thread event when:
-    # 1. We have a thread_id
-    # 2. We have a client
-    # 3. We're not editing an existing message
-    # 4. We're not making a genuine reply
-    if thread_id and client and not existing_event_id and not reply_to_event_id:
-        return await _latest_thread_event_id(client, room_id, thread_id, event_cache=event_cache)
-    return None
-
-
-async def build_threaded_edit_content(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
     new_text: str,
     thread_id: str | None,
     config: Config,
@@ -2419,17 +2375,11 @@ async def build_threaded_edit_content(
     tool_trace: list[Any] | None = None,
     extra_content: dict[str, Any] | None = None,
     latest_thread_event_id: str | None = None,
-    event_cache: ConversationEventCache,
 ) -> dict[str, Any]:
     """Build edit content that preserves thread fallback semantics when needed."""
-    latest_visible_thread_event_id = latest_thread_event_id
-    if thread_id is not None and latest_visible_thread_event_id is None:
-        latest_visible_thread_event_id = await _latest_thread_event_id(
-            client,
-            room_id,
-            thread_id,
-            event_cache=event_cache,
-        )
+    if thread_id is not None and latest_thread_event_id is None:
+        msg = "latest_thread_event_id is required for thread fallback"
+        raise ValueError(msg)
 
     return format_message_with_mentions(
         config,
@@ -2437,7 +2387,7 @@ async def build_threaded_edit_content(
         new_text,
         sender_domain=sender_domain,
         thread_event_id=thread_id,
-        latest_thread_event_id=latest_visible_thread_event_id,
+        latest_thread_event_id=latest_thread_event_id,
         tool_trace=tool_trace,
         extra_content=extra_content,
     )

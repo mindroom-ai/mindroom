@@ -56,8 +56,10 @@ class ResolvedThreadCache:
 
     max_entries: int = 200
     ttl_seconds: float = 300.0
+    generation_retention_seconds: float = 300.0
     _entries: OrderedDict[ThreadCacheKey, ResolvedThreadCacheEntry] = field(default_factory=OrderedDict, init=False)
     _generations: dict[ThreadCacheKey, int] = field(default_factory=dict, init=False)
+    _generation_touched_at: dict[ThreadCacheKey, float] = field(default_factory=dict, init=False, repr=False)
     _locks: dict[ThreadCacheKey, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
     _next_generation: int = field(default=1, init=False)
 
@@ -70,20 +72,40 @@ class ResolvedThreadCache:
 
     def _prune_lock(self, key: ThreadCacheKey) -> None:
         lock = self._locks.get(key)
-        if lock is None or key in self._entries or lock.locked():
+        if key in self._entries or (lock is not None and lock.locked()):
             return
         self._locks.pop(key, None)
 
+    def _touch_generation(self, key: ThreadCacheKey, generation: int) -> int:
+        self._generations[key] = generation
+        self._generation_touched_at[key] = time.monotonic()
+        return generation
+
+    def _prune_stale_generations(self) -> None:
+        if not self._generation_touched_at:
+            return
+        cutoff = time.monotonic() - self.generation_retention_seconds
+        for key, touched_at in tuple(self._generation_touched_at.items()):
+            if touched_at > cutoff:
+                continue
+            lock = self._locks.get(key)
+            if key in self._entries or (lock is not None and lock.locked()):
+                continue
+            self._generation_touched_at.pop(key, None)
+            self._generations.pop(key, None)
+            self._prune_lock(key)
+
     def version(self, room_id: str, thread_id: str) -> int:
         """Return the current in-memory generation for one thread."""
+        self._prune_stale_generations()
         return self._generations.get((room_id, thread_id), 0)
 
     def bump_version(self, room_id: str, thread_id: str) -> int:
         """Advance one thread generation without reusing tokens during this process."""
         generation = self._next_generation
         self._next_generation += 1
-        self._generations[(room_id, thread_id)] = generation
-        return generation
+        self._prune_stale_generations()
+        return self._touch_generation((room_id, thread_id), generation)
 
     def lookup(self, room_id: str, thread_id: str) -> ResolvedThreadCacheLookup:
         """Return one entry when still fresh, evicting expired entries eagerly."""
@@ -94,6 +116,7 @@ class ResolvedThreadCache:
         if self._is_expired(entry):
             self._entries.pop(key, None)
             self._prune_lock(key)
+            self._prune_stale_generations()
             return ResolvedThreadCacheLookup(entry=None, expired=True)
         self._entries.move_to_end(key)
         return ResolvedThreadCacheLookup(entry=entry)
@@ -108,15 +131,18 @@ class ResolvedThreadCache:
         key = (room_id, thread_id)
         self._entries[key] = entry
         self._entries.move_to_end(key)
+        self._touch_generation(key, max(self._generations.get(key, 0), entry.thread_version))
         while len(self._entries) > self.max_entries:
             evicted_key, _evicted_entry = self._entries.popitem(last=False)
             self._prune_lock(evicted_key)
+        self._prune_stale_generations()
 
     def invalidate(self, room_id: str, thread_id: str) -> ResolvedThreadCacheEntry | None:
         """Drop one cache entry if it exists."""
         key = (room_id, thread_id)
         entry = self._entries.pop(key, None)
         self._prune_lock(key)
+        self._prune_stale_generations()
         return entry
 
     def _is_expired(self, entry: ResolvedThreadCacheEntry) -> bool:
@@ -133,11 +159,13 @@ class ResolvedThreadCache:
         finally:
             lock.release()
             self._prune_lock(key)
+            self._prune_stale_generations()
 
     def clear(self) -> None:
         """Drop all cached resolved histories and freshness metadata."""
         self._entries.clear()
         self._generations.clear()
+        self._generation_touched_at.clear()
         self._locks.clear()
 
 

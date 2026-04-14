@@ -26,6 +26,7 @@ from mindroom.streaming import build_restart_interrupted_body
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     resolve_response_thread_root_for_test,
@@ -69,7 +70,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.hook_registry = HookRegistry.empty()
     bot.enable_streaming = True
     bot.orchestrator = None
-    bot._conversation_resolver = MagicMock()
+    install_runtime_cache_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
     )

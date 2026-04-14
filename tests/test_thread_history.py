@@ -75,10 +75,9 @@ async def _latest_thread_history_event_id(*args: object, **kwargs: object) -> st
     return await _latest_thread_history_event_id_impl(*args, **kwargs)
 
 
-async def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
-    """Inject a concrete event cache for threaded edit-content construction."""
-    kwargs.setdefault("event_cache", _event_cache())
-    return await _build_threaded_edit_content_impl(*args, **kwargs)
+def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
+    """Call the real threaded edit-content helper directly."""
+    return _build_threaded_edit_content_impl(*args, **kwargs)
 
 
 class TestThreadHistory:
@@ -1008,38 +1007,32 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
         """Threaded edits should preserve MSC3440 fallback semantics through the latest visible event."""
-        client = AsyncMock()
-        event_cache = make_event_cache_mock()
-
-        with (
-            patch(
-                "mindroom.matrix.client._latest_thread_event_id",
-                new=AsyncMock(return_value="$latest"),
-            ) as mock_latest,
-            patch(
-                "mindroom.matrix.client.format_message_with_mentions",
-                return_value={"body": "edited"},
-            ) as mock_format,
-        ):
-            content = await build_threaded_edit_content(
-                client,
-                room_id="!room:localhost",
+        with patch(
+            "mindroom.matrix.client.format_message_with_mentions",
+            return_value={"body": "edited"},
+        ) as mock_format:
+            content = build_threaded_edit_content(
                 new_text="edited",
                 thread_id="$thread_root",
                 config=MagicMock(),
                 runtime_paths=MagicMock(),
                 sender_domain="localhost",
-                event_cache=event_cache,
+                latest_thread_event_id="$latest",
             )
 
         assert content == {"body": "edited"}
-        mock_latest.assert_awaited_once_with(
-            client,
-            "!room:localhost",
-            "$thread_root",
-            event_cache=event_cache,
-        )
         assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$latest"
+
+    def test_build_threaded_edit_content_requires_latest_thread_event_id_for_threads(self) -> None:
+        """Threaded edit content should require caller-owned fallback resolution."""
+        with pytest.raises(ValueError, match="latest_thread_event_id is required for thread fallback"):
+            build_threaded_edit_content(
+                new_text="edited",
+                thread_id="$thread_root",
+                config=MagicMock(),
+                runtime_paths=MagicMock(),
+                sender_domain="localhost",
+            )
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_returns_root_when_thread_has_no_children(self) -> None:

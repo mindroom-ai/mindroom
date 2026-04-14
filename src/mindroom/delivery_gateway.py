@@ -366,9 +366,13 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         else:
-            content = await build_threaded_edit_content(
-                client,
-                room_id=target.room_id,
+            latest_thread_event_id = (
+                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+                    target.room_id,
+                    target.resolved_thread_id,
+                )
+            )
+            content = build_threaded_edit_content(
                 new_text=request.new_text,
                 thread_id=target.resolved_thread_id,
                 config=config,
@@ -376,7 +380,7 @@ class DeliveryGateway:
                 sender_domain=self.deps.sender_domain,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
-                event_cache=self.deps.runtime.event_cache,
+                latest_thread_event_id=latest_thread_event_id,
             )
 
         response = await edit_message(

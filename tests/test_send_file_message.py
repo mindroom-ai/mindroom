@@ -9,7 +9,6 @@ import nio
 import pytest
 
 from mindroom.matrix.client import _msgtype_for_mimetype, _upload_file_as_mxc, send_file_message, send_message
-from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -160,7 +159,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                event_cache=make_event_cache_mock(),
             )
 
         assert event_id == "$evt:localhost"
@@ -207,7 +205,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                event_cache=make_event_cache_mock(),
             )
 
         assert event_id == "$evt:localhost"
@@ -232,20 +229,13 @@ class TestSendFileMessage:
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with (
-            patch("mindroom.matrix.client.send_message", side_effect=capture_send),
-            patch(
-                "mindroom.matrix.client._latest_thread_event_id",
-                new_callable=AsyncMock,
-                return_value="$latest:localhost",
-            ),
-        ):
+        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
                 file,
                 thread_id="$root:localhost",
-                event_cache=make_event_cache_mock(),
+                latest_thread_event_id="$latest:localhost",
             )
 
         assert event_id == "$evt:localhost"
@@ -274,7 +264,6 @@ class TestSendFileMessage:
 
         with (
             patch("mindroom.matrix.client.send_message", side_effect=capture_send),
-            patch("mindroom.matrix.client._latest_thread_event_id", new_callable=AsyncMock) as mock_latest,
         ):
             event_id = await send_file_message(
                 client,
@@ -282,13 +271,27 @@ class TestSendFileMessage:
                 file,
                 thread_id="$root:localhost",
                 latest_thread_event_id="$precomputed:localhost",
-                event_cache=make_event_cache_mock(),
             )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None
         assert sent_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
-        mock_latest.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_threaded_send_requires_precomputed_latest_thread_event_id(self, tmp_path: Path) -> None:
+        """Threaded file sends should require fallback resolution from the conversation-cache seam."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="latest_thread_event_id is required for thread fallback"):
+            await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                thread_id="$root:localhost",
+            )
 
     @pytest.mark.asyncio
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
@@ -298,7 +301,6 @@ class TestSendFileMessage:
             client,
             "!room:localhost",
             tmp_path / "gone.txt",
-            event_cache=make_event_cache_mock(),
         )
         assert result is None
 
@@ -318,7 +320,6 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
-                event_cache=make_event_cache_mock(),
             )
 
         assert result is None
@@ -346,7 +347,6 @@ class TestSendFileMessage:
                 "!room:localhost",
                 file,
                 caption="Q4 Report",
-                event_cache=make_event_cache_mock(),
             )
 
         assert sent_content is not None
@@ -416,7 +416,6 @@ class TestSendFileMessageMsgtype:
                 client,
                 "!room:localhost",
                 file,
-                event_cache=make_event_cache_mock(),
             )
 
         assert event_id == "$evt:localhost"
@@ -447,7 +446,6 @@ class TestSendFileMessageMsgtype:
                 client,
                 "!room:localhost",
                 file,
-                event_cache=make_event_cache_mock(),
             )
 
         assert event_id == "$evt:localhost"

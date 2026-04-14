@@ -205,7 +205,8 @@ The branch remains Ruff-clean, formatter-clean, and test metadata reflects the c
 
 ### Invariant 10
 
-Thread generation tokens are monotonic within the process and are never reused after LRU entry eviction.
+Thread generation tokens are monotonic within the process and are never reused.
+Clean generation metadata may age out after an inactivity horizon, but only through explicit retention policy rather than capacity eviction.
 
 ### Invariant 11
 
@@ -248,7 +249,7 @@ Per-thread version bumps and invalidations happen after successful persistence.
 If persistence fails for a thread-affecting update, that thread is marked repair-required so the next read bypasses freshness shortcuts and repairs from the homeserver.
 If a mutation cannot resolve the thread at all, the affected event ID is recorded as a durable lookup-repair obligation in the SQLite event cache.
 That obligation is correctness state, not disposable cache metadata.
-It remains until a concrete thread read can promote it to one thread-specific repair or an equivalent authoritative refill clears it.
+It remains until a concrete thread read can promote it to one thread-specific repair, an equivalent authoritative refill clears it, or the obligation ages past the explicit stale-repair retention horizon.
 
 ## Error Handling
 
@@ -349,7 +350,8 @@ That also includes high-level callers importing low-level `matrix.client` fallba
 - Sync errors do not update freshness clocks used to suppress repair reads.
 - Forced repair reads do not clear repair-required after degraded homeserver fallback results.
 - Resolved-thread cache reuse rechecks version and repair-required state after taking the per-thread entry lock.
-- Durable unresolved lookup repairs are not silently evicted when many failures occur in one room.
+- Durable unresolved lookup repairs are not silently evicted by room-local capacity pressure.
+- Stale unmatched lookup repairs age out only through an explicit retention policy.
 - Outbound send paths use `conversation_cache` for latest-thread fallback selection instead of reading cached thread history directly from `matrix.client`.
 - Team responses queue exactly one summary job through post-response effects.
 - API schedule editing does not instantiate private cache backends directly.

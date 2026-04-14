@@ -303,12 +303,17 @@ class MatrixMessageTools(Toolkit):
 
                 first_attachment_path = attachment_paths[0]
                 remaining_attachment_paths = attachment_paths[1:]
+                assert context.conversation_cache is not None
+                latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
+                    room_id,
+                    effective_thread_id,
+                )
                 first_attachment_event_id = await send_file_message(
                     context.client,
                     room_id,
                     first_attachment_path,
                     thread_id=effective_thread_id,
-                    event_cache=context.event_cache,
+                    latest_thread_event_id=latest_thread_event_id,
                 )
                 if first_attachment_event_id is None:
                     return self._payload(

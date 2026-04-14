@@ -215,7 +215,6 @@ async def _send_attachment_paths(
             room_id,
             attachment_path,
             thread_id=thread_id,
-            event_cache=context.event_cache,
             latest_thread_event_id=latest_thread_event_id,
         )
         if attachment_event_id is None:

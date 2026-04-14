@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -880,6 +881,52 @@ async def test_initialize_backfills_event_edit_index_from_old_schema(tmp_path: P
     assert latest_edit["event_id"] == "$reply_edit"
     assert latest_edit["content"]["m.new_content"]["body"] == "Final reply"
     assert schema_version == event_cache_module._EVENT_CACHE_SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+async def test_pending_lookup_repairs_prune_stale_unmatched_entries(tmp_path: Path) -> None:
+    """Old unmatched lookup repairs should age out instead of growing forever."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        stale_created_at = time.time() - event_cache_module._PENDING_LOOKUP_REPAIR_RETENTION_SECONDS - 1
+        fresh_created_at = time.time()
+        with sqlite3.connect(db_path) as db:
+            db.executemany(
+                """
+                INSERT INTO pending_lookup_repairs(room_id, event_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    ("!room:localhost", "$stale", stale_created_at),
+                    ("!room:localhost", "$fresh", fresh_created_at),
+                ],
+            )
+            db.commit()
+
+        pending = await cache.pending_lookup_repairs_for_event_ids(
+            "!room:localhost",
+            frozenset({"$stale", "$fresh"}),
+        )
+
+        with sqlite3.connect(db_path) as db:
+            remaining_repairs = {
+                str(row[0])
+                for row in db.execute(
+                    """
+                    SELECT event_id
+                    FROM pending_lookup_repairs
+                    WHERE room_id = ?
+                    """,
+                    ("!room:localhost",),
+                ).fetchall()
+            }
+    finally:
+        await cache.close()
+
+    assert pending == frozenset({"$fresh"})
+    assert remaining_repairs == {"$fresh"}
 
 
 @pytest.mark.asyncio

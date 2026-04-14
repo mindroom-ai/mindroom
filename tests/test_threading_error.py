@@ -248,13 +248,13 @@ class TestResolvedThreadCache:
         assert thread_key not in cache._locks
         assert cache.lookup(*thread_key).entry is None
 
-    def test_thread_versions_remain_monotonic_when_evicted_threads_reappear(self) -> None:
-        """Evicted threads keep their freshness generation and future bumps still increase globally."""
+    def test_thread_versions_prune_after_eviction_but_future_bumps_still_increase_globally(self) -> None:
+        """Evicted clean threads can forget their generation without reusing generation numbers."""
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._resolved_thread_cache = ResolvedThreadCache(max_entries=1)
+        access._resolved_thread_cache = ResolvedThreadCache(max_entries=1, generation_retention_seconds=0)
         thread_a_key = ("!room:localhost", "$thread-a")
         thread_b_key = ("!room:localhost", "$thread-b")
 
@@ -264,7 +264,7 @@ class TestResolvedThreadCache:
             resolved_thread_cache_entry(
                 history=[_message(event_id="$thread-a", body="A")],
                 source_event_ids=frozenset({"$thread-a"}),
-                thread_version=access.thread_version(*thread_a_key),
+                thread_version=1,
             ),
         )
         access._resolved_thread_cache.bump_version(*thread_b_key)
@@ -273,17 +273,15 @@ class TestResolvedThreadCache:
             resolved_thread_cache_entry(
                 history=[_message(event_id="$thread-b", body="B")],
                 source_event_ids=frozenset({"$thread-b"}),
-                thread_version=access.thread_version(*thread_b_key),
+                thread_version=2,
             ),
         )
 
         assert access._resolved_thread_cache.lookup(*thread_a_key).entry is None
-        assert access.thread_version(*thread_a_key) == 1
+        assert access.thread_version(*thread_a_key) == 0
         assert access.thread_version(*thread_b_key) == 2
 
-        access._bump_thread_version(*thread_a_key)
-
-        assert access.thread_version(*thread_a_key) == 3
+        assert access._bump_thread_version(*thread_a_key) == 3
 
     @pytest.mark.asyncio
     async def test_lru_eviction_prunes_clean_thread_lock_state(self) -> None:
@@ -292,7 +290,7 @@ class TestResolvedThreadCache:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._resolved_thread_cache = ResolvedThreadCache(max_entries=1)
+        access._resolved_thread_cache = ResolvedThreadCache(max_entries=1, generation_retention_seconds=0)
         thread_a_key = ("!room:localhost", "$thread-a")
         thread_b_key = ("!room:localhost", "$thread-b")
         access._resolved_thread_cache.bump_version(*thread_a_key)
@@ -315,7 +313,7 @@ class TestResolvedThreadCache:
 
         assert access._resolved_thread_cache.lookup(*thread_a_key).entry is None
         assert access._resolved_thread_cache.lookup(*thread_b_key).entry is not None
-        assert access.thread_version(*thread_a_key) == 1
+        assert access.thread_version(*thread_a_key) == 0
         assert access.thread_version(*thread_b_key) == 2
         assert thread_a_key not in access._resolved_thread_cache._locks
 
@@ -466,6 +464,15 @@ class TestThreadingBehavior:
         bot.event_cache_write_coordinator = shared_coordinator
         other_bot.event_cache = shared_cache
         other_bot.event_cache_write_coordinator = shared_coordinator
+        _prime_resolved_thread_history(
+            bot._conversation_cache,
+            room_id="!test:localhost",
+            thread_id="$thread",
+            history=[_message(event_id="$thread", body="Root")],
+            source_event_ids=frozenset({"$thread"}),
+            thread_version=7,
+        )
+        bot._conversation_cache._bump_thread_version("!test:localhost", "$thread")
 
         try:
             await shared_cache.store_event(
@@ -483,6 +490,8 @@ class TestThreadingBehavior:
             assert bot._standalone_runtime_support is None
             assert bot.event_cache is shared_cache
             assert other_bot.event_cache is shared_cache
+            assert bot._conversation_cache._resolved_thread_cache.lookup("!test:localhost", "$thread").entry is None
+            assert bot._conversation_cache.thread_version("!test:localhost", "$thread") == 0
 
             cached_event = await other_bot.event_cache.get_event("!test:localhost", "$shared-event")
         finally:

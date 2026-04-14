@@ -215,8 +215,8 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     second_call = mock_send.await_args_list[1]
     assert first_call.kwargs["latest_thread_event_id"] == "$latest:localhost"
     assert second_call.kwargs["latest_thread_event_id"] == "$file_evt_1"
-    assert first_call.kwargs["event_cache"] is event_cache
-    assert second_call.kwargs["event_cache"] is event_cache
+    assert "event_cache" not in first_call.kwargs
+    assert "event_cache" not in second_call.kwargs
 
 
 @pytest.mark.asyncio
