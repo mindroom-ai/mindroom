@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.cache.event_cache import ConversationEventCache
-    from mindroom.matrix.reply_chain import ReplyChainCaches
 
 
 def _collect_sync_timeline_cache_updates(
@@ -105,21 +104,16 @@ class ThreadWritePolicy:
         *,
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        reply_chain_caches_getter: typing.Callable[[], ReplyChainCaches | None],
         require_client: typing.Callable[[], nio.AsyncClient],
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
-        self._reply_chain_caches_getter = reply_chain_caches_getter
         self.require_client = require_client
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
         return self._logger_getter()
-
-    def _reply_chain_caches(self) -> ReplyChainCaches | None:
-        return self._reply_chain_caches_getter()
 
     def _cache_runtime_available(self) -> bool:
         return self.runtime.event_cache is not None and self.runtime.event_cache_write_coordinator is not None
@@ -133,64 +127,6 @@ class ThreadWritePolicy:
     ) -> asyncio.Task[object]:
         coordinator = self.runtime.event_cache_write_coordinator
         return coordinator.queue_room_update(room_id, update_coro_factory, name=name)
-
-    def _invalidate_reply_chain(self, room_id: str, *event_ids: str | None) -> None:
-        reply_chain_caches = self._reply_chain_caches()
-        if reply_chain_caches is None:
-            return
-        reply_chain_caches.invalidate(room_id, event_ids)
-
-    async def _reply_chain_invalidation_ids_for_redaction(
-        self,
-        room_id: str,
-        redacted_event_id: str,
-        *,
-        event_cache: ConversationEventCache,
-    ) -> set[str]:
-        invalidation_ids = {redacted_event_id}
-        try:
-            cached_event = await event_cache.get_event(room_id, redacted_event_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to inspect cached redacted event for reply-chain invalidation",
-                room_id=room_id,
-                redacted_event_id=redacted_event_id,
-                error=str(exc),
-            )
-            return invalidation_ids
-        if not isinstance(cached_event, dict):
-            return invalidation_ids
-        original_event_id = EventInfo.from_event(cached_event).original_event_id
-        if isinstance(original_event_id, str):
-            invalidation_ids.add(original_event_id)
-        return invalidation_ids
-
-    async def _reply_chain_invalidation_ids_for_sync_redaction(
-        self,
-        room_id: str,
-        redacted_event_id: str,
-        *,
-        event_cache: ConversationEventCache,
-        event_source: dict[str, object] | None,
-    ) -> set[str]:
-        invalidation_ids = {redacted_event_id}
-        candidate_event_source = event_source
-        if candidate_event_source is None:
-            reply_chain_caches = self._reply_chain_caches()
-            if reply_chain_caches is not None:
-                candidate_event_source = reply_chain_caches.event_source(room_id, redacted_event_id)
-        if candidate_event_source is None:
-            return await self._reply_chain_invalidation_ids_for_redaction(
-                room_id,
-                redacted_event_id,
-                event_cache=event_cache,
-            )
-        if not isinstance(candidate_event_source, dict):
-            return invalidation_ids
-        original_event_id = EventInfo.from_event(candidate_event_source).original_event_id
-        if isinstance(original_event_id, str):
-            invalidation_ids.add(original_event_id)
-        return invalidation_ids
 
     def _disable_cache_after_fail_closed_invalidation(
         self,
@@ -481,8 +417,6 @@ class ThreadWritePolicy:
         )
         if not is_thread_candidate:
             return
-        if event_info.is_edit:
-            self._invalidate_reply_chain(room_id, event_id, event_info.original_event_id)
 
         try:
             await self._queue_room_cache_update(
@@ -503,12 +437,6 @@ class ThreadWritePolicy:
         room_id: str,
         redacted_event_id: str,
     ) -> None:
-        reply_chain_invalidation_ids = await self._reply_chain_invalidation_ids_for_redaction(
-            room_id,
-            redacted_event_id,
-            event_cache=self.runtime.event_cache,
-        )
-        self._invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
         thread_id = await self._lookup_redaction_thread_id(
             room_id,
             redacted_event_id,
@@ -563,8 +491,6 @@ class ThreadWritePolicy:
         """Append one live threaded event into the advisory cache when the thread is known."""
         if not self._cache_runtime_available():
             return
-        if event_info.is_edit:
-            self._invalidate_reply_chain(room_id, event.event_id, event_info.original_event_id)
 
         thread_id = await self._resolve_thread_id_for_mutation(
             room_id,
@@ -608,12 +534,6 @@ class ThreadWritePolicy:
         """Apply one redaction to the advisory cache when the affected thread is known."""
         if not self._cache_runtime_available():
             return
-        invalidation_ids = await self._reply_chain_invalidation_ids_for_redaction(
-            room_id,
-            event.redacts,
-            event_cache=self.runtime.event_cache,
-        )
-        self._invalidate_reply_chain(room_id, *invalidation_ids)
         thread_id = await self._lookup_redaction_thread_id(
             room_id,
             event.redacts,
@@ -686,13 +606,6 @@ class ThreadWritePolicy:
         redacted_event_ids: Sequence[str],
     ) -> None:
         for redacted_event_id in redacted_event_ids:
-            reply_chain_invalidation_ids = await self._reply_chain_invalidation_ids_for_sync_redaction(
-                room_id,
-                redacted_event_id,
-                event_cache=event_cache,
-                event_source=None,
-            )
-            self._invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
             thread_id = await self._lookup_redaction_thread_id(
                 room_id,
                 redacted_event_id,
@@ -754,19 +667,6 @@ class ThreadWritePolicy:
         await self._persist_threaded_sync_events(room_id, threaded_events)
         await self._apply_sync_redactions(event_cache, room_id, redacted_event_ids)
 
-    def _track_sync_cached_event(
-        self,
-        room_id: str,
-        event_source: dict[str, object],
-    ) -> None:
-        event_info = EventInfo.from_event(event_source)
-        if event_info.is_edit:
-            self._invalidate_reply_chain(
-                room_id,
-                event_info.original_event_id,
-                event_id_from_event_source(event_source),
-            )
-
     def _group_sync_timeline_updates(
         self,
         response: nio.SyncResponse,
@@ -793,9 +693,6 @@ class ThreadWritePolicy:
                     room_plain_events=room_plain_events,
                     room_redactions=room_redactions,
                 )
-                event_source = event.source if isinstance(event.source, dict) else None
-                if isinstance(event_source, dict):
-                    self._track_sync_cached_event(room_id, event_source)
         return room_plain_events, room_threaded_events, room_redactions
 
     def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
