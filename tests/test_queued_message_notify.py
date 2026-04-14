@@ -539,7 +539,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             ) as mock_run_cancellable_response,
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.reprioritize_auto_flush_sessions", new=MagicMock()),
-            patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock()),
+            patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
         ):
             task = asyncio.create_task(
                 bot._generate_response(
@@ -832,7 +832,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )
 
-    assert bot._handled_turn_ledger.has_responded("$older")
+    assert bot._turn_store.is_handled("$older")
     mock_plan.assert_not_awaited()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert coordinator._thread_queued_signals == {}

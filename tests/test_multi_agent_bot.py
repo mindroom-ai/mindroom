@@ -122,6 +122,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
+    from mindroom.turn_store import TurnStore
+
 
 def _make_matrix_client_mock() -> AsyncMock:
     """Return a minimal Matrix client mock for bot tests."""
@@ -149,6 +151,24 @@ def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
 def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> TurnPolicy:
     """Rebuild the policy with the shared collaborator-replacement helper."""
     return shared_replace_turn_policy_deps(bot, **changes)
+
+
+def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
+    """Return the real turn store behind one wrapped bot."""
+    return unwrap_extracted_collaborator(bot._turn_store)
+
+
+def _mock_turn_store(bot: AgentBot | TeamBot, *, is_handled: bool = False) -> TurnStore:
+    """Patch the existing turn store in place for tests that only need dedupe control."""
+    turn_store = _turn_store(bot)
+    turn_store.is_handled = MagicMock(return_value=is_handled)
+    return turn_store
+
+
+def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> MagicMock:
+    """Swap the private handled-turn ledger behind one turn store for test assertions."""
+    _turn_store(bot)._ledger = tracker
+    return tracker
 
 
 def _replace_response_runner_runtime_deps(
@@ -2092,7 +2112,7 @@ class TestAgentBot:
         matrix_ids = config.get_ids(runtime_paths_for(config))
         storage = MagicMock()
         mock_strip_enrichment = MagicMock()
-        bot._conversation_state_writer.create_team_history_storage = MagicMock(return_value=storage)
+        bot._conversation_state_writer.create_storage = MagicMock(return_value=storage)
         with (
             patch(
                 "mindroom.delivery_gateway.edit_message",
@@ -3468,7 +3488,7 @@ class TestAgentBot:
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch(
-                "mindroom.response_runner.apply_post_response_effects",
+                "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),
             ),
         ):
@@ -4225,9 +4245,8 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -4243,11 +4262,11 @@ class TestAgentBot:
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
+            tracker.record_handled_turn.assert_called_once_with(
                 HandledTurnState.from_source_event_id(event.event_id),
             )
         else:
-            bot._handled_turn_ledger.record_handled_turn.assert_not_called()
+            tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -4278,9 +4297,8 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -4311,11 +4329,11 @@ class TestAgentBot:
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
+            tracker.record_handled_turn.assert_called_once_with(
                 HandledTurnState.from_source_event_id(event.event_id),
             )
         else:
-            bot._handled_turn_ledger.record_handled_turn.assert_not_called()
+            tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_forwards_image_to_generate_response(
@@ -4331,7 +4349,7 @@ class TestAgentBot:
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
-        bot.__dict__["_handled_turn_ledger"] = tracker
+        _set_turn_store_tracker(bot, tracker)
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -4425,7 +4443,7 @@ class TestAgentBot:
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
-        bot.__dict__["_handled_turn_ledger"] = tracker
+        _set_turn_store_tracker(bot, tracker)
 
         history_attachment_id = "att_prev_image"
         current_attachment_id = _attachment_id_for_event("$img_event_history")
@@ -4449,6 +4467,7 @@ class TestAgentBot:
         bot._generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, bot._generate_response)
         _replace_turn_policy_deps(bot, resolver=bot._conversation_resolver)
+        _set_turn_store_tracker(bot, tracker)
 
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -4576,7 +4595,7 @@ class TestAgentBot:
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
-        bot.__dict__["_handled_turn_ledger"] = tracker
+        _set_turn_store_tracker(bot, tracker)
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -4631,7 +4650,7 @@ class TestAgentBot:
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
-        bot.__dict__["_handled_turn_ledger"] = tracker
+        _set_turn_store_tracker(bot, tracker)
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -4730,7 +4749,7 @@ class TestAgentBot:
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
-        bot.__dict__["_handled_turn_ledger"] = tracker
+        _set_turn_store_tracker(bot, tracker)
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -4796,9 +4815,8 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
         bot._turn_controller._execute_router_relay = AsyncMock()
 
         mock_context = MagicMock()
@@ -4918,9 +4936,8 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
         bot._turn_controller._execute_router_relay = AsyncMock()
 
         mock_context = MagicMock()
@@ -5020,8 +5037,7 @@ class TestAgentBot:
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        _set_turn_store_tracker(bot, MagicMock())
         bot._send_response = AsyncMock(return_value="$route")
         install_send_response_mock(bot, bot._send_response)
 
@@ -5112,8 +5128,7 @@ class TestAgentBot:
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        _set_turn_store_tracker(bot, MagicMock())
         bot._send_response = AsyncMock(return_value="$route")
         install_send_response_mock(bot, bot._send_response)
 
@@ -5207,12 +5222,10 @@ class TestAgentBot:
 
         router_bot.client = AsyncMock()
         general_bot.client = AsyncMock()
-        router_bot._handled_turn_ledger = MagicMock()
-        router_bot._handled_turn_ledger.has_responded.return_value = False
-        general_bot._handled_turn_ledger = MagicMock()
-        general_bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(router_bot, handled_turn_ledger=router_bot._handled_turn_ledger)
-        _replace_turn_policy_deps(general_bot, handled_turn_ledger=general_bot._handled_turn_ledger)
+        router_tracker = _set_turn_store_tracker(router_bot, MagicMock())
+        router_tracker.has_responded.return_value = False
+        general_tracker = _set_turn_store_tracker(general_bot, MagicMock())
+        general_tracker.has_responded.return_value = False
         router_bot._send_response = AsyncMock(return_value="$route")
         install_send_response_mock(router_bot, router_bot._send_response)
         general_bot._generate_response = AsyncMock()
@@ -5322,9 +5335,8 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
         bot._turn_controller._execute_router_relay = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -5406,9 +5418,8 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
         bot._turn_controller._execute_router_relay = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -5468,7 +5479,7 @@ class TestAgentBot:
 
         tracker = MagicMock()
         tracker.has_responded.return_value = False
-        bot._handled_turn_ledger = tracker
+        _set_turn_store_tracker(bot, tracker)
         bot._generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, bot._generate_response)
 
@@ -6259,8 +6270,7 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot._handled_turn_ledger = MagicMock()
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         event = MagicMock()
@@ -6293,7 +6303,6 @@ class TestAgentBot:
         _replace_turn_policy_deps(
             bot,
             delivery_gateway=bot._delivery_gateway,
-            handled_turn_ledger=bot._handled_turn_ledger,
         )
 
         async def unused_payload_builder(_context: MessageContext) -> DispatchPayload:
@@ -6314,7 +6323,7 @@ class TestAgentBot:
         assert mock_send_response.await_args.args[2].endswith(
             "private agents cannot participate in teams yet",
         )
-        bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$reply",
@@ -6490,8 +6499,7 @@ class TestAgentBot:
             correlation_id="corr-hydrate-dispatch",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
-        bot._handled_turn_ledger = MagicMock()
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        _set_turn_store_tracker(bot, MagicMock())
         full_history = [
             ResolvedVisibleMessage.synthetic(
                 sender="@user:localhost",
@@ -6539,7 +6547,6 @@ class TestAgentBot:
         _replace_turn_policy_deps(
             bot,
             response_runner=bot._response_runner,
-            handled_turn_ledger=bot._handled_turn_ledger,
         )
 
         with (
@@ -6715,12 +6722,11 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
-        bot._handled_turn_ledger = MagicMock()
-        bot._handled_turn_ledger.visible_echo_event_id_for_sources.side_effect = (
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.visible_echo_event_id_for_sources.side_effect = (
             lambda source_event_ids: "$voice_echo" if tuple(source_event_ids) == ("$voice", "$text") else None
         )
-        bot._handled_turn_ledger.has_responded.return_value = False
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -6765,7 +6771,7 @@ class TestAgentBot:
                 ),
             )
 
-        assert bot._handled_turn_ledger.record_handled_turn.call_args_list == [
+        assert tracker.record_handled_turn.call_args_list == [
             call(
                 HandledTurnState.create(
                     ["$voice", "$text"],
@@ -6794,8 +6800,7 @@ class TestAgentBot:
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
-        bot._handled_turn_ledger = MagicMock()
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -6878,7 +6883,7 @@ class TestAgentBot:
                 handled_turn=coalesced_turn,
             )
 
-        assert bot._handled_turn_ledger.record_handled_turn.call_args_list == [
+        assert tracker.record_handled_turn.call_args_list == [
             call(
                 HandledTurnState.create(
                     ["$voice", "$text"],
@@ -7027,9 +7032,9 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger, handled_turn_ledger=bot._handled_turn_ledger)
+        _replace_turn_policy_deps(bot, logger=bot.logger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7080,7 +7085,6 @@ class TestAgentBot:
             bot,
             delivery_gateway=bot._delivery_gateway,
             response_runner=bot._response_runner,
-            handled_turn_ledger=bot._handled_turn_ledger,
         )
 
         with patch.object(TurnController, "_log_dispatch_latency"):
@@ -7103,7 +7107,7 @@ class TestAgentBot:
         assert team_request.existing_event_id is None
         assert team_request.existing_event_is_placeholder is False
         mock_send_response.assert_not_awaited()
-        bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$team-response",
@@ -7121,9 +7125,9 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger, handled_turn_ledger=bot._handled_turn_ledger)
+        _replace_turn_policy_deps(bot, logger=bot.logger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7157,7 +7161,6 @@ class TestAgentBot:
             bot,
             delivery_gateway=bot._delivery_gateway,
             response_runner=bot._response_runner,
-            handled_turn_ledger=bot._handled_turn_ledger,
         )
 
         with patch.object(TurnController, "_log_dispatch_latency"):
@@ -7179,7 +7182,7 @@ class TestAgentBot:
         mock_send_response.assert_not_awaited()
         assert mock_generate_response.await_args.kwargs["existing_event_id"] is None
         assert mock_generate_response.await_args.kwargs["existing_event_is_placeholder"] is False
-        bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$response",
@@ -7200,7 +7203,7 @@ class TestAgentBot:
         bot.logger = MagicMock()
         tracker = MagicMock()
         tracker.has_responded.return_value = False
-        bot._handled_turn_ledger = tracker
+        _set_turn_store_tracker(bot, tracker)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -7316,9 +7319,9 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger, handled_turn_ledger=bot._handled_turn_ledger)
+        _replace_turn_policy_deps(bot, logger=bot.logger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7356,7 +7359,6 @@ class TestAgentBot:
         _replace_turn_policy_deps(
             bot,
             delivery_gateway=bot._delivery_gateway,
-            handled_turn_ledger=bot._handled_turn_ledger,
         )
 
         with patch.object(TurnController, "_log_dispatch_latency"):
@@ -7373,7 +7375,7 @@ class TestAgentBot:
 
         mock_edit.assert_not_awaited()
         mock_send_response.assert_awaited_once()
-        bot._handled_turn_ledger.record_handled_turn.assert_called_once_with(
+        tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$error",
@@ -7390,9 +7392,9 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger, handled_turn_ledger=bot._handled_turn_ledger)
+        _replace_turn_policy_deps(bot, logger=bot.logger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7435,7 +7437,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        bot._handled_turn_ledger.record_handled_turn.assert_not_called()
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_suppressed_cleanup_fails(
@@ -7447,13 +7449,11 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._handled_turn_ledger = MagicMock()
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_response_runner")
         replace_turn_controller_deps(
             bot,
-            handled_turn_ledger=bot._handled_turn_ledger,
             logger=bot.logger,
             response_runner=bot._response_runner,
         )
@@ -7505,7 +7505,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        bot._handled_turn_ledger.record_handled_turn.assert_not_called()
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(
@@ -7517,8 +7517,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._handled_turn_ledger = MagicMock()
-        _replace_turn_policy_deps(bot, handled_turn_ledger=bot._handled_turn_ledger)
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -7563,7 +7562,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        bot._handled_turn_ledger.record_handled_turn.assert_not_called()
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_logs_startup_latency(
@@ -7575,9 +7574,9 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot._handled_turn_ledger = MagicMock()
+        _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
-        _replace_turn_policy_deps(bot, logger=bot.logger, handled_turn_ledger=bot._handled_turn_ledger)
+        _replace_turn_policy_deps(bot, logger=bot.logger)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -7619,7 +7618,6 @@ class TestAgentBot:
             bot,
             logger=bot.logger,
             response_runner=bot._response_runner,
-            handled_turn_ledger=bot._handled_turn_ledger,
         )
 
         with patch("mindroom.turn_controller.time.monotonic", side_effect=lambda: next(monotonic_values)):
@@ -7927,7 +7925,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         # Mark an event as already responded
-        bot._handled_turn_ledger.record_handled_turn(HandledTurnState.from_source_event_id("event123"))
+        _turn_store(bot).record_turn(HandledTurnState.from_source_event_id("event123"))
 
         # Create mock room and event
         mock_room = MagicMock()
