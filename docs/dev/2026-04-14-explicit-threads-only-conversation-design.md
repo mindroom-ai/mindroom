@@ -41,6 +41,22 @@ Plain replies do not imply `is_thread=True`.
 Plain replies do not produce `thread_id`.
 Plain replies do not trigger thread-history reads.
 
+## Outbound Target And Session Identity
+
+Plain replies may still keep `reply_to_event_id` for client UX.
+Plain replies must not affect `resolved_thread_id`.
+Plain replies must not affect `session_id`.
+Plain replies must not populate `safe_thread_root` for conversation routing.
+
+That means the outbound target model must change in three places.
+`EventInfo.safe_thread_root` must stop using plain replies as a synthetic thread root.
+`MessageTarget.resolve()` must stop treating plain reply targets as a thread/session identity source.
+`ConversationResolver.build_message_target()` must only pass thread-affecting root information for explicit thread cases.
+
+The resulting rule is simple.
+Explicit thread metadata controls thread/session identity.
+Plain reply metadata controls only immediate reply anchoring.
+
 `ConversationResolver` becomes an explicit-thread resolver.
 For full-history reads, it returns thread history only for direct thread events.
 For preview reads, it returns lightweight thread snapshots only for direct thread events.
@@ -77,8 +93,12 @@ It should not derive a synthetic thread root from that reply target.
 `src/mindroom/conversation_resolver.py` should lose the `ReplyChainCaches` field, reply-chain imports, plain-reply traversal paths, and related hydration branches.
 `src/mindroom/matrix/conversation_cache.py` should lose reply-chain cache binding methods.
 `src/mindroom/matrix/cache/thread_writes.py` should lose reply-chain cache getters, invalidation helpers, and redaction/edit invalidation paths that only exist for reply-chain state.
+`src/mindroom/message_target.py` should stop deriving `resolved_thread_id` and `session_id` from plain replies.
+`src/mindroom/matrix/event_info.py` should stop setting `safe_thread_root` from plain reply metadata.
+`src/mindroom/bot.py` should stop wiring reply-chain caches into the conversation cache.
 `src/mindroom/thread_tags.py` should simplify its normalization path.
-Related tests in `tests/test_threading_error.py`, `tests/test_thread_mode.py`, `tests/test_preformed_team_routing.py`, `tests/test_thread_tags.py`, and other reply-chain-specific files should shrink significantly.
+`src/mindroom/custom_tools/thread_tags.py` and `src/mindroom/custom_tools/thread_summary.py` should stop normalizing plain replies into synthetic thread roots.
+Related tests in `tests/test_threading_error.py`, `tests/test_thread_mode.py`, `tests/test_preformed_team_routing.py`, `tests/test_thread_tags.py`, `tests/test_thread_tags_tool.py`, `tests/test_thread_summary_tool.py`, and other reply-chain-specific files should shrink significantly.
 
 ## Compatibility Stance
 
@@ -106,4 +126,5 @@ There is no reply-chain traversal module in `src/`.
 Conversation resolution no longer depends on `m.in_reply_to` chain walking.
 Plain replies do not produce thread context.
 Reply-chain caches and invalidation hooks are gone.
+Plain replies do not affect `resolved_thread_id`, `session_id`, or `safe_thread_root`.
 The remaining thread model is explicit, smaller, and easier to reason about.

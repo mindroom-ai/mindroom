@@ -14,15 +14,22 @@
 
 - Delete: `src/mindroom/matrix/reply_chain.py`
 - Modify: `src/mindroom/conversation_resolver.py`
+- Modify: `src/mindroom/message_target.py`
+- Modify: `src/mindroom/matrix/event_info.py`
 - Modify: `src/mindroom/matrix/conversation_cache.py`
 - Modify: `src/mindroom/matrix/cache/thread_writes.py`
+- Modify: `src/mindroom/bot.py`
 - Modify: `src/mindroom/thread_tags.py`
+- Modify: `src/mindroom/custom_tools/thread_tags.py`
+- Modify: `src/mindroom/custom_tools/thread_summary.py`
 - Modify: `src/mindroom/inbound_turn_normalizer.py`
 - Modify: `src/mindroom/commands/handler.py`
 - Modify: `src/mindroom/turn_controller.py`
 - Test: `tests/test_threading_error.py`
 - Test: `tests/test_thread_mode.py`
 - Test: `tests/test_thread_tags.py`
+- Test: `tests/test_thread_tags_tool.py`
+- Test: `tests/test_thread_summary_tool.py`
 - Test: `tests/test_preformed_team_routing.py`
 - Test: any other reply-chain-specific tests surfaced by `rg -n "reply_chain|canonicalize_related_event_id|requires_full_thread_history|m\\.in_reply_to" tests`
 
@@ -53,11 +60,53 @@ git add tests/test_threading_error.py tests/test_thread_mode.py tests/test_prefo
 git commit -m "test: lock explicit-thread-only conversation behavior"
 ```
 
-### Task 2: Remove Reply-Chain Resolution from ConversationResolver
+### Task 2: Fix Outbound Target And Session Semantics First
+
+**Files:**
+- Modify: `src/mindroom/message_target.py`
+- Modify: `src/mindroom/matrix/event_info.py`
+- Modify: `src/mindroom/conversation_resolver.py`
+- Modify: `tests/test_threading_error.py`
+- Modify: `tests/test_thread_mode.py`
+
+- [ ] **Step 1: Write failing tests for plain-reply target semantics**
+
+Add or update tests that prove:
+- plain replies may keep `reply_to_event_id`
+- plain replies do not affect `resolved_thread_id`
+- plain replies do not affect `session_id`
+- plain replies do not set `safe_thread_root`
+
+- [ ] **Step 2: Run the focused tests to verify failure**
+
+Run: `uv run pytest tests/test_threading_error.py tests/test_thread_mode.py -k 'resolved_thread_id or session_id or safe_thread_root or plain reply' -x -n 0 --no-cov -q`
+
+- [ ] **Step 3: Implement the target-model change**
+
+Update:
+- `EventInfo.safe_thread_root` so plain replies no longer populate it for routing
+- `MessageTarget.resolve()` so plain replies are not treated as thread/session identity
+- `ConversationResolver.build_message_target()` so only explicit thread metadata influences thread routing
+
+- [ ] **Step 4: Re-run the focused tests**
+
+Run: `uv run pytest tests/test_threading_error.py tests/test_thread_mode.py -k 'resolved_thread_id or session_id or safe_thread_root or plain reply' -x -n 0 --no-cov -q`
+
+Expected: PASS
+
+- [ ] **Step 5: Commit the target-semantics checkpoint**
+
+```bash
+git add src/mindroom/message_target.py src/mindroom/matrix/event_info.py src/mindroom/conversation_resolver.py tests/test_threading_error.py tests/test_thread_mode.py
+git commit -m "refactor: make thread identity explicit only"
+```
+
+### Task 3: Remove Reply-Chain Resolution From Conversation Flow
 
 **Files:**
 - Modify: `src/mindroom/conversation_resolver.py`
 - Delete: `src/mindroom/matrix/reply_chain.py`
+- Modify: `src/mindroom/bot.py`
 
 - [ ] **Step 1: Remove reply-chain imports and state from the resolver**
 
@@ -72,24 +121,29 @@ Implement:
 - `derive_conversation_target()` returns snapshot plus `requires_full_thread_history` only for explicit threads
 - plain replies return non-thread context with no history
 
-- [ ] **Step 3: Run focused resolver tests**
+- [ ] **Step 3: Remove reply-chain cache wiring**
+
+Delete the `bind_reply_chain_caches(...)` call from `bot.py`.
+
+- [ ] **Step 4: Run focused resolver tests**
 
 Run: `uv run pytest tests/test_threading_error.py tests/test_thread_mode.py -k 'conversation_context or dispatch_context or coalescing_thread_id' -x -n 0 --no-cov -q`
 
 Expected: PASS
 
-- [ ] **Step 4: Commit the resolver simplification**
+- [ ] **Step 5: Commit the resolver simplification**
 
 ```bash
-git add src/mindroom/conversation_resolver.py src/mindroom/matrix/reply_chain.py tests/test_threading_error.py tests/test_thread_mode.py
+git add src/mindroom/conversation_resolver.py src/mindroom/matrix/reply_chain.py src/mindroom/bot.py tests/test_threading_error.py tests/test_thread_mode.py
 git commit -m "refactor: drop reply-chain conversation inference"
 ```
 
-### Task 3: Remove Reply-Chain Hooks from the Cache Layer
+### Task 4: Remove Reply-Chain Hooks From The Cache Layer
 
 **Files:**
 - Modify: `src/mindroom/matrix/conversation_cache.py`
 - Modify: `src/mindroom/matrix/cache/thread_writes.py`
+- Modify: `tests/test_threading_error.py`
 
 - [ ] **Step 1: Delete reply-chain cache binding from `conversation_cache.py`**
 
@@ -118,12 +172,17 @@ git add src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thre
 git commit -m "cleanup: remove reply-chain cache invalidation"
 ```
 
-### Task 4: Simplify Thread Tags and Callers
+### Task 5: Simplify Thread Tags, Summary Tools, And Callers
 
 **Files:**
 - Modify: `src/mindroom/thread_tags.py`
+- Modify: `src/mindroom/custom_tools/thread_tags.py`
+- Modify: `src/mindroom/custom_tools/thread_summary.py`
 - Modify: `src/mindroom/inbound_turn_normalizer.py`
 - Modify: `src/mindroom/commands/handler.py`
+- Modify: `tests/test_thread_tags.py`
+- Modify: `tests/test_thread_tags_tool.py`
+- Modify: `tests/test_thread_summary_tool.py`
 
 - [ ] **Step 1: Remove thread-root normalization by plain reply traversal**
 
@@ -137,18 +196,18 @@ Make any plain-reply path fall back to non-thread behavior instead of inferred-t
 
 - [ ] **Step 3: Run focused caller and thread-tag tests**
 
-Run: `uv run pytest tests/test_thread_tags.py tests/test_threading_error.py tests/test_unknown_command_response.py -k 'thread tag or plain reply or command' -x -n 0 --no-cov -q`
+Run: `uv run pytest tests/test_thread_tags.py tests/test_thread_tags_tool.py tests/test_thread_summary_tool.py tests/test_threading_error.py tests/test_unknown_command_response.py -k 'thread tag or thread summary or plain reply or command' -x -n 0 --no-cov -q`
 
 Expected: PASS
 
 - [ ] **Step 4: Commit caller simplification**
 
 ```bash
-git add src/mindroom/thread_tags.py src/mindroom/inbound_turn_normalizer.py src/mindroom/commands/handler.py tests/test_thread_tags.py tests/test_threading_error.py tests/test_unknown_command_response.py
+git add src/mindroom/thread_tags.py src/mindroom/custom_tools/thread_tags.py src/mindroom/custom_tools/thread_summary.py src/mindroom/inbound_turn_normalizer.py src/mindroom/commands/handler.py tests/test_thread_tags.py tests/test_thread_tags_tool.py tests/test_thread_summary_tool.py tests/test_threading_error.py tests/test_unknown_command_response.py
 git commit -m "refactor: stop inferring thread roots from plain replies"
 ```
 
-### Task 5: Remove Dead Preview and Routing Branches
+### Task 6: Remove Dead Preview And Routing Branches
 
 **Files:**
 - Modify: `src/mindroom/turn_controller.py`
@@ -179,7 +238,7 @@ git add src/mindroom/turn_controller.py src/mindroom/conversation_resolver.py te
 git commit -m "cleanup: remove plain-reply thread preview paths"
 ```
 
-### Task 6: Delete Dead Tests and Run Full Verification
+### Task 7: Delete Dead Tests And Run Full Verification
 
 **Files:**
 - Modify: reply-chain-related test files found by search
