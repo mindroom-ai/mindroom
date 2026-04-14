@@ -30,13 +30,17 @@ class ThreadReadPolicy:
         *,
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        fetch_thread_history_from_client: typing.Callable[[str, str, bool], typing.Awaitable[ThreadHistoryResult]],
-        fetch_thread_snapshot_from_client: typing.Callable[[str, str, bool], typing.Awaitable[ThreadHistoryResult]],
+        fetch_thread_history_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
+        fetch_thread_snapshot_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
+        fetch_dispatch_thread_history_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
+        fetch_dispatch_thread_snapshot_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
         self.fetch_thread_snapshot_from_client = fetch_thread_snapshot_from_client
+        self.fetch_dispatch_thread_history_from_client = fetch_dispatch_thread_history_from_client
+        self.fetch_dispatch_thread_snapshot_from_client = fetch_dispatch_thread_snapshot_from_client
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
@@ -63,10 +67,10 @@ class ThreadReadPolicy:
         room_id: str,
         thread_id: str,
         *,
-        allow_durable_cache: bool,
+        fetcher: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
     ) -> ThreadHistoryResult:
         return self._full_history_result(
-            await self.fetch_thread_history_from_client(room_id, thread_id, allow_durable_cache),
+            await fetcher(room_id, thread_id),
         )
 
     async def _load_thread_history_under_room_barrier(
@@ -74,7 +78,8 @@ class ThreadReadPolicy:
         room_id: str,
         thread_id: str,
         *,
-        allow_durable_cache: bool,
+        fetcher: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
+        name: str,
     ) -> ThreadHistoryResult:
         return typing.cast(
             "ThreadHistoryResult",
@@ -83,9 +88,9 @@ class ThreadReadPolicy:
                 lambda: self._load_full_thread_history(
                     room_id,
                     thread_id,
-                    allow_durable_cache=allow_durable_cache,
+                    fetcher=fetcher,
                 ),
-                name="matrix_cache_refresh_thread_history",
+                name=name,
             ),
         )
 
@@ -93,20 +98,14 @@ class ThreadReadPolicy:
         self,
         room_id: str,
         thread_id: str,
-        *,
-        allow_durable_cache: bool = True,
     ) -> ThreadHistoryResult:
-        """Resolve lightweight thread context for one thread under the room-scoped barrier."""
+        """Resolve advisory lightweight thread context for one thread under the room-scoped barrier."""
         await self._wait_for_pending_room_cache_updates(room_id)
         return typing.cast(
             "ThreadHistoryResult",
             await self.runtime.event_cache_write_coordinator.run_room_update(
                 room_id,
-                lambda: self.fetch_thread_snapshot_from_client(
-                    room_id,
-                    thread_id,
-                    allow_durable_cache,
-                ),
+                lambda: self.fetch_thread_snapshot_from_client(room_id, thread_id),
                 name="matrix_cache_refresh_thread_snapshot",
             ),
         )
@@ -115,15 +114,44 @@ class ThreadReadPolicy:
         self,
         room_id: str,
         thread_id: str,
-        *,
-        allow_durable_cache: bool = True,
     ) -> ThreadHistoryResult:
-        """Resolve full thread history for one conversation root."""
+        """Resolve advisory full thread history for one conversation root."""
         await self._wait_for_pending_room_cache_updates(room_id)
         return await self._load_thread_history_under_room_barrier(
             room_id,
             thread_id,
-            allow_durable_cache=allow_durable_cache,
+            fetcher=self.fetch_thread_history_from_client,
+            name="matrix_cache_refresh_thread_history",
+        )
+
+    async def get_dispatch_thread_snapshot(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult:
+        """Resolve strict lightweight thread context for dispatch under the room-scoped barrier."""
+        await self._wait_for_pending_room_cache_updates(room_id)
+        return typing.cast(
+            "ThreadHistoryResult",
+            await self.runtime.event_cache_write_coordinator.run_room_update(
+                room_id,
+                lambda: self.fetch_dispatch_thread_snapshot_from_client(room_id, thread_id),
+                name="matrix_cache_refresh_dispatch_thread_snapshot",
+            ),
+        )
+
+    async def get_dispatch_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult:
+        """Resolve strict full thread history for dispatch."""
+        await self._wait_for_pending_room_cache_updates(room_id)
+        return await self._load_thread_history_under_room_barrier(
+            room_id,
+            thread_id,
+            fetcher=self.fetch_dispatch_thread_history_from_client,
+            name="matrix_cache_refresh_dispatch_thread_history",
         )
 
     async def get_latest_thread_event_id_if_needed(

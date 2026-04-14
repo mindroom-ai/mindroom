@@ -69,8 +69,8 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
-def test_plain_reply_event_info_has_no_safe_thread_root_for_routing() -> None:
-    """Plain replies should not populate a synthetic safe thread root."""
+def test_plain_reply_event_info_has_no_thread_routing_root() -> None:
+    """Plain replies should not populate any synthetic routing root."""
     event_info = EventInfo.from_event(
         {
             "content": {
@@ -88,7 +88,7 @@ def test_plain_reply_event_info_has_no_safe_thread_root_for_routing() -> None:
 
     assert event_info.is_reply is True
     assert event_info.reply_to_event_id == "$target:localhost"
-    assert event_info.safe_thread_root is None
+    assert event_info.relates_to_event_id is None
 
 
 def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> ResolvedVisibleMessage:
@@ -1830,7 +1830,6 @@ class TestThreadingBehavior:
         async def slow_refresh(
             _room_id: str,
             _thread_id: str,
-            _allow_durable_cache: bool,
         ) -> ThreadHistoryResult:
             refresh_started.set()
             await allow_refresh.wait()
@@ -1875,7 +1874,6 @@ class TestThreadingBehavior:
         async def slow_refresh(
             _room_id: str,
             _thread_id: str,
-            _allow_durable_cache: bool,
         ) -> ThreadHistoryResult:
             refresh_started.set()
             await allow_refresh.wait()
@@ -1956,7 +1954,6 @@ class TestThreadingBehavior:
         async def fetch_fresh_history(
             _room_id: str,
             _thread_id: str,
-            _allow_durable_cache: bool,
         ) -> ThreadHistoryResult:
             thread_state["value"] = ThreadCacheState(
                 validated_at=time.time(),
@@ -2014,7 +2011,6 @@ class TestThreadingBehavior:
         access._reads.fetch_thread_history_from_client.assert_awaited_once_with(
             "!room:localhost",
             "$thread:localhost",
-            True,
         )
 
     @pytest.mark.asyncio
@@ -2116,6 +2112,30 @@ class TestThreadingBehavior:
         latest_event_id = await access.get_latest_thread_event_id_if_needed("!test:localhost", "$thread:localhost")
 
         assert latest_event_id == "$thread:localhost"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_thread_history_does_not_fall_back_to_stale_cache(self) -> None:
+        """Strict dispatch history reads must fail rather than returning stale durable history."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+        access._reads.fetch_dispatch_thread_history_from_client = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await access.get_dispatch_thread_history("!test:localhost", "$thread:localhost")
+
+    @pytest.mark.asyncio
+    async def test_dispatch_thread_snapshot_does_not_fall_back_to_stale_cache(self) -> None:
+        """Strict dispatch snapshot reads must fail rather than returning stale durable history."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+        access._reads.fetch_dispatch_thread_snapshot_from_client = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await access.get_dispatch_thread_snapshot("!test:localhost", "$thread:localhost")
 
     @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:
@@ -2432,10 +2452,10 @@ class TestThreadingBehavior:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_thread_snapshot",
+                "get_dispatch_thread_snapshot",
                 AsyncMock(return_value=thread_history_result([], is_full_history=False)),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=[])),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=[])),
         ):
             # Process the message
             await bot._on_message(room, event)
@@ -2495,7 +2515,6 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
-            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -2559,7 +2578,6 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
-            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -2823,8 +2841,12 @@ class TestThreadingBehavior:
 
             with (
                 patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
+                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
                     AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+                ),
+                patch(
+                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
+                    AsyncMock(return_value=[]),
                 ),
                 patch(
                     "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
@@ -2937,8 +2959,12 @@ class TestThreadingBehavior:
 
             with (
                 patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
+                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
                     AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+                ),
+                patch(
+                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
+                    AsyncMock(return_value=[]),
                 ),
                 patch(
                     "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
@@ -3205,8 +3231,12 @@ class TestThreadingBehavior:
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
                 AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+            ),
+            patch(
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
+                AsyncMock(return_value=[]),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",

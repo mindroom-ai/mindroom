@@ -149,18 +149,16 @@ class ConversationResolver:
             self.deps.runtime_paths,
             room_id=room_id,
         )
-        safe_thread_root = None
+        thread_start_root_event_id = None
         if event_source is not None:
             event_info = EventInfo.from_event(event_source)
             if event_info.can_be_thread_root and reply_to_event_id is not None:
-                safe_thread_root = reply_to_event_id
-            elif event_info.relation_type in ("m.replace", "m.annotation", "m.reference"):
-                safe_thread_root = event_info.safe_thread_root
+                thread_start_root_event_id = reply_to_event_id
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
-            safe_thread_root=safe_thread_root,
+            thread_start_root_event_id=thread_start_root_event_id,
             room_mode=effective_thread_mode == "room",
         )
 
@@ -316,15 +314,13 @@ class ConversationResolver:
         self,
         room_id: str,
         event_info: EventInfo,
-        *,
-        allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
         """Derive conversation context from explicit Matrix threads only."""
         is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
             room_id,
             event_info,
             full_history=True,
-            allow_durable_cache=allow_durable_cache,
+            dispatch_safe=False,
         )
         return is_thread, thread_id, thread_history
 
@@ -332,15 +328,13 @@ class ConversationResolver:
         self,
         room_id: str,
         event_info: EventInfo,
-        *,
-        allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
         """Derive dispatch target using explicit-thread snapshots only."""
         return await self._resolve_thread_context(
             room_id,
             event_info,
             full_history=False,
-            allow_durable_cache=allow_durable_cache,
+            dispatch_safe=False,
         )
 
     async def _resolve_thread_context(
@@ -349,7 +343,7 @@ class ConversationResolver:
         event_info: EventInfo,
         *,
         full_history: bool,
-        allow_durable_cache: bool = False,
+        dispatch_safe: bool,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
         """Resolve one explicit-thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(room_id, event_info)
@@ -357,18 +351,20 @@ class ConversationResolver:
             return False, None, [], False
 
         if full_history:
-            thread_history = await self.deps.conversation_cache.get_thread_history(
-                room_id,
-                thread_id,
-                allow_durable_cache=allow_durable_cache,
+            fetch_history = (
+                self.deps.conversation_cache.get_dispatch_thread_history
+                if dispatch_safe
+                else self.deps.conversation_cache.get_thread_history
             )
+            thread_history = await fetch_history(room_id, thread_id)
             return True, thread_id, list(thread_history), False
 
-        snapshot = await self.deps.conversation_cache.get_thread_snapshot(
-            room_id,
-            thread_id,
-            allow_durable_cache=allow_durable_cache,
+        fetch_snapshot = (
+            self.deps.conversation_cache.get_dispatch_thread_snapshot
+            if dispatch_safe
+            else self.deps.conversation_cache.get_thread_snapshot
         )
+        snapshot = await fetch_snapshot(room_id, thread_id)
         return True, thread_id, list(snapshot), not snapshot.is_full_history
 
     async def extract_dispatch_context(
@@ -377,7 +373,12 @@ class ConversationResolver:
         event: DispatchEvent,
     ) -> MessageContext:
         """Extract lightweight routing context without hydrating full thread history."""
-        return await self.extract_message_context(room, event, full_history=False)
+        return await self.extract_message_context_impl(
+            room,
+            event,
+            full_history=False,
+            dispatch_safe=True,
+        )
 
     async def extract_message_context(
         self,
@@ -387,7 +388,12 @@ class ConversationResolver:
         full_history: bool = True,
     ) -> MessageContext:
         """Extract message context, optionally using a lightweight thread snapshot."""
-        return await self.extract_message_context_impl(room, event, full_history=full_history)
+        return await self.extract_message_context_impl(
+            room,
+            event,
+            full_history=full_history,
+            dispatch_safe=False,
+        )
 
     async def extract_message_context_impl(
         self,
@@ -395,6 +401,7 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         full_history: bool,
+        dispatch_safe: bool,
     ) -> MessageContext:
         """Resolve event metadata, mentions, and thread history for one inbound turn."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
@@ -438,7 +445,7 @@ class ConversationResolver:
                 room.room_id,
                 event_info,
                 full_history=full_history,
-                allow_durable_cache=False,
+                dispatch_safe=dispatch_safe,
             )
 
         return MessageContext(
@@ -462,7 +469,12 @@ class ConversationResolver:
         if not context.requires_full_thread_history or context.thread_id is None:
             context.requires_full_thread_history = False
             return
-        full_context = await self.extract_message_context(room, event)
+        full_context = await self.extract_message_context_impl(
+            room,
+            event,
+            full_history=True,
+            dispatch_safe=True,
+        )
         context.thread_history = full_context.thread_history
         context.is_thread = full_context.is_thread
         context.thread_id = full_context.thread_id
@@ -490,5 +502,5 @@ class ConversationResolver:
         room_id: str,
         thread_id: str,
     ) -> list[ResolvedVisibleMessage]:
-        """Fetch thread history through the shared conversation-cache policy."""
-        return await self.deps.conversation_cache.get_thread_history(room_id, thread_id)
+        """Fetch strict post-lock thread history through the shared conversation-cache policy."""
+        return await self.deps.conversation_cache.get_dispatch_thread_history(room_id, thread_id)

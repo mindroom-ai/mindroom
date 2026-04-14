@@ -230,7 +230,7 @@ def _message_envelope(
         room_id=room_id,
         thread_id=thread_id,
         reply_to_event_id="$event",
-        safe_thread_root=resolved_thread_id if thread_id is None else None,
+        thread_start_root_event_id=resolved_thread_id if thread_id is None else None,
         room_mode=room_mode,
     )
     if thread_id is not None:

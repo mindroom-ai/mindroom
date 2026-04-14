@@ -1542,6 +1542,7 @@ async def refresh_thread_history_from_source(
     event_cache: ConversationEventCache,
     *,
     hydrate_sidecars: bool = True,
+    allow_stale_fallback: bool = True,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
     try:
@@ -1552,16 +1553,17 @@ async def refresh_thread_history_from_source(
             hydrate_sidecars=hydrate_sidecars,
         )
     except Exception as exc:
-        stale_history = await _load_stale_cached_thread_history(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=hydrate_sidecars,
-            fetch_error=exc,
-        )
-        if stale_history is not None:
-            return stale_history
+        if allow_stale_fallback:
+            stale_history = await _load_stale_cached_thread_history(
+                client,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_cache=event_cache,
+                hydrate_sidecars=hydrate_sidecars,
+                fetch_error=exc,
+            )
+            if stale_history is not None:
+                return stale_history
         raise
     if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
         await _store_thread_history_cache(
@@ -1767,34 +1769,33 @@ async def fetch_thread_history(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
-    allow_durable_cache: bool = True,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
-    if allow_durable_cache:
-        try:
-            cached_history = await _load_cached_thread_history_if_usable(
-                client,
-                room_id=room_id,
-                thread_id=thread_id,
-                event_cache=event_cache,
-                hydrate_sidecars=True,
-                runtime_started_at=runtime_started_at,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Durable thread cache read failed; refetching from homeserver",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-        else:
-            if cached_history is not None:
-                return cached_history
+    try:
+        cached_history = await _load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=True,
+            runtime_started_at=runtime_started_at,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Durable thread cache read failed; refetching from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+    else:
+        if cached_history is not None:
+            return cached_history
     return await refresh_thread_history_from_source(
         client,
         room_id,
         thread_id,
         event_cache,
+        allow_stale_fallback=True,
     )
 
 
@@ -1805,35 +1806,68 @@ async def fetch_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
-    allow_durable_cache: bool = True,
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context without hydrating sidecars when a fresh cache hit is unavailable."""
-    if allow_durable_cache:
-        try:
-            cached_history = await _load_cached_thread_history_if_usable(
-                client,
-                room_id=room_id,
-                thread_id=thread_id,
-                event_cache=event_cache,
-                hydrate_sidecars=False,
-                runtime_started_at=runtime_started_at,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Durable thread cache read failed; refetching snapshot from homeserver",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-        else:
-            if cached_history is not None:
-                return cached_history
+    try:
+        cached_history = await _load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=False,
+            runtime_started_at=runtime_started_at,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Durable thread cache read failed; refetching snapshot from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+    else:
+        if cached_history is not None:
+            return cached_history
     return await refresh_thread_history_from_source(
         client,
         room_id,
         thread_id,
         event_cache,
         hydrate_sidecars=False,
+        allow_stale_fallback=True,
+    )
+
+
+async def fetch_dispatch_thread_history(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+) -> ThreadHistoryResult:
+    """Fetch authoritative full thread history for dispatch without durable-cache reuse or stale fallback."""
+    return await refresh_thread_history_from_source(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        hydrate_sidecars=True,
+        allow_stale_fallback=False,
+    )
+
+
+async def fetch_dispatch_thread_snapshot(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+) -> ThreadHistoryResult:
+    """Fetch authoritative lightweight thread context for dispatch without durable-cache reuse or stale fallback."""
+    return await refresh_thread_history_from_source(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        hydrate_sidecars=False,
+        allow_stale_fallback=False,
     )
 
 

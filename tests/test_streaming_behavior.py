@@ -911,7 +911,7 @@ class TestStreamingBehavior:
                 room_id="!test:localhost",
                 thread_id=None,
                 reply_to_event_id="$reply_plain:localhost",
-                safe_thread_root="$thread_root:localhost",
+                thread_start_root_event_id="$thread_root:localhost",
             ),
             requester_id="@user:localhost",
             sender_id="@user:localhost",

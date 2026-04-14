@@ -81,11 +81,11 @@ class MessageTarget:
         room_id: str,
         thread_id: str | None,
         reply_to_event_id: str | None,
-        safe_thread_root: str | None = None,
+        thread_start_root_event_id: str | None = None,
         room_mode: bool = False,
     ) -> MessageTarget:
         """Resolve one canonical delivery target."""
-        resolved_thread_id = None if room_mode else thread_id or safe_thread_root
+        resolved_thread_id = None if room_mode else thread_id or thread_start_root_event_id
 
         return cls(
             room_id=room_id,

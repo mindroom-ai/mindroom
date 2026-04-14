@@ -1265,8 +1265,8 @@ class TestAgentBot:
         history = ThreadHistoryResult([], is_full_history=True)
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_snapshot", AsyncMock(return_value=snapshot)),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", AsyncMock(return_value=snapshot)),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
         ):
             await bot._on_message(mock_room, mock_event)
 
@@ -3285,7 +3285,7 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_thread_history",
+                "get_dispatch_thread_history",
                 new=AsyncMock(side_effect=cached_history_refresh),
             ) as mock_get_thread_history,
             patch_response_runner_module(
@@ -3350,7 +3350,7 @@ class TestAgentBot:
                 room_id="!test:localhost",
                 thread_id=None,
                 reply_to_event_id="$reply_plain:localhost",
-                safe_thread_root="$thread_root:localhost",
+                thread_start_root_event_id="$thread_root:localhost",
             ),
             requester_id="@alice:localhost",
             sender_id="@alice:localhost",
@@ -3460,7 +3460,7 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_thread_history",
+                "get_dispatch_thread_history",
                 new=AsyncMock(return_value=thread_history),
             ) as mock_get_thread_history,
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
@@ -3546,7 +3546,7 @@ class TestAgentBot:
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),
@@ -3636,7 +3636,7 @@ class TestAgentBot:
             patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(bot, "_generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             pytest.raises(RuntimeError, match="boom"),
@@ -3734,7 +3734,11 @@ class TestAgentBot:
                 "_generate_team_response_helper",
                 new=AsyncMock(return_value="$response"),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=refreshed_history)),
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=refreshed_history),
+            ),
             patch(
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
                 new_callable=AsyncMock,
@@ -3833,7 +3837,7 @@ class TestAgentBot:
             ),
             patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(return_value=("$team-response", "Team reply")),
@@ -6565,7 +6569,7 @@ class TestAgentBot:
         mock_snapshot = AsyncMock(return_value=snapshot)
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_snapshot", new=mock_snapshot),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", new=mock_snapshot),
             patch.object(bot._conversation_cache, "get_thread_history", new=mock_history),
         ):
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
@@ -6577,7 +6581,6 @@ class TestAgentBot:
         mock_snapshot.assert_awaited_once_with(
             room.room_id,
             "$thread_root",
-            allow_durable_cache=False,
         )
         mock_history.assert_not_awaited()
 
@@ -6629,7 +6632,7 @@ class TestAgentBot:
         )
 
         with patch(
-            "mindroom.matrix.conversation_cache.fetch_thread_snapshot",
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
             new=AsyncMock(return_value=snapshot_history),
         ) as mock_snapshot:
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
@@ -6643,8 +6646,6 @@ class TestAgentBot:
             room.room_id,
             "$thread_root",
             event_cache=bot.event_cache,
-            runtime_started_at=bot._runtime_view.runtime_started_at,
-            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -8021,8 +8022,8 @@ class TestAgentBot:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot")
-    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history")
+    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot")
+    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history")
     @patch("mindroom.response_runner.should_use_streaming")
     @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed")
     async def test_agent_bot_thread_response(  # noqa: PLR0915

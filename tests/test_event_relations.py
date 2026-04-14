@@ -130,7 +130,6 @@ class TestEventRelations:
         assert info.reply_to_event_id == "$reply_to_xyz"
         assert info.has_relations is True
         assert info.can_be_thread_root is False
-        assert info.safe_thread_root is None
 
         # Other types should be False
         assert info.is_edit is False
@@ -151,7 +150,6 @@ class TestEventRelations:
 
         assert info.has_relations is False
         assert info.can_be_thread_root is True
-        assert info.safe_thread_root is None
 
         # All relation types should be False
         assert info.is_edit is False
@@ -167,7 +165,6 @@ class TestEventRelations:
 
         assert info.has_relations is False
         assert info.can_be_thread_root is True
-        assert info.safe_thread_root is None
 
         # All relation types should be False
         assert info.is_edit is False
@@ -176,8 +173,8 @@ class TestEventRelations:
         assert info.is_reply is False
         assert info.relation_type is None
 
-    def test_safe_thread_root_for_edit(self) -> None:
-        """Test that safe_thread_root is set correctly for edits."""
+    def test_edit_relates_to_original_event(self) -> None:
+        """Edit relation metadata should point at the original event only."""
         event_source = {
             "content": {
                 "m.relates_to": {
@@ -190,10 +187,11 @@ class TestEventRelations:
         info = EventInfo.from_event(event_source)
 
         assert info.can_be_thread_root is False
-        assert info.safe_thread_root == "$original_msg"
+        assert info.original_event_id == "$original_msg"
+        assert info.relates_to_event_id == "$original_msg"
 
-    def test_safe_thread_root_for_reaction(self) -> None:
-        """Test that safe_thread_root is set correctly for reactions."""
+    def test_reaction_relates_to_target_event(self) -> None:
+        """Reaction relation metadata should point at the target event only."""
         event_source = {
             "content": {
                 "m.relates_to": {
@@ -206,7 +204,8 @@ class TestEventRelations:
         info = EventInfo.from_event(event_source)
 
         assert info.can_be_thread_root is False
-        assert info.safe_thread_root == "$reacted_msg"
+        assert info.reaction_target_event_id == "$reacted_msg"
+        assert info.relates_to_event_id == "$reacted_msg"
 
     def test_next_related_event_id_prefers_original_event_for_edits(self) -> None:
         """Edits should follow the edited event before any copied reply metadata."""

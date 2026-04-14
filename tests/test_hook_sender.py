@@ -654,7 +654,7 @@ async def test_prepare_dispatch_builds_target_via_conversation_resolver(tmp_path
         room_id=room.room_id,
         thread_id="$thread-root",
         reply_to_event_id=event.event_id,
-        safe_thread_root="$thread-root",
+        thread_start_root_event_id="$thread-root",
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
 

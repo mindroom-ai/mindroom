@@ -184,6 +184,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
         room,
         event_with_skip,
         full_history=True,
+        dispatch_safe=False,
     )
 
     # Verify mentions were ignored
@@ -215,6 +216,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
             room,
             event_without_skip,
             full_history=True,
+            dispatch_safe=False,
         )
 
         # Verify mentions were detected
@@ -254,6 +256,7 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
         room,
         event,
         full_history=True,
+        dispatch_safe=False,
     )
 
     assert context.am_i_mentioned is True

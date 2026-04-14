@@ -532,7 +532,6 @@ class TestCreateSessionIdWithNoneThread:
             room_id="!room:localhost",
             thread_id=None,
             reply_to_event_id="$event456",
-            safe_thread_root=None,
             room_mode=False,
         )
         assert target.reply_to_event_id == "$event456"
@@ -601,8 +600,8 @@ class TestExtractMessageContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
-        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-            return_value=(True, "$thread123", [{"event_id": "$thread123"}]),
+        unwrap_extracted_collaborator(bot._conversation_resolver)._resolve_thread_context = AsyncMock(
+            return_value=(True, "$thread123", [{"event_id": "$thread123"}], False),
         )
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -720,7 +719,15 @@ class TestExtractMessageContextRoomMode:
 
         assert await bot._conversation_resolver.extract_dispatch_context(room, event) is context
         assert await bot._conversation_resolver.extract_message_context(room, event, full_history=False) is context
-        assert await bot._conversation_resolver.extract_message_context_impl(room, event, full_history=True) is context
+        assert (
+            await bot._conversation_resolver.extract_message_context_impl(
+                room,
+                event,
+                full_history=True,
+                dispatch_safe=False,
+            )
+            is context
+        )
 
         bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
         bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
@@ -732,6 +739,7 @@ class TestExtractMessageContextRoomMode:
             room,
             event,
             full_history=True,
+            dispatch_safe=False,
         )
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
@@ -1298,10 +1306,7 @@ class TestExtractedModuleLoggerRebinding:
             ),
         )
 
-        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with(
-            "!room:localhost",
-            "$threadroot",
-        )
+        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with("!room:localhost", "$threadroot")
 
     @pytest.mark.asyncio
     async def test_conversation_cache_fetch_path_passes_explicit_event_cache(
