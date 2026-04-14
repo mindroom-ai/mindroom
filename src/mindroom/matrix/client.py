@@ -1353,6 +1353,7 @@ async def _load_cached_thread_history(
         return None
     if not thread_cache_state_is_fresh(cache_state, context=freshness_context):
         return None
+
     cache_read_started = time.perf_counter()
     try:
         cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
@@ -1364,6 +1365,7 @@ async def _load_cached_thread_history(
             error=str(exc),
         )
         return None
+
     cache_read_ms = round((time.perf_counter() - cache_read_started) * 1000, 1)
     if cached_event_sources is None:
         logger.warning(
@@ -1386,36 +1388,36 @@ async def _load_cached_thread_history(
         for event_source in cached_event_sources
         if (event_id := _event_id_from_source(event_source)) is not None
     }
-    if not cached_event_ids:
+    history_result: ThreadHistoryResult | None = None
+    if cached_event_ids:
+        resolution_started = time.perf_counter()
+        resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            cached_event_sources=cached_event_sources,
+            hydrate_sidecars=hydrate_sidecars,
+        )
+        if resolved_history is not None:
+            history_result = _thread_history_result(
+                resolved_history,
+                is_full_history=hydrate_sidecars,
+                diagnostics={
+                    "cache_read_ms": cache_read_ms,
+                    "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+                    "sidecar_hydration_ms": sidecar_hydration_ms,
+                    THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
+                },
+            )
+    else:
         logger.warning(
             "Cached thread payload was missing event IDs; refetching from homeserver",
             room_id=room_id,
             thread_id=thread_id,
         )
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
-        return None
-
-    resolution_started = time.perf_counter()
-    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        cached_event_sources=cached_event_sources,
-        hydrate_sidecars=hydrate_sidecars,
-    )
-    if resolved_history is None:
-        return None
-    return _thread_history_result(
-        resolved_history,
-        is_full_history=hydrate_sidecars,
-        diagnostics={
-            "cache_read_ms": cache_read_ms,
-            "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
-            "sidecar_hydration_ms": sidecar_hydration_ms,
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
-        },
-    )
+    return history_result
 
 
 async def _load_cached_thread_result(

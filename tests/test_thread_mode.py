@@ -7,8 +7,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
-from unittest.mock import ANY
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest

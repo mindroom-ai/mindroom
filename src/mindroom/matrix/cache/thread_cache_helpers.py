@@ -6,13 +6,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.cache.event_cache import ThreadCacheState
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import structlog
 
+    from mindroom.matrix.cache.event_cache import ThreadCacheState
     from mindroom.matrix.client import ResolvedVisibleMessage
 
 

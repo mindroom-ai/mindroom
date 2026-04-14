@@ -50,6 +50,11 @@ def _event_cache() -> AsyncMock:
     return make_event_cache_mock()
 
 
+def _sync_batch_marker(index: int) -> str:
+    """Return one deterministic sync batch marker for freshness tests."""
+    return f"sync_batch_{index}"
+
+
 async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistoryResult:
     """Inject a concrete event cache for test-local calls into the real helper."""
     kwargs.setdefault("event_cache", _event_cache())
@@ -2004,11 +2009,12 @@ class TestThreadHistoryCache:
         )
 
         try:
+            sync_token = _sync_batch_marker(1)
             await cache.replace_thread(
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
-                validated_sync_token="s1",
+                validated_sync_token=sync_token,
                 validated_at=time.time(),
             )
             await cache.mark_room_threads_stale("!room:localhost", reason="sync_lookup_missing")
@@ -2021,7 +2027,7 @@ class TestThreadHistoryCache:
                 freshness_context=ThreadCacheFreshnessContext(
                     runtime_started_at=0.0,
                     last_sync_activity_monotonic=1.0,
-                    current_sync_token="s1",
+                    current_sync_token=sync_token,
                 ),
             )
         finally:
@@ -2063,11 +2069,13 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(side_effect=RuntimeError("scan failed"))
 
         try:
+            cached_sync_token = _sync_batch_marker(1)
+            current_sync_token = _sync_batch_marker(2)
             await cache.replace_thread(
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
-                validated_sync_token="s1",
+                validated_sync_token=cached_sync_token,
                 validated_at=time.time(),
             )
 
@@ -2079,7 +2087,7 @@ class TestThreadHistoryCache:
                 freshness_context=ThreadCacheFreshnessContext(
                     runtime_started_at=0.0,
                     last_sync_activity_monotonic=1.0,
-                    current_sync_token="s2",
+                    current_sync_token=current_sync_token,
                 ),
             )
         finally:

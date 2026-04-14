@@ -229,7 +229,7 @@ class ThreadReadPolicy:
         thread_id: str,
     ) -> ThreadHistoryResult:
         return typing.cast(
-            ThreadHistoryResult,
+            "ThreadHistoryResult",
             await self.runtime.event_cache_write_coordinator.run_room_update(
                 room_id,
                 lambda: self._fetch_full_thread_history_from_source(room_id, thread_id),

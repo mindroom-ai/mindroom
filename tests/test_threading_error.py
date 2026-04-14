@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -26,8 +26,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
-from mindroom.matrix.cache.event_cache import _EventCache
-from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_cache import (
     ResolvedThreadCache,
 )
@@ -37,6 +36,8 @@ from mindroom.matrix.cache.thread_cache import (
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
+)
+from mindroom.matrix.cache.thread_history_result import (
     thread_history_result as _thread_history_result_impl,
 )
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -85,6 +86,11 @@ def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> Re
         body=body,
         event_id=event_id,
     )
+
+
+def _sync_batch_marker(index: int) -> str:
+    """Return one deterministic sync batch marker for thread freshness tests."""
+    return f"sync_batch_{index}"
 
 
 def resolved_thread_cache_entry(
@@ -153,15 +159,18 @@ def _text_event(
         content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replacement_of}
     elif thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
-    return nio.RoomMessageText.from_dict(
-        {
-            "content": content,
-            "event_id": event_id,
-            "sender": sender,
-            "origin_server_ts": server_timestamp,
-            "room_id": room_id,
-            "type": "m.room.message",
-        },
+    return cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "content": content,
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        ),
     )
 
 
@@ -200,7 +209,13 @@ def _relations_client(
 
     client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(root_event))
     client.room_get_event_relations = MagicMock(
-        side_effect=lambda _room_id, event_id, *, rel_type, event_type, direction=nio.MessageDirection.back, limit=None: _event_iter(  # noqa: ARG005,E501
+        side_effect=lambda _room_id,
+        event_id,
+        *,
+        rel_type,
+        _event_type,
+        _direction=nio.MessageDirection.back,
+        _limit=None: _event_iter(
             relation_events(event_id, rel_type),
         ),
     )
@@ -430,12 +445,13 @@ class TestMatrixConversationCacheThreadReads:
     async def test_get_thread_history_revalidates_resolved_cache_against_durable_state(self) -> None:
         """A stale durable state must force a refetch instead of serving the in-memory resolved cache."""
         client = _make_client_mock()
-        client.next_batch = "s2"
+        client.next_batch = _sync_batch_marker(2)
+        cached_sync_token = _sync_batch_marker(1)
         event_cache = _runtime_event_cache()
         event_cache.get_thread_cache_state = AsyncMock(
             return_value=ThreadCacheState(
                 validated_at=time.time(),
-                validated_sync_token="s1",
+                validated_sync_token=cached_sync_token,
                 invalidated_at=None,
                 invalidation_reason=None,
                 room_invalidated_at=None,
@@ -559,11 +575,12 @@ class TestMatrixConversationCacheThreadReads:
         second_access.runtime.last_sync_activity_monotonic = 101.0
 
         try:
+            sync_token = _sync_batch_marker(1)
             await event_cache.replace_thread(
                 "!test:localhost",
                 "$thread:localhost",
                 [root_event, stale_reply_event],
-                validated_sync_token="s1",
+                validated_sync_token=sync_token,
                 validated_at=time.time(),
             )
             await first_access.record_outbound_message(

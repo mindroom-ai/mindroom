@@ -33,7 +33,8 @@ _EVENT_CACHE_TABLES = (
     "thread_cache_state",
     "room_cache_state",
 )
-_EVENT_CACHE_RESET_TABLES = _EVENT_CACHE_TABLES + (
+_EVENT_CACHE_RESET_TABLES = (
+    *_EVENT_CACHE_TABLES,
     "pending_lookup_repairs",
     "thread_repairs",
 )

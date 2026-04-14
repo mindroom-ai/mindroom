@@ -275,19 +275,6 @@ class ThreadWritePolicy:
                 error=str(exc),
             )
 
-    async def _invalidate_resolved_threads_for_event_ids(
-        self,
-        room_id: str,
-        *event_ids: str | None,
-        reason: str,
-    ) -> None:
-        candidate_event_ids = frozenset(event_id for event_id in event_ids if isinstance(event_id, str) and event_id)
-        if not candidate_event_ids:
-            return
-        matching_thread_ids = self._resolved_thread_cache().matching_thread_ids(room_id, candidate_event_ids)
-        for thread_id in matching_thread_ids:
-            await self._invalidate_known_thread(room_id, thread_id, reason=reason)
-
     async def _resolve_thread_id_for_mutation(
         self,
         room_id: str,
