@@ -717,11 +717,20 @@ class ResponseRunner:
         if request.thread_id is None:
             return request
 
-        refreshed_history = await self.deps.resolver.fetch_thread_history(
-            self._client(),
-            request.room_id,
-            request.thread_id,
-        )
+        try:
+            refreshed_history = await self.deps.resolver.fetch_thread_history(
+                self._client(),
+                request.room_id,
+                request.thread_id,
+            )
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Failed to refresh thread history after lock; continuing with existing history",
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                error=str(exc),
+            )
+            return request
         return replace(request, thread_history=refreshed_history)
 
     async def _prepare_request_after_lock(

@@ -22,7 +22,10 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache.event_cache import ConversationEventCache, normalize_event_source_for_cache
+from mindroom.matrix.cache.event_cache import (
+    ConversationEventCache,
+    normalize_nio_event_for_cache,
+)
 from mindroom.matrix.cache.thread_cache_helpers import ThreadCacheFreshnessContext, thread_cache_state_is_fresh
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -1256,15 +1259,7 @@ def _parse_visible_text_message_event(
 
 def _event_source_for_cache(event: nio.Event) -> dict[str, Any]:
     """Normalize one nio event source for persistent cache storage."""
-    server_timestamp = event.server_timestamp
-    return normalize_event_source_for_cache(
-        event.source,
-        event_id=event.event_id if isinstance(event.event_id, str) else None,
-        sender=event.sender if isinstance(event.sender, str) else None,
-        origin_server_ts=server_timestamp
-        if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-        else None,
-    )
+    return normalize_nio_event_for_cache(event)
 
 
 def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
@@ -1373,14 +1368,13 @@ async def _load_cached_thread_history(
             room_id=room_id,
             thread_id=thread_id,
         )
-        try:
-            await event_cache.mark_thread_stale(room_id, thread_id, reason="missing_thread_rows")
-        except Exception:
-            logger.warning(
-                "Failed to mark thread cache state stale after missing rows",
-                room_id=room_id,
-                thread_id=thread_id,
-            )
+        await _mark_thread_stale_fail_closed(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            reason="missing_thread_rows",
+            failure_log="Failed to mark thread cache state stale after missing rows",
+        )
         return None
 
     cached_event_ids = {
@@ -1418,26 +1412,6 @@ async def _load_cached_thread_history(
         )
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
     return history_result
-
-
-async def _load_cached_thread_result(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    freshness_context: ThreadCacheFreshnessContext,
-    hydrate_sidecars: bool,
-) -> ThreadHistoryResult | None:
-    """Resolve cached thread history into the shared thread-result wrapper."""
-    return await _load_cached_thread_history(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        freshness_context=freshness_context,
-        hydrate_sidecars=hydrate_sidecars,
-    )
 
 
 async def _load_stale_cached_thread_history(
@@ -1542,6 +1516,40 @@ async def _invalidate_thread_cache_entry(
         )
 
 
+async def _mark_thread_stale_fail_closed(
+    event_cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+    reason: str,
+    failure_log: str,
+) -> None:
+    """Fail closed when a durable stale marker cannot be written."""
+    try:
+        await event_cache.mark_thread_stale(room_id, thread_id, reason=reason)
+        return
+    except Exception as exc:
+        logger.warning(
+            failure_log,
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=reason,
+            error=str(exc),
+        )
+    try:
+        await event_cache.invalidate_thread(room_id, thread_id)
+        return
+    except Exception as invalidate_exc:
+        logger.warning(
+            "Failed to delete thread cache rows after stale-marker failure; disabling cache",
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=reason,
+            error=str(invalidate_exc),
+        )
+    event_cache.disable(f"thread_stale_marker_failed:{room_id}:{thread_id}:{reason}")
+
+
 async def _fetch_thread_history_with_events(
     client: nio.AsyncClient,
     room_id: str,
@@ -1558,6 +1566,57 @@ async def _fetch_thread_history_with_events(
             reason=str(exc),
         )
         return await _fetch_thread_history_via_room_messages_with_events(client, room_id, thread_id)
+
+
+async def refresh_thread_history_from_source(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    freshness_context: ThreadCacheFreshnessContext | None = None,
+) -> ThreadHistoryResult:
+    """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
+    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
+    try:
+        fetch_result = await _fetch_thread_history_with_events(client, room_id, thread_id)
+    except Exception as exc:
+        stale_history = await _load_stale_cached_thread_history(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            fetch_error=exc,
+        )
+        if stale_history is not None:
+            return stale_history
+        raise
+    if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
+        await _store_thread_history_cache(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_sources=fetch_result.event_sources,
+            validated_sync_token=effective_freshness_context.current_sync_token,
+        )
+    return _thread_history_result(
+        fetch_result.history,
+        is_full_history=True,
+        diagnostics={
+            "cache_read_ms": 0.0,
+            "resolution_ms": fetch_result.resolution_ms,
+            "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+        },
+    )
+
+
+def _default_thread_cache_freshness_context() -> ThreadCacheFreshnessContext:
+    """Return a default freshness context for direct helper callers outside the facade."""
+    return ThreadCacheFreshnessContext(
+        runtime_started_at=0.0,
+        last_sync_activity_monotonic=None,
+        current_sync_token=None,
+    )
 
 
 async def _fetch_thread_event_sources_via_relations(
@@ -1930,11 +1989,7 @@ async def fetch_thread_history(
     freshness_context: ThreadCacheFreshnessContext | None = None,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
-    effective_freshness_context = freshness_context or ThreadCacheFreshnessContext(
-        runtime_started_at=0.0,
-        last_sync_activity_monotonic=None,
-        current_sync_token=None,
-    )
+    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
     cached_history = await _load_cached_thread_history(
         client,
         room_id=room_id,
@@ -1944,37 +1999,33 @@ async def fetch_thread_history(
     )
     if cached_history is not None:
         return cached_history
+    return await refresh_thread_history_from_source(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        freshness_context=effective_freshness_context,
+    )
 
-    try:
-        fetch_result = await _fetch_thread_history_with_events(client, room_id, thread_id)
-    except Exception as exc:
-        stale_history = await _load_stale_cached_thread_history(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            fetch_error=exc,
-        )
-        if stale_history is not None:
-            return stale_history
-        raise
-    if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
-        await _store_thread_history_cache(
-            event_cache,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_sources=fetch_result.event_sources,
-            validated_sync_token=effective_freshness_context.current_sync_token,
-        )
-    return _thread_history_result(
-        fetch_result.history,
-        is_full_history=True,
-        diagnostics={
-            "cache_read_ms": 0.0,
-            "resolution_ms": fetch_result.resolution_ms,
-            "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
-        },
+
+async def load_cached_thread_history(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    freshness_context: ThreadCacheFreshnessContext | None = None,
+    *,
+    hydrate_sidecars: bool = True,
+) -> ThreadHistoryResult | None:
+    """Return only the fresh cached thread payload when available."""
+    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
+    return await _load_cached_thread_history(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+        freshness_context=effective_freshness_context,
+        hydrate_sidecars=hydrate_sidecars,
     )
 
 
@@ -2083,8 +2134,9 @@ async def _fetch_thread_event_sources_via_room_messages(
         )
 
         if not isinstance(response, nio.RoomMessagesResponse):
-            logger.error("Failed to fetch thread history", room_id=room_id, error=str(response))
-            break
+            msg = f"room scan failed for {thread_id}: {response}"
+            logger.error("Failed to fetch thread history", room_id=room_id, thread_id=thread_id, error=str(response))
+            raise RuntimeError(msg)
 
         if not response.chunk:
             break
@@ -2103,6 +2155,16 @@ async def _fetch_thread_event_sources_via_room_messages(
         if root_message_found or not response.end:
             break
         from_token = response.end
+
+    if not root_message_found:
+        msg = f"thread root {thread_id} not found during room scan"
+        logger.warning(
+            "Thread room scan ended without finding root",
+            room_id=room_id,
+            thread_id=thread_id,
+            scanned_event_count=len(relevant_message_sources),
+        )
+        raise RuntimeError(msg)
 
     relevant_event_ids = set(relevant_message_sources)
     event_sources = list(relevant_message_sources.values())
@@ -2131,12 +2193,8 @@ async def fetch_thread_snapshot(
     freshness_context: ThreadCacheFreshnessContext | None = None,
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context for dispatch decisions."""
-    effective_freshness_context = freshness_context or ThreadCacheFreshnessContext(
-        runtime_started_at=0.0,
-        last_sync_activity_monotonic=None,
-        current_sync_token=None,
-    )
-    cached_snapshot = await _load_cached_thread_result(
+    effective_freshness_context = freshness_context or _default_thread_cache_freshness_context()
+    cached_snapshot = await _load_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,

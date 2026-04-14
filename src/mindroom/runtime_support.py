@@ -45,15 +45,16 @@ async def initialize_standalone_runtime_support(
     *,
     logger: structlog.stdlib.BoundLogger,
 ) -> None:
-    """Initialize the standalone-owned event cache and fail fast on SQLite errors."""
+    """Initialize the standalone-owned event cache, degrading to no-cache on SQLite errors."""
     try:
         await support.event_cache.initialize()
-    except Exception:
-        try:
-            await support.event_cache.close()
-        except Exception:
-            logger.warning("Failed to close partially initialized event cache", exc_info=True)
-        raise
+    except Exception as exc:
+        support.event_cache.disable(f"standalone_runtime_init_failed:{exc}")
+        logger.warning(
+            "Event cache init failed; continuing without advisory cache",
+            db_path=str(support.event_cache.db_path),
+            error=str(exc),
+        )
 
 
 async def create_standalone_runtime_support(

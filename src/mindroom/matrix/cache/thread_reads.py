@@ -41,12 +41,19 @@ class ThreadReadPolicy:
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
         resolved_thread_cache_getter: typing.Callable[[], ResolvedThreadCache],
+        freshness_context_getter: typing.Callable[[], ThreadCacheFreshnessContext],
+        load_cached_thread_history_from_client: typing.Callable[
+            [str, str],
+            typing.Awaitable[ThreadHistoryResult | None],
+        ],
         fetch_thread_history_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
         fetch_thread_snapshot_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self._resolved_thread_cache_getter = resolved_thread_cache_getter
+        self._freshness_context_getter = freshness_context_getter
+        self.load_cached_thread_history_from_client = load_cached_thread_history_from_client
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
         self.fetch_thread_snapshot_from_client = fetch_thread_snapshot_from_client
 
@@ -57,15 +64,6 @@ class ThreadReadPolicy:
 
     def _resolved_thread_cache(self) -> ResolvedThreadCache:
         return self._resolved_thread_cache_getter()
-
-    def _freshness_context(self) -> ThreadCacheFreshnessContext:
-        client = self.runtime.client
-        next_batch = None if client is None else client.next_batch
-        return ThreadCacheFreshnessContext(
-            runtime_started_at=self.runtime.runtime_started_at,
-            last_sync_activity_monotonic=self.runtime.last_sync_activity_monotonic,
-            current_sync_token=next_batch if isinstance(next_batch, str) and next_batch else None,
-        )
 
     async def _wait_for_pending_room_cache_updates(self, room_id: str) -> None:
         await self.runtime.event_cache_write_coordinator.wait_for_room_idle(room_id)
@@ -83,7 +81,7 @@ class ThreadReadPolicy:
             return False
         return thread_cache_state_is_fresh(
             cache_state,
-            context=self._freshness_context(),
+            context=self._freshness_context_getter(),
         )
 
     async def _cached_thread_source_event_ids(
@@ -214,7 +212,7 @@ class ThreadReadPolicy:
             diagnostics=resolved_cache_diagnostics(cache_read_ms=cache_read_ms),
         )
 
-    async def _fetch_full_thread_history_from_source(
+    async def _load_full_thread_history(
         self,
         room_id: str,
         thread_id: str,
@@ -223,7 +221,7 @@ class ThreadReadPolicy:
             await self.fetch_thread_history_from_client(room_id, thread_id),
         )
 
-    async def _refresh_thread_history_under_room_barrier(
+    async def _load_thread_history_under_room_barrier(
         self,
         room_id: str,
         thread_id: str,
@@ -232,7 +230,7 @@ class ThreadReadPolicy:
             "ThreadHistoryResult",
             await self.runtime.event_cache_write_coordinator.run_room_update(
                 room_id,
-                lambda: self._fetch_full_thread_history_from_source(room_id, thread_id),
+                lambda: self._load_full_thread_history(room_id, thread_id),
                 name="matrix_cache_refresh_thread_history",
             ),
         )
@@ -256,6 +254,20 @@ class ThreadReadPolicy:
             )
             return history
 
+    async def _maybe_use_raw_thread_cache(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult | None:
+        cached_history = await self.load_cached_thread_history_from_client(room_id, thread_id)
+        if cached_history is None:
+            return None
+        return await self._store_resolved_thread_history_if_fresh(
+            room_id,
+            thread_id,
+            cached_history,
+        )
+
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadHistoryResult:
         """Resolve lightweight snapshot history for one thread."""
         await self._wait_for_pending_room_cache_updates(room_id)
@@ -263,6 +275,9 @@ class ThreadReadPolicy:
             cached_history = await self._maybe_use_resolved_thread_cache(room_id, thread_id)
             if cached_history is not None:
                 return cached_history
+        raw_cached_history = await self._maybe_use_raw_thread_cache(room_id, thread_id)
+        if raw_cached_history is not None:
+            return raw_cached_history
         snapshot = self._snapshot_result(
             await self.fetch_thread_snapshot_from_client(room_id, thread_id),
         )
@@ -277,10 +292,13 @@ class ThreadReadPolicy:
             cached_history = await self._maybe_use_resolved_thread_cache(room_id, thread_id)
             if cached_history is not None:
                 return cached_history
+        raw_cached_history = await self._maybe_use_raw_thread_cache(room_id, thread_id)
+        if raw_cached_history is not None:
+            return raw_cached_history
         return await self._store_resolved_thread_history_if_fresh(
             room_id,
             thread_id,
-            await self._refresh_thread_history_under_room_barrier(room_id, thread_id),
+            await self._load_thread_history_under_room_barrier(room_id, thread_id),
         )
 
     async def get_latest_thread_event_id_if_needed(
@@ -293,5 +311,21 @@ class ThreadReadPolicy:
         """Resolve the latest visible thread event when MSC3440 fallback needs it."""
         if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
             return None
-        thread_history = await self.get_thread_history(room_id, thread_id)
+        try:
+            thread_history = await self.get_thread_history(room_id, thread_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to refresh latest thread event ID; falling back to thread root",
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return thread_id
+        if thread_history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_STALE_CACHE:
+            self.logger.warning(
+                "Ignoring stale cached thread tail for latest-event lookup; falling back to thread root",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            return thread_id
         return latest_visible_thread_event_id(thread_history) or thread_id

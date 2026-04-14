@@ -18,6 +18,7 @@ from mindroom.matrix.cache.thread_cache_helpers import ThreadCacheFreshnessConte
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
@@ -26,7 +27,9 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
     ThreadHistoryResult,
+    _event_source_for_cache,
     _fetch_thread_history_via_room_messages,
+    _resolve_thread_history_from_event_sources,
     _ThreadHistoryFastPathUnavailableError,
     get_room_threads_page,
 )
@@ -1324,6 +1327,13 @@ class TestThreadHistory:
     async def test_fetch_thread_history_edit_without_thread_does_not_synthesize_missing_original(self) -> None:
         """Do not synthesize unrelated missing messages from edits without thread metadata."""
         client = AsyncMock()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
 
         edit_only_event = self._make_text_event(
             event_id="$edit1",
@@ -1342,19 +1352,25 @@ class TestThreadHistory:
             },
         )
 
-        response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [edit_only_event]
-        response.end = None
-        client.room_messages.return_value = response
+        history = await _resolve_thread_history_from_event_sources(
+            client,
+            thread_id="$thread_root",
+            event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
+        )
 
-        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
-
-        assert history == []
+        assert [message.event_id for message in history] == ["$thread_root"]
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_skips_unrelated_missing_edit_before_body_extraction(self) -> None:
         """Avoid edit-body extraction for missing originals unrelated to this thread."""
         client = AsyncMock()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
 
         unrelated_edit = self._make_text_event(
             event_id="$edit1",
@@ -1373,21 +1389,27 @@ class TestThreadHistory:
             },
         )
 
-        response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [unrelated_edit]
-        response.end = None
-        client.room_messages.return_value = response
-
         with patch("mindroom.matrix.client.extract_edit_body", new_callable=AsyncMock) as mock_extract_edit_body:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+            history = await _resolve_thread_history_from_event_sources(
+                client,
+                thread_id="$thread_root",
+                event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(unrelated_edit)],
+            )
 
-        assert history == []
+        assert [message.event_id for message in history] == ["$thread_root"]
         mock_extract_edit_body.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_only_event_still_visible(self) -> None:
         """Synthesize a history entry when only edit events are returned."""
         client = AsyncMock()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
 
         edit_only_event = self._make_text_event(
             event_id="$edit1",
@@ -1410,16 +1432,14 @@ class TestThreadHistory:
             },
         )
 
-        response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [edit_only_event]
-        response.end = None
-        client.room_messages.return_value = response
+        history = await _resolve_thread_history_from_event_sources(
+            client,
+            thread_id="$thread_root",
+            event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
+        )
 
-        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
-
-        assert len(history) == 1
-        assert history[0].event_id == "$missing_original"
-        assert history[0].body == "Final answer"
+        assert [message.event_id for message in history] == ["$thread_root", "$missing_original"]
+        assert history[1].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_does_not_stop_after_edit_only_page(self) -> None:
@@ -1557,6 +1577,37 @@ class TestThreadHistory:
         assert client.room_messages.call_count == 1
         assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
         assert history[0].to_dict()["msgtype"] == "m.audio"
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_room_scan_raises_on_api_error_response(self) -> None:
+        """Room-scan fallback must fail when the Matrix API returns a non-success response."""
+        client = AsyncMock()
+        client.room_messages = AsyncMock(return_value=object())
+
+        with pytest.raises(RuntimeError, match="room scan failed"):
+            await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_room_scan_raises_when_root_is_missing(self) -> None:
+        """Room-scan fallback must fail when pagination never finds the thread root."""
+        client = AsyncMock()
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [reply_event]
+        response.end = None
+        client.room_messages = AsyncMock(return_value=response)
+
+        with pytest.raises(RuntimeError, match="not found during room scan"):
+            await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
 
 
 @pytest.mark.asyncio
@@ -1756,6 +1807,16 @@ class TestThreadHistoryCache:
         return source
 
     @staticmethod
+    async def _seed_thread_cache(
+        cache: _EventCache,
+        *,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, object]],
+    ) -> None:
+        await cache.replace_thread(room_id, thread_id, events, validated_sync_token=None)
+
+    @staticmethod
     def _make_redaction_event(
         *,
         event_id: str,
@@ -1801,10 +1862,11 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [self._cache_source(root_event), self._cache_source(reply_event)],
+        await self._seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[self._cache_source(root_event), self._cache_source(reply_event)],
         )
 
         client = MagicMock()
@@ -1847,10 +1909,11 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [self._cache_source(root_event), self._cache_source(reply_event)],
+        await self._seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[self._cache_source(root_event), self._cache_source(reply_event)],
         )
 
         client = MagicMock()
@@ -1895,10 +1958,11 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [self._cache_source(root_event), self._cache_source(reply_event)],
+        await self._seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[self._cache_source(root_event), self._cache_source(reply_event)],
         )
 
         client = MagicMock()
@@ -2030,19 +2094,33 @@ class TestThreadHistoryCache:
                     current_sync_token=sync_token,
                 ),
             )
+            client.room_get_event = AsyncMock(side_effect=AssertionError("expected cached second read"))
+            client.room_get_event_relations = MagicMock(side_effect=AssertionError("expected cached second read"))
+            second_history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+                freshness_context=ThreadCacheFreshnessContext(
+                    runtime_started_at=0.0,
+                    last_sync_activity_monotonic=1.0,
+                    current_sync_token=sync_token,
+                ),
+            )
         finally:
             await cache.close()
 
         assert [message.body for message in history] == ["Root message", "Fresh reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        client.room_get_event.assert_awaited_once_with("!room:localhost", "$thread_root")
+        assert [message.body for message in second_history] == ["Root message", "Fresh reply"]
+        assert second_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_returns_stale_cached_history_with_diagnostic_on_refetch_failure(
         self,
         tmp_path: Path,
     ) -> None:
-        """Failed refetches should degrade to stale cached history with explicit diagnostics."""
+        """Failed refetches should degrade once, then recover to a fresh refetch when the network returns."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
@@ -2063,10 +2141,28 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
+        fresh_reply = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Fresh reply",
+            server_timestamp=3000,
+            source_content={
+                "body": "Fresh reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
         client = MagicMock()
         client.room_get_event = AsyncMock(side_effect=RuntimeError("root fetch failed"))
         client.room_get_event_relations = MagicMock()
         client.room_messages = AsyncMock(side_effect=RuntimeError("scan failed"))
+        recovered_client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [fresh_reply],
+                self._relation_key("$thread_root", RelationshipType.replacement): [],
+                self._relation_key("$reply", RelationshipType.replacement): [],
+            },
+        )
 
         try:
             cached_sync_token = _sync_batch_marker(1)
@@ -2090,6 +2186,17 @@ class TestThreadHistoryCache:
                     current_sync_token=current_sync_token,
                 ),
             )
+            recovered_history = await fetch_thread_history(
+                recovered_client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+                freshness_context=ThreadCacheFreshnessContext(
+                    runtime_started_at=0.0,
+                    last_sync_activity_monotonic=1.0,
+                    current_sync_token=current_sync_token,
+                ),
+            )
         finally:
             await cache.close()
 
@@ -2097,6 +2204,8 @@ class TestThreadHistoryCache:
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_STALE_CACHE
         assert history.diagnostics[THREAD_HISTORY_DEGRADED_DIAGNOSTIC] is True
         assert history.diagnostics[THREAD_HISTORY_ERROR_DIAGNOSTIC] == "scan failed"
+        assert [message.body for message in recovered_history] == ["Root message", "Fresh reply"]
+        assert recovered_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_gracefully_degrades_when_cache_read_fails(self) -> None:

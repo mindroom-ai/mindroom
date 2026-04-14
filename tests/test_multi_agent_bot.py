@@ -158,6 +158,11 @@ def _install_runtime_cache_support(bot: AgentBot | TeamBot) -> None:
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
 
 
+def _empty_full_thread_history() -> ThreadHistoryResult:
+    """Return a fully hydrated empty thread history for tests that bypass Matrix fetches."""
+    return ThreadHistoryResult([], is_full_history=True)
+
+
 def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> TurnPolicy:
     """Rebuild the policy with the shared collaborator-replacement helper."""
     return shared_replace_turn_policy_deps(bot, **changes)
@@ -1256,7 +1261,14 @@ class TestAgentBot:
             },
         }
 
-        await bot._on_message(mock_room, mock_event)
+        snapshot = ThreadHistoryResult([], is_full_history=False)
+        history = ThreadHistoryResult([], is_full_history=True)
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_snapshot", AsyncMock(return_value=snapshot)),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
+        ):
+            await bot._on_message(mock_room, mock_event)
 
         # Should call AI and send response based on streaming mode
         if enable_streaming:
@@ -2213,12 +2225,14 @@ class TestAgentBot:
             agent_name=mock_agent_user.agent_name,
             source_kind="message",
         )
+        history = ThreadHistoryResult([], is_full_history=True)
 
         with (
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
@@ -3512,6 +3526,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        history = _empty_full_thread_history()
 
         with (
             patch.object(
@@ -3531,6 +3546,7 @@ class TestAgentBot:
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),
@@ -3599,6 +3615,7 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        history = _empty_full_thread_history()
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -3619,6 +3636,7 @@ class TestAgentBot:
             patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(bot, "_generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             pytest.raises(RuntimeError, match="boom"),
@@ -3691,6 +3709,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths,
         )
+        refreshed_history = ThreadHistoryResult(list(thread_history), is_full_history=True)
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -3715,6 +3734,7 @@ class TestAgentBot:
                 "_generate_team_response_helper",
                 new=AsyncMock(return_value="$response"),
             ),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=refreshed_history)),
             patch(
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
                 new_callable=AsyncMock,
@@ -3789,6 +3809,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths,
         )
+        history = _empty_full_thread_history()
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
             requested_members=[team_member],
@@ -3812,6 +3833,7 @@ class TestAgentBot:
             ),
             patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(return_value=("$team-response", "Team reply")),
@@ -3900,6 +3922,7 @@ class TestAgentBot:
         _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
+        history = _empty_full_thread_history()
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
@@ -3912,6 +3935,7 @@ class TestAgentBot:
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(return_value=("$placeholder", "stream chunk")),
@@ -3971,6 +3995,7 @@ class TestAgentBot:
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
+        history = _empty_full_thread_history()
 
         with (
             patch.object(
@@ -3978,6 +4003,7 @@ class TestAgentBot:
                 "run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(return_value=("$placeholder", "stream chunk")),
@@ -4030,6 +4056,7 @@ class TestAgentBot:
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
+        history = _empty_full_thread_history()
 
         with (
             patch_response_runner_module(
@@ -4037,6 +4064,7 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 team_response=AsyncMock(return_value="Team handled"),
             ),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
         ):
             event_id = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
@@ -8587,8 +8615,8 @@ class TestMultiAgentOrchestrator:
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
-    async def test_initialize_raises_when_shared_event_cache_init_fails(self, tmp_path: Path) -> None:
-        """Initialize should fail fast when the shared event cache cannot open."""
+    async def test_initialize_degrades_when_shared_event_cache_init_fails(self, tmp_path: Path) -> None:
+        """Initialize should keep starting bots when the shared event cache cannot open."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         config = _runtime_bound_config(
             Config(
@@ -8612,12 +8640,12 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch("mindroom.orchestrator._EventCache.initialize", new=AsyncMock(side_effect=RuntimeError("boom"))),
             patch.object(MultiAgentOrchestrator, "_create_managed_bot") as mock_create_managed_bot,
-            pytest.raises(RuntimeError, match="boom"),
         ):
             await orchestrator.initialize()
 
         assert orchestrator.config is config
-        assert mock_create_managed_bot.call_count == 0
+        assert mock_create_managed_bot.call_count == 2
+        assert orchestrator._event_cache.is_initialized is False
 
     @pytest.mark.asyncio
     async def test_initialize_does_not_activate_hook_runtime_before_user_account_succeeds(

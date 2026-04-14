@@ -14,7 +14,7 @@ from nio.responses import RoomGetEventError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.event_cache import (
     ConversationEventCache,
-    normalize_event_source_for_cache,
+    normalize_nio_event_for_cache,
 )
 from mindroom.matrix.cache.event_cache import (
     _EventCache as EventCache,
@@ -27,12 +27,17 @@ from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
 from mindroom.matrix.cache.write_coordinator import (
     _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
 )
-from mindroom.matrix.client import fetch_thread_history, fetch_thread_snapshot
+from mindroom.matrix.client import (
+    fetch_thread_history,
+    fetch_thread_snapshot,
+    load_cached_thread_history,
+    refresh_thread_history_from_source,
+)
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncContextManager, AsyncIterator
 
     import structlog
 
@@ -58,6 +63,9 @@ __all__ = [
 
 class ConversationCacheProtocol(Protocol):
     """Conversation-data reads available to resolver and reply-chain code."""
+
+    def turn_scope(self) -> AsyncContextManager[None]:
+        """Provide per-turn memoization for event lookups."""
 
     async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
         """Resolve one Matrix event by ID."""
@@ -89,7 +97,7 @@ class ConversationCacheProtocol(Protocol):
         """Write one locally sent threaded message or edit through to the cache.
 
         This is advisory post-send bookkeeping and must fail open.
-        Callers should be able to treat the Matrix delivery as successful even if cache repair state cannot be updated.
+        Callers should be able to treat the Matrix delivery as successful even if advisory cache state cannot be updated.
         """
 
     async def record_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
@@ -97,6 +105,15 @@ class ConversationCacheProtocol(Protocol):
 
         This is advisory post-redaction bookkeeping and must fail open.
         """
+
+    async def append_live_event(
+        self,
+        room_id: str,
+        event: nio.RoomMessage,
+        *,
+        event_info: EventInfo,
+    ) -> None:
+        """Append one live threaded event into the advisory cache when the thread is known."""
 
 
 async def _apply_cached_latest_edit(
@@ -201,13 +218,9 @@ async def _cached_room_get_event(
     event = response.event
     event_source = event.source if isinstance(event.source, dict) else {}
     server_timestamp = event.server_timestamp
-    normalized_event_source = normalize_event_source_for_cache(
-        event_source,
-        event_id=event.event_id if isinstance(event.event_id, str) else normalized_event_id,
-        sender=event.sender if isinstance(event.sender, str) else None,
-        origin_server_ts=server_timestamp
-        if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-        else None,
+    normalized_event_source = normalize_nio_event_for_cache(
+        event,
+        event_id=normalized_event_id,
     )
     visible_response = await _cached_room_get_event_response(
         client,
@@ -249,6 +262,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
+            freshness_context_getter=self._thread_cache_freshness_context,
+            load_cached_thread_history_from_client=self._load_cached_thread_history_from_client,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
             fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
         )
@@ -335,12 +350,28 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if reply_chain_caches is not None:
             reply_chain_caches.clear()
 
+    async def _load_cached_thread_history_from_client(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult | None:
+        client = self.runtime.client
+        if client is None:
+            return None
+        return await load_cached_thread_history(
+            client,
+            room_id,
+            thread_id,
+            event_cache=self.runtime.event_cache,
+            freshness_context=self._thread_cache_freshness_context(),
+        )
+
     async def _fetch_thread_history_from_client(
         self,
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
-        return await fetch_thread_history(
+        return await refresh_thread_history_from_source(
             self._require_client(),
             room_id,
             thread_id,

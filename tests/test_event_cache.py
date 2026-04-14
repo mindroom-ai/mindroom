@@ -6,7 +6,7 @@ import asyncio
 import json
 import sqlite3
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -111,6 +111,17 @@ def _make_relations_client(
     return client
 
 
+async def _seed_thread_cache(
+    cache: _EventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+    events: list[dict[str, object]],
+) -> None:
+    """Seed one authoritative cached thread snapshot for tests."""
+    await cache.replace_thread(room_id, thread_id, events, validated_sync_token=None)
+
+
 @pytest.mark.asyncio
 async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
     """Stored events should round-trip in timestamp order."""
@@ -118,10 +129,11 @@ async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
     await cache.initialize()
 
     try:
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[
                 {
                     "event_id": "$reply",
                     "sender": "@agent:localhost",
@@ -368,6 +380,25 @@ async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_event_cache_initialize_clears_half_initialized_connection_on_failure(tmp_path: Path) -> None:
+    """Mid-init failures must close and clear the SQLite connection so a later retry can recover."""
+    cache = _EventCache(tmp_path / "event_cache.db")
+    broken_connection = AsyncMock()
+    broken_connection.close = AsyncMock()
+    broken_connection.execute = AsyncMock(side_effect=[MagicMock(), RuntimeError("pragma boom")])
+
+    with patch(
+        "mindroom.matrix.cache.event_cache.aiosqlite.connect",
+        AsyncMock(return_value=broken_connection),
+    ):
+        with pytest.raises(RuntimeError, match="pragma boom"):
+            await cache.initialize()
+
+    broken_connection.close.assert_awaited_once()
+    assert cache._db is None
+
+
+@pytest.mark.asyncio
 async def test_individual_event_cache_strips_runtime_timing_marker(tmp_path: Path) -> None:
     """Batch event caching should drop in-memory timing objects before serialization."""
     cache = _EventCache(tmp_path / "event_cache.db")
@@ -422,10 +453,11 @@ async def test_thread_cache_store_populates_individual_event_lookup(tmp_path: Pa
     )
 
     try:
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [_cache_source(root_event), _cache_source(reply_event)],
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(reply_event)],
         )
         cached_event = await cache.get_event("!room:localhost", "$reply")
     finally:
@@ -459,7 +491,12 @@ async def test_thread_event_cache_strips_runtime_timing_marker(tmp_path: Path) -
     )
 
     try:
-        await cache.store_events("!room:localhost", "$thread_root", [event_source])
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[event_source],
+        )
         cached_event = await cache.get_event("!room:localhost", "$reply")
         cached_thread_events = await cache.get_thread_events("!room:localhost", "$thread_root")
     finally:
@@ -671,10 +708,11 @@ async def test_redaction_removes_individual_event_cache_entry(tmp_path: Path) ->
         },
     )
     try:
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [_cache_source(root_event), _cache_source(reply_event)],
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(reply_event)],
         )
         assert await cache.get_event("!room:localhost", "$reply") is not None
         redacted = await cache.redact_event("!room:localhost", "$reply")
@@ -730,10 +768,11 @@ async def test_redacting_original_removes_dependent_cached_edits_from_thread_his
     client.room_get_event_relations = MagicMock()
 
     try:
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [_cache_source(root_event), _cache_source(original_event), _cache_source(edit_event)],
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(original_event), _cache_source(edit_event)],
         )
         history_before = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
 
@@ -794,10 +833,11 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(tmp_pat
     client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(original_event))
 
     try:
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [_cache_source(root_event), _cache_source(original_event)],
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(original_event)],
         )
         await cache.store_event("$reply_edit", "!room:localhost", _cache_source(edit_event))
         await cache.invalidate_thread("!room:localhost", "$thread_root")
@@ -839,10 +879,11 @@ async def test_invalidate_thread_removes_event_thread_rows(tmp_path: Path) -> No
     )
 
     try:
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [_cache_source(root_event), _cache_source(reply_event)],
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(reply_event)],
         )
         assert await cache.get_thread_id_for_event("!room:localhost", "$reply") == "$thread_root"
 
@@ -898,10 +939,11 @@ async def test_redaction_removes_event_thread_rows_and_blocks_late_edit_resurrec
     client.room_get_event_relations = MagicMock()
 
     try:
-        await cache.store_events(
-            "!room:localhost",
-            "$thread_root",
-            [_cache_source(root_event), _cache_source(reply_event)],
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(reply_event)],
         )
         assert await cache.get_thread_id_for_event("!room:localhost", "$reply") == "$thread_root"
 
@@ -1068,7 +1110,12 @@ async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(tmp_path: 
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
         },
     )
-    await cache.store_events("!room:localhost", "$thread_root", [_cache_source(root_event), _cache_source(reply_event)])
+    await _seed_thread_cache(
+        cache,
+        room_id="!room:localhost",
+        thread_id="$thread_root",
+        events=[_cache_source(root_event), _cache_source(reply_event)],
+    )
 
     client = MagicMock()
     incremental_page = MagicMock(spec=nio.RoomMessagesResponse)

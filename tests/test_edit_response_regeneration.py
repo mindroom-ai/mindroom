@@ -1639,6 +1639,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
         patch.object(
             bot._conversation_state_writer,
             "create_storage",

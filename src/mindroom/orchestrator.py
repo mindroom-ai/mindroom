@@ -293,16 +293,13 @@ class MultiAgentOrchestrator:
         if not cache.is_initialized:
             try:
                 await cache.initialize()
-            except Exception:
-                try:
-                    await cache.close()
-                except Exception:
-                    logger.warning(
-                        "Failed to close partially initialized event cache",
-                        db_path=str(cache.db_path),
-                        exc_info=True,
-                    )
-                raise
+            except Exception as exc:
+                cache.disable(f"shared_runtime_init_failed:{exc}")
+                logger.warning(
+                    "Shared event cache init failed; continuing without advisory cache",
+                    db_path=str(cache.db_path),
+                    error=str(exc),
+                )
         self._rebind_runtime_support_services()
 
     async def _close_event_cache_write_coordinator(self) -> None:

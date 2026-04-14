@@ -427,7 +427,16 @@ async def _resolve_direct_thread_root(
     if chain_history_length != 1 or node.parent_event_id or node.thread_root_id or node.has_relations:
         return None
 
-    thread_history = await access.get_thread_snapshot(room_id, event_id)
+    try:
+        thread_history = await access.get_thread_snapshot(room_id, event_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed to probe direct thread root from reply chain; continuing without thread inference",
+            room_id=room_id,
+            event_id=event_id,
+            error=str(exc),
+        )
+        return None
     if not _thread_history_has_replies(thread_history, event_id):
         return None
 
@@ -627,6 +636,51 @@ def _reply_chain_seed(event_info: EventInfo) -> str | None:
     return event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
 
 
+async def _thread_history_or_fallback(
+    *,
+    access: ConversationCacheProtocol,
+    logger: structlog.stdlib.BoundLogger,
+    room_id: str,
+    thread_id: str,
+    fallback_history: Sequence[_HistoryMessage],
+    log_message: str,
+) -> list[_HistoryMessage]:
+    try:
+        return list(await access.get_thread_history(room_id, thread_id))
+    except Exception as exc:
+        logger.warning(
+            log_message,
+            room_id=room_id,
+            thread_id=thread_id,
+            fallback_message_count=len(fallback_history),
+            error=str(exc),
+        )
+        return list(fallback_history)
+
+
+async def _thread_snapshot_or_fallback(
+    *,
+    access: ConversationCacheProtocol,
+    logger: structlog.stdlib.BoundLogger,
+    room_id: str,
+    thread_id: str,
+    fallback_history: Sequence[_HistoryMessage],
+    log_message: str,
+) -> tuple[list[_HistoryMessage], bool]:
+    try:
+        snapshot = await access.get_thread_snapshot(room_id, thread_id)
+    except Exception as exc:
+        logger.warning(
+            log_message,
+            room_id=room_id,
+            thread_id=thread_id,
+            fallback_message_count=len(fallback_history),
+            error=str(exc),
+        )
+        return list(fallback_history), False
+    return list(snapshot), not _thread_history_is_full(snapshot, default=False)
+
+
 async def derive_conversation_context(
     client: nio.AsyncClient,
     room_id: str,
@@ -638,7 +692,14 @@ async def derive_conversation_context(
     """Derive conversation context from threads or reply chains."""
     thread_root_id = _thread_root_id_from_event_info(event_info)
     if thread_root_id is not None:
-        thread_history = await access.get_thread_history(room_id, thread_root_id)
+        thread_history = await _thread_history_or_fallback(
+            access=access,
+            logger=logger,
+            room_id=room_id,
+            thread_id=thread_root_id,
+            fallback_history=[],
+            log_message="Failed to fetch thread history for direct thread context; continuing without history",
+        )
         return True, thread_root_id, thread_history
 
     reply_chain_seed = _reply_chain_seed(event_info)
@@ -664,7 +725,14 @@ async def derive_conversation_context(
         if is_full_thread_history:
             return True, context_root_id, list(chain_history)
 
-        thread_history = await access.get_thread_history(room_id, context_root_id)
+        thread_history = await _thread_history_or_fallback(
+            access=access,
+            logger=logger,
+            room_id=room_id,
+            thread_id=context_root_id,
+            fallback_history=chain_history,
+            log_message="Failed to fetch thread history for reply-chain context; continuing with chain history",
+        )
         return True, context_root_id, _merged_thread_history(thread_history, chain_history)
 
     # Policy choice: reply-only chains are still treated as one conversation
@@ -688,12 +756,19 @@ async def derive_conversation_target(
     """
     thread_root_id = _thread_root_id_from_event_info(event_info)
     if thread_root_id is not None:
-        thread_history = await access.get_thread_snapshot(room_id, thread_root_id)
+        thread_history, requires_full_thread_history = await _thread_snapshot_or_fallback(
+            access=access,
+            logger=logger,
+            room_id=room_id,
+            thread_id=thread_root_id,
+            fallback_history=[],
+            log_message="Failed to fetch thread snapshot for direct thread target; continuing without history",
+        )
         return (
             True,
             thread_root_id,
             thread_history,
-            not _thread_history_is_full(thread_history, default=False),
+            requires_full_thread_history,
         )
 
     reply_chain_seed = _reply_chain_seed(event_info)
@@ -719,8 +794,14 @@ async def derive_conversation_target(
         if is_full_thread_history:
             return True, context_root_id, list(chain_history), False
 
-        thread_history = await access.get_thread_snapshot(room_id, context_root_id)
-        requires_full_thread_history = not _thread_history_is_full(thread_history, default=False)
+        thread_history, requires_full_thread_history = await _thread_snapshot_or_fallback(
+            access=access,
+            logger=logger,
+            room_id=room_id,
+            thread_id=context_root_id,
+            fallback_history=chain_history,
+            log_message="Failed to fetch thread snapshot for reply-chain target; continuing with chain history",
+        )
         return (
             True,
             context_root_id,
