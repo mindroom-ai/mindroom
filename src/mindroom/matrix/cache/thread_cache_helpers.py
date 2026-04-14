@@ -56,17 +56,14 @@ def log_resolved_thread_cache(
     room_id: str,
     thread_id: str,
     reason: str | None = None,
-    thread_version: int | None = None,
 ) -> None:
     """Emit one structured resolved-thread cache log entry."""
-    event_data: dict[str, str | int] = {
+    event_data: dict[str, str] = {
         "room_id": room_id,
         "thread_id": thread_id,
     }
     if reason is not None:
         event_data["reason"] = reason
-    if thread_version is not None:
-        event_data["thread_version"] = thread_version
     logger.debug(event, **event_data)
 
 

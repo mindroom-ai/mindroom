@@ -1239,7 +1239,6 @@ class TestExtractedModuleLoggerRebinding:
             "!room:localhost",
             "$threadroot",
             event_cache=bot.event_cache,
-            refresh_cache=True,
         )
 
     @pytest.mark.asyncio

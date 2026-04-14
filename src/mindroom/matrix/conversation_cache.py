@@ -21,16 +21,12 @@ from mindroom.matrix.cache.event_cache import (
 )
 from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.cache.thread_reads import ThreadReadDeps, ThreadReadPolicy, ThreadRepairRequiredError
-from mindroom.matrix.cache.thread_writes import ThreadWriteDeps, ThreadWritePolicy
+from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
+from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
 from mindroom.matrix.cache.write_coordinator import (
     _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
 )
-from mindroom.matrix.client import (
-    fetch_thread_history,
-    fetch_thread_snapshot,
-    resolve_thread_history_delta,
-)
+from mindroom.matrix.client import fetch_thread_history, fetch_thread_snapshot
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 
@@ -56,7 +52,6 @@ __all__ = [
     "EventLookupResult",
     "MatrixConversationCache",
     "ThreadReadResult",
-    "ThreadRepairRequiredError",
 ]
 
 
@@ -240,29 +235,18 @@ class MatrixConversationCache(ConversationCacheProtocol):
     def __post_init__(self) -> None:
         """Bind extracted read/write policy collaborators to this facade."""
         self._writes = ThreadWritePolicy(
-            ThreadWriteDeps(
-                logger_getter=lambda: self.logger,
-                runtime=self.runtime,
-                resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
-                reply_chain_caches_getter=self._reply_chain_caches,
-                thread_version=self.thread_version,
-                bump_thread_version=self._bump_thread_version,
-                require_client=self._require_client,
-            ),
+            logger_getter=lambda: self.logger,
+            runtime=self.runtime,
+            resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
+            reply_chain_caches_getter=self._reply_chain_caches,
+            require_client=self._require_client,
         )
         self._reads = ThreadReadPolicy(
-            ThreadReadDeps(
-                logger_getter=lambda: self.logger,
-                runtime=self.runtime,
-                resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
-                thread_version=self.thread_version,
-                thread_requires_refresh=self._thread_requires_refresh,
-                clear_thread_refresh_required=self._clear_thread_refresh_required,
-                adopt_room_lookup_repairs_locked=self._writes.adopt_room_lookup_repairs_locked,
-                fetch_thread_history_from_client=self._fetch_thread_history_from_client,
-                fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
-                resolve_thread_history_delta_from_client=self._resolve_thread_history_delta_from_client,
-            ),
+            logger_getter=lambda: self.logger,
+            runtime=self.runtime,
+            resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
+            fetch_thread_history_from_client=self._fetch_thread_history_from_client,
+            fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
         )
 
     def _require_client(self) -> nio.AsyncClient:
@@ -331,19 +315,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             turn_cache[cache_key] = response
         return response
 
-    def thread_version(self, room_id: str, thread_id: str) -> int:
-        """Return the current in-memory version for one thread."""
-        return self._resolved_thread_cache.version(room_id, thread_id)
-
-    def _bump_thread_version(self, room_id: str, thread_id: str) -> int:
-        return self._resolved_thread_cache.bump_version(room_id, thread_id)
-
-    async def _thread_requires_refresh(self, room_id: str, thread_id: str) -> bool:
-        return await self.runtime.event_cache.thread_repair_required(room_id, thread_id)
-
-    async def _clear_thread_refresh_required(self, room_id: str, thread_id: str) -> None:
-        await self.runtime.event_cache.clear_thread_repair_required(room_id, thread_id)
-
     def reset_runtime_state(self) -> None:
         """Drop in-memory conversation state tied to one runtime lifetime."""
         self._resolved_thread_cache.clear()
@@ -355,15 +326,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
         thread_id: str,
-        *,
-        refresh_cache: bool,
     ) -> ThreadHistoryResult:
         return await fetch_thread_history(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            refresh_cache=refresh_cache,
         )
 
     async def _fetch_thread_snapshot_from_client(
@@ -376,18 +344,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-        )
-
-    async def _resolve_thread_history_delta_from_client(
-        self,
-        *,
-        thread_id: str,
-        event_sources: Sequence[dict[str, Any]],
-    ) -> ThreadHistoryResult:
-        return await resolve_thread_history_delta(
-            self._require_client(),
-            thread_id=thread_id,
-            event_sources=event_sources,
         )
 
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:

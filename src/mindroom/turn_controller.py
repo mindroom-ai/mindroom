@@ -61,7 +61,6 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.conversation_cache import ThreadRepairRequiredError
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
@@ -1245,24 +1244,13 @@ class TurnController:
 
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
-            try:
-                dispatch = await self._prepare_dispatch(
-                    room,
-                    event,
-                    requester_user_id,
-                    event_label="message",
-                    handled_turn=handled_turn,
-                )
-            except ThreadRepairRequiredError as error:
-                response_event_id = await self._finalize_dispatch_failure(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
-                    thread_id=EventInfo.from_event(event.source).thread_id,
-                    error=error,
-                )
-                if response_event_id is not None:
-                    self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
-                return
+            dispatch = await self._prepare_dispatch(
+                room,
+                event,
+                requester_user_id,
+                event_label="message",
+                handled_turn=handled_turn,
+            )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
             if dispatch is None:
