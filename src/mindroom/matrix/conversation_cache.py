@@ -20,6 +20,7 @@ from mindroom.matrix.cache.event_cache import (
     _EventCache as EventCache,
 )
 from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
+from mindroom.matrix.cache.thread_cache_helpers import ThreadCacheFreshnessContext
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
 from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
@@ -268,6 +269,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
             return None
         return self._reply_chain_caches_getter()
 
+    def _thread_cache_freshness_context(self) -> ThreadCacheFreshnessContext:
+        client = self._require_client()
+        next_batch = client.next_batch
+        return ThreadCacheFreshnessContext(
+            runtime_started_at=self.runtime.runtime_started_at,
+            last_sync_activity_monotonic=self.runtime.last_sync_activity_monotonic,
+            current_sync_token=next_batch if isinstance(next_batch, str) and next_batch else None,
+        )
+
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
         """Memoize event lookups for the lifetime of one inbound turn."""
@@ -335,6 +345,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
+            freshness_context=self._thread_cache_freshness_context(),
         )
 
     async def _fetch_thread_snapshot_from_client(
@@ -347,6 +358,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
+            freshness_context=self._thread_cache_freshness_context(),
         )
 
     async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:

@@ -23,13 +23,19 @@ if TYPE_CHECKING:
 _RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
-_EVENT_CACHE_SCHEMA_VERSION = 4
+_EVENT_CACHE_SCHEMA_VERSION = 6
 _EVENT_CACHE_TABLES = (
     "thread_events",
     "events",
     "event_edits",
     "event_threads",
     "redacted_events",
+    "thread_cache_state",
+    "room_cache_state",
+)
+_EVENT_CACHE_RESET_TABLES = _EVENT_CACHE_TABLES + (
+    "pending_lookup_repairs",
+    "thread_repairs",
 )
 _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 logger = get_logger(__name__)
@@ -41,6 +47,18 @@ class _RoomLockEntry:
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active_users: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadCacheState:
+    """Durable freshness and invalidation metadata for one cached thread."""
+
+    validated_at: float | None
+    validated_sync_token: str | None
+    invalidated_at: float | None
+    invalidation_reason: str | None
+    room_invalidated_at: float | None
+    room_invalidation_reason: str | None
 
 
 class ConversationEventCache(Protocol):
@@ -55,8 +73,8 @@ class ConversationEventCache(Protocol):
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
 
-    async def get_latest_ts(self, room_id: str, thread_id: str) -> int | None:
-        """Return the latest cached timestamp for one thread."""
+    async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
+        """Return durable freshness metadata for one cached thread."""
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
@@ -73,8 +91,25 @@ class ConversationEventCache(Protocol):
     async def store_events(self, room_id: str, thread_id: str, events: list[dict[str, Any]]) -> None:
         """Insert or replace one batch of thread events."""
 
+    async def replace_thread(
+        self,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        *,
+        validated_sync_token: str | None,
+        validated_at: float | None = None,
+    ) -> None:
+        """Atomically replace one cached thread snapshot."""
+
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
+
+    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
+        """Persist one durable thread invalidation marker."""
+
+    async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
+        """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
 
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""
@@ -257,6 +292,28 @@ class _EventCache:
                 )
                 """,
             )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_cache_state (
+                    room_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    validated_at REAL,
+                    validated_sync_token TEXT,
+                    invalidated_at REAL,
+                    invalidation_reason TEXT,
+                    PRIMARY KEY (room_id, thread_id)
+                )
+                """,
+            )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS room_cache_state (
+                    room_id TEXT PRIMARY KEY,
+                    invalidated_at REAL,
+                    invalidation_reason TEXT
+                )
+                """,
+            )
             await self._db.execute(f"PRAGMA user_version = {_EVENT_CACHE_SCHEMA_VERSION}")
             await self._db.commit()
 
@@ -287,20 +344,39 @@ class _EventCache:
                 return None
             return [json.loads(row[0]) for row in rows]
 
-    async def get_latest_ts(self, room_id: str, thread_id: str) -> int | None:
-        """Return the latest cached server timestamp for one thread."""
-        async with self._acquire_db_operation(room_id, operation="get_latest_ts") as db:
+    async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
+        """Return durable freshness metadata for one cached thread."""
+        async with self._acquire_db_operation(room_id, operation="get_thread_cache_state") as db:
             cursor = await db.execute(
                 """
-                SELECT MAX(origin_server_ts)
-                FROM thread_events
-                WHERE room_id = ? AND thread_id = ?
+                SELECT
+                    thread_cache_state.validated_at,
+                    thread_cache_state.validated_sync_token,
+                    thread_cache_state.invalidated_at,
+                    thread_cache_state.invalidation_reason,
+                    room_cache_state.invalidated_at,
+                    room_cache_state.invalidation_reason
+                FROM (SELECT ? AS requested_room_id, ? AS requested_thread_id) AS requested
+                LEFT JOIN thread_cache_state
+                    ON thread_cache_state.room_id = requested.requested_room_id
+                    AND thread_cache_state.thread_id = requested.requested_thread_id
+                LEFT JOIN room_cache_state
+                    ON room_cache_state.room_id = requested.requested_room_id
                 """,
                 (room_id, thread_id),
             )
             row = await cursor.fetchone()
             await cursor.close()
-            return None if row is None or row[0] is None else int(row[0])
+            if row is None or all(value is None for value in row):
+                return None
+            return ThreadCacheState(
+                validated_at=None if row[0] is None else float(row[0]),
+                validated_sync_token=row[1] if isinstance(row[1], str) else None,
+                invalidated_at=None if row[2] is None else float(row[2]),
+                invalidation_reason=row[3] if isinstance(row[3], str) else None,
+                room_invalidated_at=None if row[4] is None else float(row[4]),
+                room_invalidation_reason=row[5] if isinstance(row[5], str) else None,
+            )
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
@@ -408,87 +484,214 @@ class _EventCache:
                     await db.rollback()
                     raise
 
+    async def _store_thread_events_locked(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        validated_sync_token: str | None,
+        validated_at: float,
+    ) -> None:
+        """Persist one authoritative thread snapshot within an existing DB transaction."""
+        if not events:
+            await db.execute(
+                """
+                INSERT INTO thread_cache_state(
+                    room_id,
+                    thread_id,
+                    validated_at,
+                    validated_sync_token,
+                    invalidated_at,
+                    invalidation_reason
+                )
+                VALUES (?, ?, ?, ?, NULL, NULL)
+                ON CONFLICT(room_id, thread_id) DO UPDATE SET
+                    validated_at = excluded.validated_at,
+                    validated_sync_token = excluded.validated_sync_token,
+                    invalidated_at = NULL,
+                    invalidation_reason = NULL
+                """,
+                (room_id, thread_id, validated_at, validated_sync_token),
+            )
+            return
+
+        cached_at = validated_at
+        normalized_events = [normalize_event_source_for_cache(event) for event in events]
+        cacheable_events = await _filter_cacheable_events(
+            db,
+            room_id,
+            [(_event_id(event), event) for event in normalized_events],
+        )
+        serialized_events = [
+            (
+                event_id,
+                _event_timestamp(event),
+                json.dumps(event, separators=(",", ":")),
+            )
+            for event_id, event in cacheable_events
+        ]
+        if serialized_events:
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        room_id,
+                        thread_id,
+                        event_id,
+                        origin_server_ts,
+                        event_json,
+                    )
+                    for event_id, origin_server_ts, event_json in serialized_events
+                ],
+            )
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO events(event_id, room_id, event_json, cached_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (
+                        event_id,
+                        room_id,
+                        event_json,
+                        cached_at,
+                    )
+                    for event_id, _origin_server_ts, event_json in serialized_events
+                ],
+            )
+            edit_rows = [
+                row
+                for row in (_edit_cache_row(room_id, event) for _event_id, event in cacheable_events)
+                if row is not None
+            ]
+            if edit_rows:
+                await db.executemany(
+                    """
+                    INSERT OR REPLACE INTO event_edits(edit_event_id, room_id, original_event_id, origin_server_ts)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    edit_rows,
+                )
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (
+                        room_id,
+                        event_id,
+                        thread_id,
+                    )
+                    for event_id, _origin_server_ts, _event_json in serialized_events
+                ],
+            )
+        await db.execute(
+            """
+            INSERT INTO thread_cache_state(
+                room_id,
+                thread_id,
+                validated_at,
+                validated_sync_token,
+                invalidated_at,
+                invalidation_reason
+            )
+            VALUES (?, ?, ?, ?, NULL, NULL)
+            ON CONFLICT(room_id, thread_id) DO UPDATE SET
+                validated_at = excluded.validated_at,
+                validated_sync_token = excluded.validated_sync_token,
+                invalidated_at = NULL,
+                invalidation_reason = NULL
+            """,
+            (room_id, thread_id, validated_at, validated_sync_token),
+        )
+
+    async def _replace_thread_locked(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        validated_sync_token: str | None,
+        validated_at: float,
+    ) -> None:
+        """Replace one thread snapshot atomically within an existing DB transaction."""
+        existing_event_ids = await _thread_event_ids_for_thread(db, room_id=room_id, thread_id=thread_id)
+        await db.execute(
+            """
+            DELETE FROM thread_events
+            WHERE room_id = ? AND thread_id = ?
+            """,
+            (room_id, thread_id),
+        )
+        if existing_event_ids:
+            await _delete_cached_events(db, event_ids=existing_event_ids)
+            await _delete_event_edit_rows(
+                db,
+                room_id,
+                event_ids=existing_event_ids,
+                original_event_id="",
+            )
+            await _delete_event_thread_rows(
+                db,
+                room_id,
+                event_ids=existing_event_ids,
+            )
+        await self._store_thread_events_locked(
+            db,
+            room_id=room_id,
+            thread_id=thread_id,
+            events=events,
+            validated_sync_token=validated_sync_token,
+            validated_at=validated_at,
+        )
+
     async def store_events(self, room_id: str, thread_id: str, events: list[dict[str, Any]]) -> None:
         """Insert or replace one batch of thread events."""
         if not events:
             return
 
-        cached_at = time.time()
-        normalized_events = [normalize_event_source_for_cache(event) for event in events]
         async with self._acquire_db_operation(room_id, operation="store_events") as db:
             try:
-                cacheable_events = await _filter_cacheable_events(
+                await self._store_thread_events_locked(
                     db,
-                    room_id,
-                    [(_event_id(event), event) for event in normalized_events],
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    events=events,
+                    validated_sync_token=None,
+                    validated_at=time.time(),
                 )
-                serialized_events = [
-                    (
-                        event_id,
-                        _event_timestamp(event),
-                        json.dumps(event, separators=(",", ":")),
-                    )
-                    for event_id, event in cacheable_events
-                ]
-                if serialized_events:
-                    await db.executemany(
-                        """
-                        INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                room_id,
-                                thread_id,
-                                event_id,
-                                origin_server_ts,
-                                event_json,
-                            )
-                            for event_id, origin_server_ts, event_json in serialized_events
-                        ],
-                    )
-                    await db.executemany(
-                        """
-                        INSERT OR REPLACE INTO events(event_id, room_id, event_json, cached_at)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                event_id,
-                                room_id,
-                                event_json,
-                                cached_at,
-                            )
-                            for event_id, _origin_server_ts, event_json in serialized_events
-                        ],
-                    )
-                    edit_rows = [
-                        row
-                        for row in (_edit_cache_row(room_id, event) for _event_id, event in cacheable_events)
-                        if row is not None
-                    ]
-                    if edit_rows:
-                        await db.executemany(
-                            """
-                            INSERT OR REPLACE INTO event_edits(edit_event_id, room_id, original_event_id, origin_server_ts)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            edit_rows,
-                        )
-                    await db.executemany(
-                        """
-                        INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
-                        VALUES (?, ?, ?)
-                        """,
-                        [
-                            (
-                                room_id,
-                                event_id,
-                                thread_id,
-                            )
-                            for event_id, _origin_server_ts, _event_json in serialized_events
-                        ],
-                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def replace_thread(
+        self,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        *,
+        validated_sync_token: str | None,
+        validated_at: float | None = None,
+    ) -> None:
+        """Atomically replace one cached thread snapshot."""
+        async with self._acquire_db_operation(room_id, operation="replace_thread") as db:
+            try:
+                await self._replace_thread_locked(
+                    db,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    events=events,
+                    validated_sync_token=validated_sync_token,
+                    validated_at=time.time() if validated_at is None else validated_at,
+                )
                 await db.commit()
             except Exception:
                 await db.rollback()
@@ -498,16 +701,7 @@ class _EventCache:
         """Delete cached events for one thread."""
         async with self._acquire_db_operation(room_id, operation="invalidate_thread") as db:
             try:
-                cursor = await db.execute(
-                    """
-                    SELECT event_id
-                    FROM thread_events
-                    WHERE room_id = ? AND thread_id = ?
-                    """,
-                    (room_id, thread_id),
-                )
-                event_ids = [str(row[0]) for row in await cursor.fetchall()]
-                await cursor.close()
+                event_ids = await _thread_event_ids_for_thread(db, room_id=room_id, thread_id=thread_id)
                 await db.execute(
                     """
                     DELETE FROM thread_events
@@ -516,26 +710,90 @@ class _EventCache:
                     (room_id, thread_id),
                 )
                 if event_ids:
-                    await db.executemany(
-                        """
-                        DELETE FROM events
-                        WHERE event_id = ?
-                        """,
-                        [(event_id,) for event_id in event_ids],
+                    await _delete_cached_events(db, event_ids=event_ids)
+                    await _delete_event_edit_rows(
+                        db,
+                        room_id,
+                        event_ids=event_ids,
+                        original_event_id="",
                     )
-                    await db.executemany(
-                        """
-                        DELETE FROM event_edits
-                        WHERE room_id = ? AND edit_event_id = ?
-                        """,
-                        [(room_id, event_id) for event_id in event_ids],
+                    await _delete_event_thread_rows(
+                        db,
+                        room_id,
+                        event_ids=event_ids,
                     )
+                await db.execute(
+                    """
+                    DELETE FROM thread_cache_state
+                    WHERE room_id = ? AND thread_id = ?
+                    """,
+                    (room_id, thread_id),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
+        """Persist one durable thread invalidation marker."""
+        async with self._acquire_db_operation(room_id, operation="mark_thread_stale") as db:
+            try:
+                await _mark_thread_stale_locked(
+                    db,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reason=reason,
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
+        """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
+        async with self._acquire_db_operation(room_id, operation="mark_room_threads_stale") as db:
+            try:
+                invalidated_at = time.time()
+                await _mark_room_stale_locked(
+                    db,
+                    room_id=room_id,
+                    invalidated_at=invalidated_at,
+                    reason=reason,
+                )
+                await db.execute(
+                    """
+                    UPDATE thread_cache_state
+                    SET invalidated_at = ?, invalidation_reason = ?
+                    WHERE room_id = ?
+                    """,
+                    (invalidated_at, reason, room_id),
+                )
+                thread_ids = await _distinct_room_thread_ids(db, room_id=room_id)
+                if thread_ids:
                     await db.executemany(
                         """
-                        DELETE FROM event_threads
-                        WHERE room_id = ? AND event_id = ?
+                        INSERT INTO thread_cache_state(
+                            room_id,
+                            thread_id,
+                            validated_at,
+                            validated_sync_token,
+                            invalidated_at,
+                            invalidation_reason
+                        )
+                        VALUES (?, ?, NULL, NULL, ?, ?)
+                        ON CONFLICT(room_id, thread_id) DO UPDATE SET
+                            invalidated_at = excluded.invalidated_at,
+                            invalidation_reason = excluded.invalidation_reason
                         """,
-                        [(room_id, event_id) for event_id in event_ids],
+                        [
+                            (
+                                room_id,
+                                thread_id,
+                                invalidated_at,
+                                reason,
+                            )
+                            for thread_id in thread_ids
+                        ],
                     )
                 await db.commit()
             except Exception:
@@ -739,7 +997,7 @@ class _EventCache:
             existing_tables=sorted(existing_tables),
         )
         await db.executescript(
-            "\n".join(f"DROP TABLE IF EXISTS {table_name};" for table_name in _EVENT_CACHE_TABLES),
+            "\n".join(f"DROP TABLE IF EXISTS {table_name};" for table_name in _EVENT_CACHE_RESET_TABLES),
         )
         await db.execute("PRAGMA user_version = 0")
         await db.commit()
@@ -785,6 +1043,96 @@ def _edit_cache_row(room_id: str, event: dict[str, Any]) -> tuple[str, str, str,
         return None
 
     return (_event_id(event), room_id, event_info.original_event_id, _event_timestamp(event))
+
+
+async def _thread_event_ids_for_thread(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> list[str]:
+    """Return cached event IDs currently stored for one thread."""
+    cursor = await db.execute(
+        """
+        SELECT event_id
+        FROM thread_events
+        WHERE room_id = ? AND thread_id = ?
+        """,
+        (room_id, thread_id),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [str(row[0]) for row in rows]
+
+
+async def _distinct_room_thread_ids(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+) -> list[str]:
+    """Return every thread ID currently cached for one room."""
+    cursor = await db.execute(
+        """
+        SELECT DISTINCT thread_id
+        FROM thread_events
+        WHERE room_id = ?
+        """,
+        (room_id,),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [str(row[0]) for row in rows]
+
+
+async def _mark_thread_stale_locked(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    thread_id: str,
+    reason: str,
+) -> None:
+    """Persist a durable invalidate-and-refetch marker within an active transaction."""
+    await db.execute(
+        """
+        INSERT INTO thread_cache_state(
+            room_id,
+            thread_id,
+            validated_at,
+            validated_sync_token,
+            invalidated_at,
+            invalidation_reason
+        )
+        VALUES (?, ?, NULL, NULL, ?, ?)
+        ON CONFLICT(room_id, thread_id) DO UPDATE SET
+            invalidated_at = excluded.invalidated_at,
+            invalidation_reason = excluded.invalidation_reason
+        """,
+        (room_id, thread_id, time.time(), reason),
+    )
+
+
+async def _mark_room_stale_locked(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    invalidated_at: float,
+    reason: str,
+) -> None:
+    """Persist one durable room-scoped invalidate-and-refetch marker."""
+    await db.execute(
+        """
+        INSERT INTO room_cache_state(
+            room_id,
+            invalidated_at,
+            invalidation_reason
+        )
+        VALUES (?, ?, ?)
+        ON CONFLICT(room_id) DO UPDATE SET
+            invalidated_at = excluded.invalidated_at,
+            invalidation_reason = excluded.invalidation_reason
+        """,
+        (room_id, invalidated_at, reason),
+    )
 
 
 async def _dependent_edit_event_ids(

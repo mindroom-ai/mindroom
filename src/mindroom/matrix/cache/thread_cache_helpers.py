@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from mindroom.matrix.cache.event_cache import ThreadCacheState
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -12,38 +16,51 @@ if TYPE_CHECKING:
     from mindroom.matrix.client import ResolvedVisibleMessage
 
 
+_RAW_THREAD_CACHE_TTL_SECONDS = 300.0
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadCacheFreshnessContext:
+    """Runtime freshness inputs used to decide whether raw SQLite thread rows are reusable."""
+
+    runtime_started_at: float
+    last_sync_activity_monotonic: float | None
+    current_sync_token: str | None
+
+
 def event_id_from_event_source(event_source: dict[str, object]) -> str | None:
     """Return the event ID when one cached event source contains it."""
     event_id = event_source.get("event_id")
     return event_id if isinstance(event_id, str) else None
 
 
-def sort_thread_history_root_first(
-    history: list[ResolvedVisibleMessage],
+def thread_cache_state_is_fresh(
+    state: ThreadCacheState | None,
     *,
-    thread_id: str,
-) -> None:
-    """Keep thread history ordered by timestamp while pinning the root first."""
-    history.sort(key=lambda message: (message.timestamp, message.event_id))
-    root_index = next(
-        (index for index, message in enumerate(history) if message.event_id == thread_id),
-        None,
-    )
-    if root_index not in (None, 0):
-        history.insert(0, history.pop(root_index))
+    context: ThreadCacheFreshnessContext,
+    ttl_seconds: float = _RAW_THREAD_CACHE_TTL_SECONDS,
+) -> bool:
+    """Return whether one raw thread cache entry is still trustworthy for reads."""
+    if state is None or state.invalidated_at is not None or state.validated_at is None:
+        return False
+    if state.room_invalidated_at is not None and state.validated_at <= state.room_invalidated_at:
+        return False
+    if (time.time() - state.validated_at) >= ttl_seconds:
+        return False
+    if context.last_sync_activity_monotonic is None or context.current_sync_token is None:
+        return state.validated_at >= context.runtime_started_at
+    return state.validated_sync_token == context.current_sync_token
 
 
 def resolved_cache_diagnostics(
     *,
     cache_read_ms: float,
-    incremental_refresh_ms: float = 0.0,
     resolution_ms: float = 0.0,
     sidecar_hydration_ms: float = 0.0,
 ) -> dict[str, float]:
     """Return diagnostics for one resolved-thread cache read path."""
     return {
         "cache_read_ms": cache_read_ms,
-        "incremental_refresh_ms": incremental_refresh_ms,
         "resolution_ms": resolution_ms,
         "sidecar_hydration_ms": sidecar_hydration_ms,
     }

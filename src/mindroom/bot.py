@@ -357,6 +357,7 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
+            runtime_started_at=time.time(),
             last_sync_activity_monotonic=None,
         )
         self._deferred_overdue_task_drain_task = None

@@ -107,6 +107,18 @@ class ResolvedThreadCache:
         self._prune_lock(key)
         return entry
 
+    def invalidate_room(self, room_id: str) -> tuple[str, ...]:
+        """Drop every cached thread entry for one room and return the removed thread IDs."""
+        removed_thread_ids: list[str] = []
+        for key in tuple(self._entries):
+            candidate_room_id, thread_id = key
+            if candidate_room_id != room_id:
+                continue
+            self._entries.pop(key, None)
+            self._prune_lock(key)
+            removed_thread_ids.append(thread_id)
+        return tuple(removed_thread_ids)
+
     def _is_expired(self, entry: ResolvedThreadCacheEntry) -> bool:
         return (time.monotonic() - entry.cached_at_monotonic) >= self.ttl_seconds
 

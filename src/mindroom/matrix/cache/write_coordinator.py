@@ -93,6 +93,20 @@ class _EventCacheWriteCoordinator:
         task.add_done_callback(lambda done_task: self._clear_room_tail(room_id, done_task))
         return task
 
+    async def run_room_update(
+        self,
+        room_id: str,
+        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
+        *,
+        name: str,
+    ) -> object:
+        """Run one room-scoped operation through the same ordered barrier and await its result."""
+        return await self.queue_room_update(
+            room_id,
+            update_coro_factory,
+            name=name,
+        )
+
     async def wait_for_room_idle(self, room_id: str) -> None:
         """Wait for the currently queued same-room update chain to drain."""
         while True:

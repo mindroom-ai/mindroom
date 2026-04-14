@@ -232,6 +232,16 @@ class ThreadWritePolicy:
     ) -> None:
         async with self._resolved_thread_cache().entry_lock(room_id, thread_id):
             self._resolved_thread_cache().invalidate(room_id, thread_id)
+        try:
+            await self.runtime.event_cache.mark_thread_stale(room_id, thread_id, reason=reason)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to mark cached thread stale",
+                room_id=room_id,
+                thread_id=thread_id,
+                reason=reason,
+                error=str(exc),
+            )
         log_resolved_thread_cache(
             self.logger,
             "resolved_thread_cache_invalidate",
@@ -239,6 +249,31 @@ class ThreadWritePolicy:
             thread_id=thread_id,
             reason=reason,
         )
+
+    async def _invalidate_room_threads(
+        self,
+        room_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        thread_ids = self._resolved_thread_cache().invalidate_room(room_id)
+        for thread_id in thread_ids:
+            log_resolved_thread_cache(
+                self.logger,
+                "resolved_thread_cache_invalidate",
+                room_id=room_id,
+                thread_id=thread_id,
+                reason=reason,
+            )
+        try:
+            await self.runtime.event_cache.mark_room_threads_stale(room_id, reason=reason)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to mark cached room threads stale",
+                room_id=room_id,
+                reason=reason,
+                error=str(exc),
+            )
 
     async def _invalidate_resolved_threads_for_event_ids(
         self,
@@ -328,11 +363,7 @@ class ThreadWritePolicy:
             context="outbound",
         )
         if thread_id is None:
-            await self._invalidate_resolved_threads_for_event_ids(
-                room_id,
-                event_info.original_event_id,
-                reason="outbound_lookup_missing",
-            )
+            await self._invalidate_room_threads(room_id, reason="outbound_lookup_missing")
             return
         await self._append_event_to_cache(
             room_id,
@@ -438,11 +469,7 @@ class ThreadWritePolicy:
                 reason="outbound_redaction",
             )
             return
-        await self._invalidate_resolved_threads_for_event_ids(
-            room_id,
-            redacted_event_id,
-            reason="outbound_redaction_lookup_missing",
-        )
+        await self._invalidate_room_threads(room_id, reason="outbound_redaction_lookup_missing")
 
     async def record_outbound_redaction(
         self,
@@ -484,11 +511,7 @@ class ThreadWritePolicy:
             context="live",
         )
         if thread_id is None:
-            await self._invalidate_resolved_threads_for_event_ids(
-                room_id,
-                event_info.original_event_id,
-                reason="live_lookup_missing",
-            )
+            await self._invalidate_room_threads(room_id, reason="live_lookup_missing")
             return
 
         raw_event_source = event.source if isinstance(event.source, dict) else {}
@@ -560,11 +583,7 @@ class ThreadWritePolicy:
                     reason="live_redaction" if redacted else "live_redaction_failed",
                 )
             else:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event.redacts,
-                    reason="live_redaction_lookup_missing",
-                )
+                await self._invalidate_room_threads(room_id, reason="live_redaction_lookup_missing")
             return bool(redacted)
 
         await self._queue_room_cache_update(
@@ -588,11 +607,7 @@ class ThreadWritePolicy:
                 context="sync",
             )
             if thread_id is None:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    event_info.original_event_id,
-                    reason="sync_lookup_missing",
-                )
+                await self._invalidate_room_threads(room_id, reason="sync_lookup_missing")
                 continue
             appended = await self._append_event_to_cache(
                 room_id,
@@ -650,11 +665,7 @@ class ThreadWritePolicy:
                     reason="sync_redaction" if redacted else "sync_redaction_failed",
                 )
             else:
-                await self._invalidate_resolved_threads_for_event_ids(
-                    room_id,
-                    redacted_event_id,
-                    reason="sync_redaction_lookup_missing",
-                )
+                await self._invalidate_room_threads(room_id, reason="sync_redaction_lookup_missing")
 
     async def _persist_room_sync_timeline_updates(
         self,

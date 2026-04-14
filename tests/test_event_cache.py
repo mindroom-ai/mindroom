@@ -144,13 +144,11 @@ async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
         )
 
         cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
-        latest_ts = await cache.get_latest_ts("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 
     assert cached_events is not None
     assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
-    assert latest_ts == 2000
 
 
 @pytest.mark.asyncio
@@ -1172,13 +1170,11 @@ async def test_fetch_thread_history_gracefully_falls_back_on_db_error() -> None:
         },
     )
     broken_cache = MagicMock(spec=_EventCache)
-    broken_cache.get_thread_events = AsyncMock(side_effect=RuntimeError("db broken"))
-    broken_cache.invalidate_thread = AsyncMock()
-    broken_cache.store_events = AsyncMock()
+    broken_cache.get_thread_cache_state = AsyncMock(side_effect=RuntimeError("db broken"))
+    broken_cache.replace_thread = AsyncMock()
 
     history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
 
     assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-    broken_cache.get_thread_events.assert_awaited_once_with("!room:localhost", "$thread_root")
-    assert broken_cache.invalidate_thread.await_count >= 1
-    broken_cache.store_events.assert_awaited_once()
+    broken_cache.get_thread_cache_state.assert_awaited_once_with("!room:localhost", "$thread_root")
+    broken_cache.replace_thread.assert_awaited_once()

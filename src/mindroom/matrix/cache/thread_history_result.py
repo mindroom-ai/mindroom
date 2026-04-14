@@ -14,6 +14,9 @@ type ThreadHistoryDiagnosticValue = str | int | float | bool
 THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
 THREAD_HISTORY_SOURCE_CACHE = "cache"
 THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
+THREAD_HISTORY_SOURCE_STALE_CACHE = "stale_cache"
+THREAD_HISTORY_ERROR_DIAGNOSTIC = "thread_read_error"
+THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"
 
 
 class ThreadHistoryResult(list["ResolvedVisibleMessage"]):
@@ -49,9 +52,3 @@ def thread_history_result(
         is_full_history=is_full_history,
         diagnostics=diagnostics,
     )
-
-
-def thread_history_read_source(history: ThreadHistoryResult) -> str | None:
-    """Return the logical source that produced one thread-history result."""
-    source = history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
-    return source if isinstance(source, str) else None
