@@ -1224,9 +1224,9 @@ class TestExtractedModuleLoggerRebinding:
         bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
 
-        client = MagicMock()
+        client = AsyncMock()
         with patch(
-            "mindroom.matrix.conversation_cache.fetch_thread_history",
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
             new=AsyncMock(return_value=[]),
         ) as fetch_thread_history_mock:
             bot.client = client
@@ -1272,11 +1272,11 @@ class TestExtractedModuleLoggerRebinding:
                 new=AsyncMock(return_value=preview_snapshot),
             ) as fetch_thread_snapshot_mock,
             patch(
-                "mindroom.matrix.conversation_cache.fetch_thread_history",
+                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
                 new=AsyncMock(return_value=hydrated_history),
-            ) as fetch_thread_history_mock,
+            ) as refresh_mock,
         ):
-            bot.client = MagicMock()
+            bot.client = AsyncMock()
             async with bot._conversation_cache.turn_scope():
                 snapshot_history = await bot._conversation_cache.get_thread_snapshot(
                     "!room:localhost",
@@ -1290,7 +1290,7 @@ class TestExtractedModuleLoggerRebinding:
         assert snapshot_history is preview_snapshot
         assert full_history is hydrated_history
         fetch_thread_snapshot_mock.assert_awaited_once()
-        fetch_thread_history_mock.assert_awaited_once()
+        refresh_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_uses_canonical_relation_walk(
