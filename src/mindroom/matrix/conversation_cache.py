@@ -354,6 +354,11 @@ def _threaded_sync_event_cache_update(
     return room_id, event_source
 
 
+def _has_explicit_thread_relation(event_info: EventInfo) -> bool:
+    """Return whether one event explicitly carries thread membership in its own content."""
+    return isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str)
+
+
 async def _resolve_thread_id_for_cached_event_append(
     room_id: str,
     *,
@@ -727,6 +732,27 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if not history:
             return None
         return history[-1].visible_event_id or history[-1].event_id or None
+
+    async def _invalidate_resolved_threads_for_event_ids(
+        self,
+        room_id: str,
+        *event_ids: str | None,
+        reason: str,
+    ) -> None:
+        candidate_event_ids = frozenset(event_id for event_id in event_ids if isinstance(event_id, str) and event_id)
+        if not candidate_event_ids:
+            return
+        matching_thread_ids = self._resolved_thread_cache.matching_thread_ids(room_id, candidate_event_ids)
+        for thread_id in matching_thread_ids:
+            thread_version = self._bump_thread_version(room_id, thread_id)
+            self._resolved_thread_cache.invalidate(room_id, thread_id)
+            self._log_resolved_thread_cache(
+                "resolved_thread_cache_invalidate",
+                room_id=room_id,
+                thread_id=thread_id,
+                reason=reason,
+                thread_version=thread_version,
+            )
 
     async def _cached_thread_event_sources(
         self,
@@ -1146,6 +1172,107 @@ class MatrixConversationCache(ConversationCacheProtocol):
             return thread_id
         return self._latest_visible_thread_event_id(thread_history) or thread_id
 
+    async def _resolve_outbound_thread_id_for_write_through(
+        self,
+        room_id: str,
+        event_id: str,
+        event_info: EventInfo,
+    ) -> str | None:
+        """Resolve one locally sent thread candidate to a thread root for cache write-through."""
+        has_explicit_thread_relation = _has_explicit_thread_relation(event_info)
+        try:
+            thread_id = await _resolve_thread_id_for_cached_event_append(
+                room_id,
+                event_info=event_info,
+                event_cache=self.runtime.event_cache,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to resolve outbound threaded event for cache write-through",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
+            thread_id = None
+            if has_explicit_thread_relation:
+                await self._mark_lookup_repair_pending(
+                    room_id,
+                    event_info.original_event_id or event_id,
+                    reason="outbound_lookup_failed",
+                    queue_write=False,
+                )
+            else:
+                await self._invalidate_resolved_threads_for_event_ids(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="outbound_lookup_non_thread_edit",
+                )
+            return None
+
+        if thread_id is not None:
+            return thread_id
+
+        if has_explicit_thread_relation:
+            await self._mark_lookup_repair_pending(
+                room_id,
+                event_info.original_event_id or event_id,
+                reason="outbound_lookup_missing",
+                queue_write=False,
+            )
+        else:
+            await self._invalidate_resolved_threads_for_event_ids(
+                room_id,
+                event_info.original_event_id,
+                reason="outbound_lookup_non_thread_edit",
+            )
+        return None
+
+    async def _append_outbound_thread_event_to_cache(
+        self,
+        room_id: str,
+        thread_id: str,
+        event_id: str,
+        event_source: dict[str, Any],
+    ) -> bool:
+        """Persist one locally sent threaded event into the durable room cache."""
+        try:
+            return bool(await self.runtime.event_cache.append_event(room_id, thread_id, event_source))
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to write outbound threaded event through to cache",
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event_id,
+                error=str(exc),
+            )
+            return False
+
+    async def _record_outbound_message_update(
+        self,
+        room_id: str,
+        event_id: str,
+        event_source: dict[str, Any],
+        event_info: EventInfo,
+    ) -> None:
+        """Apply one outbound threaded send/edit to durable cache state."""
+        thread_id = await self._resolve_outbound_thread_id_for_write_through(room_id, event_id, event_info)
+        if thread_id is None:
+            return
+
+        appended = await self._append_outbound_thread_event_to_cache(
+            room_id,
+            thread_id,
+            event_id,
+            event_source,
+        )
+        await self._finalize_thread_cache_mutation(
+            room_id,
+            thread_id,
+            persisted=appended,
+            invalidate_resolved=event_info.is_edit,
+            failure_reason="outbound_append_failed",
+        )
+
     async def record_outbound_message(
         self,
         room_id: str,
@@ -1186,66 +1313,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 event_info.original_event_id,
             )
 
-        event_cache = self.runtime.event_cache
-
-        async def append_and_finalize() -> bool:
-            try:
-                thread_id = await _resolve_thread_id_for_cached_event_append(
-                    room_id,
-                    event_info=event_info,
-                    event_cache=event_cache,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Failed to resolve outbound threaded event for cache write-through",
-                    room_id=room_id,
-                    event_id=event_id,
-                    error=str(exc),
-                )
-                thread_id = None
-                await self._mark_lookup_repair_pending(
-                    room_id,
-                    event_info.original_event_id or event_id,
-                    reason="outbound_lookup_failed",
-                    queue_write=False,
-                )
-            else:
-                if thread_id is None:
-                    await self._mark_lookup_repair_pending(
-                        room_id,
-                        event_info.original_event_id or event_id,
-                        reason="outbound_lookup_missing",
-                        queue_write=False,
-                    )
-                    return False
-
-            if thread_id is None:
-                return False
-
-            try:
-                appended = await event_cache.append_event(room_id, thread_id, event_source)
-            except Exception as exc:
-                self.logger.warning(
-                    "Failed to write outbound threaded event through to cache",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    event_id=event_id,
-                    error=str(exc),
-                )
-                appended = False
-
-            await self._finalize_thread_cache_mutation(
-                room_id,
-                thread_id,
-                persisted=bool(appended),
-                invalidate_resolved=event_info.is_edit,
-                failure_reason="outbound_append_failed",
-            )
-            return bool(appended)
-
         await self._queue_room_cache_update(
             room_id,
-            append_and_finalize,
+            lambda: self._record_outbound_message_update(room_id, event_id, event_source, event_info),
             name="matrix_cache_record_outbound_message",
         )
 
@@ -1264,6 +1334,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 event_info.original_event_id,
             )
         event_cache = self.runtime.event_cache
+        has_explicit_thread_relation = _has_explicit_thread_relation(event_info)
 
         try:
             thread_id = await _resolve_thread_id_for_cached_event_append(
@@ -1279,18 +1350,32 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 original_event_id=event_info.original_event_id,
                 error=str(exc),
             )
-            await self._mark_lookup_repair_pending(
-                room_id,
-                event_info.original_event_id,
-                reason="live_append_lookup_failed",
-            )
+            if has_explicit_thread_relation:
+                await self._mark_lookup_repair_pending(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="live_append_lookup_failed",
+                )
+            else:
+                await self._invalidate_resolved_threads_for_event_ids(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="live_lookup_non_thread_edit",
+                )
             return
         if thread_id is None:
-            await self._mark_lookup_repair_pending(
-                room_id,
-                event_info.original_event_id,
-                reason="live_append_lookup_missing",
-            )
+            if has_explicit_thread_relation:
+                await self._mark_lookup_repair_pending(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="live_append_lookup_missing",
+                )
+            else:
+                await self._invalidate_resolved_threads_for_event_ids(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="live_lookup_non_thread_edit",
+                )
             return
 
         server_timestamp = event.server_timestamp
@@ -1358,10 +1443,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
             )
         else:
             if thread_id is None:
-                await self._mark_lookup_repair_pending(
+                await self._invalidate_resolved_threads_for_event_ids(
                     room_id,
                     event.redacts,
-                    reason="live_redaction_lookup_missing",
+                    reason="live_redaction_without_thread_mapping",
                 )
 
         async def redact_and_finalize() -> bool:
@@ -1401,6 +1486,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Resolve the thread root for one sync event."""
         event_info = EventInfo.from_event(event_source)
         event_id = event_source.get("event_id")
+        has_explicit_thread_relation = _has_explicit_thread_relation(event_info)
         try:
             return await _resolve_thread_id_for_cached_event_append(
                 room_id,
@@ -1415,12 +1501,19 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 original_event_id=event_info.original_event_id,
                 error=str(exc),
             )
-            await self._mark_lookup_repair_pending(
-                room_id,
-                event_info.original_event_id,
-                reason="sync_thread_lookup_failed",
-                queue_write=False,
-            )
+            if has_explicit_thread_relation:
+                await self._mark_lookup_repair_pending(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="sync_thread_lookup_failed",
+                    queue_write=False,
+                )
+            else:
+                await self._invalidate_resolved_threads_for_event_ids(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="sync_lookup_non_thread_edit",
+                )
             return None
 
     async def _append_sync_thread_event(
@@ -1439,12 +1532,19 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
         if thread_id is None:
             event_info = EventInfo.from_event(event_source)
-            await self._mark_lookup_repair_pending(
-                room_id,
-                event_info.original_event_id,
-                reason="sync_thread_lookup_missing",
-                queue_write=False,
-            )
+            if _has_explicit_thread_relation(event_info):
+                await self._mark_lookup_repair_pending(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="sync_thread_lookup_missing",
+                    queue_write=False,
+                )
+            else:
+                await self._invalidate_resolved_threads_for_event_ids(
+                    room_id,
+                    event_info.original_event_id,
+                    reason="sync_lookup_non_thread_edit",
+                )
             return None, False
 
         event_id = event_source.get("event_id")
@@ -1550,11 +1650,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 redacted = False
             else:
                 if thread_id is None:
-                    await self._mark_lookup_repair_pending(
+                    await self._invalidate_resolved_threads_for_event_ids(
                         room_id,
                         redacted_event_id,
-                        reason="sync_redaction_lookup_missing",
-                        queue_write=False,
+                        reason="sync_redaction_without_thread_mapping",
                     )
             await self._finalize_thread_cache_mutation(
                 room_id,

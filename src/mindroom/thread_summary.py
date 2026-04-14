@@ -7,7 +7,7 @@ import hashlib
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import nio
 from agno.agent import Agent
@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import send_message
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -306,6 +308,7 @@ async def send_thread_summary_event(
     summary: str,
     message_count: int,
     model_name: str,
+    conversation_cache: ConversationCacheProtocol,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event."""
     normalized_summary = normalize_thread_summary_text(summary)
@@ -323,37 +326,40 @@ async def send_thread_summary_event(
         if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
         else normalized_summary
     )
-    content: dict[str, Any] = {
-        "msgtype": "m.notice",
-        "body": truncated_summary,
-        "m.relates_to": {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": thread_id},
-        },
-        "io.mindroom.thread_summary": {
-            "version": 1,
-            "summary": truncated_summary,
-            "message_count": message_count,
-            "generated_at": datetime.now(UTC).isoformat(),
-            "model": model_name,
-        },
-    }
-    response = await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=content,
+    latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
+        room_id,
+        thread_id,
     )
-    if isinstance(response, nio.RoomSendResponse):
+    content = build_message_content(
+        truncated_summary,
+        thread_event_id=thread_id,
+        latest_thread_event_id=latest_thread_event_id,
+        extra_content={
+            "msgtype": "m.notice",
+            "io.mindroom.thread_summary": {
+                "version": 1,
+                "summary": truncated_summary,
+                "message_count": message_count,
+                "generated_at": datetime.now(UTC).isoformat(),
+                "model": model_name,
+            },
+        },
+    )
+    event_id = await send_message(client, room_id, content)
+    if event_id is not None:
+        await conversation_cache.record_outbound_message(
+            room_id,
+            event_id,
+            content,
+        )
         logger.info(
             "Sent thread summary",
             room_id=room_id,
             thread_id=thread_id,
             message_count=message_count,
         )
-        return str(response.event_id)
-    logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id, response=str(response))
+        return event_id
+    logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id)
     return None
 
 
@@ -415,4 +421,12 @@ async def maybe_generate_thread_summary(
         # Record count before sending — the LLM cost is already incurred, so don't
         # retry on Matrix send failure (avoids cost amplification loop).
         update_last_summary_count(room_id, thread_id, message_count)
-        await send_thread_summary_event(client, room_id, thread_id, normalized_summary, message_count, model_name)
+        await send_thread_summary_event(
+            client,
+            room_id,
+            thread_id,
+            normalized_summary,
+            message_count,
+            model_name,
+            conversation_cache,
+        )

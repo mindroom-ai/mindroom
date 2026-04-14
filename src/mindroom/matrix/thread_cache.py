@@ -121,6 +121,16 @@ class ResolvedThreadCache:
         self._entries.move_to_end(key)
         return ResolvedThreadCacheLookup(entry=entry)
 
+    def matching_thread_ids(self, room_id: str, event_ids: frozenset[str]) -> tuple[str, ...]:
+        """Return cached thread IDs whose source-event set intersects the provided event IDs."""
+        if not event_ids:
+            return ()
+        return tuple(
+            thread_id
+            for (candidate_room_id, thread_id), entry in tuple(self._entries.items())
+            if candidate_room_id == room_id and not entry.source_event_ids.isdisjoint(event_ids)
+        )
+
     def store(
         self,
         room_id: str,

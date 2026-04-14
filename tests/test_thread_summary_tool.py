@@ -164,6 +164,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "🧵 Ready for review",
         3,
         "manual",
+        context.conversation_cache,
     )
     assert _last_summary_counts[thread_summary_cache_key(context.room_id, "$ctx-thread:localhost")] == 3
 
@@ -197,6 +198,7 @@ async def test_set_thread_summary_strips_markdown_before_send() -> None:
         "Fix ISSUE-116",
         3,
         "manual",
+        context.conversation_cache,
     )
 
 
@@ -282,6 +284,7 @@ async def test_set_thread_summary_falls_back_to_reply_to_event_id_for_room_timel
         "done",
         3,
         "manual",
+        context.conversation_cache,
     )
 
 
@@ -421,6 +424,7 @@ async def test_set_thread_summary_excludes_existing_summary_notices_from_message
         "done",
         3,
         "manual",
+        context.conversation_cache,
     )
 
 

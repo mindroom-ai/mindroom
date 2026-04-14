@@ -13,6 +13,7 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import EventInfo
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -381,6 +382,20 @@ class MatrixApiTools(Toolkit):
             )
         return None
 
+    @staticmethod
+    def _requires_conversation_cache_write(
+        event_type: str,
+        content: dict[str, object],
+    ) -> bool:
+        """Return whether one send_event payload must update threaded conversation cache state."""
+        if event_type != "m.room.message":
+            return False
+        event_info = EventInfo.from_event({"type": event_type, "content": content})
+        return isinstance(event_info.thread_id, str) or (
+            event_info.is_edit
+            and (isinstance(event_info.thread_id_from_edit, str) or isinstance(event_info.original_event_id, str))
+        )
+
     async def _send_event(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
@@ -416,6 +431,17 @@ class MatrixApiTools(Toolkit):
             policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)
         ) is not None:
             return policy_error
+        requires_conversation_cache_write = self._requires_conversation_cache_write(
+            normalized_event_type,
+            normalized_content,
+        )
+        if requires_conversation_cache_write and context.conversation_cache is None:
+            return self._error_payload(
+                action="send_event",
+                room_id=room_id,
+                event_type=normalized_event_type,
+                message="Conversation cache is required for threaded Matrix message sends.",
+            )
 
         if dry_run:
             return self._payload(
@@ -463,6 +489,12 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomSendResponse):
+            if normalized_event_type == "m.room.message" and context.conversation_cache is not None:
+                await context.conversation_cache.record_outbound_message(
+                    room_id,
+                    response.event_id,
+                    normalized_content,
+                )
             self._audit_write(
                 context=context,
                 room_id=room_id,

@@ -402,6 +402,8 @@ class TestMaybeGenerateThreadSummary:
     def _conversation_cache(self) -> None:
         """Provide one explicit conversation-cache mock per test."""
         self.conversation_cache = MagicMock()
+        self.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
+        self.conversation_cache.record_outbound_message = AsyncMock()
 
     async def _maybe_generate(
         self,
@@ -610,6 +612,7 @@ class TestMaybeGenerateThreadSummary:
             "Users discussed testing strategies",
             5,
             "default",
+            self.conversation_cache,
         )
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -646,6 +649,7 @@ class TestMaybeGenerateThreadSummary:
             "Fix ISSUE-116",
             5,
             "default",
+            self.conversation_cache,
         )
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -1066,6 +1070,8 @@ class TestSendSummaryEvent:
         """Verify the public summary-send API writes the expected event payload."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
 
         result = await send_thread_summary_event(
             client,
@@ -1074,6 +1080,7 @@ class TestSendSummaryEvent:
             summary="Discussed deployment plan",
             message_count=15,
             model_name="haiku",
+            conversation_cache=conversation_cache,
         )
 
         assert result == "$s1"
@@ -1088,6 +1095,7 @@ class TestSendSummaryEvent:
         relates_to = content["m.relates_to"]
         assert relates_to["rel_type"] == "m.thread"
         assert relates_to["event_id"] == "$root1"
+        assert relates_to["m.in_reply_to"] == {"event_id": "$reply1"}
 
         meta = content["io.mindroom.thread_summary"]
         assert meta["version"] == 1
@@ -1095,11 +1103,15 @@ class TestSendSummaryEvent:
         assert meta["message_count"] == 15
         assert meta["model"] == "haiku"
         assert "generated_at" in meta
+        conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with("!room:x", "$root1")
+        conversation_cache.record_outbound_message.assert_awaited_once_with("!room:x", "$s1", content)
 
     async def test_event_content_truncates_overlong_summary(self) -> None:
         """Overlong summaries should be truncated before sending to Matrix."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
         summary = "x" * (THREAD_SUMMARY_MAX_LENGTH + 1)
 
         result = await send_thread_summary_event(
@@ -1109,6 +1121,7 @@ class TestSendSummaryEvent:
             summary=summary,
             message_count=15,
             model_name="haiku",
+            conversation_cache=conversation_cache,
         )
 
         assert result == "$s1"
@@ -1122,6 +1135,8 @@ class TestSendSummaryEvent:
         """Return None when room_send fails."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
 
         result = await send_thread_summary_event(
             client,
@@ -1130,9 +1145,11 @@ class TestSendSummaryEvent:
             summary="test",
             message_count=5,
             model_name="default",
+            conversation_cache=conversation_cache,
         )
 
         assert result is None
+        conversation_cache.record_outbound_message.assert_not_awaited()
 
 
 class TestBuildConversationText:

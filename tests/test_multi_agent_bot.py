@@ -7788,6 +7788,83 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
+    async def test_execute_dispatch_action_logs_latency_after_locked_payload_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Latency logging should happen after the locked payload preparation path completes."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        _set_turn_store_tracker(bot, MagicMock())
+        bot.logger = MagicMock()
+        _replace_turn_policy_deps(bot, logger=bot.logger)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=ThreadHistoryResult([], is_full_history=True),
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+                requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="corr-latency-order",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+
+        mock_generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, mock_generate_response)
+        _replace_turn_policy_deps(
+            bot,
+            logger=bot.logger,
+            response_runner=bot._response_runner,
+        )
+
+        payload_built = False
+
+        async def payload_builder(_context: MessageContext) -> DispatchPayload:
+            nonlocal payload_built
+            payload_built = True
+            return DispatchPayload(prompt="help me")
+
+        original_log_dispatch_latency = bot._turn_controller._log_dispatch_latency
+
+        def assert_payload_already_built(**kwargs: object) -> None:
+            assert payload_built is True
+            original_log_dispatch_latency(**kwargs)
+
+        with patch.object(
+            bot._turn_controller,
+            "_log_dispatch_latency",
+            side_effect=assert_payload_already_built,
+        ):
+            await bot._turn_controller._execute_response_action(
+                room,
+                event,
+                dispatch,
+                ResponseAction(kind="individual"),
+                payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
+
+        assert payload_built is True
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.Config.from_yaml")
     @patch("mindroom.teams.get_agent_knowledge")

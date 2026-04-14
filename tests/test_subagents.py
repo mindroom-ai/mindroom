@@ -560,7 +560,15 @@ async def test_sessions_spawn_sets_summary_after_spawn(
         )
 
     assert payload["status"] == "ok"
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
 
 
@@ -794,7 +802,15 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
     assert first["status"] == "ok"
     assert "reused" not in first
     send_mock.assert_awaited_once()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,
@@ -827,7 +843,15 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
     assert second["summary"] == TEST_SUMMARY
     assert second["tag"] == TEST_TAG
     send_mock.assert_not_awaited()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 0, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        0,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,
@@ -870,7 +894,15 @@ async def test_sessions_spawn_skips_reuse_when_registry_entry_lacks_thread_id(
     assert payload["event_id"] == "$new-event"
     assert payload["session_key"] == create_session_id(ctx.room_id, "$new-event")
     send_mock.assert_awaited_once()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$new-event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$new-event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,
@@ -920,6 +952,7 @@ async def test_sessions_spawn_reuse_derives_thread_id_from_session_key(
         TEST_SUMMARY,
         0,
         "manual",
+        ctx.conversation_cache,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -957,7 +990,15 @@ async def test_sessions_spawn_skips_room_level_reuse_candidates(
     assert "reused" not in payload
     assert payload["event_id"] == "$event"
     send_mock.assert_awaited_once()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,

@@ -149,6 +149,7 @@ class ThreadSummaryTools(Toolkit):
                                     normalized_summary,
                                     message_count,
                                     "manual",
+                                    conversation_cache,
                                 )
                             except Exception:
                                 error_thread_id = normalized_thread_id

@@ -301,6 +301,7 @@ async def _spawn_followup_warnings(
     last_summary_count: int | None = 1,
 ) -> list[str]:
     warnings: list[str] = []
+    assert context.conversation_cache is not None
     try:
         summary_event_id = await send_thread_summary_event(
             context.client,
@@ -309,6 +310,7 @@ async def _spawn_followup_warnings(
             summary,
             summary_message_count,
             "manual",
+            context.conversation_cache,
         )
     except Exception as exc:
         warnings.append(f"Failed to set thread summary: {exc}")

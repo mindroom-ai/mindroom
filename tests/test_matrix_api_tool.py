@@ -174,6 +174,89 @@ async def test_matrix_api_send_event_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_records_threaded_room_message() -> None:
+    """send_event should write successful threaded room messages through the conversation cache."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    content = {
+        "msgtype": "m.notice",
+        "body": "threaded",
+        "m.relates_to": {
+            "rel_type": "m.thread",
+            "event_id": "$thread:localhost",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$latest:localhost"},
+        },
+    }
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$send:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload == {
+        "action": "send_event",
+        "event_id": "$send:localhost",
+        "event_type": "m.room.message",
+        "room_id": ctx.room_id,
+        "status": "ok",
+        "tool": "matrix_api",
+    }
+    ctx.conversation_cache.record_outbound_message.assert_awaited_once_with(
+        ctx.room_id,
+        "$send:localhost",
+        content,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_send_event_rejects_threaded_room_message_without_conversation_cache() -> None:
+    """Threaded room messages should fail fast when the conversation cache seam is unavailable."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    content = {
+        "msgtype": "m.notice",
+        "body": "threaded",
+        "m.relates_to": {
+            "rel_type": "m.thread",
+            "event_id": "$thread:localhost",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$latest:localhost"},
+        },
+    }
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload == {
+        "action": "send_event",
+        "event_type": "m.room.message",
+        "message": "Conversation cache is required for threaded Matrix message sends.",
+        "room_id": ctx.room_id,
+        "status": "error",
+        "tool": "matrix_api",
+    }
+    ctx.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_get_state_happy_path() -> None:
     """get_state should return the fetched content."""
     tool = MatrixApiTools()

@@ -3231,6 +3231,122 @@ class TestThreadingBehavior:
         assert latest_event_id == "$reply_edit"
 
     @pytest.mark.asyncio
+    async def test_outbound_room_edit_without_thread_mapping_does_not_mark_lookup_repair(self) -> None:
+        """Ordinary room-mode edits should not persist thread repair rows when no mapping exists."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event.return_value = None
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
+        runtime = _conversation_runtime(
+            client=client,
+            event_cache=event_cache,
+        )
+        runtime.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=runtime,
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+
+        await access.record_outbound_message(
+            "!room:localhost",
+            "$edit:localhost",
+            {
+                "body": "* updated",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message"},
+            },
+        )
+
+        event_cache.mark_pending_lookup_repair.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sync_room_edit_without_thread_mapping_does_not_mark_lookup_repair(self) -> None:
+        """Sync room-mode edits should not persist thread repair rows when no mapping exists."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event.return_value = None
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=event_cache,
+        )
+        runtime.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=runtime,
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message"},
+                },
+                "event_id": "$edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock(
+            join={
+                "!room:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+            },
+        )
+
+        access.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=runtime)
+
+        event_cache.mark_pending_lookup_repair.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sync_room_redaction_without_thread_mapping_does_not_mark_lookup_repair(self) -> None:
+        """Redacting a non-thread event should not create durable thread repair obligations."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event.return_value = None
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=event_cache,
+        )
+        runtime.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=runtime,
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$room-message"
+        redaction_event.sender = "@user:localhost"
+        redaction_event.server_timestamp = 1234567891
+        redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$room-message",
+            "room_id": "!room:localhost",
+            "type": "m.room.redaction",
+        }
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock(
+            join={
+                "!room:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
+            },
+        )
+
+        access.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=runtime)
+
+        event_cache.mark_pending_lookup_repair.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unrelated_lookup_failure_does_not_force_other_threads_to_full_history(self) -> None:
         """Room-scoped lookup failures should only promote matching threads into repair mode."""
         runtime = _conversation_runtime(

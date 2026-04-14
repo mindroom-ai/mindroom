@@ -944,14 +944,6 @@ class TurnController:
         with bound_log_context(**dispatch.target.log_context):
             if dispatch_timing is not None and isinstance(dispatch.context.thread_history, ThreadHistoryResult):
                 dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
-            self._log_dispatch_latency(
-                event_id=event.event_id,
-                action_kind=action.kind,
-                dispatch_started_at=dispatch_started_at,
-                context_ready_monotonic=context_ready_monotonic,
-                payload_ready_monotonic=payload_ready_monotonic,
-                thread_history=dispatch.context.thread_history,
-            )
 
         with bound_log_context(**dispatch.target.log_context):
             self.deps.logger.info(processing_log, event_id=event.event_id)
@@ -987,6 +979,15 @@ class TurnController:
                 payload_ready_monotonic = time.monotonic()
                 if dispatch_timing is not None:
                     dispatch_timing.mark("response_payload_ready")
+                with bound_log_context(**dispatch.target.log_context):
+                    self._log_dispatch_latency(
+                        event_id=event.event_id,
+                        action_kind=action.kind,
+                        dispatch_started_at=dispatch_started_at,
+                        context_ready_monotonic=context_ready_monotonic,
+                        payload_ready_monotonic=payload_ready_monotonic,
+                        thread_history=request.thread_history,
+                    )
                 return ResponseRequest(
                     room_id=request.room_id,
                     reply_to_event_id=request.reply_to_event_id,
