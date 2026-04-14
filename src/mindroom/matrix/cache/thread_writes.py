@@ -353,7 +353,7 @@ class ThreadWritePolicy:
             )
         return bool(appended)
 
-    async def _record_outbound_message_update(
+    async def _apply_outbound_message_notification(
         self,
         room_id: str,
         event_id: str,
@@ -419,7 +419,7 @@ class ThreadWritePolicy:
 
         async def safe_update() -> None:
             try:
-                await self._record_outbound_message_update(room_id, event_id, event_source, event_info)
+                await self._apply_outbound_message_notification(room_id, event_id, event_source, event_info)
             except asyncio.CancelledError as exc:
                 self.logger.warning(
                     "Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
@@ -456,7 +456,7 @@ class ThreadWritePolicy:
                 error=str(exc),
             )
 
-    async def _record_outbound_redaction_update(
+    async def _apply_outbound_redaction_notification(
         self,
         room_id: str,
         redacted_event_id: str,
@@ -494,7 +494,7 @@ class ThreadWritePolicy:
 
         async def safe_update() -> None:
             try:
-                await self._record_outbound_redaction_update(room_id, redacted_event_id)
+                await self._apply_outbound_redaction_notification(room_id, redacted_event_id)
             except asyncio.CancelledError as exc:
                 self.logger.warning(
                     "Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",

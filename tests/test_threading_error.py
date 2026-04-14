@@ -2002,7 +2002,7 @@ class TestThreadingBehavior:
         read_task = asyncio.create_task(access.get_thread_history("!room:localhost", "$thread:localhost"))
         await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
         write_task = asyncio.create_task(
-            access._writes._record_outbound_message_update(
+            access._writes._apply_outbound_message_notification(
                 "!room:localhost",
                 "$reply-new:localhost",
                 new_event_source,
