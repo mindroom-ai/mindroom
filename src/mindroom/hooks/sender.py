@@ -72,7 +72,7 @@ async def send_hook_message(
     )
     delivered = await send_message_result(client, room_id, content)
     if delivered is not None:
-        await conversation_cache.record_outbound_message(room_id, delivered.event_id, delivered.content_sent)
+        conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
         return delivered.event_id
     return None
 

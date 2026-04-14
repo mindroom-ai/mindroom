@@ -6,7 +6,7 @@ import importlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -625,6 +625,7 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     conversation_cache = AsyncMock()
+    conversation_cache.notify_outbound_message = Mock()
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -648,8 +649,8 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
         )
 
     assert resumed_count == 1
-    conversation_cache.record_outbound_message.assert_awaited_once()
-    record_args = conversation_cache.record_outbound_message.await_args.args
+    conversation_cache.notify_outbound_message.assert_called_once()
+    record_args = conversation_cache.notify_outbound_message.call_args.args
     assert record_args[:2] == (ROOM_ID, "$resume")
     assert record_args[2]["m.relates_to"]["event_id"] == "$threaded"
 
@@ -660,6 +661,7 @@ async def test_edit_stale_message_records_outbound_edit_when_successful(tmp_path
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     conversation_cache = AsyncMock()
+    conversation_cache.notify_outbound_message = Mock()
 
     with (
         patch(
@@ -686,8 +688,8 @@ async def test_edit_stale_message_records_outbound_edit_when_successful(tmp_path
         )
 
     assert edited is True
-    conversation_cache.record_outbound_message.assert_awaited_once()
-    record_args = conversation_cache.record_outbound_message.await_args.args
+    conversation_cache.notify_outbound_message.assert_called_once()
+    record_args = conversation_cache.notify_outbound_message.call_args.args
     assert record_args[:2] == (ROOM_ID, "$cleanup-edit")
     assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
     assert record_args[2]["m.relates_to"]["event_id"] == "$target"

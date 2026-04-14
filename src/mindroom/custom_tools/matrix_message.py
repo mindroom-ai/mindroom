@@ -190,7 +190,7 @@ class MatrixMessageTools(Toolkit):
         delivered = await send_message_result(context.client, room_id, content)
         if delivered is not None:
             assert context.conversation_cache is not None
-            await context.conversation_cache.record_outbound_message(
+            context.conversation_cache.notify_outbound_message(
                 room_id,
                 delivered.event_id,
                 delivered.content_sent,
@@ -788,7 +788,7 @@ class MatrixMessageTools(Toolkit):
                 message="Failed to edit message in Matrix.",
             )
         assert context.conversation_cache is not None
-        await context.conversation_cache.record_outbound_message(
+        context.conversation_cache.notify_outbound_message(
             room_id,
             delivered.event_id,
             delivered.content_sent,

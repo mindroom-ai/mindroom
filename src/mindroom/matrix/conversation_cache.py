@@ -1,7 +1,8 @@
-"""Facade for Matrix conversation reads and advisory cache writes."""
+"""Facade for Matrix conversation reads and advisory cache notifications."""
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -107,20 +108,20 @@ class ConversationCacheProtocol(Protocol):
     ) -> str | None:
         """Resolve the latest visible thread event when MSC3440 fallback needs it."""
 
-    async def record_outbound_message(
+    def notify_outbound_message(
         self,
         room_id: str,
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Write one locally sent threaded message or edit through to the cache.
+        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping.
 
         This is advisory post-send bookkeeping and must fail open.
-        Callers should be able to treat the Matrix delivery as successful even if advisory cache state cannot be updated.
+        Callers should treat Matrix delivery as complete before this local cache work runs.
         """
 
-    async def record_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Write one locally redacted threaded message through to the cache.
+    def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
+        """Schedule one locally redacted threaded message for advisory cache bookkeeping.
 
         This is advisory post-redaction bookkeeping and must fail open.
         """
@@ -438,30 +439,44 @@ class MatrixConversationCache(ConversationCacheProtocol):
             existing_event_id=existing_event_id,
         )
 
-    async def record_outbound_message(
+    def notify_outbound_message(
         self,
         room_id: str,
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Write one locally sent threaded message or edit through to the cache."""
+        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
         try:
-            await self._writes.record_outbound_message(room_id, event_id, content)
+            self._writes.notify_outbound_message(room_id, event_id, content)
+        except asyncio.CancelledError as exc:
+            self.logger.warning(
+                "Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
         except Exception as exc:
             self.logger.warning(
-                "Ignoring outbound threaded message cache write-through failure after successful send",
+                "Ignoring outbound threaded message cache bookkeeping failure after successful send",
                 room_id=room_id,
                 event_id=event_id,
                 error=str(exc),
             )
 
-    async def record_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Write one locally redacted threaded message through to the cache."""
+    def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
+        """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
         try:
-            await self._writes.record_outbound_redaction(room_id, redacted_event_id)
+            self._writes.notify_outbound_redaction(room_id, redacted_event_id)
+        except asyncio.CancelledError as exc:
+            self.logger.warning(
+                "Ignoring cancelled outbound threaded message cache redaction bookkeeping after successful redact",
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+                error=str(exc),
+            )
         except Exception as exc:
             self.logger.warning(
-                "Ignoring outbound threaded message cache redaction failure after successful redact",
+                "Ignoring outbound threaded message cache redaction bookkeeping failure after successful redact",
                 room_id=room_id,
                 redacted_event_id=redacted_event_id,
                 error=str(exc),

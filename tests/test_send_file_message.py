@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -305,6 +305,7 @@ class TestSendFileMessage:
         client = _mock_client(encrypted=False)
         client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
         conversation_cache = AsyncMock()
+        conversation_cache.notify_outbound_message = Mock()
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
@@ -337,8 +338,8 @@ class TestSendFileMessage:
             )
 
         assert event_id == "$evt:localhost"
-        conversation_cache.record_outbound_message.assert_awaited_once()
-        record_args = conversation_cache.record_outbound_message.await_args.args
+        conversation_cache.notify_outbound_message.assert_called_once()
+        record_args = conversation_cache.notify_outbound_message.call_args.args
         assert record_args[0] == "!room:localhost"
         assert record_args[1] == "$evt:localhost"
         assert record_args[2]["m.relates_to"]["event_id"] == "$root:localhost"

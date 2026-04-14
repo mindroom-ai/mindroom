@@ -776,7 +776,7 @@ async def _notify_scheduled_workflow_failure(
     try:
         delivered = await send_message_result(client, workflow.room_id, error_content)
         if delivered is not None:
-            await conversation_cache.record_outbound_message(
+            conversation_cache.notify_outbound_message(
                 workflow.room_id,
                 delivered.event_id,
                 delivered.content_sent,
@@ -849,7 +849,7 @@ async def _execute_scheduled_workflow(
             delivered = await send_message_result(client, workflow.room_id, content)
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
-            await conversation_cache.record_outbound_message(
+            conversation_cache.notify_outbound_message(
                 workflow.room_id,
                 delivered.event_id,
                 delivered.content_sent,
@@ -986,7 +986,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
                 delivered = await send_message_result(client, workflow.room_id, error_content)
                 if delivered is not None:
-                    await conversation_cache.record_outbound_message(
+                    conversation_cache.notify_outbound_message(
                         workflow.room_id,
                         delivered.event_id,
                         delivered.content_sent,
@@ -1100,7 +1100,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 )
                 delivered = await send_message_result(client, workflow.room_id, error_content)
                 if delivered is not None:
-                    await conversation_cache.record_outbound_message(
+                    conversation_cache.notify_outbound_message(
                         workflow.room_id,
                         delivered.event_id,
                         delivered.content_sent,

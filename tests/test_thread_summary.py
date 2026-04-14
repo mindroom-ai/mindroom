@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -403,7 +403,7 @@ class TestMaybeGenerateThreadSummary:
         """Provide one explicit conversation-cache mock per test."""
         self.conversation_cache = MagicMock()
         self.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
-        self.conversation_cache.record_outbound_message = AsyncMock()
+        self.conversation_cache.notify_outbound_message = Mock()
 
     async def _maybe_generate(
         self,
@@ -1072,6 +1072,7 @@ class TestSendSummaryEvent:
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_cache = AsyncMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
+        conversation_cache.notify_outbound_message = Mock()
 
         result = await send_thread_summary_event(
             client,
@@ -1104,7 +1105,7 @@ class TestSendSummaryEvent:
         assert meta["model"] == "haiku"
         assert "generated_at" in meta
         conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with("!room:x", "$root1")
-        conversation_cache.record_outbound_message.assert_awaited_once_with("!room:x", "$s1", content)
+        conversation_cache.notify_outbound_message.assert_called_once_with("!room:x", "$s1", content)
 
     async def test_event_content_truncates_overlong_summary(self) -> None:
         """Overlong summaries should be truncated before sending to Matrix."""
@@ -1112,6 +1113,7 @@ class TestSendSummaryEvent:
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_cache = AsyncMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
+        conversation_cache.notify_outbound_message = Mock()
         summary = "x" * (THREAD_SUMMARY_MAX_LENGTH + 1)
 
         result = await send_thread_summary_event(
@@ -1137,6 +1139,7 @@ class TestSendSummaryEvent:
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
         conversation_cache = AsyncMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
+        conversation_cache.notify_outbound_message = Mock()
 
         result = await send_thread_summary_event(
             client,
@@ -1149,7 +1152,7 @@ class TestSendSummaryEvent:
         )
 
         assert result is None
-        conversation_cache.record_outbound_message.assert_not_awaited()
+        conversation_cache.notify_outbound_message.assert_not_called()
 
 
 class TestBuildConversationText:

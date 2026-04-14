@@ -1,7 +1,8 @@
-"""Thread mutation and write-through policy for Matrix conversation cache."""
+"""Thread mutation and advisory bookkeeping policy for Matrix conversation cache."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 import typing
 from typing import TYPE_CHECKING, Any
@@ -12,7 +13,6 @@ from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, 
 from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Callable, Coroutine, Sequence
 
     import structlog
@@ -96,7 +96,7 @@ async def _resolve_thread_id_for_cached_event_append(
 
 
 class ThreadWritePolicy:
-    """Own thread-affecting cache mutations and outbound write-through."""
+    """Own thread-affecting cache mutations and outbound advisory bookkeeping."""
 
     def __init__(
         self,
@@ -381,13 +381,13 @@ class ThreadWritePolicy:
             context="outbound",
         )
 
-    async def record_outbound_message(
+    def notify_outbound_message(
         self,
         room_id: str,
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Write one locally sent threaded message or edit through to the cache."""
+        """Schedule advisory bookkeeping for one locally sent threaded message or edit."""
         if not self._cache_runtime_available():
             return
         if not isinstance(event_id, str) or not event_id:
@@ -417,15 +417,40 @@ class ThreadWritePolicy:
         if not is_thread_candidate:
             return
 
+        async def safe_update() -> None:
+            try:
+                await self._record_outbound_message_update(room_id, event_id, event_source, event_info)
+            except asyncio.CancelledError as exc:
+                self.logger.warning(
+                    "Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+                    room_id=room_id,
+                    event_id=event_id,
+                    error=str(exc),
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Ignoring outbound threaded message cache bookkeeping failure after successful send",
+                    room_id=room_id,
+                    event_id=event_id,
+                    error=str(exc),
+                )
+
         try:
-            await self._queue_room_cache_update(
+            self._queue_room_cache_update(
                 room_id,
-                lambda: self._record_outbound_message_update(room_id, event_id, event_source, event_info),
-                name="matrix_cache_record_outbound_message",
+                safe_update,
+                name="matrix_cache_notify_outbound_message",
+            )
+        except asyncio.CancelledError as exc:
+            self.logger.warning(
+                "Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
             )
         except Exception as exc:
             self.logger.warning(
-                "Ignoring outbound threaded message cache write-through failure after successful send",
+                "Ignoring outbound threaded message cache bookkeeping failure after successful send",
                 room_id=room_id,
                 event_id=event_id,
                 error=str(exc),
@@ -445,7 +470,7 @@ class ThreadWritePolicy:
             room_id,
             redacted_event_id,
             thread_id=thread_id,
-            failure_message="Ignoring outbound Matrix redaction cache write-through failure after successful redact",
+            failure_message="Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
         )
         await self._invalidate_after_redaction(
             room_id,
@@ -456,25 +481,51 @@ class ThreadWritePolicy:
             lookup_missing_reason="outbound_redaction_lookup_missing",
         )
 
-    async def record_outbound_redaction(
+    def notify_outbound_redaction(
         self,
         room_id: str,
         redacted_event_id: str,
     ) -> None:
-        """Write one locally redacted threaded message through to the cache."""
+        """Schedule advisory bookkeeping for one locally redacted threaded message."""
         if not self._cache_runtime_available():
             return
         if not redacted_event_id:
             return
+
+        async def safe_update() -> None:
+            try:
+                await self._record_outbound_redaction_update(room_id, redacted_event_id)
+            except asyncio.CancelledError as exc:
+                self.logger.warning(
+                    "Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",
+                    room_id=room_id,
+                    redacted_event_id=redacted_event_id,
+                    error=str(exc),
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
+                    room_id=room_id,
+                    redacted_event_id=redacted_event_id,
+                    error=str(exc),
+                )
+
         try:
-            await self._queue_room_cache_update(
+            self._queue_room_cache_update(
                 room_id,
-                lambda: self._record_outbound_redaction_update(room_id, redacted_event_id),
-                name="matrix_cache_record_outbound_redaction",
+                safe_update,
+                name="matrix_cache_notify_outbound_redaction",
+            )
+        except asyncio.CancelledError as exc:
+            self.logger.warning(
+                "Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+                error=str(exc),
             )
         except Exception as exc:
             self.logger.warning(
-                "Ignoring outbound Matrix redaction cache write-through failure after successful redact",
+                "Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
                 room_id=room_id,
                 redacted_event_id=redacted_event_id,
                 error=str(exc),

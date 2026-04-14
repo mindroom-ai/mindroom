@@ -8,7 +8,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -69,7 +69,7 @@ def _workflow(message: str) -> ScheduledWorkflow:
 def _conversation_cache(*, latest_thread_event_id: str | None = None) -> AsyncMock:
     access = AsyncMock()
     access.get_latest_thread_event_id_if_needed.return_value = latest_thread_event_id
-    access.record_outbound_message = AsyncMock()
+    access.notify_outbound_message = Mock()
     return access
 
 

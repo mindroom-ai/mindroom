@@ -3,7 +3,7 @@
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -245,6 +245,7 @@ async def test_streaming_large_initial_message_records_transformed_content_to_ca
     client = MockClient()
     config = MockConfig()
     conversation_cache = AsyncMock()
+    conversation_cache.notify_outbound_message = Mock()
 
     streaming = StreamingResponse(
         room_id="!test:room",
@@ -262,7 +263,7 @@ async def test_streaming_large_initial_message_records_transformed_content_to_ca
     await streaming._send_or_edit_message(client, is_final=True)
 
     sent_content = client.messages_sent[0][2]
-    conversation_cache.record_outbound_message.assert_awaited_once_with(
+    conversation_cache.notify_outbound_message.assert_called_once_with(
         "!test:room",
         "$event_1",
         sent_content,
@@ -317,6 +318,7 @@ async def test_streaming_large_edit_records_transformed_content_to_cache() -> No
     client = MockClient()
     config = MockConfig()
     conversation_cache = AsyncMock()
+    conversation_cache.notify_outbound_message = Mock()
 
     streaming = StreamingResponse(
         room_id="!test:room",
@@ -331,7 +333,7 @@ async def test_streaming_large_edit_records_transformed_content_to_cache() -> No
     streaming.accumulated_text = "Small start"
     streaming.last_update = float("-inf")
     await streaming._send_or_edit_message(client, is_final=False)
-    conversation_cache.record_outbound_message.reset_mock()
+    conversation_cache.notify_outbound_message.reset_mock()
 
     streaming.accumulated_text = "b" * 35000
     streaming.last_update = float("-inf")
@@ -339,7 +341,7 @@ async def test_streaming_large_edit_records_transformed_content_to_cache() -> No
     await streaming._send_or_edit_message(client, is_final=True)
 
     edit_content = client.messages_sent[1][2]
-    conversation_cache.record_outbound_message.assert_awaited_once_with(
+    conversation_cache.notify_outbound_message.assert_called_once_with(
         "!test:room",
         "$event_2",
         edit_content,

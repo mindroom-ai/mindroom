@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -279,7 +279,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     response_hooks.emit_after_response = after_hooks
     conversation_cache = SimpleNamespace(
         get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
-        record_outbound_message=AsyncMock(),
+        notify_outbound_message=Mock(),
     )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -378,8 +378,8 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
         )
 
     assert event_id == "$response"
-    gateway.deps.resolver.deps.conversation_cache.record_outbound_message.assert_awaited_once()
-    record_args = gateway.deps.resolver.deps.conversation_cache.record_outbound_message.await_args.args
+    gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.assert_called_once()
+    record_args = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.call_args.args
     assert record_args[0] == "!test:server"
     assert record_args[1] == "$response"
     assert record_args[2]["m.relates_to"]["event_id"] == "$thread"
@@ -408,8 +408,8 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
         )
 
     assert edited is True
-    gateway.deps.resolver.deps.conversation_cache.record_outbound_message.assert_awaited_once()
-    record_args = gateway.deps.resolver.deps.conversation_cache.record_outbound_message.await_args.args
+    gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.assert_called_once()
+    record_args = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.call_args.args
     assert record_args[0] == "!test:server"
     assert record_args[1] == "$edit-event"
     assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"

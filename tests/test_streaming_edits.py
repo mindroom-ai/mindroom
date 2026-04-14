@@ -74,6 +74,10 @@ def setup_test_bot(
     bot._conversation_cache.get_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
+    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
 
     # Mock orchestrator
     mock_orchestrator = MagicMock()

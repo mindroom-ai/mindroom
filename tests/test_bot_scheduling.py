@@ -120,6 +120,10 @@ def mock_agent_bot() -> AgentBot:
     bot._conversation_cache.get_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
+    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
     return bot
 
 
@@ -538,6 +542,10 @@ class TestCommandHandling:
             bot._turn_controller._execute_command = AsyncMock()
             bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
             bot._conversation_cache.get_thread_snapshot = AsyncMock(
+                return_value=thread_history_result([], is_full_history=False),
+            )
+            bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 

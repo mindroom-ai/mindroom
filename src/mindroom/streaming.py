@@ -382,7 +382,7 @@ class StreamingResponse:
         """Persist one just-sent streaming message into the conversation cache."""
         if self.conversation_cache is None:
             return
-        await self.conversation_cache.record_outbound_message(self.room_id, event_id, content_sent)
+        self.conversation_cache.notify_outbound_message(self.room_id, event_id, content_sent)
 
     async def _record_streaming_edit(
         self,
@@ -393,7 +393,7 @@ class StreamingResponse:
         """Persist one just-sent streaming edit into the conversation cache."""
         if self.conversation_cache is None or self.event_id is None:
             return
-        await self.conversation_cache.record_outbound_message(self.room_id, edit_event_id, content_sent)
+        self.conversation_cache.notify_outbound_message(self.room_id, edit_event_id, content_sent)
 
     def _mark_first_visible_reply_if_needed(self) -> None:
         """Mark first visible reply timing once visible text exists."""

@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -801,6 +801,7 @@ class TestStreamingBehavior:
         """Streaming delivery should write through both the initial send and later edit."""
         mock_client = _make_matrix_client_mock()
         conversation_cache = AsyncMock()
+        conversation_cache.notify_outbound_message = Mock()
 
         async def one_chunk_stream() -> AsyncIterator[str]:
             yield "Hello from stream"
@@ -847,9 +848,9 @@ class TestStreamingBehavior:
 
         assert event_id == "$stream-send"
         assert accumulated == "Hello from stream"
-        assert conversation_cache.record_outbound_message.await_count == 2
-        first_call = conversation_cache.record_outbound_message.await_args_list[0].args
-        second_call = conversation_cache.record_outbound_message.await_args_list[1].args
+        assert conversation_cache.notify_outbound_message.call_count == 2
+        first_call = conversation_cache.notify_outbound_message.call_args_list[0].args
+        second_call = conversation_cache.notify_outbound_message.call_args_list[1].args
         assert first_call[:2] == ("!test:localhost", "$stream-send")
         assert first_call[2]["body"] == "Hello from stream"
         assert second_call[:2] == ("!test:localhost", "$stream-edit")

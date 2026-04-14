@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -66,6 +66,8 @@ def _make_context(
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     conversation_cache = AsyncMock()
     conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
+    conversation_cache.notify_outbound_message = Mock()
+    conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="openclaw",
         room_id=room_id,

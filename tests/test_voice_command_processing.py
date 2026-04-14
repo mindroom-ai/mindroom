@@ -116,10 +116,10 @@ def _install_voice_thread_dispatch_mocks(
     bot: AgentBot,
 ) -> None:
     """Provide minimal explicit-thread cache reads for normalized voice dispatch."""
-    bot._conversation_cache.get_thread_snapshot = AsyncMock(
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
 
 
 def _make_visible_router_echo_scenario(
@@ -1170,7 +1170,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
     assert request.target.reply_to_event_id == "$voice_event"
-    assert request.target.thread_id is None
+    assert request.target.thread_id == "$voice_event"
+    assert request.target.resolved_thread_id == "$voice_event"
     assert request.response_text == "@home could you help with this?"
     assert request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
@@ -1185,7 +1186,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
             history_scope=None,
             conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
-                thread_id=None,
+                thread_id="$voice_event",
                 reply_to_event_id="$voice_event",
             ),
         ),

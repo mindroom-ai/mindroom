@@ -586,6 +586,7 @@ class TestThreadHistory:
             "$thread_root",
             ANY,
             hydrate_sidecars=False,
+            allow_stale_fallback=True,
         )
 
     @pytest.mark.asyncio
@@ -629,6 +630,7 @@ class TestThreadHistory:
             "$thread_root",
             ANY,
             hydrate_sidecars=False,
+            allow_stale_fallback=True,
         )
 
     @pytest.mark.asyncio

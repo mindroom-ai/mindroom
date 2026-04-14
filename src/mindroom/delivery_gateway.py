@@ -334,7 +334,7 @@ class DeliveryGateway:
 
         delivered = await send_message_result(client, resolved_target.room_id, content)
         if delivered is not None:
-            await self.deps.resolver.deps.conversation_cache.record_outbound_message(
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
                 delivered.event_id,
                 delivered.content_sent,
@@ -391,7 +391,7 @@ class DeliveryGateway:
             request.new_text,
         )
         if delivered is not None:
-            await self.deps.resolver.deps.conversation_cache.record_outbound_message(
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
                 delivered.event_id,
                 delivered.content_sent,
@@ -585,7 +585,7 @@ class DeliveryGateway:
         )
         delivered = await send_message_result(client, target.room_id, content)
         if delivered is not None:
-            await self.deps.resolver.deps.conversation_cache.record_outbound_message(
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
                 delivered.event_id,
                 delivered.content_sent,

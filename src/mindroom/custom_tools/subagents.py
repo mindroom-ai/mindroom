@@ -275,7 +275,7 @@ async def _send_matrix_text(
     delivered = await send_message_result(context.client, room_id, content)
     if delivered is not None:
         assert context.conversation_cache is not None
-        await context.conversation_cache.record_outbound_message(room_id, delivered.event_id, delivered.content_sent)
+        context.conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
         return delivered.event_id
     return None
 

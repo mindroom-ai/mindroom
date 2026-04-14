@@ -12,7 +12,7 @@ import asyncio
 import json
 import time
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -282,16 +282,22 @@ def _install_runtime_write_coordinator(bot: AgentBot) -> _EventCacheWriteCoordin
 class TestMatrixConversationCacheThreadReads:
     """Targeted read-path tests for invalidate-and-refetch behavior."""
 
-    @pytest.mark.asyncio
-    async def test_record_outbound_message_swallows_internal_write_failure(self) -> None:
-        """The public outbound write-through boundary must fail open."""
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("cache write failed"),
+            asyncio.CancelledError(),
+        ],
+    )
+    def test_notify_outbound_message_swallows_internal_write_failure(self, error: BaseException) -> None:
+        """The public outbound bookkeeping boundary must fail open for ordinary failures and cancellation."""
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._writes.record_outbound_message = AsyncMock(side_effect=RuntimeError("cache write failed"))
+        access._writes.notify_outbound_message = Mock(side_effect=error)
 
-        await access.record_outbound_message(
+        access.notify_outbound_message(
             "!room:localhost",
             "$event:localhost",
             {"body": "hello", "msgtype": "m.text"},
@@ -456,7 +462,7 @@ class TestMatrixConversationCacheThreadReads:
                 [root_event, stale_reply_event],
                 validated_at=time.time(),
             )
-            await first_access.record_outbound_message(
+            first_access.notify_outbound_message(
                 "!test:localhost",
                 "$edit:localhost",
                 {
@@ -466,6 +472,7 @@ class TestMatrixConversationCacheThreadReads:
                     "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing:localhost"},
                 },
             )
+            await first_access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
 
             event_cache = await _reopen_event_cache(event_cache)
             second_access = MatrixConversationCache(
@@ -1609,7 +1616,7 @@ class TestThreadingBehavior:
                 room_id="!test:localhost",
             ),
         )
-        bot._conversation_cache.record_outbound_redaction = AsyncMock()
+        bot._conversation_cache.notify_outbound_redaction = Mock()
 
         result = await bot._redact_message_event(
             room_id="!test:localhost",
@@ -1623,7 +1630,7 @@ class TestThreadingBehavior:
             "$target:localhost",
             reason="cleanup",
         )
-        bot._conversation_cache.record_outbound_redaction.assert_awaited_once_with(
+        bot._conversation_cache.notify_outbound_redaction.assert_called_once_with(
             "!test:localhost",
             "$target:localhost",
         )

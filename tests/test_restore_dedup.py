@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -17,7 +17,7 @@ from tests.conftest import make_event_cache_mock
 def _conversation_cache() -> AsyncMock:
     access = AsyncMock()
     access.get_latest_thread_event_id_if_needed.return_value = None
-    access.record_outbound_message = AsyncMock()
+    access.notify_outbound_message = Mock()
     return access
 
 

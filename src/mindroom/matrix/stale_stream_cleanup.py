@@ -191,7 +191,7 @@ async def auto_resume_interrupted_threads(
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
                 if conversation_cache is not None:
-                    await conversation_cache.record_outbound_message(
+                    conversation_cache.notify_outbound_message(
                         interrupted_thread.room_id,
                         delivered.event_id,
                         delivered.content_sent,
@@ -1071,7 +1071,7 @@ async def _edit_stale_message(
     )
     if delivered is not None:
         if conversation_cache is not None:
-            await conversation_cache.record_outbound_message(
+            conversation_cache.notify_outbound_message(
                 room_id,
                 delivered.event_id,
                 delivered.content_sent,

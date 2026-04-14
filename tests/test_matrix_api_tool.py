@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import nio
 import pytest
@@ -45,6 +45,9 @@ def _make_context(
     resolved_conversation_cache = (
         AsyncMock() if conversation_cache is _DEFAULT_CONVERSATION_ACCESS else conversation_cache
     )
+    if resolved_conversation_cache is not None:
+        resolved_conversation_cache.notify_outbound_message = Mock()
+        resolved_conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -213,7 +216,7 @@ async def test_matrix_api_send_event_records_threaded_room_message() -> None:
         "status": "ok",
         "tool": "matrix_api",
     }
-    ctx.conversation_cache.record_outbound_message.assert_awaited_once_with(
+    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
         ctx.room_id,
         "$send:localhost",
         content,
@@ -318,7 +321,7 @@ async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send
 
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$send:localhost"
-    ctx.conversation_cache.record_outbound_message.assert_awaited_once_with(
+    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
         ctx.room_id,
         "$send:localhost",
         content,
@@ -552,7 +555,7 @@ async def test_matrix_api_redact_happy_path() -> None:
         event_id="$target:localhost",
         reason="cleanup",
     )
-    ctx.conversation_cache.record_outbound_redaction.assert_awaited_once_with(
+    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
         ctx.room_id,
         "$target:localhost",
     )
@@ -648,7 +651,7 @@ async def test_matrix_api_redact_ignores_cache_failure_after_successful_redact()
 
     assert payload["status"] == "ok"
     assert payload["redaction_event_id"] == "$redaction:localhost"
-    ctx.conversation_cache.record_outbound_redaction.assert_awaited_once_with(
+    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
         ctx.room_id,
         "$target:localhost",
     )
