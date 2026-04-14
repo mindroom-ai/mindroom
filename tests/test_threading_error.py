@@ -217,9 +217,9 @@ def _relations_client(
         event_type: str | None = None,  # noqa: ARG001
         direction: nio.MessageDirection = nio.MessageDirection.back,  # noqa: ARG001
         limit: int | None = None,  # noqa: ARG001
-        _event_type: str | None = None,  # noqa: ARG001
-        _direction: nio.MessageDirection = nio.MessageDirection.back,  # noqa: ARG001
-        _limit: int | None = None,  # noqa: ARG001
+        _event_type: str | None = None,
+        _direction: nio.MessageDirection = nio.MessageDirection.back,
+        _limit: int | None = None,
     ) -> AsyncGenerator[nio.Event, None]:
         return _event_iter(relation_events(event_id, rel_type))
 

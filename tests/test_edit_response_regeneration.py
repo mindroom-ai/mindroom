@@ -45,6 +45,7 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     install_generate_response_mock,
     install_runtime_cache_support,
+    make_matrix_client_mock,
     patch_response_runner_module,
     replace_edit_regenerator_deps,
     replace_turn_controller_deps,
@@ -250,9 +251,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
     replace_turn_policy_deps(bot)
@@ -402,9 +401,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     bot.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,
@@ -512,9 +509,7 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     bot.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,
@@ -604,9 +599,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -794,9 +787,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         team_agents=[team_member],
         team_mode="coordinate",
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_team:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     bot.orchestrator = MagicMock(
@@ -958,9 +949,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
     replace_turn_policy_deps(bot)
@@ -1047,9 +1036,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
 
@@ -1194,9 +1181,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
         thread_id=None,
@@ -1343,9 +1328,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
@@ -1464,9 +1447,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
@@ -1581,9 +1562,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
@@ -1874,9 +1853,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.client.rooms = {}
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     _record_handled_turn(
         bot._turn_store,
@@ -2003,9 +1980,7 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = "@mindroom_test_agent:example.com"
-    bot.client.rooms = {}
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     _record_handled_turn(
         bot._turn_store,
@@ -2292,9 +2267,7 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     _record_handled_turn(
@@ -2418,9 +2391,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
@@ -2585,9 +2556,7 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -2713,9 +2682,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -2824,7 +2791,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
 
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_prefers_persisted_response_event_id_after_restart(  # noqa: PLR0915
+async def test_handle_message_edit_prefers_persisted_response_event_id_after_restart(
     tmp_path: Path,
 ) -> None:
     """A fresh bot should prefer the newest persisted response linkage over a stale ledger row."""
@@ -2845,9 +2812,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
@@ -2944,9 +2909,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    restarted_bot.client = AsyncMock(spec=nio.AsyncClient)
-    restarted_bot.client.rooms = {}
-    restarted_bot.client.user_id = "@mindroom_test_agent:example.com"
+    restarted_bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(restarted_bot)
     restarted_bot.logger = MagicMock()
     assert _response_event_id(restarted_bot, "$original:example.com") == "$response-old:example.com"
@@ -3050,9 +3013,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
 
@@ -3146,9 +3107,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -3224,9 +3183,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
     install_runtime_cache_support(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -3345,9 +3302,7 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -3460,9 +3415,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = f"@mindroom_{ROUTER_AGENT_NAME}:example.com"
+    bot.client = make_matrix_client_mock(user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
 
@@ -3533,9 +3486,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
 
@@ -3639,9 +3590,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
 
@@ -3757,9 +3706,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
 
@@ -3838,9 +3785,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     )
 
     # Mock the client
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
 
     replace_edit_regenerator_deps(bot)
 

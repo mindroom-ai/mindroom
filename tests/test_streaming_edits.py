@@ -35,6 +35,7 @@ async def _empty_event_iterator() -> AsyncGenerator[object, None]:
 def _make_matrix_client_mock() -> AsyncMock:
     client = AsyncMock()
     client.rooms = {}
+    client.next_batch = "s_test_token"
     client.add_event_callback = MagicMock()
     client.add_response_callback = MagicMock()
     client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _empty_event_iterator())

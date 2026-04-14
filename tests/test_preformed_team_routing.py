@@ -54,6 +54,7 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGene
 def _make_matrix_client_mock() -> AsyncMock:
     client = AsyncMock()
     client.rooms = {}
+    client.next_batch = "s_test_token"
     client.add_event_callback = MagicMock()
     client.add_response_callback = MagicMock()
     client.room_get_event_relations = MagicMock(return_value=_empty_event_iterator())
