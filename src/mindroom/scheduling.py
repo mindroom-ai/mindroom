@@ -756,6 +756,35 @@ async def _build_scheduled_failure_content(
     )
 
 
+async def _notify_scheduled_workflow_failure(
+    client: nio.AsyncClient,
+    workflow: ScheduledWorkflow,
+    target: MessageTarget,
+    error: Exception,
+    conversation_cache: ConversationCacheProtocol,
+) -> None:
+    """Send the visible failure notice for one scheduled workflow when possible."""
+    if not workflow.room_id:
+        return
+    error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {error!s}"
+    error_content = await _build_scheduled_failure_content(
+        workflow,
+        target,
+        error_message,
+        conversation_cache,
+    )
+    try:
+        error_event_id = await send_message(client, workflow.room_id, error_content)
+        if error_event_id is not None:
+            await conversation_cache.record_outbound_message(
+                workflow.room_id,
+                error_event_id,
+                error_content,
+            )
+    except Exception:
+        logger.exception("Failed to send scheduled workflow failure message")
+
+
 async def _execute_scheduled_workflow(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
@@ -820,6 +849,7 @@ async def _execute_scheduled_workflow(
             event_id = await send_message(client, workflow.room_id, content)
             if event_id is None:
                 _raise_scheduled_workflow_send_error()
+            await conversation_cache.record_outbound_message(workflow.room_id, event_id, content)
             logger.info(
                 "Executed scheduled workflow",
                 description=workflow.description,
@@ -829,18 +859,13 @@ async def _execute_scheduled_workflow(
             )
         except Exception as e:
             logger.exception("Failed to execute scheduled workflow")
-            if workflow.room_id:
-                error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
-                error_content = await _build_scheduled_failure_content(
-                    workflow,
-                    target,
-                    error_message,
-                    conversation_cache,
-                )
-                try:
-                    await send_message(client, workflow.room_id, error_content)
-                except Exception:
-                    logger.exception("Failed to send scheduled workflow failure message")
+            await _notify_scheduled_workflow_failure(
+                client,
+                workflow,
+                target,
+                e,
+                conversation_cache,
+            )
             return False
         else:
             return True
@@ -955,7 +980,13 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                await send_message(client, workflow.room_id, error_content)
+                error_event_id = await send_message(client, workflow.room_id, error_content)
+                if error_event_id is not None:
+                    await conversation_cache.record_outbound_message(
+                        workflow.room_id,
+                        error_event_id,
+                        error_content,
+                    )
     finally:
         _cleanup_task_if_current(task_id, running_tasks)
 
@@ -1063,7 +1094,13 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                await send_message(client, workflow.room_id, error_content)
+                error_event_id = await send_message(client, workflow.room_id, error_content)
+                if error_event_id is not None:
+                    await conversation_cache.record_outbound_message(
+                        workflow.room_id,
+                        error_event_id,
+                        error_content,
+                    )
             if latest_pending_task is not None:
                 try:
                     await _save_one_time_task_status(

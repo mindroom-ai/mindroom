@@ -70,6 +70,9 @@ The ownership model remains the same.
 - `_event_cache_write_coordinator.py` owns room-ordered visibility for freshness-affecting writes.
 - `conversation_cache.py` owns orchestration and policy across those layers.
 
+Stale on-disk cache schemas are intentionally discarded rather than migrated.
+The Matrix event cache is treated as rebuildable advisory state, so old SQLite cache contents are dropped and repopulated lazily through normal usage.
+
 What changes is not the storage model.
 What changes is the reply-path contract.
 

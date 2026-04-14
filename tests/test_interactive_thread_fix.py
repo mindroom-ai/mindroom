@@ -284,6 +284,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$standalone_message")
         bot.client = client
+        install_runtime_cache_support(bot)
 
         room_id = "!test:localhost"
         event_id = await bot._generate_response(

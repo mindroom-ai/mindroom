@@ -23,6 +23,7 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
+    build_edit_event_content,
     edit_message,
     get_joined_rooms,
     resolve_latest_visible_messages,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)
 
@@ -125,6 +127,7 @@ async def cleanup_stale_streaming_messages(
     bot_user_ids: set[str] | None = None,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale in-progress bot messages across currently joined rooms."""
     joined_room_ids = await get_joined_rooms(client)
@@ -146,6 +149,7 @@ async def cleanup_stale_streaming_messages(
                 sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
+                conversation_cache=conversation_cache,
             )
             cleaned_count += room_cleaned_count
             interrupted_threads.extend(room_interrupted_threads)
@@ -165,6 +169,7 @@ async def auto_resume_interrupted_threads(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     max_resumes: int | None = None,
     delay: float = 2.0,
 ) -> int:
@@ -186,6 +191,12 @@ async def auto_resume_interrupted_threads(
             )
             response_event_id = await send_message(client, interrupted_thread.room_id, content)
             if response_event_id:
+                if conversation_cache is not None:
+                    await conversation_cache.record_outbound_message(
+                        interrupted_thread.room_id,
+                        response_event_id,
+                        content,
+                    )
                 logger.info(
                     "Queued auto-resume after restart",
                     room_id=interrupted_thread.room_id,
@@ -224,6 +235,7 @@ async def _cleanup_room_stale_streaming_messages(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale bot messages in one room."""
     current_time_ms = int(time.time() * 1000)
@@ -266,6 +278,7 @@ async def _cleanup_room_stale_streaming_messages(
                 sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
+                conversation_cache=conversation_cache,
                 agent_name=agent_name,
                 prior_edit_succeeded=prior_edit_succeeded,
             )
@@ -287,6 +300,7 @@ async def _cleanup_room_stale_streaming_messages(
                 sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
+                conversation_cache=conversation_cache,
                 prior_edit_succeeded=prior_edit_succeeded,
             )
             if repaired:
@@ -312,6 +326,7 @@ async def _repair_restart_marked_message_metadata(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
 ) -> bool:
     """Repair non-terminal stream metadata on already restart-marked messages."""
@@ -333,6 +348,7 @@ async def _repair_restart_marked_message_metadata(
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
         )
     except Exception as exc:
         logger.warning(
@@ -354,6 +370,7 @@ async def _cleanup_one_stale_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
 ) -> tuple[bool, InterruptedThread | None]:
     """Edit one stale message, redact stop reactions, return interrupted thread info."""
@@ -369,6 +386,7 @@ async def _cleanup_one_stale_message(
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
+        conversation_cache=conversation_cache,
     )
     if not edit_succeeded:
         return False, None
@@ -404,6 +422,7 @@ async def _cleanup_candidate_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, InterruptedThread | None]:
@@ -420,6 +439,7 @@ async def _cleanup_candidate_message(
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
             agent_name=agent_name,
         )
     except Exception as exc:
@@ -1028,6 +1048,7 @@ async def _edit_stale_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
     extra_content = _preserved_cleanup_content(preserved_content)
@@ -1050,6 +1071,17 @@ async def _edit_stale_message(
         extra_content=extra_content,
     )
     if response_event_id:
+        if conversation_cache is not None:
+            await conversation_cache.record_outbound_message(
+                room_id,
+                response_event_id,
+                build_edit_event_content(
+                    event_id=target_event_id,
+                    new_content=content,
+                    new_text=new_text,
+                    extra_content=extra_content,
+                ),
+            )
         return True
 
     logger.warning(

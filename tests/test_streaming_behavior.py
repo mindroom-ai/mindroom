@@ -780,6 +780,43 @@ class TestStreamingBehavior:
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
     @pytest.mark.asyncio
+    async def test_send_streaming_response_records_outbound_send_and_edit(self) -> None:
+        """Streaming delivery should write through both the initial send and later edit."""
+        mock_client = _make_matrix_client_mock()
+        conversation_cache = AsyncMock()
+
+        async def one_chunk_stream() -> AsyncIterator[str]:
+            yield "Hello from stream"
+
+        with (
+            patch("mindroom.streaming.send_message", new=AsyncMock(return_value="$stream-send")),
+            patch("mindroom.streaming.edit_message", new=AsyncMock(return_value="$stream-edit")),
+        ):
+            event_id, accumulated = await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id="$thread_root",
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=one_chunk_stream(),
+                conversation_cache=conversation_cache,
+                latest_thread_event_id="$original_123",
+            )
+
+        assert event_id == "$stream-send"
+        assert accumulated == "Hello from stream"
+        assert conversation_cache.record_outbound_message.await_count == 2
+        first_call = conversation_cache.record_outbound_message.await_args_list[0].args
+        second_call = conversation_cache.record_outbound_message.await_args_list[1].args
+        assert first_call[:2] == ("!test:localhost", "$stream-send")
+        assert first_call[2]["body"] == "Hello from stream"
+        assert second_call[:2] == ("!test:localhost", "$stream-edit")
+        assert second_call[2]["m.relates_to"]["rel_type"] == "m.replace"
+        assert second_call[2]["m.relates_to"]["event_id"] == "$stream-send"
+
+    @pytest.mark.asyncio
     async def test_streaming_first_send_uses_resolved_thread_root(
         self,
         mock_helper_agent: AgentMatrixUser,

@@ -70,7 +70,10 @@ async def send_hook_message(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=content_extra,
     )
-    return await send_message(client, room_id, content)
+    event_id = await send_message(client, room_id, content)
+    if event_id is not None:
+        await conversation_cache.record_outbound_message(room_id, event_id, content)
+    return event_id
 
 
 def build_hook_message_sender(

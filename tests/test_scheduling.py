@@ -43,9 +43,11 @@ def _event_cache() -> AsyncMock:
     return make_event_cache_mock()
 
 
-def _conversation_cache(thread_history: list[object] | None = None) -> MagicMock:
-    access = MagicMock()
+def _conversation_cache(thread_history: list[object] | None = None) -> AsyncMock:
+    access = AsyncMock()
     access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
+    access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    access.record_outbound_message = AsyncMock()
     return access
 
 

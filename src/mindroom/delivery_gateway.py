@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
-import nio
-
 from mindroom import constants, interactive
 from mindroom.hooks import (
     AfterResponseContext,
@@ -27,6 +25,7 @@ from mindroom.hooks.types import (
     EVENT_MESSAGE_CANCELLED,
 )
 from mindroom.matrix.client import (
+    build_edit_event_content,
     build_threaded_edit_content,
     edit_message,
     send_message,
@@ -38,6 +37,7 @@ from mindroom.streaming import StreamingResponse, send_streaming_response
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    import nio
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -339,6 +339,11 @@ class DeliveryGateway:
 
         event_id = await send_message(client, resolved_target.room_id, content)
         if event_id:
+            await self.deps.resolver.deps.conversation_cache.record_outbound_message(
+                resolved_target.room_id,
+                event_id,
+                content,
+            )
             self.deps.logger.info("Sent response", event_id=event_id, **resolved_target.log_context)
             return event_id
         self.deps.logger.error("Failed to send response to room", **resolved_target.log_context)
@@ -383,20 +388,29 @@ class DeliveryGateway:
                 latest_thread_event_id=latest_thread_event_id,
             )
 
-        response = await edit_message(
+        edit_event_id = await edit_message(
             client,
             target.room_id,
             request.event_id,
             content,
             request.new_text,
         )
-        if isinstance(response, nio.RoomSendResponse):
+        if edit_event_id is not None:
+            await self.deps.resolver.deps.conversation_cache.record_outbound_message(
+                target.room_id,
+                edit_event_id,
+                build_edit_event_content(
+                    event_id=request.event_id,
+                    new_content=content,
+                    new_text=request.new_text,
+                ),
+            )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
-            error=str(response),
+            error=str(edit_event_id),
             **target.log_context,
         )
         return False
@@ -580,6 +594,11 @@ class DeliveryGateway:
         )
         event_id = await send_message(client, target.room_id, content)
         if event_id:
+            await self.deps.resolver.deps.conversation_cache.record_outbound_message(
+                target.room_id,
+                event_id,
+                content,
+            )
             self.deps.logger.info(
                 "Sent compaction notice",
                 event_id=event_id,
@@ -623,6 +642,7 @@ class DeliveryGateway:
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             latest_thread_event_id=latest_thread_event_id,
+            conversation_cache=self.deps.resolver.deps.conversation_cache,
         )
 
     async def finalize_streamed_response(

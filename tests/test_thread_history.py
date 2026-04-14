@@ -684,6 +684,57 @@ class TestThreadHistory:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_relations_fast_path_applies_latest_edits(self) -> None:
+        """Snapshot fast path should reflect the latest visible edited reply state."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Draft reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Draft reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        reply_edit = self._make_text_event(
+            event_id="$reply_edit",
+            sender="@agent:localhost",
+            body="* Final reply @mindroom_code:localhost",
+            server_timestamp=2100,
+            source_content={
+                "body": "* Final reply @mindroom_code:localhost",
+                "m.new_content": {
+                    "body": "Final reply @mindroom_code:localhost",
+                    "msgtype": "m.text",
+                    "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        )
+        client = self._make_relations_client(
+            root_event=root_event,
+            relations={
+                self._relation_key("$thread_root", RelationshipType.thread): [reply_event],
+                self._relation_key("$reply", RelationshipType.replacement): [reply_edit],
+            },
+        )
+
+        snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
+
+        assert isinstance(snapshot, ThreadHistoryResult)
+        assert snapshot.is_full_history is False
+        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply"]
+        assert snapshot[1].body == "Final reply @mindroom_code:localhost"
+        assert snapshot[1].visible_event_id == "$reply_edit"
+
+    @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_relations_fast_path(self) -> None:
         """Latest-thread lookup should return the newest visible thread child."""
         root_event = self._make_text_event(

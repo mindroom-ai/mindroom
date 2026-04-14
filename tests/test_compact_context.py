@@ -35,7 +35,7 @@ from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, make_event_cache_mock
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, install_runtime_cache_support, make_event_cache_mock
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -449,6 +449,7 @@ async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(t
         rooms=["!room:localhost"],
     )
     bot.client = AsyncMock()
+    install_runtime_cache_support(bot)
     outcome = CompactionOutcome(
         mode="auto",
         session_id="session-1",

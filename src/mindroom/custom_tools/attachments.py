@@ -216,6 +216,7 @@ async def _send_attachment_paths(
             attachment_path,
             thread_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
+            conversation_cache=context.conversation_cache,
         )
         if attachment_event_id is None:
             return attachment_event_ids, f"Failed to send attachment: {attachment_path}"

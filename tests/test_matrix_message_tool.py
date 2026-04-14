@@ -390,6 +390,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         attachment.local_path,
         thread_id="$evt",
         latest_thread_event_id="$evt",
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -442,6 +443,7 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         attachment.local_path,
         thread_id=None,
         latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -491,6 +493,7 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         attachment.local_path,
         thread_id=ctx.thread_id,
         latest_thread_event_id=ctx.thread_id,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -548,6 +551,7 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         attachment.local_path,
         thread_id=explicit_thread_id,
         latest_thread_event_id=explicit_thread_id,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -594,6 +598,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         attachment.local_path,
         thread_id=None,
         latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -653,6 +658,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         first_attachment.local_path,
         thread_id=None,
         latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
     mock_send_attachment_paths.assert_awaited_once()
     assert mock_send_attachment_paths.await_args.args == (ctx,)
@@ -727,11 +733,13 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     assert first_call.kwargs == {
         "thread_id": None,
         "latest_thread_event_id": None,
+        "conversation_cache": ctx.conversation_cache,
     }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
     assert second_call.kwargs == {
         "thread_id": None,
         "latest_thread_event_id": "$file_one",
+        "conversation_cache": ctx.conversation_cache,
     }
 
 
@@ -773,6 +781,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         generated_file,
         thread_id="$evt",
         latest_thread_event_id="$evt",
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -876,6 +885,7 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
         first_attachment.local_path,
         thread_id=None,
         latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
     mock_send_attachment_paths.assert_not_awaited()
 

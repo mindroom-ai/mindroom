@@ -294,6 +294,33 @@ class TestSendFileMessage:
             )
 
     @pytest.mark.asyncio
+    async def test_threaded_send_records_outbound_message_when_cache_available(self, tmp_path: Path) -> None:
+        """Threaded file sends should write through to the conversation cache immediately."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
+        conversation_cache = AsyncMock()
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c", encoding="utf-8")
+
+        with patch("mindroom.matrix.client.send_message", new=AsyncMock(return_value="$evt:localhost")):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                thread_id="$root:localhost",
+                latest_thread_event_id="$precomputed:localhost",
+                conversation_cache=conversation_cache,
+            )
+
+        assert event_id == "$evt:localhost"
+        conversation_cache.record_outbound_message.assert_awaited_once()
+        record_args = conversation_cache.record_outbound_message.await_args.args
+        assert record_args[0] == "!room:localhost"
+        assert record_args[1] == "$evt:localhost"
+        assert record_args[2]["m.relates_to"]["event_id"] == "$root:localhost"
+        assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
+
+    @pytest.mark.asyncio
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
         """Should return None when the file doesn't exist."""
         client = _mock_client()

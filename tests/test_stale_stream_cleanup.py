@@ -609,6 +609,80 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path: Path) -> None:
+    """Auto-resume should write successful threaded sends through the conversation cache."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    conversation_cache = AsyncMock()
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$threaded",
+            target_event_id="$target",
+            partial_text="Threaded",
+            agent_name="test_agent",
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message",
+        new=AsyncMock(return_value="$resume"),
+    ):
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 1
+    conversation_cache.record_outbound_message.assert_awaited_once()
+    record_args = conversation_cache.record_outbound_message.await_args.args
+    assert record_args[:2] == (ROOM_ID, "$resume")
+    assert record_args[2]["m.relates_to"]["event_id"] == "$threaded"
+
+
+@pytest.mark.asyncio
+async def test_edit_stale_message_records_outbound_edit_when_successful(tmp_path: Path) -> None:
+    """Restart cleanup edits should write through the outbound edit event."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    conversation_cache = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.format_message_with_mentions",
+            return_value={"body": "cleanup", "msgtype": "m.text"},
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message",
+            new=AsyncMock(return_value="$cleanup-edit"),
+        ),
+    ):
+        edited = await stale_stream_cleanup_module._edit_stale_message(
+            client,
+            room_id=ROOM_ID,
+            target_event_id="$target",
+            new_text="cleanup",
+            preserved_content=None,
+            thread_id="$thread-root",
+            latest_thread_event_id="$reply-latest",
+            sender_domain="example.com",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    assert edited is True
+    conversation_cache.record_outbound_message.assert_awaited_once()
+    record_args = conversation_cache.record_outbound_message.await_args.args
+    assert record_args[:2] == (ROOM_ID, "$cleanup-edit")
+    assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
+    assert record_args[2]["m.relates_to"]["event_id"] == "$target"
+
+
+@pytest.mark.asyncio
 async def test_cleanup_skips_recent_in_progress_message_on_startup(tmp_path: Path) -> None:
     """Startup cleanup should skip fresh in-progress messages to avoid cross-instance clobbering."""
     config = _make_config(tmp_path)

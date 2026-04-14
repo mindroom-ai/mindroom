@@ -19,7 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import edit_message, send_message
+from mindroom.matrix.client import build_edit_event_content, edit_message, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import is_sync_restart_cancel
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.timing import DispatchPipelineTiming
 
 logger = get_logger(__name__)
@@ -186,6 +187,7 @@ class StreamingResponse:
     chars_since_last_update: int = 0
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
+    conversation_cache: ConversationCacheProtocol | None = None
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -376,6 +378,64 @@ class StreamingResponse:
             return STREAM_STATUS_PENDING
         return STREAM_STATUS_STREAMING
 
+    async def _record_streaming_send(self, event_id: str, content: dict[str, Any]) -> None:
+        """Persist one just-sent streaming message into the conversation cache."""
+        if self.conversation_cache is None:
+            return
+        await self.conversation_cache.record_outbound_message(self.room_id, event_id, content)
+
+    async def _record_streaming_edit(
+        self,
+        edit_event_id: str,
+        *,
+        content: dict[str, Any],
+        display_text: str,
+    ) -> None:
+        """Persist one just-sent streaming edit into the conversation cache."""
+        if self.conversation_cache is None or self.event_id is None:
+            return
+        await self.conversation_cache.record_outbound_message(
+            self.room_id,
+            edit_event_id,
+            build_edit_event_content(
+                event_id=self.event_id,
+                new_content=content,
+                new_text=display_text,
+            ),
+        )
+
+    def _mark_first_visible_reply_if_needed(self) -> None:
+        """Mark first visible reply timing once visible text exists."""
+        if self.pipeline_timing is not None and self.accumulated_text.strip():
+            self.pipeline_timing.mark_first_visible_reply("stream_update")
+
+    async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
+        """Send the initial streaming event."""
+        response_event_id = await send_message(client, self.room_id, content)
+        if response_event_id is None:
+            return False
+        self.event_id = response_event_id
+        await self._record_streaming_send(response_event_id, content)
+        self._mark_first_visible_reply_if_needed()
+        logger.debug("Initial streaming message sent", event_id=self.event_id)
+        return True
+
+    async def _edit_existing_content(
+        self,
+        client: nio.AsyncClient,
+        *,
+        content: dict[str, Any],
+        display_text: str,
+    ) -> bool:
+        """Send one streaming edit event for the existing message."""
+        assert self.event_id is not None
+        response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
+        if response_event_id is None:
+            return False
+        await self._record_streaming_edit(response_event_id, content=content, display_text=display_text)
+        self._mark_first_visible_reply_if_needed()
+        return True
+
     async def _send_content(
         self,
         client: nio.AsyncClient,
@@ -390,20 +450,12 @@ class StreamingResponse:
             try:
                 if self.event_id is None:
                     logger.debug("Sending initial streaming message", attempt=attempt)
-                    response_event_id = await send_message(client, self.room_id, content)
-                    if response_event_id:
-                        self.event_id = response_event_id
-                        if self.pipeline_timing is not None and self.accumulated_text.strip():
-                            self.pipeline_timing.mark_first_visible_reply("stream_update")
-                        logger.debug("Initial streaming message sent", event_id=self.event_id)
+                    if await self._send_initial_content(client, content=content):
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
                 else:
                     logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
-                    response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
-                    if response_event_id:
-                        if self.pipeline_timing is not None and self.accumulated_text.strip():
-                            self.pipeline_timing.mark_first_visible_reply("stream_update")
+                    if await self._edit_existing_content(client, content=content, display_text=display_text):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
             except Exception:
@@ -540,6 +592,7 @@ async def send_streaming_response(
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     latest_thread_event_id: str | None = None,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text)."""
     resolved_target = target or MessageTarget.resolve(
@@ -566,6 +619,7 @@ async def send_streaming_response(
         min_update_interval=sc.min_update_interval,
         interval_ramp_seconds=sc.interval_ramp_seconds,
         pipeline_timing=pipeline_timing,
+        conversation_cache=conversation_cache,
     )
 
     # Ensure the first chunk triggers an initial send immediately

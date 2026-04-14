@@ -7,7 +7,7 @@ import itertools
 import os
 import signal
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -1329,6 +1329,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
+        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
         with patch_response_runner_module(
@@ -1375,6 +1376,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
+        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
         with patch_response_runner_module(
@@ -1518,6 +1520,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
+        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -1833,6 +1836,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
+        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         mock_ai = AsyncMock(return_value="Handled")
@@ -1873,6 +1877,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
+        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         running_task = asyncio.create_task(asyncio.sleep(60))
@@ -1943,6 +1948,7 @@ class TestAgentBot:
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         mock_stream_agent_response = AsyncMock(return_value=mock_streaming_response())
@@ -2066,6 +2072,7 @@ class TestAgentBot:
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         bot._send_response = AsyncMock(return_value="$team")
         install_send_response_mock(bot, bot._send_response)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
@@ -2115,6 +2122,7 @@ class TestAgentBot:
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         bot._send_response = AsyncMock(return_value="$team")
         install_send_response_mock(bot, bot._send_response)
         bot.orchestrator = MagicMock(
@@ -2543,6 +2551,7 @@ class TestAgentBot:
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         bot._send_response = AsyncMock(return_value="$team")
         install_send_response_mock(bot, bot._send_response)
         bot.orchestrator = MagicMock(
@@ -2741,6 +2750,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
+        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -3453,7 +3463,10 @@ class TestAgentBot:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
+        assert mock_get_thread_history.await_count >= 1
+        assert all(
+            await_args.args == ("!test:localhost", "$thread") for await_args in mock_get_thread_history.await_args_list
+        )
         mock_thread_summary.assert_awaited_once_with(
             client=bot.client,
             room_id="!test:localhost",
@@ -6496,16 +6509,17 @@ class TestAgentBot:
         mock_snapshot_fallback.assert_awaited_once_with(bot.client, room.room_id, "$thread_root")
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_hydrates_full_history_before_payload_builder_when_required(
+    async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Payload building should hydrate full history first when the snapshot is incomplete."""
+        """Normal replies should derive history-dependent payload inputs after the lock refresh."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = MagicMock(spec=nio.RoomMessageText)
@@ -6567,60 +6581,83 @@ class TestAgentBot:
                 response_action=ResponseAction(kind="individual"),
             )
 
-        async def fake_hydrate_dispatch_context(
-            _room: object,
-            _event: object,
-            context: MessageContext,
-        ) -> None:
-            call_order.append("hydrate")
-            context.thread_history = full_history
-            context.requires_full_thread_history = False
-
         async def fake_build_payload(context: MessageContext) -> DispatchPayload:
             call_order.append("payload")
             assert list(context.thread_history) == full_history
             return DispatchPayload(prompt="hello", attachment_ids=["att_older"])
 
-        async def fake_generate_response(*_args: object, **kwargs: object) -> str:
-            call_order.append("generate")
-            assert kwargs["thread_history"] == full_history
-            assert kwargs["attachment_ids"] == ["att_older"]
-            assert kwargs["existing_event_id"] is None
-            assert kwargs["existing_event_is_placeholder"] is False
-            return "$response"
+        async def refresh_thread_history(request: ResponseRequest) -> ResponseRequest:
+            return replace(
+                request,
+                thread_history=ThreadHistoryResult(full_history, is_full_history=True),
+            )
 
-        generate_response = AsyncMock(side_effect=fake_generate_response)
-        install_generate_response_mock(bot, generate_response)
-        _replace_turn_policy_deps(
-            bot,
-            response_runner=bot._response_runner,
-        )
+        async def run_cancellable_response(**kwargs: object) -> str | None:
+            call_order.append("generate")
+            response_function = kwargs["response_function"]
+            assert callable(response_function)
+            await cast("Any", response_function)(None)
+            return None
+
+        def prepare_memory_and_model_context(
+            prompt: str,
+            thread_history: Sequence[ResolvedVisibleMessage],
+            *,
+            config: Config,
+            runtime_paths: RuntimePaths,
+            model_prompt: str | None = None,
+        ) -> tuple[str, Sequence[ResolvedVisibleMessage], str | None, Sequence[ResolvedVisibleMessage]]:
+            del config, runtime_paths
+            return prompt, thread_history, model_prompt, thread_history
 
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
             patch.object(
-                bot._conversation_resolver,
-                "hydrate_dispatch_context",
-                new=AsyncMock(side_effect=fake_hydrate_dispatch_context),
-            ) as mock_hydrate_dispatch_context,
+                ResponseRunner,
+                "_refresh_thread_history_after_lock",
+                new=AsyncMock(side_effect=refresh_thread_history),
+            ) as mock_refresh_thread_history,
             patch.object(
                 bot._inbound_turn_normalizer,
                 "build_dispatch_payload_with_attachments",
                 new=AsyncMock(side_effect=fake_build_payload),
+            ) as mock_build_payload,
+            patch.object(
+                ResponseRunner,
+                "process_and_respond",
+                new=AsyncMock(
+                    return_value=DeliveryResult(
+                        event_id="$response",
+                        response_text="ok",
+                        delivery_kind="sent",
+                    ),
+                ),
+            ) as mock_process,
+            patch.object(
+                ResponseRunner,
+                "run_cancellable_response",
+                new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(bot._turn_controller, "_log_dispatch_latency"),
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=False),
+                prepare_memory_and_model_context=prepare_memory_and_model_context,
+                reprioritize_auto_flush_sessions=MagicMock(),
+                apply_post_response_effects=AsyncMock(),
+            ),
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        mock_hydrate_dispatch_context.assert_awaited_once()
-        hydrate_args = mock_hydrate_dispatch_context.await_args.args
-        assert hydrate_args[0] is room
-        assert hydrate_args[2] is dispatch.context
-        assert call_order == ["action", "hydrate", "payload", "generate"]
+        mock_refresh_thread_history.assert_awaited_once()
+        mock_build_payload.assert_awaited_once()
+        process_request = mock_process.await_args.args[0]
+        assert list(process_request.thread_history) == full_history
+        assert process_request.attachment_ids == ("att_older",)
+        assert call_order == ["action", "payload", "generate"]
         assert dispatch.context.thread_history == full_history
         assert dispatch.context.requires_full_thread_history is False
 

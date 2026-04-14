@@ -23,7 +23,7 @@ from mindroom.edit_regenerator import EditRegenerator
 from mindroom.matrix._event_cache import _EventCache
 from mindroom.matrix._event_cache_write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.turn_controller import TurnController
 from mindroom.turn_policy import TurnPolicy
 from mindroom.turn_store import TurnStore
@@ -613,6 +613,11 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
     wrap_extracted_collaborators(bot, "_response_runner")
 
     async def _generate(request: ResponseRequest) -> str | None:
+        if request.prepare_after_lock is not None:
+            try:
+                request = await request.prepare_after_lock(request)
+            except Exception as exc:
+                raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         return await generate_response(
             room_id=request.room_id,

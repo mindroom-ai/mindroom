@@ -2885,6 +2885,49 @@ class TestThreadingBehavior:
         assert access._resolved_thread_cache.lookup("!room:localhost", "$thread").entry is None
 
     @pytest.mark.asyncio
+    async def test_get_thread_history_does_not_cache_degraded_non_authoritative_result(self) -> None:
+        """Non-authoritative full-history fetches should not become resolved-cache hits."""
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=_runtime_event_cache(),
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+        degraded_history = ThreadHistoryResult(
+            [_message(event_id="$thread", body="Root")],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+                THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: False,
+                THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: False,
+            },
+        )
+        authoritative_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply", body="Reply", sender="@agent:localhost"),
+            ],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+                THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: True,
+                THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: True,
+            },
+        )
+
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
+            new=AsyncMock(side_effect=[degraded_history, authoritative_history]),
+        ) as mock_fetch_thread_history:
+            async with access.turn_scope():
+                first_history = await access.get_thread_history("!room:localhost", "$thread")
+            async with access.turn_scope():
+                second_history = await access.get_thread_history("!room:localhost", "$thread")
+
+        assert [message.event_id for message in first_history] == ["$thread"]
+        assert [message.event_id for message in second_history] == ["$thread", "$reply"]
+        assert mock_fetch_thread_history.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_live_edit_lookup_failure_invalidates_matching_resolved_thread_cache(self) -> None:
         """Live lookup failures should force a refetch for threads containing the target event."""
         event_cache = _runtime_event_cache()
@@ -3010,6 +3053,137 @@ class TestThreadingBehavior:
         assert refreshed_history.thread_version > stale_history.thread_version
 
     @pytest.mark.asyncio
+    async def test_latest_thread_event_id_uses_authoritative_full_history(self) -> None:
+        """MSC3440 fallback resolution should use the full-history path, not snapshots."""
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=_runtime_event_cache(),
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+        latest_message = _message(event_id="$reply", body="Reply", sender="@agent:localhost")
+        latest_message.apply_edit(
+            body="Reply edited",
+            timestamp=2,
+            latest_event_id="$reply_edit",
+            thread_id="$thread",
+            content={"body": "Reply edited"},
+        )
+        full_history = thread_history_result(
+            [
+                _message(event_id="$thread", body="Root"),
+                latest_message,
+            ],
+            is_full_history=True,
+        )
+
+        with (
+            patch.object(
+                access,
+                "get_thread_snapshot",
+                new=AsyncMock(side_effect=AssertionError("should not use snapshot fallback")),
+            ),
+            patch.object(
+                access,
+                "get_thread_history",
+                new=AsyncMock(return_value=full_history),
+            ) as mock_get_thread_history,
+        ):
+            latest_event_id = await access.get_latest_thread_event_id_if_needed("!room:localhost", "$thread")
+
+        assert latest_event_id == "$reply_edit"
+        mock_get_thread_history.assert_awaited_once_with("!room:localhost", "$thread")
+
+    @pytest.mark.asyncio
+    async def test_latest_thread_event_id_uses_repair_aware_history_for_dirty_threads(self, tmp_path: Path) -> None:
+        """Dirty-thread fallback resolution should honor the same repair path as get_thread_history()."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=cache,
+        )
+        runtime.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=runtime,
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+
+        root_event = {
+            "event_id": "$thread",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+        }
+        reply_event = {
+            "event_id": "$reply",
+            "sender": "@agent:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+            },
+        }
+        await cache.store_thread_events("!room:localhost", "$thread", [root_event, reply_event])
+        await cache.mark_thread_repair_required("!room:localhost", "$thread")
+
+        stale_history = thread_history_result(
+            [
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply", body="Reply", sender="@agent:localhost"),
+            ],
+            is_full_history=True,
+        )
+        latest_message = _message(event_id="$reply", body="Reply", sender="@agent:localhost")
+        latest_message.apply_edit(
+            body="Reply edited",
+            timestamp=2,
+            latest_event_id="$reply_edit",
+            thread_id="$thread",
+            content={"body": "Reply edited"},
+        )
+        repaired_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread", body="Root"),
+                latest_message,
+            ],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+                THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: True,
+                THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: True,
+            },
+        )
+
+        async def fetch_history_side_effect(
+            _client: nio.AsyncClient,
+            room_id: str,
+            thread_id: str,
+            *,
+            event_cache: _EventCache,
+            refresh_cache: bool = True,
+        ) -> ThreadHistoryResult:
+            assert refresh_cache is True
+            cached_thread_events = await event_cache.get_thread_events(room_id, thread_id)
+            if cached_thread_events is not None:
+                return stale_history
+            return repaired_history
+
+        try:
+            with patch(
+                "mindroom.matrix.conversation_cache.fetch_thread_history",
+                new=AsyncMock(side_effect=fetch_history_side_effect),
+            ):
+                async with access.turn_scope():
+                    latest_event_id = await access.get_latest_thread_event_id_if_needed("!room:localhost", "$thread")
+        finally:
+            await cache.close()
+
+        assert latest_event_id == "$reply_edit"
+
+    @pytest.mark.asyncio
     async def test_unrelated_lookup_failure_does_not_force_other_threads_to_full_history(self) -> None:
         """Room-scoped lookup failures should only promote matching threads into repair mode."""
         runtime = _conversation_runtime(
@@ -3056,8 +3230,8 @@ class TestThreadingBehavior:
         assert await access._thread_requires_refresh("!room:localhost", "$thread") is False
 
     @pytest.mark.asyncio
-    async def test_event_cache_retains_thread_membership_for_redacted_events(self, tmp_path: Path) -> None:
-        """Redactions should remove payload rows without losing the durable event-to-thread mapping."""
+    async def test_event_cache_removes_thread_membership_for_redacted_events(self, tmp_path: Path) -> None:
+        """Redactions should clear the durable event-to-thread mapping for deleted events."""
         event_cache = _EventCache(tmp_path / "event-cache.db")
         await event_cache.initialize()
         try:
@@ -3092,7 +3266,7 @@ class TestThreadingBehavior:
 
             await event_cache.redact_event("!room:localhost", "$reply")
 
-            assert await event_cache.get_thread_id_for_event("!room:localhost", "$reply") == "$thread"
+            assert await event_cache.get_thread_id_for_event("!room:localhost", "$reply") is None
         finally:
             await event_cache.close()
 

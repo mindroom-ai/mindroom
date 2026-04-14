@@ -15,7 +15,13 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.conversation_resolver import should_skip_mentions
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalDeliveryRequest, SendTextRequest
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    EditTextRequest,
+    FinalDeliveryRequest,
+    SendTextRequest,
+)
 from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.identity import MatrixID
@@ -268,6 +274,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     response_hooks.emit_after_response = after_hooks
     conversation_cache = SimpleNamespace(
         get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
+        record_outbound_message=AsyncMock(),
     )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -340,6 +347,59 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
     assert payload["event"] == "Sent response"
     assert payload["room_id"] == "!test:server"
     assert payload["thread_id"] == "$thread"
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_path: Path) -> None:
+    """Threaded sends should write through to the conversation cache immediately."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    target = MessageTarget.resolve("!test:server", "$thread", None)
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value="$latest",
+    )
+
+    with patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response")):
+        event_id = await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="formatted response",
+            ),
+        )
+
+    assert event_id == "$response"
+    gateway.deps.resolver.deps.conversation_cache.record_outbound_message.assert_awaited_once()
+    record_args = gateway.deps.resolver.deps.conversation_cache.record_outbound_message.await_args.args
+    assert record_args[0] == "!test:server"
+    assert record_args[1] == "$response"
+    assert record_args[2]["m.relates_to"]["event_id"] == "$thread"
+    assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_path: Path) -> None:
+    """Threaded edits should treat edit_message success as an event ID and write through immediately."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    target = MessageTarget.resolve("!test:server", "$thread", "$root")
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value="$latest",
+    )
+
+    with patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value="$edit-event")):
+        edited = await gateway.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id="$original",
+                new_text="updated response",
+            ),
+        )
+
+    assert edited is True
+    gateway.deps.resolver.deps.conversation_cache.record_outbound_message.assert_awaited_once()
+    record_args = gateway.deps.resolver.deps.conversation_cache.record_outbound_message.await_args.args
+    assert record_args[0] == "!test:server"
+    assert record_args[1] == "$edit-event"
+    assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
+    assert record_args[2]["m.new_content"]["m.relates_to"]["event_id"] == "$thread"
 
 
 @pytest.mark.asyncio

@@ -287,8 +287,13 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     strip_transient_enrichment_after_run: bool = False
+    prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
+
+
+class PostLockRequestPreparationError(RuntimeError):
+    """Raised when post-lock request preparation fails before generation starts."""
 
 
 @dataclass(frozen=True)
@@ -719,6 +724,19 @@ class ResponseRunner:
         )
         return replace(request, thread_history=refreshed_history)
 
+    async def _prepare_request_after_lock(
+        self,
+        request: ResponseRequest,
+    ) -> ResponseRequest:
+        """Refresh thread history and rebuild any history-derived payload once locked."""
+        request = await self._refresh_thread_history_after_lock(request)
+        if request.prepare_after_lock is None:
+            return request
+        try:
+            return await request.prepare_after_lock(request)
+        except Exception as exc:
+            raise PostLockRequestPreparationError from exc
+
     def _note_pipeline_metadata(
         self,
         request: ResponseRequest,
@@ -873,7 +891,7 @@ class ResponseRunner:
         request = team_request.request
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        request = await self._refresh_thread_history_after_lock(request)
+        request = await self._prepare_request_after_lock(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
@@ -2101,7 +2119,7 @@ class ResponseRunner:
         resolved_target = resolved_target.with_thread_root(delivery_thread_id)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        request = await self._refresh_thread_history_after_lock(request)
+        request = await self._prepare_request_after_lock(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (

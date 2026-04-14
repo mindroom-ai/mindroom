@@ -1,12 +1,14 @@
-# Matrix Conversation Cache Response-Path Simplification Implementation Plan
+# Matrix Conversation Cache Simplification And Truth-Cleanup Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Simplify Matrix reply generation so each reply uses one authoritative post-lock thread-history read through `MatrixConversationCache` while keeping the durable and cross-turn caches that are already necessary.
+**Goal:** Finish the Matrix conversation-cache simplification so reply generation uses one authoritative post-lock thread-history read, durable cache truth stays atomic and non-resurrecting, and latest-thread fallback is resolved through one authoritative cache path.
 
 **Architecture:** `MatrixConversationCache` remains the one public conversation-data boundary.
-Durable event truth, durable repair obligations, and sync-populated raw thread state stay in `_event_cache.py`.
-Response generation stops trusting pre-lock `thread_history`, and every freshness-affecting live write must become visible behind the same room-ordered barrier that post-lock thread reads trust.
+`_event_cache.py` remains the durable owner of event truth, redaction truth, derived indexes, and repair obligations, and those durable writes must be atomic.
+Stale on-disk cache schemas are intentionally reset instead of migrated.
+The SQLite event cache is rebuildable advisory state, so old cache contents are discarded and repopulated lazily through normal usage.
+Response generation stops trusting pre-lock `thread_history`, latest-thread fallback stops trusting non-refreshing snapshots, and every freshness-affecting write must become visible behind the same room-ordered barrier that authoritative reads trust.
 
 **Tech Stack:** Python 3.13, asyncio, SQLite, matrix-nio, pytest, Ruff, pre-commit.
 
@@ -16,8 +18,11 @@ Response generation stops trusting pre-lock `thread_history`, and every freshnes
 
 This plan intentionally supersedes the extraction-first plan in `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`.
 The approved spec for this work is `docs/superpowers/specs/2026-04-13-matrix-conversation-cache-response-path-simplification-design.md`.
-The priority is to simplify the reply-path invariant first.
-Only after that lands should we reconsider any file-splitting refactor.
+This plan now covers the three remaining correctness seams that keep surfacing together in review:
+- reply-path authority,
+- durable `_event_cache` truth,
+- authoritative latest-thread fallback resolution.
+Only after those invariants are complete should we reconsider any file-splitting refactor.
 
 ## Non-Goals
 
@@ -32,6 +37,9 @@ Only after that lands should we reconsider any file-splitting refactor.
 - Normal agent and team reply generation do one authoritative full-thread read after the lifecycle lock.
 - `ResponseRunner` no longer relies on `is_thread_history_current()` to reuse a pre-lock `ThreadHistoryResult`.
 - Normal dispatch no longer hydrates full thread history before the lock just to feed the eventual reply.
+- Durable `_event_cache` writes are all-or-nothing and keep derived indexes consistent with stored payload rows.
+- Redacted events cannot be resurrected by late edits.
+- Latest-thread fallback is edit-aware, authoritative, and immediately correct after local sends or edits.
 - Freshness-affecting live writes become visible after the same room-idle barrier the post-lock read trusts.
 - The full test suite passes with `-n auto`.
 

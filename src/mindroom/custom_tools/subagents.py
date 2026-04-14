@@ -272,7 +272,11 @@ async def _send_matrix_text(
     )
     if original_sender:
         content[ORIGINAL_SENDER_KEY] = original_sender
-    return await send_message(context.client, room_id, content)
+    event_id = await send_message(context.client, room_id, content)
+    if event_id is not None:
+        assert context.conversation_cache is not None
+        await context.conversation_cache.record_outbound_message(room_id, event_id, content)
+    return event_id
 
 
 def _spawn_room_mode_error(context: ToolRuntimeContext, *, target_agent: str) -> str | None:

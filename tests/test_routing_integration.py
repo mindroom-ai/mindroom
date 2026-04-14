@@ -20,6 +20,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -105,6 +106,7 @@ class TestRoutingIntegration:
         # Mock clients
         for bot in [research_bot, news_bot]:
             bot.client = make_matrix_client_mock(user_id=bot.matrix_id)
+            install_runtime_cache_support(bot)
 
             # Mock orchestrator
             mock_orchestrator = MagicMock()

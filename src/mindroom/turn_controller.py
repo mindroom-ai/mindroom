@@ -66,7 +66,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import get_configured_agents_for_room
 from mindroom.timing import (
@@ -924,33 +924,8 @@ class TurnController:
             )
 
         try:
-            if dispatch_timing is not None:
-                dispatch_timing.mark("response_payload_start")
             context_ready_monotonic = time.monotonic()
-            await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
-            payload = await payload_builder(dispatch.context)
-            prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
-                dispatch,
-                payload,
-                target_entity_name=self.deps.agent_name,
-                target_member_names=target_member_names,
-            )
-            system_enrichment_items = await self.deps.ingress_hook_runner.apply_system_enrichment(
-                dispatch,
-                prepared_payload.envelope,
-                target_entity_name=self.deps.agent_name,
-                target_member_names=target_member_names,
-            )
-            if system_enrichment_items:
-                prepared_payload = type(prepared_payload)(
-                    payload=prepared_payload.payload,
-                    envelope=prepared_payload.envelope,
-                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                    system_enrichment_items=tuple(system_enrichment_items),
-                )
-            payload_ready_monotonic = time.monotonic()
-            if dispatch_timing is not None:
-                dispatch_timing.mark("response_payload_ready")
+            payload_ready_monotonic = context_ready_monotonic
         except Exception as error:
             response_event_id = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
@@ -981,6 +956,59 @@ class TurnController:
         with bound_log_context(**dispatch.target.log_context):
             self.deps.logger.info(processing_log, event_id=event.event_id)
         try:
+
+            async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
+                nonlocal payload_ready_monotonic
+                if dispatch_timing is not None:
+                    dispatch_timing.mark("response_payload_start")
+                dispatch.context.thread_history = request.thread_history
+                dispatch.context.thread_id = request.thread_id
+                dispatch.context.requires_full_thread_history = False
+                payload = await payload_builder(dispatch.context)
+                prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
+                    dispatch,
+                    payload,
+                    target_entity_name=self.deps.agent_name,
+                    target_member_names=target_member_names,
+                )
+                system_enrichment_items = await self.deps.ingress_hook_runner.apply_system_enrichment(
+                    dispatch,
+                    prepared_payload.envelope,
+                    target_entity_name=self.deps.agent_name,
+                    target_member_names=target_member_names,
+                )
+                if system_enrichment_items:
+                    prepared_payload = type(prepared_payload)(
+                        payload=prepared_payload.payload,
+                        envelope=prepared_payload.envelope,
+                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        system_enrichment_items=tuple(system_enrichment_items),
+                    )
+                payload_ready_monotonic = time.monotonic()
+                if dispatch_timing is not None:
+                    dispatch_timing.mark("response_payload_ready")
+                return ResponseRequest(
+                    room_id=request.room_id,
+                    reply_to_event_id=request.reply_to_event_id,
+                    thread_id=request.thread_id,
+                    thread_history=request.thread_history,
+                    prompt=prepared_payload.payload.prompt,
+                    model_prompt=prepared_payload.payload.model_prompt,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    user_id=request.user_id,
+                    media=prepared_payload.payload.media,
+                    attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
+                    response_envelope=prepared_payload.envelope,
+                    correlation_id=request.correlation_id,
+                    target=request.target,
+                    matrix_run_metadata=request.matrix_run_metadata,
+                    system_enrichment_items=prepared_payload.system_enrichment_items,
+                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
+                    pipeline_timing=request.pipeline_timing,
+                )
+
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
@@ -990,17 +1018,13 @@ class TurnController:
                         reply_to_event_id=event.event_id,
                         thread_id=dispatch.context.thread_id,
                         thread_history=dispatch.context.thread_history,
-                        prompt=prepared_payload.payload.prompt,
-                        model_prompt=prepared_payload.payload.model_prompt,
+                        prompt=event.body,
                         user_id=dispatch.requester_user_id,
-                        media=prepared_payload.payload.media,
-                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
-                        response_envelope=prepared_payload.envelope,
+                        response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
                         matrix_run_metadata=matrix_run_metadata,
-                        system_enrichment_items=prepared_payload.system_enrichment_items,
-                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
                     ),
                     team_agents=action.form_team.eligible_members,
@@ -1013,20 +1037,27 @@ class TurnController:
                         reply_to_event_id=event.event_id,
                         thread_id=dispatch.context.thread_id,
                         thread_history=dispatch.context.thread_history,
-                        prompt=prepared_payload.payload.prompt,
-                        model_prompt=prepared_payload.payload.model_prompt,
+                        prompt=event.body,
                         user_id=dispatch.requester_user_id,
-                        media=prepared_payload.payload.media,
-                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
-                        response_envelope=prepared_payload.envelope,
+                        response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
                         matrix_run_metadata=matrix_run_metadata,
-                        system_enrichment_items=prepared_payload.system_enrichment_items,
-                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
                     ),
                 )
+        except PostLockRequestPreparationError as error:
+            failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
+            response_event_id = await self._finalize_dispatch_failure(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                thread_id=dispatch.context.thread_id,
+                error=failure,
+            )
+            if response_event_id is not None:
+                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+            return
         except SuppressedPlaceholderCleanupError:
             with bound_log_context(**dispatch.target.log_context):
                 self.deps.logger.warning(

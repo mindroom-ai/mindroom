@@ -1,5 +1,7 @@
 """Matrix client operations and utilities."""
 
+from __future__ import annotations
+
 import asyncio
 import io
 import json
@@ -10,7 +12,7 @@ from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nio
 from aiohttp import ClientError
@@ -18,8 +20,6 @@ from nio import crypto
 from nio.api import RelationshipType
 from nio.responses import RoomThreadsResponse
 
-from mindroom.config.main import Config
-from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix._event_cache import ConversationEventCache, normalize_event_source_for_cache
@@ -42,6 +42,11 @@ from mindroom.matrix.thread_history_result import (
     thread_history_result,
 )
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
+    from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
@@ -83,7 +88,7 @@ class ResolvedVisibleMessage:
         *,
         thread_id: str | None,
         latest_event_id: str,
-    ) -> "ResolvedVisibleMessage":
+    ) -> ResolvedVisibleMessage:
         """Build a resolved visible message from extracted message data."""
         message = cls(
             sender=message_data["sender"],
@@ -107,7 +112,7 @@ class ResolvedVisibleMessage:
         timestamp: int = 0,
         content: dict[str, Any] | None = None,
         thread_id: str | None = None,
-    ) -> "ResolvedVisibleMessage":
+    ) -> ResolvedVisibleMessage:
         """Build a synthetic visible message for non-Matrix history inputs."""
         message = cls(
             sender=sender,
@@ -1132,6 +1137,7 @@ async def send_file_message(
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
     resolved_path = Path(file_path).expanduser().resolve()
@@ -1175,7 +1181,10 @@ async def send_file_message(
             "m.in_reply_to": {"event_id": latest_thread_event_id},
         }
 
-    return await send_message(client, room_id, content)
+    event_id = await send_message(client, room_id, content)
+    if event_id is not None and conversation_cache is not None:
+        await conversation_cache.record_outbound_message(room_id, event_id, content)
+    return event_id
 
 
 def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
@@ -1230,7 +1239,7 @@ async def _fetch_thread_context_via_relations(
         client,
         room_id,
         thread_id,
-        include_latest_edits=False,
+        include_latest_edits=True,
     )
     return await _resolve_thread_history_from_event_sources(
         client,
@@ -2393,6 +2402,29 @@ def build_threaded_edit_content(
     )
 
 
+def build_edit_event_content(
+    *,
+    event_id: str,
+    new_content: dict[str, Any],
+    new_text: str,
+    extra_content: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Wrap replacement content in one Matrix m.replace edit envelope."""
+    replacement_content = dict(new_content)
+    edit_content = {
+        "msgtype": "m.text",
+        "body": f"* {new_text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": new_content.get("formatted_body", new_text),
+        "m.new_content": replacement_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+    }
+    if extra_content:
+        replacement_content.update(extra_content)
+        edit_content.update(extra_content)
+    return edit_content
+
+
 async def edit_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -2418,18 +2450,12 @@ async def edit_message(
         The event ID of the edit message, or None if editing failed
 
     """
-    replacement_content = dict(new_content)
-    edit_content = {
-        "msgtype": "m.text",
-        "body": f"* {new_text}",
-        "format": "org.matrix.custom.html",
-        "formatted_body": new_content.get("formatted_body", new_text),
-        "m.new_content": replacement_content,
-        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
-    }
-    if extra_content:
-        replacement_content.update(extra_content)
-        edit_content.update(extra_content)
+    edit_content = build_edit_event_content(
+        event_id=event_id,
+        new_content=new_content,
+        new_text=new_text,
+        extra_content=extra_content,
+    )
 
     # send_message will handle large messages, including the lower threshold for edits
     return await send_message(client, room_id, edit_content)

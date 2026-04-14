@@ -909,6 +909,7 @@ class MultiAgentOrchestrator:
                     bot_user_ids=bot_user_ids,
                     config=config,
                     runtime_paths=self.runtime_paths,
+                    conversation_cache=bot._conversation_cache,
                 )
                 cleaned_count += bot_cleaned_count
                 interrupted_threads.extend(bot_interrupted_threads)
@@ -942,6 +943,7 @@ class MultiAgentOrchestrator:
                 interrupted_threads,
                 config=config,
                 runtime_paths=self.runtime_paths,
+                conversation_cache=router_bot._conversation_cache,
             )
             if resumed_count > 0:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)

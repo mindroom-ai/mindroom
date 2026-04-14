@@ -35,6 +35,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
+    build_edit_event_content,
     edit_message,
     get_room_threads_page,
     send_file_message,
@@ -187,7 +188,11 @@ class MatrixMessageTools(Toolkit):
             latest_thread_event_id=latest_thread_event_id,
             extra_content=extra_content or None,
         )
-        return await send_message(context.client, room_id, content)
+        event_id = await send_message(context.client, room_id, content)
+        if event_id is not None:
+            assert context.conversation_cache is not None
+            await context.conversation_cache.record_outbound_message(room_id, event_id, content)
+        return event_id
 
     async def _maybe_add_interactive_question(
         self,
@@ -314,6 +319,7 @@ class MatrixMessageTools(Toolkit):
                     first_attachment_path,
                     thread_id=effective_thread_id,
                     latest_thread_event_id=latest_thread_event_id,
+                    conversation_cache=context.conversation_cache,
                 )
                 if first_attachment_event_id is None:
                     return self._payload(
@@ -777,6 +783,16 @@ class MatrixMessageTools(Toolkit):
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
+        assert context.conversation_cache is not None
+        await context.conversation_cache.record_outbound_message(
+            room_id,
+            edit_event_id,
+            build_edit_event_content(
+                event_id=target,
+                new_content=content,
+                new_text=formatted_text,
+            ),
+        )
 
         if interactive_response.option_map and interactive_response.options_list:
             register_interactive_question(
