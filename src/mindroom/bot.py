@@ -122,8 +122,8 @@ from .response_runner import (
 )
 from .runtime_support import (
     StandaloneRuntimeSupport,
-    create_standalone_runtime_support,
     close_standalone_runtime_support,
+    create_standalone_runtime_support,
     initialize_standalone_runtime_support,
 )
 from .scheduling import (
@@ -1007,9 +1007,7 @@ class AgentBot:
                 return "injected"
             return "mixed"
         uses_standalone_event_cache = runtime_event_cache is support.event_cache
-        uses_standalone_coordinator = (
-            runtime_coordinator is support.event_cache_write_coordinator
-        )
+        uses_standalone_coordinator = runtime_coordinator is support.event_cache_write_coordinator
         if uses_standalone_event_cache and uses_standalone_coordinator:
             return "standalone"
         if not uses_standalone_event_cache and not uses_standalone_coordinator:
@@ -1798,7 +1796,7 @@ class TeamBot(AgentBot):
 
         media_inputs = media or MediaInputs()
 
-        event_id = await self._generate_team_response_helper(
+        return await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
@@ -1835,4 +1833,3 @@ class TeamBot(AgentBot):
             matrix_run_metadata=matrix_run_metadata,
             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )
-        return event_id

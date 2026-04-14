@@ -2,7 +2,7 @@
 
 import os
 import re
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
@@ -39,6 +39,7 @@ __all__ = [
     "create_mock_room",
     "install_edit_message_mock",
     "install_generate_response_mock",
+    "install_runtime_cache_support",
     "install_send_response_mock",
     "install_send_skill_command_response_mock",
     "make_event_cache_mock",
@@ -115,12 +116,43 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
 
 def make_event_cache_mock() -> AsyncMock:
     """Return an async mock shaped like the event cache protocol."""
-    return AsyncMock(spec=_EventCache)
+    event_cache = AsyncMock(spec=_EventCache)
+    event_cache.get_event.return_value = None
+    event_cache.get_latest_edit.return_value = None
+    event_cache.get_thread_events.return_value = None
+    event_cache.get_thread_id_for_event.return_value = None
+    event_cache.append_event.return_value = True
+    event_cache.append_thread_event.return_value = False
+    event_cache.redact_event.return_value = False
+    return event_cache
 
 
 def make_event_cache_write_coordinator_mock() -> MagicMock:
     """Return a mock shaped like the event-cache write coordinator."""
-    return MagicMock(spec=_EventCacheWriteCoordinator)
+
+    async def _queue_room_update(
+        _room_id: str,
+        update_coro_factory: Callable[[], Awaitable[object]],
+        *,
+        name: str,
+    ) -> object:
+        del name
+        return await update_coro_factory()
+
+    coordinator = MagicMock(spec=_EventCacheWriteCoordinator)
+    coordinator.wait_for_room_idle = AsyncMock(return_value=None)
+    coordinator.queue_room_update = AsyncMock(side_effect=_queue_room_update)
+    return coordinator
+
+
+def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
+    """Attach required cache runtime support to one test bot."""
+    if bot._runtime_view.event_cache is None:
+        bot.event_cache = make_event_cache_mock()
+    if bot._runtime_view.event_cache_write_coordinator is None:
+        bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
+    sync_bot_runtime_state(bot)
+    return bot
 
 
 def normalize_console_output(text: str) -> str:
@@ -432,7 +464,7 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
 
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
-    sync_bot_runtime_state(bot)
+    install_runtime_cache_support(bot)
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
     rebuilt_changes = {

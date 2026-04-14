@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `mindroom.matrix.conversation_cache` the required read-through owner of Matrix conversation data, remove split cache ownership, and eliminate stale-read and duplicate-summary regressions.
+**Goal:** Make `mindroom.matrix.conversation_cache` the required read-through owner of Matrix conversation data, enforce the thread-cache boundary uniformly, and eliminate stale-read and duplicate-summary regressions.
 
-**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, and repair policy. Standalone and orchestrated runtimes inject that public cache service, while private cache backend modules stay internal to `mindroom.matrix`.
+**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, and repair policy. This enforcement pass finishes that architecture at the thread-cache seam by routing all thread-affecting writes through one mutation contract, requiring verified homeserver-backed repair before clearing repair state, and making resolved-cache reuse decisions under the per-thread entry lock.
 
 **Tech Stack:** Python, asyncio, aiosqlite, matrix-nio, pytest, AsyncMock, existing Matrix cache and bot runtime abstractions.
 
@@ -17,6 +17,7 @@
 - Modify: `src/mindroom/matrix/conversation_cache.py`
 - Modify: `src/mindroom/matrix/client.py`
 - Modify: `src/mindroom/matrix/thread_history_result.py`
+- Modify: `src/mindroom/matrix/thread_cache.py`
 
 ### Runtime ownership and injection
 
@@ -41,7 +42,14 @@
 - Modify: `tests/test_multi_agent_bot.py`
 - Modify: `tests/test_scheduling.py`
 - Modify: `tests/test_matrix_sync_tokens.py`
+- Modify: `tests/test_tool_dependencies.py`
 - Modify any nearby focused test modules needed for cache-init and summary-path coverage
+
+### Repo hygiene
+
+- Modify: `src/mindroom/post_response_effects.py`
+- Modify: `src/mindroom/response_runner.py`
+- Modify: `src/mindroom/thread_summary.py`
 
 ## Task 1: Lock in required-cache runtime ownership
 
@@ -260,5 +268,86 @@ Write one failing test per uncovered regression before changing production code.
 Run: `uv run pytest tests/test_send_file_message.py tests/test_thread_history.py tests/test_matrix_message_tool.py -x -n 0 --no-cov -v`
 
 - [ ] **Step 4: Commit final integration fixes**
+
+Use a focused commit after tests pass.
+
+## Task 8: Enforce uniform mutation and repair contracts
+
+**Files:**
+- Modify: `tests/test_threading_error.py`
+- Modify: `src/mindroom/matrix/conversation_cache.py`
+- Modify: `src/mindroom/matrix/client.py`
+
+- [ ] **Step 1: Write failing tests for degraded live-mutation results**
+
+Add tests that prove:
+- live append and redaction paths treat non-exception failed write results as repair-required outcomes
+- the same shared helper owns the version, invalidation, and repair behavior for live and sync thread-affecting writes
+
+- [ ] **Step 2: Write failing tests for degraded repair completion**
+
+Add tests that prove:
+- a forced repair read does not clear `repair_required` when the homeserver fallback degrades into an empty room-scan result
+- an empty degraded refill is not stored as a healed resolved-thread entry
+
+- [ ] **Step 3: Run the focused threading tests to verify they fail**
+
+Run: `uv run pytest tests/test_threading_error.py -x -n 0 --no-cov -v`
+
+- [ ] **Step 4: Implement shared mutation and repair helpers**
+
+Implement:
+- one shared helper for thread-affecting cache mutation outcomes
+- one shared helper for verified repair completion
+- read-path handling that clears repair-required only after a verified authoritative refill
+
+- [ ] **Step 5: Run the focused threading tests to verify they pass**
+
+Run: `uv run pytest tests/test_threading_error.py -x -n 0 --no-cov -v`
+
+- [ ] **Step 6: Commit**
+
+Use a focused commit after tests pass.
+
+## Task 9: Enforce lock-coherent resolved-cache reuse and repo hygiene
+
+**Files:**
+- Modify: `tests/test_threading_error.py`
+- Modify: `tests/test_tool_dependencies.py`
+- Modify: `src/mindroom/matrix/conversation_cache.py`
+- Modify: `src/mindroom/post_response_effects.py`
+- Modify: `src/mindroom/bot.py`
+- Modify: `src/mindroom/response_runner.py`
+- Modify: `src/mindroom/thread_summary.py`
+
+- [ ] **Step 1: Write failing tests for pre-lock stale reuse**
+
+Add a regression test that proves a thread update that lands between pre-read setup and lock acquisition cannot reuse stale resolved history for one call.
+
+- [ ] **Step 2: Run the focused threading and metadata tests to verify they fail**
+
+Run: `uv run pytest tests/test_threading_error.py tests/test_tool_dependencies.py -x -n 0 --no-cov -v`
+
+- [ ] **Step 3: Move reuse decisions under the thread entry lock**
+
+Implement:
+- version and repair-required rechecks after lock acquisition
+- helper extraction where needed to keep the function within repo complexity limits
+
+- [ ] **Step 4: Clean repo-policy violations in touched files**
+
+Implement:
+- update stale dependency metadata for `_event_cache.py`
+- remove dead imports
+- apply formatter-clean structure
+- resolve the touched Ruff violations without adding suppression-only branches
+
+- [ ] **Step 5: Run Ruff and focused tests**
+
+Run: `uv run ruff check $(git diff --diff-filter=ACMRT --name-only origin/main..HEAD -- '*.py')`
+Run: `uv run ruff format --check $(git diff --diff-filter=ACMRT --name-only origin/main..HEAD -- '*.py')`
+Run: `uv run pytest tests/test_threading_error.py tests/test_tool_dependencies.py -x -n 0 --no-cov -v`
+
+- [ ] **Step 6: Commit**
 
 Use a focused commit after tests pass.

@@ -32,7 +32,15 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     visible_body_from_event_source,
 )
-from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.thread_history_result import (
+    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
+    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    ThreadHistoryResult,
+    thread_history_result,
+)
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 logger = get_logger(__name__)
@@ -173,6 +181,7 @@ class _ThreadHistoryFetchResult:
     event_sources: list[dict[str, Any]]
     resolution_ms: float
     sidecar_hydration_ms: float
+    authoritative_refill: bool
 
 
 def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
@@ -1450,6 +1459,7 @@ async def _load_cached_thread_history(
             "incremental_refresh_ms": incremental_refresh_ms,
             "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
             "sidecar_hydration_ms": sidecar_hydration_ms,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
         },
     )
 
@@ -1629,7 +1639,7 @@ async def _store_thread_history_cache(
     room_id: str,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
-) -> None:
+) -> bool:
     """Best-effort replacement of one cached thread snapshot."""
     try:
         await event_cache.invalidate_thread(room_id, thread_id)
@@ -1641,6 +1651,8 @@ async def _store_thread_history_cache(
             thread_id=thread_id,
             error=str(exc),
         )
+        return False
+    return True
 
 
 def _bundled_replacement_event(
@@ -1942,12 +1954,14 @@ async def fetch_thread_history(
         return cached_history
 
     fetch_result = await _fetch_thread_history_with_events(client, room_id, thread_id)
-    await _store_thread_history_cache(
-        event_cache,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_sources=fetch_result.event_sources,
-    )
+    cache_refilled = False
+    if fetch_result.authoritative_refill:
+        cache_refilled = await _store_thread_history_cache(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_sources=fetch_result.event_sources,
+        )
     return _thread_history_result(
         fetch_result.history,
         is_full_history=True,
@@ -1956,6 +1970,9 @@ async def fetch_thread_history(
             "incremental_refresh_ms": 0.0,
             "resolution_ms": fetch_result.resolution_ms,
             "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+            THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: fetch_result.authoritative_refill,
+            THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: cache_refilled,
         },
     )
 
@@ -1984,6 +2001,7 @@ async def _fetch_thread_history_via_relations_with_events(
         event_sources=event_sources,
         resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
         sidecar_hydration_ms=sidecar_hydration_ms,
+        authoritative_refill=True,
     )
 
 
@@ -2002,7 +2020,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
     thread_id: str,
 ) -> _ThreadHistoryFetchResult:
     """Fetch all thread messages by scanning room history pages."""
-    event_sources = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
+    event_sources, root_message_found = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
     resolution_started = time.perf_counter()
     history, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
         client,
@@ -2015,6 +2033,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
         event_sources=event_sources,
         resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
         sidecar_hydration_ms=sidecar_hydration_ms,
+        authoritative_refill=root_message_found,
     )
 
 
@@ -2048,7 +2067,7 @@ async def _fetch_thread_event_sources_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Fetch thread event sources by scanning room history pages."""
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
     relevant_message_sources: dict[str, dict[str, Any]] = {}
@@ -2093,7 +2112,7 @@ async def _fetch_thread_event_sources_via_room_messages(
         for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items()
         if original_event_id in relevant_event_ids or edit_thread_id == thread_id
     )
-    return event_sources
+    return event_sources, root_message_found
 
 
 async def _fetch_thread_history_via_room_messages(

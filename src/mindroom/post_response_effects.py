@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from mindroom import constants, interactive
+from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.message_target import MessageTarget
@@ -252,6 +252,7 @@ class PostResponseEffectsSupport:
             queue_thread_summary=self.queue_thread_summary,
             record_handled_turn=record_handled_turn,
         )
+
 
 def clear_tracked_response_message(
     stop_manager: StopManager,

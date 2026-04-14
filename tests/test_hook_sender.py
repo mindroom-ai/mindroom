@@ -50,6 +50,7 @@ from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     install_send_skill_command_response_mock,
     orchestrator_runtime_paths,
     replace_turn_controller_deps,
@@ -167,6 +168,7 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
+    install_runtime_cache_support(bot)
     sync_bot_runtime_state(bot)
     wrap_extracted_collaborators(bot)
     replace_turn_policy_deps(
@@ -202,6 +204,7 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
+    install_runtime_cache_support(bot)
     sync_bot_runtime_state(bot)
     wrap_extracted_collaborators(bot)
     replace_turn_policy_deps(

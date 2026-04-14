@@ -164,6 +164,25 @@ Sync errors do not mark cached data as fresher.
 
 Thread summaries are queued from one owner path only.
 
+### Invariant 6
+
+Thread-affecting cache mutations interpret persistence outcomes uniformly.
+Successful local mutation means the persisted raw cache is usable.
+Any failed or degraded mutation outcome marks the thread repair-required.
+
+### Invariant 7
+
+Repair-required state is only cleared after a verified successful homeserver-backed refill.
+An empty or degraded fallback result does not count as repair success.
+
+### Invariant 8
+
+Resolved-thread cache reuse decisions observe thread version and repair-required state under the same per-thread lock that guards cache fill and reuse.
+
+### Invariant 9
+
+The branch remains Ruff-clean, formatter-clean, and test metadata reflects the current file layout.
+
 ## Read Path
 
 1. Caller requests an event, snapshot, or full thread history through `MatrixConversationCache`.
@@ -179,8 +198,11 @@ Thread summaries are queued from one owner path only.
 ### Live events
 
 Live message, edit, and redaction updates flow through `MatrixConversationCache`.
-The service persists the event update first, or marks the thread for repair if persistence fails.
-Only then does it bump versions or invalidate in-memory derived views.
+The service applies one shared mutation policy for thread-affecting writes.
+The write result is classified as success, degraded failure, or exception.
+Success means the persisted raw cache is usable for subsequent reads.
+Any degraded failure or exception marks the thread repair-required and invalidates disposable derived state.
+Versioning and invalidation behavior follows that shared policy instead of being open-coded at each call site.
 
 ### Sync timeline
 
@@ -202,10 +224,55 @@ Runtime write failure is not fatal to the whole process.
 Instead, affected derived views are invalidated and the affected thread is marked repair-required.
 Subsequent reads repair from the homeserver through the cache service.
 
+### Runtime degraded persistence result
+
+Primitive cache writes that return a non-exception failure signal are treated the same as runtime write failure.
+They are not advisory success.
+The cache service marks the thread repair-required and does not pretend the mutation produced a reusable persisted state.
+
 ### Runtime read failure
 
 If persisted reads fail, the cache service attempts a repair read from the homeserver where possible.
 If repair cannot succeed, the read fails explicitly rather than silently serving data known to be suspect.
+
+### Runtime repair failure
+
+If a forced repair read cannot produce a verified authoritative refill, the thread remains repair-required.
+The service does not cache an empty healed result just because one fallback path returned no events.
+Repair completion requires proof that the homeserver-backed refill actually succeeded.
+
+## Enforcement Pass
+
+This implementation pass finishes the architecture at the thread-cache seam.
+It does not redesign the whole cache stack.
+It enforces the chosen architecture everywhere that currently advertises the wrong pattern.
+
+### Mutation contract
+
+All thread-affecting cache writes in `conversation_cache.py` must route through shared helpers.
+Those helpers own how boolean results, exceptions, version bumps, resolved-cache invalidation, and repair-required markers interact.
+Live append, live redaction, sync append, and sync redaction paths do not encode their own partial variants of that policy.
+
+### Repair contract
+
+Homeserver repair paths must distinguish between:
+
+- cache hit
+- verified homeserver-backed refill
+- degraded or failed refill
+
+Only the verified refill path may clear repair-required state.
+The repair path must not silently replace a broken thread with an empty cached thread after a transient homeserver failure.
+
+### Read-side concurrency contract
+
+Resolved-thread cache reuse decisions must be made after acquiring the per-thread entry lock.
+The code may not snapshot thread version or repair-required state before lock acquisition and then use that stale snapshot to decide whether to reuse a cached entry.
+
+### Repo-policy contract
+
+This pass also removes repo-level examples that would teach future agents the wrong standard.
+That includes stale dependency metadata, lint violations, formatter violations, and any touched helper that encodes the wrong ownership or contract shape.
 
 ## Boundary Changes Required
 
@@ -223,9 +290,13 @@ If repair cannot succeed, the read fails explicitly rather than silently serving
 - `AgentBot` construction does not resolve cache paths or create private cache instances before runtime initialization.
 - Sync-delivered edits that require original-event thread lookup invalidate resolved-thread state correctly.
 - Failed sync persistence marks threads repair-required and forces homeserver-backed repair on next read.
+- Live thread mutations that receive degraded write results mark the thread repair-required through the same shared mutation contract.
 - Sync errors do not update freshness clocks used to suppress repair reads.
+- Forced repair reads do not clear repair-required after degraded homeserver fallback results.
+- Resolved-thread cache reuse rechecks version and repair-required state after taking the per-thread entry lock.
 - Team responses queue exactly one summary job through post-response effects.
 - API schedule editing does not instantiate private cache backends directly.
+- Dependency metadata and lint checks match the renamed private cache modules and touched files.
 
 ### Integration tests
 

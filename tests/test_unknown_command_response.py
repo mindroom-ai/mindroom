@@ -13,7 +13,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+)
 
 
 @pytest.mark.asyncio
@@ -55,6 +61,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
+    install_runtime_cache_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -155,6 +162,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
+    install_runtime_cache_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -277,6 +285,7 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
+    install_runtime_cache_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)

@@ -105,6 +105,8 @@ from tests.conftest import (
     install_edit_message_mock,
     install_generate_response_mock,
     install_send_response_mock,
+    make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
     patch_response_runner_module,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
@@ -146,6 +148,12 @@ def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
         state_writer=wrapped_bot._conversation_state_writer,
     )
     return wrapped_bot
+
+
+def _install_runtime_cache_support(bot: AgentBot | TeamBot) -> None:
+    """Attach one required cache runtime double to a bot test instance."""
+    bot.event_cache = make_event_cache_mock()
+    bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
 
 
 def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> TurnPolicy:
@@ -1198,6 +1206,7 @@ class TestAgentBot:
             runtime_paths=runtime_paths_for(config),
         )
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
 
         # Mock presence check to return user online when streaming is enabled
         # We need to create a proper mock response that will be returned by get_presence
@@ -2168,6 +2177,7 @@ class TestAgentBot:
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -2586,6 +2596,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
+        _install_runtime_cache_support(bot)
         bot.client.room_get_event = AsyncMock(
             side_effect=[
                 nio.RoomGetEventResponse.from_dict(
@@ -3015,6 +3026,7 @@ class TestAgentBot:
         config.timezone = "America/Los_Angeles"
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
 
         bob_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
         alice_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -3130,6 +3142,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
 
         with (
             patch.object(
@@ -3216,6 +3229,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
 
         async def cached_history_refresh(_room_id: str, _thread_id: str) -> list[ResolvedVisibleMessage]:
             return fresh_history
@@ -3296,6 +3310,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             room_id="!test:localhost",
@@ -3387,6 +3402,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         thread_history = [
             _visible_message(
@@ -3468,6 +3484,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
 
         with (
             patch.object(
@@ -3554,6 +3571,7 @@ class TestAgentBot:
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -3640,6 +3658,7 @@ class TestAgentBot:
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -3735,6 +3754,7 @@ class TestAgentBot:
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -3849,6 +3869,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
         with (
@@ -3917,6 +3938,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
@@ -3975,6 +3997,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])

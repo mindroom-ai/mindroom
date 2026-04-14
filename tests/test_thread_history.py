@@ -36,6 +36,12 @@ from mindroom.matrix.client import (
 from mindroom.matrix.client import (
     fetch_thread_snapshot as _fetch_thread_snapshot_impl,
 )
+from mindroom.matrix.thread_history_result import (
+    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
+    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+)
 from tests.conftest import make_event_cache_mock, make_matrix_client_mock
 
 if TYPE_CHECKING:
@@ -504,6 +510,7 @@ class TestThreadHistory:
                         event_sources=[{"event_id": "$thread_root"}],
                         resolution_ms=0.0,
                         sidecar_hydration_ms=0.0,
+                        authoritative_refill=True,
                     ),
                 ),
             ) as mock_fallback,
@@ -519,6 +526,48 @@ class TestThreadHistory:
         assert history == fallback_history
         mock_fallback.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
         mock_store.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_skips_cache_store_for_degraded_room_scan_result(self) -> None:
+        """A degraded room-scan refill should not be persisted as a healed thread cache entry."""
+        client = AsyncMock()
+        fallback_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="fallback",
+                event_id="$thread_root",
+                content={"body": "fallback"},
+            ),
+        ]
+
+        with (
+            patch("mindroom.matrix.client._load_cached_thread_history", new=AsyncMock(return_value=None)),
+            patch(
+                "mindroom.matrix.client._fetch_thread_history_with_events",
+                new=AsyncMock(
+                    return_value=MagicMock(
+                        history=fallback_history,
+                        event_sources=[],
+                        resolution_ms=0.0,
+                        sidecar_hydration_ms=0.0,
+                        authoritative_refill=False,
+                    ),
+                ),
+            ),
+            patch("mindroom.matrix.client._store_thread_history_cache", new=AsyncMock()) as mock_store,
+        ):
+            history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=make_event_cache_mock(),
+            )
+
+        assert [message.event_id for message in history] == ["$thread_root"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC] is False
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC] is False
+        mock_store.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_marks_room_scan_fallback_as_full_history(self) -> None:

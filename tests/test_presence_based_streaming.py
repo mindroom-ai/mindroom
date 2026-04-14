@@ -13,7 +13,7 @@ from mindroom.bot import AgentBot, create_bot_for_entity
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_runtime_cache_support, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -294,6 +294,7 @@ class TestBotIntegration:
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
+        install_runtime_cache_support(bot)
 
         # Simulate a message from a user
         await bot._generate_response(
@@ -356,6 +357,7 @@ class TestBotIntegration:
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
+        install_runtime_cache_support(bot)
 
         # Simulate a message from a user
         await bot._generate_response(

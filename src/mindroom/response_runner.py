@@ -1008,6 +1008,7 @@ class ResponseRunner:
             session_type=session_type,
             create_storage=team_storage_factory,
         )
+
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
             nonlocal delivery_result, tracked_event_id, delivery_stage_started
             delivery_request = self._request_for_delivery(delivery_request_base, message_id=message_id)
@@ -2209,6 +2210,7 @@ class ResponseRunner:
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
         )
+
         def note_delivery_started(event_id: str | None) -> None:
             nonlocal delivery_stage_started, tracked_event_id
             delivery_stage_started = True

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     install_send_response_mock,
     make_event_cache_mock,
     runtime_paths_for,
@@ -78,6 +79,7 @@ def _agent_bot(
         runtime_paths=runtime_paths_for(config),
         rooms=[] if rooms is None else rooms,
     )
+    install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 

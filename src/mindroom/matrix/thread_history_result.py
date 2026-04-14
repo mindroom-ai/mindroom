@@ -11,6 +11,12 @@ if TYPE_CHECKING:
 
 type ThreadHistoryDiagnosticValue = str | int | float | bool
 
+THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
+THREAD_HISTORY_SOURCE_CACHE = "cache"
+THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
+THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC = "authoritative_refill"
+THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC = "cache_refilled"
+
 
 class ThreadHistoryResult(list["ResolvedVisibleMessage"]):
     """List subclass that preserves whether the history is already fully hydrated."""
@@ -50,3 +56,19 @@ def thread_history_result(
         thread_version=thread_version,
         diagnostics=diagnostics,
     )
+
+
+def thread_history_read_source(history: ThreadHistoryResult) -> str | None:
+    """Return the logical source that produced one thread-history result."""
+    source = history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
+    return source if isinstance(source, str) else None
+
+
+def thread_history_is_authoritative_refill(history: ThreadHistoryResult) -> bool:
+    """Return whether one homeserver fetch produced an authoritative refill candidate."""
+    return history.diagnostics.get(THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC) is True
+
+
+def thread_history_cache_refilled(history: ThreadHistoryResult) -> bool:
+    """Return whether one homeserver fetch durably repopulated the raw cache."""
+    return history.diagnostics.get(THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC) is True

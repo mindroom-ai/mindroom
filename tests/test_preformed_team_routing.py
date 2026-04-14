@@ -25,6 +25,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.conftest import (
     bind_runtime_paths,
+    install_runtime_cache_support,
     make_visible_message,
     patch_response_runner_module,
     runtime_paths_for,
@@ -118,6 +119,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     )
     router = AgentBot(router_user, tmp_path, config_with_team, runtime_paths)
     router.client = _make_matrix_client_mock()
+    install_runtime_cache_support(router)
 
     # Room has router + team + two agents and the human user
     team_user_id = ids["t1"].full_id
@@ -165,6 +167,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
@@ -232,6 +235,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -315,6 +319,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
     bot._edit_message = AsyncMock(return_value=True)
@@ -368,6 +373,7 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
 
     team_user_id = ids["t1"].full_id
@@ -453,6 +459,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401

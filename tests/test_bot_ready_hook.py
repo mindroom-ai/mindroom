@@ -28,6 +28,7 @@ from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -50,17 +51,19 @@ def _config(tmp_path: Path) -> Config:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    return AgentBot(
-        agent_user=AgentMatrixUser(
-            agent_name=agent_name,
-            password=TEST_PASSWORD,
-            display_name=agent_name.title(),
-            user_id=f"@mindroom_{agent_name}:localhost",
+    return install_runtime_cache_support(
+        AgentBot(
+            agent_user=AgentMatrixUser(
+                agent_name=agent_name,
+                password=TEST_PASSWORD,
+                display_name=agent_name.title(),
+                user_id=f"@mindroom_{agent_name}:localhost",
+            ),
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!room:localhost"],
         ),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!room:localhost"],
     )
 
 
