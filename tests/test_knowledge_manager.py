@@ -11,10 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 from pydantic import ValidationError
 
+from agno.knowledge.chunking.fixed import FixedSizeChunking
+from agno.knowledge.document.base import Document
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
@@ -498,8 +501,26 @@ async def test_index_file_uses_configured_chunk_settings(
     assert getattr(reader, "chunk_size", None) == 640
     chunking_strategy = getattr(reader, "chunking_strategy", None)
     assert chunking_strategy is not None
+    assert isinstance(chunking_strategy, SafeFixedSizeChunking)
     assert getattr(chunking_strategy, "chunk_size", None) == 640
     assert getattr(chunking_strategy, "overlap", None) == 32
+
+
+def test_safe_fixed_size_chunking_avoids_micro_chunk_explosion() -> None:
+    """Whitespace backtracking should not degrade into one-character progress."""
+    document = Document(
+        id="doc-1",
+        name="doc",
+        content=("a " + "x" * 30 + " ") * 4,
+        meta_data={},
+    )
+
+    original_chunks = FixedSizeChunking(chunk_size=20, overlap=5).chunk(document)
+    safe_chunks = SafeFixedSizeChunking(chunk_size=20, overlap=5).chunk(document)
+
+    assert any(len(chunk.content) <= 5 for chunk in original_chunks)
+    assert len(safe_chunks) < len(original_chunks)
+    assert all(len(chunk.content) >= 10 for chunk in safe_chunks[:-1])
 
 
 def test_knowledge_base_chunk_overlap_must_be_smaller_than_chunk_size() -> None:

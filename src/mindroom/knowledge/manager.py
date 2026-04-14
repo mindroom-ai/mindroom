@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, urlparse, urlunparse
 
-from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
@@ -33,6 +32,7 @@ from mindroom.embeddings import (
     create_sentence_transformers_embedder,
     effective_knowledge_embedder_signature,
 )
+from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import ResolvedKnowledgeBinding, resolve_knowledge_binding
 
@@ -797,7 +797,7 @@ class KnowledgeManager:
         configured_reader = deepcopy(reader)
         configured_reader.chunk = True
         configured_reader.chunk_size = base_config.chunk_size
-        configured_reader.chunking_strategy = FixedSizeChunking(
+        configured_reader.chunking_strategy = SafeFixedSizeChunking(
             chunk_size=base_config.chunk_size,
             overlap=base_config.chunk_overlap,
         )
