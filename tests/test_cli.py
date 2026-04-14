@@ -180,7 +180,7 @@ class TestUserAccountManagement:
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Existing stored credentials should be used via direct login."""
+        """Existing stored credentials should be reused without re-registration."""
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with internal user account
@@ -189,13 +189,6 @@ class TestUserAccountManagement:
 
         runtime_paths = _runtime_paths(tmp_path)
         state.save(runtime_paths=runtime_paths)
-
-        mock_client.login.return_value = nio.LoginResponse(
-            user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.set_displayname.return_value = AsyncMock()
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
@@ -216,8 +209,8 @@ class TestUserAccountManagement:
             assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "existing_password"  # noqa: S105
 
             mock_client.register.assert_not_called()
-            mock_client.login.assert_called_once_with("existing_password")
-            mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
+            mock_client.login.assert_not_called()
+            mock_client.set_displayname.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_recreates_account_when_stored_login_fails(
@@ -225,7 +218,7 @@ class TestUserAccountManagement:
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Failed login with stored credentials should retry registration."""
+        """Stored credentials should be preserved until an explicit login happens."""
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with invalid credentials
@@ -234,20 +227,6 @@ class TestUserAccountManagement:
 
         runtime_paths = _runtime_paths(tmp_path)
         state.save(runtime_paths=runtime_paths)
-
-        # Mock failed login
-        mock_client.login.return_value = nio.LoginError(
-            message="Invalid username or password",
-            status_code="M_FORBIDDEN",
-        )
-
-        # Mock successful registration for the recreated account.
-        mock_client.register.return_value = nio.RegisterResponse(
-            user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.set_displayname.return_value = AsyncMock()
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
@@ -267,12 +246,11 @@ class TestUserAccountManagement:
             result_config = MatrixState.load(runtime_paths=runtime_paths)
             assert INTERNAL_USER_ACCOUNT_KEY in result_config.accounts
             assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-            # Password stays the same - create_agent_user reuses existing credentials
             assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "wrong_password"  # noqa: S105
 
-            mock_client.login.assert_called_once_with("wrong_password")
-            mock_client.register.assert_called_once()
-            mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
+            mock_client.login.assert_not_called()
+            mock_client.register.assert_not_called()
+            mock_client.set_displayname.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_uses_configured_identity(
