@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 _RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
-_PENDING_LOOKUP_REPAIR_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _EVENT_CACHE_SCHEMA_VERSION = 2
 logger = get_logger(__name__)
 
@@ -314,25 +313,6 @@ class _EventCache:
             await self._db.close()
             self._db = None
             self._room_locks.clear()
-
-    async def _prune_stale_pending_lookup_repairs(
-        self,
-        db: aiosqlite.Connection,
-        room_id: str,
-    ) -> None:
-        """Delete unmatched lookup repairs that have aged beyond the retention horizon."""
-        cutoff = time.time() - _PENDING_LOOKUP_REPAIR_RETENTION_SECONDS
-        cursor = await db.execute(
-            """
-            DELETE FROM pending_lookup_repairs
-            WHERE room_id = ? AND created_at < ?
-            """,
-            (room_id, cutoff),
-        )
-        deleted_rows = cursor.rowcount
-        await cursor.close()
-        if deleted_rows:
-            await db.commit()
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
@@ -699,7 +679,6 @@ class _EventCache:
     async def mark_pending_lookup_repair(self, room_id: str, event_id: str) -> None:
         """Persist one unresolved event-to-thread repair obligation."""
         async with self._acquire_db_operation(room_id, operation="mark_pending_lookup_repair") as db:
-            await self._prune_stale_pending_lookup_repairs(db, room_id)
             await db.execute(
                 """
                 INSERT OR REPLACE INTO pending_lookup_repairs(room_id, event_id, created_at)
@@ -712,7 +691,6 @@ class _EventCache:
     async def matching_pending_lookup_repairs(self, room_id: str, thread_id: str) -> frozenset[str]:
         """Return unresolved repair event IDs that now map durably to one thread."""
         async with self._acquire_db_operation(room_id, operation="matching_pending_lookup_repairs") as db:
-            await self._prune_stale_pending_lookup_repairs(db, room_id)
             cursor = await db.execute(
                 """
                 SELECT pending_lookup_repairs.event_id
@@ -737,7 +715,6 @@ class _EventCache:
         if not event_ids:
             return frozenset()
         async with self._acquire_db_operation(room_id, operation="pending_lookup_repairs_for_event_ids") as db:
-            await self._prune_stale_pending_lookup_repairs(db, room_id)
             cursor = await db.execute(
                 """
                 SELECT event_id
