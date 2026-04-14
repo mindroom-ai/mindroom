@@ -12,7 +12,13 @@ import pytest
 from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
-from mindroom.matrix._event_cache import _EventCache
+from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
+    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+)
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
@@ -29,12 +35,6 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.client import (
     fetch_thread_snapshot as _fetch_thread_snapshot_impl,
-)
-from mindroom.matrix.thread_history_result import (
-    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
-    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
 )
 from tests.conftest import make_event_cache_mock
 

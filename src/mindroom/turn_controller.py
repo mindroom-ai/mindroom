@@ -60,12 +60,12 @@ from mindroom.inbound_turn_normalizer import (
     VoiceNormalizationRequest,
 )
 from mindroom.logging_config import bound_log_context
+from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.conversation_cache import ThreadRepairRequiredError
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_agent_for_message

@@ -5,16 +5,15 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_cache import resolved_thread_cache_entry
-from mindroom.matrix.thread_cache_helpers import (
+from mindroom.matrix.cache.thread_cache import resolved_thread_cache_entry
+from mindroom.matrix.cache.thread_cache_helpers import (
     event_id_from_event_source,
     latest_visible_thread_event_id,
     log_resolved_thread_cache,
     resolved_cache_diagnostics,
     sort_thread_history_root_first,
 )
-from mindroom.matrix.thread_history_result import (
+from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     ThreadHistoryResult,
     thread_history_cache_refilled,
@@ -22,15 +21,16 @@ from mindroom.matrix.thread_history_result import (
     thread_history_read_source,
     thread_history_result,
 )
+from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import structlog
 
+    from mindroom.matrix.cache.thread_cache import ResolvedThreadCache, ResolvedThreadCacheEntry
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
-    from mindroom.matrix.thread_cache import ResolvedThreadCache, ResolvedThreadCacheEntry
 
 
 _SYNC_FRESHNESS_WINDOW_SECONDS = 30.0

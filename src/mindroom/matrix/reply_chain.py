@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Any, cast
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import resolve_event_source_content, visible_body_from_event_source
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence

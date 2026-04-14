@@ -4103,6 +4103,7 @@ class TestAgentBot:
         local_room = MagicMock(spec=nio.MatrixRoom)
         local_room.room_id = room_id
         bot.client = MagicMock(rooms={room_id: local_room})
+        bot.event_cache = MagicMock()
         bot.orchestrator = MagicMock()
 
         target = MessageTarget.resolve(room_id=room_id, thread_id="$thread", reply_to_event_id="$event")
@@ -4134,6 +4135,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room_id = "!test:localhost"
         bot.client = MagicMock(rooms={})
+        bot.event_cache = MagicMock()
         bot.orchestrator = MagicMock()
 
         target = MessageTarget.resolve(room_id=room_id, thread_id="$thread", reply_to_event_id="$event")
@@ -4263,6 +4265,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
+        bot.event_cache = MagicMock()
 
         target = MessageTarget.resolve(room_id="!test:localhost", thread_id=None, reply_to_event_id="$root_event")
         context = bot._tool_runtime_support.build_context(

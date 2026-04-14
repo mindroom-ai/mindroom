@@ -22,7 +22,16 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix._event_cache import ConversationEventCache, normalize_event_source_for_cache
+from mindroom.matrix.cache.event_cache import ConversationEventCache, normalize_event_source_for_cache
+from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
+    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    ThreadHistoryResult,
+    thread_history_result,
+)
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -31,15 +40,6 @@ from mindroom.matrix.message_content import (
     extract_edit_body,
     resolve_event_source_content,
     visible_body_from_event_source,
-)
-from mindroom.matrix.thread_history_result import (
-    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
-    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_CACHE,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    ThreadHistoryResult,
-    thread_history_result,
 )
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 

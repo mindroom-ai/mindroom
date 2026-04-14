@@ -26,8 +26,16 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
-from mindroom.matrix._event_cache import _EventCache
-from mindroom.matrix._event_cache_write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.thread_cache import ResolvedThreadCache, resolved_thread_cache_entry
+from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
+    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    thread_history_result,
+)
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import (
     DeliveredMatrixEvent,
     PermanentMatrixStartupError,
@@ -42,14 +50,6 @@ from mindroom.matrix.reply_chain import (
     _merge_thread_and_chain_history,
     _ReplyChainNode,
     _ReplyChainRoot,
-)
-from mindroom.matrix.thread_cache import ResolvedThreadCache, resolved_thread_cache_entry
-from mindroom.matrix.thread_history_result import (
-    THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC,
-    THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    thread_history_result,
 )
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -173,7 +173,7 @@ class TestResolvedThreadCache:
         )
         cache._entries[("!room:localhost", "$thread")].cached_at_monotonic = 10.0
 
-        monkeypatch.setattr("mindroom.matrix.thread_cache.time.monotonic", lambda: 311.0)
+        monkeypatch.setattr("mindroom.matrix.cache.thread_cache.time.monotonic", lambda: 311.0)
 
         lookup = cache.lookup("!room:localhost", "$thread")
 

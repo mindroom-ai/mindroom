@@ -12,8 +12,8 @@ import nio
 import pytest
 from nio.api import RelationshipType
 
-import mindroom.matrix._event_cache as event_cache_module
-from mindroom.matrix._event_cache import _EventCache
+import mindroom.matrix.cache.event_cache as event_cache_module
+from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.client import fetch_thread_history
 from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
 from mindroom.matrix.event_info import EventInfo

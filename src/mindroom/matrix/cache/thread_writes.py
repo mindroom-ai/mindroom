@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.matrix._event_cache import normalize_event_source_for_cache
+from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache
+from mindroom.matrix.cache.thread_cache_helpers import event_id_from_event_source, log_resolved_thread_cache
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_cache_helpers import event_id_from_event_source, log_resolved_thread_cache
 
 if TYPE_CHECKING:
     import asyncio
@@ -18,10 +18,10 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.matrix._event_cache import ConversationEventCache
+    from mindroom.matrix.cache.event_cache import ConversationEventCache
+    from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.reply_chain import ReplyChainCaches
-    from mindroom.matrix.thread_cache import ResolvedThreadCache
 
 
 def _collect_sync_timeline_cache_updates(

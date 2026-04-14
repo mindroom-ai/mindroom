@@ -12,14 +12,18 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix._event_cache import (
+from mindroom.matrix.cache.event_cache import (
     ConversationEventCache,
     normalize_event_source_for_cache,
 )
-from mindroom.matrix._event_cache import (
+from mindroom.matrix.cache.event_cache import (
     _EventCache as EventCache,
 )
-from mindroom.matrix._event_cache_write_coordinator import (
+from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
+from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.cache.thread_reads import ThreadReadPolicy, ThreadRepairRequiredError
+from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
+from mindroom.matrix.cache.write_coordinator import (
     _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
 )
 from mindroom.matrix.client import (
@@ -29,10 +33,6 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
-from mindroom.matrix.thread_cache import ResolvedThreadCache
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.thread_reads import ThreadReadPolicy, ThreadRepairRequiredError
-from mindroom.matrix.thread_writes import ThreadWritePolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence

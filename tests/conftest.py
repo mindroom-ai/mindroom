@@ -20,8 +20,8 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
-from mindroom.matrix._event_cache import _EventCache
-from mindroom.matrix._event_cache_write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import (
     DeliveredMatrixEvent,
     ResolvedVisibleMessage,

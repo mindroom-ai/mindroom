@@ -925,6 +925,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     bot = _agent_bot(tmp_path, config=config)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
+    bot.event_cache = MagicMock()
     bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
     bot.client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
     router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
@@ -1278,6 +1279,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     plugins = [_plugin("tool-policy", [before, on_custom_event])]
     config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
     bot = _agent_bot(tmp_path, config=config)
+    bot.event_cache = MagicMock()
     bot.hook_registry = HookRegistry.from_plugins(plugins)
 
     try:
