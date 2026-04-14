@@ -1068,38 +1068,18 @@ class AgentBot:
             )
 
             # Register media callbacks on all agents (each agent handles its own routing)
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
+            media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
+            for event_type in (
                 nio.RoomMessageImage,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
                 nio.RoomEncryptedImage,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
                 nio.RoomMessageFile,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
                 nio.RoomEncryptedFile,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
                 nio.RoomMessageVideo,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
                 nio.RoomEncryptedVideo,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
                 nio.RoomMessageAudio,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
                 nio.RoomEncryptedAudio,
-            )
+            ):
+                client.add_event_callback(media_callback, event_type)
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
