@@ -15,12 +15,6 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.reply_chain import (
-    ReplyChainCaches,
-    canonicalize_related_event_id,
-    derive_conversation_context,
-    derive_conversation_target,
-)
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import check_agent_mentioned
 
@@ -88,7 +82,6 @@ class ConversationResolver:
     """Resolve thread roots, reply-chain context, history, mentions, and ingress envelopes."""
 
     deps: ConversationResolverDeps
-    reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches)
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -292,18 +285,7 @@ class ConversationResolver:
             return event_info.thread_id
         if event_info.thread_id_from_edit:
             return event_info.thread_id_from_edit
-        if not event_info.has_relations:
-            return None
-        relation_seed = event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
-        if relation_seed is None:
-            return None
-        return await canonicalize_related_event_id(
-            self._client(),
-            room.room_id,
-            relation_seed,
-            access=self.deps.conversation_cache,
-            caches=self.reply_chain,
-        )
+        return None
 
     async def derive_conversation_context(
         self,
@@ -312,17 +294,17 @@ class ConversationResolver:
         *,
         allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
-        """Derive conversation context from threads or reply chains."""
-        is_thread, thread_id, thread_history = await derive_conversation_context(
-            self._client(),
+        """Derive conversation context from explicit Matrix threads only."""
+        thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        if thread_id is None:
+            return False, None, []
+
+        thread_history = await self.deps.conversation_cache.get_thread_history(
             room_id,
-            event_info,
-            self.reply_chain,
-            self.deps.logger,
-            self.deps.conversation_cache,
+            thread_id,
             allow_durable_cache=allow_durable_cache,
         )
-        return is_thread, thread_id, thread_history
+        return True, thread_id, list(thread_history)
 
     async def derive_conversation_target(
         self,
@@ -331,16 +313,17 @@ class ConversationResolver:
         *,
         allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
-        """Derive dispatch target using lightweight thread snapshots."""
-        return await derive_conversation_target(
-            self._client(),
+        """Derive dispatch target using explicit-thread snapshots only."""
+        thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        if thread_id is None:
+            return False, None, [], False
+
+        snapshot = await self.deps.conversation_cache.get_thread_snapshot(
             room_id,
-            event_info,
-            self.reply_chain,
-            self.deps.logger,
-            self.deps.conversation_cache,
+            thread_id,
             allow_durable_cache=allow_durable_cache,
         )
+        return True, thread_id, list(snapshot), not snapshot.is_full_history
 
     async def extract_dispatch_context(
         self,

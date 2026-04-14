@@ -410,7 +410,6 @@ class AgentBot:
                 conversation_cache=self._conversation_cache,
             ),
         )
-        self._conversation_cache.bind_reply_chain_caches(lambda: self._conversation_resolver.reply_chain)
         self._inbound_turn_normalizer = InboundTurnNormalizer(
             InboundTurnNormalizerDeps(
                 runtime=self._runtime_view,

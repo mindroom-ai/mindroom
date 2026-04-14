@@ -1428,21 +1428,14 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        with (
-            patch(
-                "mindroom.conversation_resolver.canonicalize_related_event_id",
-                new=AsyncMock(return_value="$thread-root:localhost"),
-            ) as canonicalize_mock,
-            patch.object(
-                bot._conversation_resolver,
-                "derive_conversation_target",
-                new=AsyncMock(side_effect=AssertionError("coalescing should not derive full dispatch target")),
-            ),
+        with patch.object(
+            bot._conversation_resolver,
+            "derive_conversation_target",
+            new=AsyncMock(side_effect=AssertionError("coalescing should not derive full dispatch target")),
         ):
             thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
         assert thread_id is None
-        canonicalize_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(
