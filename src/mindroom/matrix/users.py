@@ -663,8 +663,9 @@ async def create_agent_user(
             raise matrix_startup_error(msg, permanent=True)
         matrix_username = username_value
         password = password_value
-        existing_device_id = existing_creds["device_id"]
-        existing_access_token = existing_creds["access_token"]
+        # Older persisted credentials may not include session fields yet.
+        existing_device_id = existing_creds.get("device_id")
+        existing_access_token = existing_creds.get("access_token")
         logger.info("agent_credentials_loaded", agent=agent_name)
         registration_needed = False
     else:

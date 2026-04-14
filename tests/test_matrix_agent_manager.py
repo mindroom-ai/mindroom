@@ -786,41 +786,34 @@ class TestAgentUserCreation:
     @patch("mindroom.matrix.users.matrix_client")
     @patch("mindroom.matrix.users._save_agent_credentials")
     @patch("mindroom.matrix.users._get_agent_credentials")
-    async def test_create_agent_user_existing_credentials_log_in_directly(
+    async def test_create_agent_user_existing_credentials_reuses_stored_credentials(
         self,
         mock_get_creds: MagicMock,
         mock_save_creds: MagicMock,
         mock_matrix_client: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Existing credentials should be reused via login without re-registration."""
+        """Existing credentials should be reused without re-registration."""
         mock_get_creds.return_value = {
             "username": "mindroom_calculator",
             "password": "existing_pass",
         }
-        mock_client = AsyncMock()
-        mock_client.login.return_value = MagicMock(spec=nio.LoginResponse)
-        mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
         runtime_paths = _runtime_paths(tmp_path)
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent", runtime_paths)
 
         assert agent_user.password == "existing_pass"  # noqa: S105
+        assert agent_user.device_id is None
+        assert agent_user.access_token is None  # noqa: S105
         mock_save_creds.assert_not_called()  # Should not save again
-        mock_matrix_client.assert_called_once_with(
-            "http://localhost:8008",
-            user_id="@mindroom_calculator:localhost",
-            runtime_paths=runtime_paths,
-        )
-        mock_client.login.assert_called_once_with("existing_pass")
-        mock_client.set_displayname.assert_called_once_with("CalculatorAgent")
+        mock_matrix_client.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
     @patch("mindroom.matrix.users.matrix_client")
     @patch("mindroom.matrix.users._save_agent_credentials")
     @patch("mindroom.matrix.users._get_agent_credentials")
-    async def test_create_agent_user_existing_credentials_retry_registration_on_login_failure(
+    async def test_create_agent_user_existing_credentials_preserves_session_fields(
         self,
         mock_get_creds: MagicMock,
         mock_save_creds: MagicMock,
@@ -828,29 +821,23 @@ class TestAgentUserCreation:
         mock_register: AsyncMock,
         tmp_path: Path,
     ) -> None:
-        """Existing credentials should retry registration when login no longer works."""
+        """Existing credentials should preserve stored session fields."""
         mock_get_creds.return_value = {
             "username": "mindroom_calculator",
             "password": "stale_pass",
+            "device_id": "stored_device",
+            "access_token": "stored_token",
         }
-        mock_client = AsyncMock()
-        mock_client.login.return_value = MagicMock(spec=nio.LoginError)
-        mock_matrix_client.return_value.__aenter__.return_value = mock_client
-        mock_register.return_value = "@mindroom_calculator:localhost"
 
         runtime_paths = _runtime_paths(tmp_path)
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent", runtime_paths)
 
         assert agent_user.password == "stale_pass"  # noqa: S105
+        assert agent_user.device_id == "stored_device"
+        assert agent_user.access_token == "stored_token"  # noqa: S105
         mock_save_creds.assert_not_called()
-        mock_client.login.assert_called_once_with("stale_pass")
-        mock_register.assert_called_once_with(
-            homeserver="http://localhost:8008",
-            username="mindroom_calculator",
-            password="stale_pass",  # noqa: S106
-            display_name="CalculatorAgent",
-            runtime_paths=runtime_paths,
-        )
+        mock_matrix_client.assert_not_called()
+        mock_register.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
@@ -897,12 +884,14 @@ class TestAgentLogin:
         with patch("mindroom.matrix.users.login") as mock_login:
             mock_client = AsyncMock()
             mock_client.access_token = "new_token"  # noqa: S105
+            mock_client.device_id = "new_device"
             mock_login.return_value = mock_client
 
             client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
 
             assert client == mock_client
             assert agent_user.access_token == "new_token"  # noqa: S105
+            assert agent_user.device_id == "new_device"
             mock_login.assert_called_once_with(
                 "http://localhost:8008",
                 agent_user.user_id,
