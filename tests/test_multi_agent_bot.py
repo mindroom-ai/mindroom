@@ -6556,7 +6556,11 @@ class TestAgentBot:
         assert context.thread_id == "$thread_root"
         assert [message.event_id for message in context.thread_history] == ["$thread_root"]
         assert context.requires_full_thread_history is True
-        mock_snapshot.assert_awaited_once_with(room.room_id, "$thread_root")
+        mock_snapshot.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root",
+            allow_durable_cache=False,
+        )
         mock_history.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -6616,7 +6620,14 @@ class TestAgentBot:
         assert context.thread_id == "$thread_root"
         assert context.thread_history == snapshot_history
         assert context.requires_full_thread_history is True
-        assert mock_snapshot.await_count == 1
+        mock_snapshot.assert_awaited_once_with(
+            bot.client,
+            room.room_id,
+            "$thread_root",
+            event_cache=bot.event_cache,
+            runtime_started_at=bot._runtime_view.runtime_started_at,
+            allow_durable_cache=False,
+        )
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(  # noqa: PLR0915

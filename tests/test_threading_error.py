@@ -2203,7 +2203,11 @@ class TestThreadingBehavior:
         allow_refresh = asyncio.Event()
         queued_update_started = asyncio.Event()
 
-        async def slow_refresh(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+        async def slow_refresh(
+            _room_id: str,
+            _thread_id: str,
+            _allow_durable_cache: bool,
+        ) -> ThreadHistoryResult:
             refresh_started.set()
             await allow_refresh.wait()
             return thread_history_result(
@@ -2244,7 +2248,11 @@ class TestThreadingBehavior:
         allow_refresh = asyncio.Event()
         queued_update_started = asyncio.Event()
 
-        async def slow_refresh(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+        async def slow_refresh(
+            _room_id: str,
+            _thread_id: str,
+            _allow_durable_cache: bool,
+        ) -> ThreadHistoryResult:
             refresh_started.set()
             await allow_refresh.wait()
             return thread_history_result(
@@ -2321,7 +2329,11 @@ class TestThreadingBehavior:
             raw_append_committed.set()
             return True
 
-        async def fetch_fresh_history(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+        async def fetch_fresh_history(
+            _room_id: str,
+            _thread_id: str,
+            _allow_durable_cache: bool,
+        ) -> ThreadHistoryResult:
             thread_state["value"] = ThreadCacheState(
                 validated_at=time.time(),
                 invalidated_at=None,
@@ -2375,7 +2387,11 @@ class TestThreadingBehavior:
         await write_task
 
         assert [message.body for message in history] == ["Root", "Old reply", "New reply"]
-        access._reads.fetch_thread_history_from_client.assert_awaited_once_with("!room:localhost", "$thread:localhost")
+        access._reads.fetch_thread_history_from_client.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread:localhost",
+            True,
+        )
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_lookup_refetches_invalidated_thread_tail(
@@ -2860,6 +2876,7 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
+            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -2917,6 +2934,7 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
+            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -2963,6 +2981,7 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
+            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -3026,6 +3045,7 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
+            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -3585,6 +3605,7 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
+            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -3805,10 +3826,15 @@ class TestThreadingBehavior:
         assert full_context.thread_history[-1].content["body"] == "Hydrated plain reply from sidecar"
         bot.client.download.assert_awaited_once()
         assert bot.client.room_get_event.await_count == 2
-        mock_snapshot.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+        mock_snapshot.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root:localhost",
+            allow_durable_cache=False,
+        )
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
+            allow_durable_cache=False,
         )
 
     @pytest.mark.asyncio
@@ -3936,6 +3962,7 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(
             room.room_id,
             "$root:localhost",
+            allow_durable_cache=False,
         )
 
     def test_merge_thread_and_chain_history_preserves_chronological_order(self) -> None:

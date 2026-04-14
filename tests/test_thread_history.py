@@ -14,7 +14,7 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 import mindroom.matrix.client as matrix_client_module
-from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
@@ -2042,8 +2042,23 @@ class TestThreadHistoryCache:
         assert recovered_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_gracefully_degrades_when_cache_read_fails(self) -> None:
-        """Cache write errors should not fail a successful homeserver fetch."""
+    @pytest.mark.parametrize(
+        ("cache_state_side_effect", "cached_events_side_effect"),
+        [
+            (RuntimeError("db state read broken"), None),
+            (
+                None,
+                RuntimeError("db event read broken"),
+            ),
+        ],
+        ids=["thread_cache_state_read_failure", "thread_events_read_failure"],
+    )
+    async def test_fetch_thread_history_gracefully_degrades_when_cache_read_fails(
+        self,
+        cache_state_side_effect: RuntimeError | None,
+        cached_events_side_effect: RuntimeError | None,
+    ) -> None:
+        """Cache metadata read errors should fail open to a successful homeserver fetch."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
@@ -2070,8 +2085,21 @@ class TestThreadHistoryCache:
             },
         )
         broken_cache = MagicMock(spec=_EventCache)
-        broken_cache.get_thread_cache_state = AsyncMock(return_value=None)
-        broken_cache.get_thread_events = AsyncMock(return_value=None)
+        broken_cache.get_thread_cache_state = AsyncMock(
+            side_effect=cache_state_side_effect,
+            return_value=(
+                ThreadCacheState(
+                    validated_at=time.time(),
+                    invalidated_at=None,
+                    invalidation_reason=None,
+                    room_invalidated_at=None,
+                    room_invalidation_reason=None,
+                )
+                if cache_state_side_effect is None
+                else None
+            ),
+        )
+        broken_cache.get_thread_events = AsyncMock(side_effect=cached_events_side_effect, return_value=[])
         broken_cache.replace_thread = AsyncMock(side_effect=RuntimeError("db broken"))
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]

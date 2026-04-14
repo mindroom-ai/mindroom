@@ -305,6 +305,8 @@ class ConversationResolver:
         self,
         room_id: str,
         event_info: EventInfo,
+        *,
+        allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
         """Derive conversation context from threads or reply chains."""
         is_thread, thread_id, thread_history = await derive_conversation_context(
@@ -314,6 +316,7 @@ class ConversationResolver:
             self.reply_chain,
             self.deps.logger,
             self.deps.conversation_cache,
+            allow_durable_cache=allow_durable_cache,
         )
         return is_thread, thread_id, thread_history
 
@@ -321,6 +324,8 @@ class ConversationResolver:
         self,
         room_id: str,
         event_info: EventInfo,
+        *,
+        allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
         """Derive dispatch target using lightweight thread snapshots."""
         return await derive_conversation_target(
@@ -330,6 +335,7 @@ class ConversationResolver:
             self.reply_chain,
             self.deps.logger,
             self.deps.conversation_cache,
+            allow_durable_cache=allow_durable_cache,
         )
 
     async def extract_dispatch_context(
@@ -393,6 +399,7 @@ class ConversationResolver:
             is_thread, thread_id, thread_history = await self.derive_conversation_context(
                 room.room_id,
                 event_info,
+                allow_durable_cache=False,
             )
             requires_full_thread_history = False
         else:

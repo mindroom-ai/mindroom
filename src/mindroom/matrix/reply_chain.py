@@ -422,13 +422,18 @@ async def _resolve_direct_thread_root(
     chain_history_length: int,
     *,
     default_history_is_full: bool,
+    allow_durable_cache: bool,
 ) -> tuple[str, Sequence[_HistoryMessage], bool, bool] | None:
     """Resolve clients that reply to an existing thread root without m.thread metadata."""
     if chain_history_length != 1 or node.parent_event_id or node.thread_root_id or node.has_relations:
         return None
 
     try:
-        thread_history = await access.get_thread_snapshot(room_id, event_id)
+        thread_history = await access.get_thread_snapshot(
+            room_id,
+            event_id,
+            allow_durable_cache=allow_durable_cache,
+        )
     except Exception as exc:
         logger.warning(
             "Failed to probe direct thread root from reply chain; continuing without thread inference",
@@ -537,6 +542,7 @@ async def _resolve_reply_chain(
     *,
     default_history_is_full: bool,
     hydrate_sidecars: bool,
+    allow_durable_cache: bool,
 ) -> tuple[str, list[_HistoryMessage], bool, bool]:
     """Resolve reply-chain context for clients that don't send thread relations.
 
@@ -597,6 +603,7 @@ async def _resolve_reply_chain(
             visited_event_ids=visited_event_ids,
             chain_history_length=len(chain_history),
             default_history_is_full=default_history_is_full,
+            allow_durable_cache=allow_durable_cache,
         )
         if direct_thread_root_context is not None:
             break
@@ -644,9 +651,16 @@ async def _thread_history_or_fallback(
     thread_id: str,
     fallback_history: Sequence[_HistoryMessage],
     log_message: str,
+    allow_durable_cache: bool,
 ) -> list[_HistoryMessage]:
     try:
-        return list(await access.get_thread_history(room_id, thread_id))
+        return list(
+            await access.get_thread_history(
+                room_id,
+                thread_id,
+                allow_durable_cache=allow_durable_cache,
+            ),
+        )
     except Exception as exc:
         logger.warning(
             log_message,
@@ -666,9 +680,14 @@ async def _thread_snapshot_or_fallback(
     thread_id: str,
     fallback_history: Sequence[_HistoryMessage],
     log_message: str,
+    allow_durable_cache: bool,
 ) -> tuple[list[_HistoryMessage], bool]:
     try:
-        snapshot = await access.get_thread_snapshot(room_id, thread_id)
+        snapshot = await access.get_thread_snapshot(
+            room_id,
+            thread_id,
+            allow_durable_cache=allow_durable_cache,
+        )
     except Exception as exc:
         logger.warning(
             log_message,
@@ -688,6 +707,8 @@ async def derive_conversation_context(
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
     access: ConversationCacheProtocol,
+    *,
+    allow_durable_cache: bool = False,
 ) -> tuple[bool, str | None, list[_HistoryMessage]]:
     """Derive conversation context from threads or reply chains."""
     thread_root_id = _thread_root_id_from_event_info(event_info)
@@ -699,6 +720,7 @@ async def derive_conversation_context(
             thread_id=thread_root_id,
             fallback_history=[],
             log_message="Failed to fetch thread history for direct thread context; continuing without history",
+            allow_durable_cache=allow_durable_cache,
         )
         return True, thread_root_id, thread_history
 
@@ -720,6 +742,7 @@ async def derive_conversation_context(
         reply_chain_seed,
         default_history_is_full=True,
         hydrate_sidecars=True,
+        allow_durable_cache=allow_durable_cache,
     )
     if points_to_thread:
         if is_full_thread_history:
@@ -732,6 +755,7 @@ async def derive_conversation_context(
             thread_id=context_root_id,
             fallback_history=chain_history,
             log_message="Failed to fetch thread history for reply-chain context; continuing with chain history",
+            allow_durable_cache=allow_durable_cache,
         )
         return True, context_root_id, _merged_thread_history(thread_history, chain_history)
 
@@ -747,6 +771,8 @@ async def derive_conversation_target(
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
     access: ConversationCacheProtocol,
+    *,
+    allow_durable_cache: bool = False,
 ) -> tuple[bool, str | None, list[_HistoryMessage], bool]:
     """Derive the conversation target with lightweight history for dispatch.
 
@@ -763,6 +789,7 @@ async def derive_conversation_target(
             thread_id=thread_root_id,
             fallback_history=[],
             log_message="Failed to fetch thread snapshot for direct thread target; continuing without history",
+            allow_durable_cache=allow_durable_cache,
         )
         return (
             True,
@@ -789,6 +816,7 @@ async def derive_conversation_target(
         reply_chain_seed,
         default_history_is_full=False,
         hydrate_sidecars=False,
+        allow_durable_cache=allow_durable_cache,
     )
     if points_to_thread:
         if is_full_thread_history:
@@ -801,6 +829,7 @@ async def derive_conversation_target(
             thread_id=context_root_id,
             fallback_history=chain_history,
             log_message="Failed to fetch thread snapshot for reply-chain target; continuing with chain history",
+            allow_durable_cache=allow_durable_cache,
         )
         return (
             True,

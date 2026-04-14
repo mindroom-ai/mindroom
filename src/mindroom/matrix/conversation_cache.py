@@ -67,10 +67,22 @@ class ConversationCacheProtocol(Protocol):
     async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
         """Resolve one Matrix event by ID."""
 
-    async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
+    async def get_thread_snapshot(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        allow_durable_cache: bool = True,
+    ) -> ThreadReadResult:
         """Resolve thread context for dispatch."""
 
-    async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
+    async def get_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        allow_durable_cache: bool = True,
+    ) -> ThreadReadResult:
         """Resolve full thread history for one conversation root."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
@@ -334,6 +346,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
         thread_id: str,
+        allow_durable_cache: bool = True,
     ) -> ThreadHistoryResult:
         return await fetch_thread_history(
             self._require_client(),
@@ -341,12 +354,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            allow_durable_cache=allow_durable_cache,
         )
 
     async def _fetch_thread_snapshot_from_client(
         self,
         room_id: str,
         thread_id: str,
+        allow_durable_cache: bool = True,
     ) -> ThreadHistoryResult:
         return await fetch_thread_snapshot(
             self._require_client(),
@@ -354,15 +369,36 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            allow_durable_cache=allow_durable_cache,
         )
 
-    async def get_thread_snapshot(self, room_id: str, thread_id: str) -> ThreadReadResult:
+    async def get_thread_snapshot(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        allow_durable_cache: bool = True,
+    ) -> ThreadReadResult:
         """Resolve thread context for dispatch."""
-        return await self._reads.get_thread_snapshot(room_id, thread_id)
+        return await self._reads.get_thread_snapshot(
+            room_id,
+            thread_id,
+            allow_durable_cache=allow_durable_cache,
+        )
 
-    async def get_thread_history(self, room_id: str, thread_id: str) -> ThreadReadResult:
+    async def get_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        allow_durable_cache: bool = True,
+    ) -> ThreadReadResult:
         """Resolve full thread history for one conversation root."""
-        return await self._reads.get_thread_history(room_id, thread_id)
+        return await self._reads.get_thread_history(
+            room_id,
+            thread_id,
+            allow_durable_cache=allow_durable_cache,
+        )
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
