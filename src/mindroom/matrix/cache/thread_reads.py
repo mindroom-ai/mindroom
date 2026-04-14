@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+import typing
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache.thread_cache import resolved_thread_cache_entry
@@ -28,9 +30,9 @@ if TYPE_CHECKING:
 
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.cache.thread_cache import ResolvedThreadCache, ResolvedThreadCacheEntry
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import MatrixConversationCache
 
 
 _SYNC_FRESHNESS_WINDOW_SECONDS = 30.0
@@ -41,28 +43,43 @@ class ThreadRepairRequiredError(RuntimeError):
     """Raised when a repair-required thread cannot be authoritatively refilled."""
 
 
+@dataclass(frozen=True)
+class ThreadReadDeps:
+    """Explicit collaborators for thread-read policy."""
+
+    logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger]
+    runtime: BotRuntimeView
+    resolved_thread_cache_getter: typing.Callable[[], ResolvedThreadCache]
+    thread_version: typing.Callable[[str, str], int]
+    thread_requires_refresh: typing.Callable[[str, str], typing.Awaitable[bool]]
+    clear_thread_refresh_required: typing.Callable[[str, str], typing.Awaitable[None]]
+    adopt_room_lookup_repairs_locked: typing.Callable[[str, str], typing.Awaitable[frozenset[str]]]
+    fetch_thread_history_from_client: typing.Callable[..., typing.Awaitable[ThreadHistoryResult]]
+    fetch_thread_snapshot_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]]
+    resolve_thread_history_delta_from_client: typing.Callable[..., typing.Awaitable[ThreadHistoryResult]]
+
+
 class ThreadReadPolicy:
     """Own thread-history read, reuse, and repair policy for one cache facade."""
 
-    def __init__(self, cache: MatrixConversationCache) -> None:
-        self._get_logger = lambda: cache.logger
-        self.runtime = cache.runtime
-        self._get_resolved_thread_cache = lambda: cache._resolved_thread_cache
-        self.thread_version = cache.thread_version
-        self.thread_requires_refresh = cache._thread_requires_refresh
-        self.clear_thread_refresh_required = cache._clear_thread_refresh_required
-        self.adopt_room_lookup_repairs_locked = cache._writes._adopt_room_lookup_repairs_locked
-        self.fetch_thread_history_from_client = cache._fetch_thread_history_from_client
-        self.fetch_thread_snapshot_from_client = cache._fetch_thread_snapshot_from_client
-        self.resolve_thread_history_delta_from_client = cache._resolve_thread_history_delta_from_client
+    def __init__(self, deps: ThreadReadDeps) -> None:
+        self._deps = deps
+        self.runtime = deps.runtime
+        self.thread_version = deps.thread_version
+        self.thread_requires_refresh = deps.thread_requires_refresh
+        self.clear_thread_refresh_required = deps.clear_thread_refresh_required
+        self.adopt_room_lookup_repairs_locked = deps.adopt_room_lookup_repairs_locked
+        self.fetch_thread_history_from_client = deps.fetch_thread_history_from_client
+        self.fetch_thread_snapshot_from_client = deps.fetch_thread_snapshot_from_client
+        self.resolve_thread_history_delta_from_client = deps.resolve_thread_history_delta_from_client
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
-        return self._get_logger()
+        return self._deps.logger_getter()
 
     def _resolved_thread_cache(self) -> ResolvedThreadCache:
-        return self._get_resolved_thread_cache()
+        return self._deps.resolved_thread_cache_getter()
 
     def _seconds_since_last_sync_activity(self) -> float | None:
         last_sync_activity_monotonic = self.runtime.last_sync_activity_monotonic

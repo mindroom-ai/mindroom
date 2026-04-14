@@ -135,6 +135,13 @@ class ReplyChainCaches:
         while self._invalidate_nodes(room_id, pending_event_ids) or self._invalidate_roots(room_id, pending_event_ids):
             pass
 
+    def event_source(self, room_id: str, event_id: str) -> dict[str, Any] | None:
+        """Return cached event source for one node when it is currently materialized."""
+        node = self.nodes.get(room_id, event_id)
+        if node is None or not isinstance(node.event_source, dict):
+            return None
+        return node.event_source
+
     def clear(self) -> None:
         """Drop all process-local reply-chain caches for one runtime lifetime."""
         self.nodes.clear()

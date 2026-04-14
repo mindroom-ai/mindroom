@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+import typing
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -18,9 +20,9 @@ if TYPE_CHECKING:
 
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.cache.event_cache import ConversationEventCache
     from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
-    from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.reply_chain import ReplyChainCaches
 
 
@@ -126,28 +128,39 @@ async def _resolve_thread_id_for_cached_event_append(
     return await event_cache.get_thread_id_for_event(room_id, event_info.original_event_id)
 
 
+@dataclass(frozen=True)
+class ThreadWriteDeps:
+    """Explicit collaborators for thread-write policy."""
+
+    logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger]
+    runtime: BotRuntimeView
+    resolved_thread_cache_getter: typing.Callable[[], ResolvedThreadCache]
+    reply_chain_caches_getter: typing.Callable[[], ReplyChainCaches | None]
+    thread_version: typing.Callable[[str, str], int]
+    bump_thread_version: typing.Callable[[str, str], int]
+    require_client: typing.Callable[[], nio.AsyncClient]
+
+
 class ThreadWritePolicy:
     """Own thread-affecting cache mutations and outbound write-through."""
 
-    def __init__(self, cache: MatrixConversationCache) -> None:
-        self._get_logger = lambda: cache.logger
-        self.runtime = cache.runtime
-        self._get_resolved_thread_cache = lambda: cache._resolved_thread_cache
-        self._get_reply_chain_caches = cache._reply_chain_caches
-        self.thread_version = cache.thread_version
-        self.bump_thread_version = cache._bump_thread_version
-        self.require_client = cache._require_client
+    def __init__(self, deps: ThreadWriteDeps) -> None:
+        self._deps = deps
+        self.runtime = deps.runtime
+        self.thread_version = deps.thread_version
+        self.bump_thread_version = deps.bump_thread_version
+        self.require_client = deps.require_client
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
-        return self._get_logger()
+        return self._deps.logger_getter()
 
     def _resolved_thread_cache(self) -> ResolvedThreadCache:
-        return self._get_resolved_thread_cache()
+        return self._deps.resolved_thread_cache_getter()
 
     def _reply_chain_caches(self) -> ReplyChainCaches | None:
-        return self._get_reply_chain_caches()
+        return self._deps.reply_chain_caches_getter()
 
     def _queue_room_cache_update(
         self,
@@ -203,9 +216,7 @@ class ThreadWritePolicy:
         if candidate_event_source is None:
             reply_chain_caches = self._reply_chain_caches()
             if reply_chain_caches is not None:
-                cached_node = reply_chain_caches.nodes.get(room_id, redacted_event_id)
-                if cached_node is not None and isinstance(cached_node.event_source, dict):
-                    candidate_event_source = cached_node.event_source
+                candidate_event_source = reply_chain_caches.event_source(room_id, redacted_event_id)
         if candidate_event_source is None:
             return await self._reply_chain_invalidation_ids_for_redaction(
                 room_id,
@@ -282,11 +293,12 @@ class ThreadWritePolicy:
         )
         return promoted_event_ids
 
-    async def _adopt_room_lookup_repairs_locked(
+    async def adopt_room_lookup_repairs_locked(
         self,
         room_id: str,
         thread_id: str,
     ) -> frozenset[str]:
+        """Promote pending room lookup repairs for one thread under the entry lock."""
         return await self._promote_lookup_repairs_locked(room_id, thread_id)
 
     async def _record_thread_change(

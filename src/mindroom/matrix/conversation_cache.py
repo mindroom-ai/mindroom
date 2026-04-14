@@ -21,8 +21,8 @@ from mindroom.matrix.cache.event_cache import (
 )
 from mindroom.matrix.cache.thread_cache import ResolvedThreadCache
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.cache.thread_reads import ThreadReadPolicy, ThreadRepairRequiredError
-from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
+from mindroom.matrix.cache.thread_reads import ThreadReadDeps, ThreadReadPolicy, ThreadRepairRequiredError
+from mindroom.matrix.cache.thread_writes import ThreadWriteDeps, ThreadWritePolicy
 from mindroom.matrix.cache.write_coordinator import (
     _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
 )
@@ -239,8 +239,31 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def __post_init__(self) -> None:
         """Bind extracted read/write policy collaborators to this facade."""
-        self._writes = ThreadWritePolicy(self)
-        self._reads = ThreadReadPolicy(self)
+        self._writes = ThreadWritePolicy(
+            ThreadWriteDeps(
+                logger_getter=lambda: self.logger,
+                runtime=self.runtime,
+                resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
+                reply_chain_caches_getter=self._reply_chain_caches,
+                thread_version=self.thread_version,
+                bump_thread_version=self._bump_thread_version,
+                require_client=self._require_client,
+            ),
+        )
+        self._reads = ThreadReadPolicy(
+            ThreadReadDeps(
+                logger_getter=lambda: self.logger,
+                runtime=self.runtime,
+                resolved_thread_cache_getter=lambda: self._resolved_thread_cache,
+                thread_version=self.thread_version,
+                thread_requires_refresh=self._thread_requires_refresh,
+                clear_thread_refresh_required=self._clear_thread_refresh_required,
+                adopt_room_lookup_repairs_locked=self._writes.adopt_room_lookup_repairs_locked,
+                fetch_thread_history_from_client=self._fetch_thread_history_from_client,
+                fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
+                resolve_thread_history_delta_from_client=self._resolve_thread_history_delta_from_client,
+            ),
+        )
 
     def _require_client(self) -> nio.AsyncClient:
         client = self.runtime.client
