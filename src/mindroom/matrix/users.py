@@ -749,7 +749,7 @@ async def login_agent_user(
     )
     _persist_agent_session(
         agent_user.agent_name,
-        agent_user.matrix_id.localpart,
+        agent_user.matrix_id.username,
         agent_user.password,
         device_id=client.device_id,
         access_token=client.access_token,
