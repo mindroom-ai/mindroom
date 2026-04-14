@@ -104,6 +104,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_edit_message_mock,
     install_generate_response_mock,
+    install_runtime_cache_support,
     install_send_response_mock,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
@@ -6432,6 +6433,7 @@ class TestAgentBot:
         """Fallback snapshots should not trigger a second full-history fetch during hydration."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_runtime_cache_support(bot)
         bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"

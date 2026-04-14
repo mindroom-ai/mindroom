@@ -117,11 +117,30 @@ Team and single-agent responses go through the same summary gate.
 
 - Resolved thread histories.
 - Reply-chain caches.
-- Thread versions.
-- Repair-required markers for threads whose persisted state may be stale after failed writes.
+- One thread-scoped freshness state per thread.
+- A room-scoped candidate index for lookup failures whose thread cannot yet be resolved.
 
 The in-memory layer is disposable.
 It must be safe to invalidate aggressively and rebuild.
+
+## Thread Freshness State
+
+Each thread owns one in-memory freshness state record.
+That state is the single mutable owner of:
+
+- the current thread generation token exposed to callers,
+- whether the thread requires authoritative repair,
+- which lookup-failure event IDs have already been promoted into that thread,
+- and the async lock used by both reads and mutations.
+
+The resolved-thread cache entry is only a disposable value attached to that state.
+Generation and repair state are not LRU-evicted and not reused within the process.
+TTL applies only to resolved-thread entries, not to freshness identity.
+
+When a lookup failure happens and the cache cannot yet resolve the affected thread, the event ID is stored only as a room-scoped candidate.
+Reads do not treat that candidate as room-wide poisoning.
+Instead, the next read for a concrete thread checks whether that candidate intersects the thread's cached source events.
+Only matching candidates are promoted into that thread's freshness state and converted into a repair-required condition.
 
 ## Freshness Model
 
@@ -177,21 +196,36 @@ An empty or degraded fallback result does not count as repair success.
 
 ### Invariant 8
 
-Resolved-thread cache reuse decisions observe thread version and repair-required state under the same per-thread lock that guards cache fill and reuse.
+Resolved-thread cache reuse decisions observe generation, repair-required state, and promoted lookup repairs under the same per-thread lock that guards cache fill and reuse.
 
 ### Invariant 9
 
 The branch remains Ruff-clean, formatter-clean, and test metadata reflects the current file layout.
 
+### Invariant 10
+
+Thread generation tokens are monotonic within the process and are never reused after LRU entry eviction.
+
+### Invariant 11
+
+Room-scoped lookup-failure candidates do not force unrelated threads down the full-history path.
+Only threads whose cached source events intersect a candidate are promoted to repair-required.
+
+### Invariant 12
+
+Closing standalone runtime support discards the concrete support object and detaches it from the bot runtime so same-process restart rebuilds from the current config.
+
 ## Read Path
 
 1. Caller requests an event, snapshot, or full thread history through `MatrixConversationCache`.
-2. The service consults persisted cache state and disposable in-memory derived state.
-3. If data is present and valid, the service serves it from cache.
-4. If data is missing, stale, or marked for repair, the service fetches from the homeserver.
-5. The service normalizes and persists fetched results.
-6. The service rebuilds derived views from persisted data.
-7. The caller receives the repaired result through the same interface.
+2. The service waits for any queued same-room cache writes that must precede a consistent thread read.
+3. The service takes the per-thread freshness lock and consults persisted cache state plus the thread-scoped freshness state.
+4. If room-scoped lookup-failure candidates exist, the service checks whether they intersect the requested thread and promotes only matching candidates into the thread state.
+5. If data is present and valid, the service serves it from cache.
+6. If data is missing, stale, or marked for repair, the service fetches from the homeserver.
+7. The service normalizes and persists fetched results.
+8. The service rebuilds derived views from persisted data.
+9. The caller receives the repaired result through the same interface.
 
 ## Write Path
 
@@ -210,6 +244,7 @@ Sync processing collects candidate updates.
 `MatrixConversationCache` persists them in room order.
 Per-thread version bumps and invalidations happen after successful persistence.
 If persistence fails for a thread-affecting update, that thread is marked repair-required so the next read bypasses freshness shortcuts and repairs from the homeserver.
+If a mutation cannot resolve the thread at all, the affected event ID is recorded only as a room-scoped lookup candidate until a concrete thread read proves which thread it belongs to.
 
 ## Error Handling
 
@@ -238,6 +273,11 @@ If repair cannot succeed, the read fails explicitly rather than silently serving
 ### Runtime repair failure
 
 If a forced repair read cannot produce a verified authoritative refill, the thread remains repair-required.
+
+### Runtime concurrent mutation
+
+Concurrent thread-affecting reads and writes serialize through the same per-thread freshness lock.
+If a thread-unknown lookup failure arrives during a read, the room-scoped candidate is left pending and later post-lock freshness checks must still route the next use through the cache service instead of trusting raw generation equality alone.
 The service does not cache an empty healed result just because one fallback path returned no events.
 Repair completion requires proof that the homeserver-backed refill actually succeeded.
 

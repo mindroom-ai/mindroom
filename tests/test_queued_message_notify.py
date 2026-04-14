@@ -39,6 +39,7 @@ from mindroom.delivery_gateway import DeliveryResult
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_cache import resolved_thread_cache_entry
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -619,6 +620,61 @@ async def test_refresh_thread_history_after_lock_skips_when_thread_version_is_un
 
     mock_fetch_thread_history.assert_not_awaited()
     assert request.thread_history is cached_history
+
+
+@pytest.mark.asyncio
+async def test_refresh_thread_history_after_lock_refreshes_when_lookup_repair_is_pending(tmp_path: Path) -> None:
+    """Post-lock refresh should consult conversation-cache freshness, not raw version equality alone."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    access = bot._conversation_cache
+    access._resolved_thread_cache.store(
+        "!room:localhost",
+        "$thread",
+        resolved_thread_cache_entry(
+            history=[
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="Root",
+                    event_id="$thread",
+                ),
+                ResolvedVisibleMessage.synthetic(
+                    sender="@agent:localhost",
+                    body="Reply 1",
+                    event_id="$reply-1",
+                ),
+            ],
+            source_event_ids=frozenset({"$thread", "$reply-1"}),
+            thread_version=0,
+        ),
+    )
+    cached_history = thread_history_result([], is_full_history=True, thread_version=0)
+    access._mark_lookup_repair_pending(
+        "!room:localhost",
+        "$reply-1",
+        reason="live_edit_lookup_failed",
+    )
+
+    refreshed_history = [SimpleNamespace(event_id="$reply", body="updated")]
+    with patch.object(
+        resolver,
+        "fetch_thread_history",
+        new=AsyncMock(return_value=refreshed_history),
+    ) as mock_fetch_thread_history:
+        request = await coordinator._refresh_thread_history_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=cached_history,
+                prompt="hello",
+                user_id="@user:localhost",
+            ),
+        )
+
+    mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
+    assert request.thread_history == refreshed_history
 
 
 @pytest.mark.asyncio

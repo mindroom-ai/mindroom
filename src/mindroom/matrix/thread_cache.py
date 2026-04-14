@@ -51,44 +51,70 @@ class ResolvedThreadCacheLookup:
 
 
 @dataclass(slots=True)
+class ThreadFreshnessState:
+    """Mutable freshness state for one thread."""
+
+    generation: int = 0
+    repair_required: bool = False
+    pending_lookup_event_ids: set[str] = field(default_factory=set)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+
+@dataclass(slots=True)
 class ResolvedThreadCache:
-    """Bounded LRU cache of fully resolved thread histories and their generations."""
+    """Bounded LRU cache of resolved histories plus per-thread freshness state."""
 
     max_entries: int = 200
     ttl_seconds: float = 300.0
-    max_tracked_versions: int = 200
     _entries: OrderedDict[ThreadCacheKey, ResolvedThreadCacheEntry] = field(default_factory=OrderedDict, init=False)
-    _versions: OrderedDict[ThreadCacheKey, int] = field(default_factory=OrderedDict, init=False)
-    _locks: dict[ThreadCacheKey, asyncio.Lock] = field(default_factory=dict, init=False)
+    _states: dict[ThreadCacheKey, ThreadFreshnessState] = field(default_factory=dict, init=False)
+    _next_generation: int = field(default=1, init=False)
 
-    def _prune_lock_if_idle(self, key: ThreadCacheKey) -> None:
-        lock = self._locks.get(key)
-        if lock is not None and not lock.locked():
-            self._locks.pop(key, None)
+    def _state(self, key: ThreadCacheKey) -> ThreadFreshnessState:
+        return self._states.setdefault(key, ThreadFreshnessState())
 
     def version(self, room_id: str, thread_id: str) -> int:
         """Return the current in-memory generation for one thread."""
-        key = (room_id, thread_id)
-        version = self._versions.get(key)
-        if version is None:
-            return 0
-        self._versions.move_to_end(key)
-        return version
+        return self._state((room_id, thread_id)).generation
 
     def bump_version(self, room_id: str, thread_id: str) -> int:
-        """Advance one thread generation and keep the generation index bounded."""
-        key = (room_id, thread_id)
-        next_version = self._versions.get(key, 0) + 1
-        self._store_version(key, next_version)
-        return next_version
+        """Advance one thread generation without reusing tokens during this process."""
+        state = self._state((room_id, thread_id))
+        generation = self._next_generation
+        self._next_generation += 1
+        state.generation = generation
+        return generation
 
-    def _store_version(self, key: ThreadCacheKey, version: int) -> None:
-        self._versions[key] = version
-        self._versions.move_to_end(key)
-        while len(self._versions) > self.max_tracked_versions:
-            evicted_key, _evicted_version = self._versions.popitem(last=False)
-            self._entries.pop(evicted_key, None)
-            self._prune_lock_if_idle(evicted_key)
+    def repair_required(self, room_id: str, thread_id: str) -> bool:
+        """Return whether one thread requires authoritative repair."""
+        return self._state((room_id, thread_id)).repair_required
+
+    def mark_repair_required(self, room_id: str, thread_id: str) -> None:
+        """Mark one thread as requiring authoritative repair."""
+        self._state((room_id, thread_id)).repair_required = True
+
+    def clear_repair_required(self, room_id: str, thread_id: str) -> None:
+        """Clear the repair-required flag for one thread."""
+        self._state((room_id, thread_id)).repair_required = False
+
+    def pending_lookup_repairs(self, room_id: str, thread_id: str) -> frozenset[str]:
+        """Return promoted lookup-failure event IDs for one thread."""
+        return frozenset(self._state((room_id, thread_id)).pending_lookup_event_ids)
+
+    def mark_pending_lookup_repairs(
+        self,
+        room_id: str,
+        thread_id: str,
+        event_ids: frozenset[str],
+    ) -> None:
+        """Promote lookup-failure candidates into one concrete thread."""
+        if not event_ids:
+            return
+        self._state((room_id, thread_id)).pending_lookup_event_ids.update(event_ids)
+
+    def clear_pending_lookup_repairs(self, room_id: str, thread_id: str) -> None:
+        """Clear promoted lookup-failure event IDs for one thread."""
+        self._state((room_id, thread_id)).pending_lookup_event_ids.clear()
 
     def lookup(self, room_id: str, thread_id: str) -> ResolvedThreadCacheLookup:
         """Return one entry when still fresh, evicting expired entries eagerly."""
@@ -98,7 +124,6 @@ class ResolvedThreadCache:
             return ResolvedThreadCacheLookup(entry=None)
         if self._is_expired(entry):
             self._entries.pop(key, None)
-            self._prune_lock_if_idle(key)
             return ResolvedThreadCacheLookup(entry=None, expired=True)
         self._entries.move_to_end(key)
         return ResolvedThreadCacheLookup(entry=entry)
@@ -113,34 +138,26 @@ class ResolvedThreadCache:
         key = (room_id, thread_id)
         self._entries[key] = entry
         self._entries.move_to_end(key)
-        self._store_version(key, entry.thread_version)
         while len(self._entries) > self.max_entries:
-            evicted_key, _evicted_entry = self._entries.popitem(last=False)
-            self._versions.pop(evicted_key, None)
-            self._prune_lock_if_idle(evicted_key)
+            self._entries.popitem(last=False)
 
     def invalidate(self, room_id: str, thread_id: str) -> ResolvedThreadCacheEntry | None:
         """Drop one cache entry if it exists."""
         key = (room_id, thread_id)
-        entry = self._entries.pop(key, None)
-        self._prune_lock_if_idle(key)
-        return entry
+        return self._entries.pop(key, None)
 
     def _is_expired(self, entry: ResolvedThreadCacheEntry) -> bool:
         return (time.monotonic() - entry.cached_at_monotonic) >= self.ttl_seconds
 
     @asynccontextmanager
     async def entry_lock(self, room_id: str, thread_id: str) -> AsyncIterator[None]:
-        """Serialize concurrent fills and refreshes for one thread cache entry."""
-        key = (room_id, thread_id)
-        lock = self._locks.setdefault(key, asyncio.Lock())
+        """Serialize concurrent reads and writes for one thread freshness state."""
+        lock = self._state((room_id, thread_id)).lock
         await lock.acquire()
         try:
             yield
         finally:
             lock.release()
-            if key not in self._entries:
-                self._prune_lock_if_idle(key)
 
 
 def resolved_thread_cache_entry(

@@ -30,6 +30,7 @@ from mindroom.voice_handler import prepare_voice_message
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
+    install_runtime_cache_support,
     install_send_response_mock,
     install_send_skill_command_response_mock,
     orchestrator_runtime_paths,
@@ -49,12 +50,14 @@ def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
 
 def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    bot = AgentBot(
-        agent_user=agent_user,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=rooms,
+    bot = install_runtime_cache_support(
+        AgentBot(
+            agent_user=agent_user,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=rooms,
+        ),
     )
     wrap_extracted_collaborators(bot)
     return bot

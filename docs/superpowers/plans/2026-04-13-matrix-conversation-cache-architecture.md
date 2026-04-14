@@ -4,7 +4,7 @@
 
 **Goal:** Make `mindroom.matrix.conversation_cache` the required read-through owner of Matrix conversation data, enforce the thread-cache boundary uniformly, and eliminate stale-read and duplicate-summary regressions.
 
-**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, and repair policy. This enforcement pass finishes that architecture at the thread-cache seam by routing all thread-affecting writes through one mutation contract, requiring verified homeserver-backed repair before clearing repair state, and making resolved-cache reuse decisions under the per-thread entry lock.
+**Architecture:** Persisted normalized events become the only durable conversation source of truth. `MatrixConversationCache` becomes the only public owner of cache read, write, freshness, invalidation, and repair policy. This enforcement pass finishes that architecture at the thread-cache seam by moving generation, repair-required state, promoted lookup repairs, and the read/write lock into one thread-scoped freshness state, using non-reused generation tokens, and turning room-level lookup failures into thread-specific repairs only when a read proves they intersect that thread.
 
 **Tech Stack:** Python, asyncio, aiosqlite, matrix-nio, pytest, AsyncMock, existing Matrix cache and bot runtime abstractions.
 
@@ -51,20 +51,59 @@
 - Modify: `src/mindroom/response_runner.py`
 - Modify: `src/mindroom/thread_summary.py`
 
-## Task 1: Lock in required-cache runtime ownership
+## Task 1: Unify thread freshness state
+
+**Files:**
+- Modify: `tests/test_threading_error.py`
+- Modify: `tests/test_queued_message_notify.py`
+- Modify: `src/mindroom/matrix/thread_cache.py`
+- Modify: `src/mindroom/matrix/conversation_cache.py`
+- Modify: `src/mindroom/response_runner.py`
+
+- [ ] **Step 1: Write failing tests for freshness-token correctness**
+
+Add tests that prove:
+- generation tokens are not reused after resolved-entry eviction,
+- a full-history read does not stamp a concurrent mutation as already current,
+- room-scoped lookup failures only force full-history repair for matching threads,
+- a successful authoritative repair clears thread-specific pending lookup repairs.
+
+- [ ] **Step 2: Run the focused thread-cache and response tests to verify they fail**
+
+Run: `uv run pytest tests/test_threading_error.py tests/test_queued_message_notify.py -x -n 0 --no-cov -v`
+
+- [ ] **Step 3: Refactor freshness ownership**
+
+Implement:
+- one thread-scoped freshness state that owns generation, repair-required state, promoted lookup repairs, and the async lock,
+- non-reused generation tokens that survive resolved-entry LRU churn,
+- room-scoped lookup candidates that are promoted only when a concrete thread read proves an intersection,
+- a conversation-cache freshness check that ResponseRunner uses instead of raw generation equality.
+
+- [ ] **Step 4: Run the focused tests to verify they pass**
+
+Run: `uv run pytest tests/test_threading_error.py tests/test_queued_message_notify.py -x -n 0 --no-cov -v`
+
+- [ ] **Step 5: Commit**
+
+Use a focused commit after tests pass.
+
+## Task 2: Lock in required-cache runtime ownership
 
 **Files:**
 - Modify: `tests/test_multi_agent_bot.py`
+- Modify: `tests/test_threading_error.py`
 - Modify: `src/mindroom/runtime_support.py`
 - Modify: `src/mindroom/orchestrator.py`
 - Modify: `src/mindroom/bot.py`
 
-- [ ] **Step 1: Write failing tests for lazy ownership and required initialization**
+- [ ] **Step 1: Write failing tests for lazy ownership, required initialization, and rebuild-on-restart**
 
 Add tests that prove:
 - plain `AgentBot(...)` construction does not resolve cache paths eagerly
 - orchestrator-managed bots receive injected shared cache support
 - standalone initialization fails if required cache init fails
+- standalone close detaches support and restart rebuilds from the latest cache db path
 
 - [ ] **Step 2: Run the focused tests to verify they fail for the right reason**
 
@@ -86,7 +125,7 @@ Run: `uv run pytest tests/test_multi_agent_bot.py -x -n 0 --no-cov -v`
 
 Use a focused commit after tests pass.
 
-## Task 2: Remove private cache imports from non-matrix callers
+## Task 3: Remove private cache imports from non-matrix callers
 
 **Files:**
 - Modify: `tests/test_scheduling.py`
@@ -117,7 +156,7 @@ Run: `uv run pytest tests/test_scheduling.py -x -n 0 --no-cov -v`
 
 Use a focused commit after tests pass.
 
-## Task 3: Fix sync edit coherence and repair-required semantics
+## Task 4: Fix sync edit coherence and repair-required semantics
 
 **Files:**
 - Modify: `tests/test_threading_error.py`
@@ -156,7 +195,7 @@ Run: `uv run pytest tests/test_threading_error.py -x -n 0 --no-cov -v`
 
 Use a focused commit after tests pass.
 
-## Task 4: Make freshness mean successful sync, not failed sync activity
+## Task 5: Make freshness mean successful sync, not failed sync activity
 
 **Files:**
 - Modify: `tests/test_matrix_sync_tokens.py`
@@ -186,7 +225,7 @@ Run: `uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.
 
 Use a focused commit after tests pass.
 
-## Task 5: Centralize post-response summary policy
+## Task 6: Centralize post-response summary policy
 
 **Files:**
 - Modify: `tests/test_thread_summary.py`
@@ -220,7 +259,7 @@ Run: `uv run pytest tests/test_thread_summary.py tests/test_multi_agent_bot.py -
 
 Use a focused commit after tests pass.
 
-## Task 6: Remove duplicate handled-turn metadata policy
+## Task 7: Remove duplicate handled-turn metadata policy
 
 **Files:**
 - Modify: `tests/test_multi_agent_bot.py` or the nearest existing post-response/turn-store test module
@@ -250,7 +289,7 @@ Run: `uv run pytest tests/test_multi_agent_bot.py -x -n 0 --no-cov -v`
 
 Use a focused commit after tests pass.
 
-## Task 7: Final focused regression sweep
+## Task 8: Final focused regression sweep
 
 **Files:**
 - Modify only as needed from previous tasks

@@ -713,19 +713,19 @@ class ResponseRunner:
         if request.thread_id is None:
             return request
 
-        request_thread_version = (
-            request.thread_history.thread_version if isinstance(request.thread_history, ThreadHistoryResult) else None
-        )
-        current_thread_version = self.deps.resolver.deps.conversation_cache.thread_version(
+        if isinstance(
+            request.thread_history,
+            ThreadHistoryResult,
+        ) and await self.deps.resolver.deps.conversation_cache.is_thread_history_current(
             request.room_id,
             request.thread_id,
-        )
-        if request_thread_version is not None and request_thread_version == current_thread_version:
+            request.thread_history,
+        ):
             self.deps.logger.debug(
                 "Skipping post-lock thread refresh because thread version is unchanged",
                 room_id=request.room_id,
                 thread_id=request.thread_id,
-                thread_version=current_thread_version,
+                thread_version=request.thread_history.thread_version,
             )
             return request
 

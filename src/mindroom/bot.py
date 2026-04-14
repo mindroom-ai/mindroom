@@ -994,6 +994,9 @@ class AgentBot:
         support = self._standalone_runtime_support
         assert support is not None
         await close_standalone_runtime_support(support, logger=self.logger)
+        self.event_cache = None
+        self.event_cache_write_coordinator = None
+        self._standalone_runtime_support = None
 
     def _runtime_support_binding_state(self) -> Literal["uninitialized", "standalone", "injected", "mixed"]:
         """Classify whether runtime support is local, injected, or inconsistently mixed."""

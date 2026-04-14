@@ -19,6 +19,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_generate_response_mock,
+    install_runtime_cache_support,
     replace_turn_controller_deps,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -30,12 +31,14 @@ from tests.conftest import (
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    return AgentBot(
-        agent_user=agent_user,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=rooms,
+    return install_runtime_cache_support(
+        AgentBot(
+            agent_user=agent_user,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=rooms,
+        ),
     )
 
 
