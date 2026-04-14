@@ -940,7 +940,7 @@ class AgentBot:
         if isinstance(_response, nio.SyncResponse):
             # Cache before persisting so a crash prefers replaying one batch over
             # skipping events whose timeline metadata never reached local state.
-            self._conversation_access.cache_sync_timeline(_response)
+            self._conversation_cache.cache_sync_timeline(_response)
 
         # Event callbacks run fire-and-forget in background tasks. A crash after
         # persisting `next_batch` but before all callback tasks finish can still
