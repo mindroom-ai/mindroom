@@ -105,6 +105,27 @@ def _runtime_write_coordinator() -> MagicMock:
     return MagicMock(spec=_EventCacheWriteCoordinator)
 
 
+def _prime_resolved_thread_history(
+    access: MatrixConversationCache,
+    *,
+    room_id: str,
+    thread_id: str,
+    history: list[ResolvedVisibleMessage],
+    source_event_ids: frozenset[str],
+    thread_version: int = 0,
+) -> None:
+    """Seed one resolved-thread cache entry for targeted cache-coherence tests."""
+    access._resolved_thread_cache.store(
+        room_id,
+        thread_id,
+        resolved_thread_cache_entry(
+            history=history,
+            source_event_ids=source_event_ids,
+            thread_version=thread_version,
+        ),
+    )
+
+
 def _conversation_runtime(
     *,
     client: nio.AsyncClient | None = None,
@@ -2525,7 +2546,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_get_thread_history_keeps_thread_dirty_after_degraded_repair_result(self, tmp_path: Path) -> None:
-        """A degraded repair read must not clear repair-required or cache an empty healed thread."""
+        """A degraded repair read should return best-effort history without clearing repair-required."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime = _conversation_runtime(
@@ -2592,7 +2613,7 @@ class TestThreadingBehavior:
                 await wait_for_background_tasks(timeout=1.0, owner=runtime)
 
             degraded_history = ThreadHistoryResult(
-                [],
+                [_message(event_id="$thread", body="Root")],
                 is_full_history=True,
                 diagnostics={
                     THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
@@ -2600,20 +2621,229 @@ class TestThreadingBehavior:
                     THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: False,
                 },
             )
-            with (
-                patch(
-                    "mindroom.matrix.conversation_cache.fetch_thread_history",
-                    new=AsyncMock(return_value=degraded_history),
-                ),
-                pytest.raises(RuntimeError, match="authoritative"),
+            with patch(
+                "mindroom.matrix.conversation_cache.fetch_thread_history",
+                new=AsyncMock(return_value=degraded_history),
             ):
                 async with access.turn_scope():
-                    await access.get_thread_history("!room:localhost", "$thread")
+                    history = await access.get_thread_history("!room:localhost", "$thread")
         finally:
             await cache.close()
 
+        assert [message.event_id for message in history] == ["$thread"]
         assert access._thread_requires_refresh("!room:localhost", "$thread")
         assert access._resolved_thread_cache.lookup("!room:localhost", "$thread").entry is None
+
+    @pytest.mark.asyncio
+    async def test_live_edit_lookup_failure_invalidates_matching_resolved_thread_cache(self) -> None:
+        """Live lookup failures should force a refetch for threads containing the target event."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event.side_effect = RuntimeError("database is locked")
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=event_cache,
+        )
+        runtime.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=runtime,
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+        _prime_resolved_thread_history(
+            access,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            history=[
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply-1", body="Reply 1", sender="@agent:localhost"),
+            ],
+            source_event_ids=frozenset({"$thread", "$reply-1"}),
+        )
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply-1"},
+                },
+                "event_id": "$edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        await access.append_live_event(
+            "!room:localhost",
+            edit_event,
+            event_info=EventInfo.from_event(edit_event.source),
+        )
+
+        refreshed_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply-1", body="Reply 1 updated", sender="@agent:localhost"),
+            ],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+                THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: True,
+                THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: True,
+            },
+        )
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
+            new=AsyncMock(return_value=refreshed_history),
+        ) as mock_fetch_thread_history:
+            async with access.turn_scope():
+                history = await access.get_thread_history("!room:localhost", "$thread")
+
+        mock_fetch_thread_history.assert_awaited_once()
+        assert [message.body for message in history] == ["Root", "Reply 1 updated"]
+
+    @pytest.mark.asyncio
+    async def test_sync_thread_lookup_failure_invalidates_matching_resolved_thread_cache(self) -> None:
+        """Sync edits resolved via cached membership should not leave stale resolved entries behind."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event.side_effect = RuntimeError("database is locked")
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=event_cache,
+        )
+        runtime.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=runtime,
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+        _prime_resolved_thread_history(
+            access,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            history=[
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply-1", body="Reply 1", sender="@agent:localhost"),
+            ],
+            source_event_ids=frozenset({"$thread", "$reply-1"}),
+        )
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply-1"},
+                },
+                "event_id": "$edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock(
+            join={
+                "!room:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+            },
+        )
+
+        access.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=runtime)
+
+        refreshed_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply-1", body="Reply 1 updated", sender="@agent:localhost"),
+            ],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+                THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: True,
+                THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: True,
+            },
+        )
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
+            new=AsyncMock(return_value=refreshed_history),
+        ) as mock_fetch_thread_history:
+            async with access.turn_scope():
+                history = await access.get_thread_history("!room:localhost", "$thread")
+
+        mock_fetch_thread_history.assert_awaited_once()
+        assert [message.body for message in history] == ["Root", "Reply 1 updated"]
+
+    @pytest.mark.asyncio
+    async def test_sync_redaction_lookup_failure_invalidates_matching_resolved_thread_cache(self) -> None:
+        """Sync redactions must force a refetch when point lookup cannot map the redacted event."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event.side_effect = RuntimeError("database is locked")
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=event_cache,
+        )
+        runtime.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=runtime,
+        )
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+        _prime_resolved_thread_history(
+            access,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            history=[
+                _message(event_id="$thread", body="Root"),
+                _message(event_id="$reply-1", body="Reply 1", sender="@agent:localhost"),
+            ],
+            source_event_ids=frozenset({"$thread", "$reply-1"}),
+        )
+
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$reply-1"
+        redaction_event.sender = "@user:localhost"
+        redaction_event.server_timestamp = 1234567891
+        redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$reply-1",
+            "room_id": "!room:localhost",
+            "type": "m.room.redaction",
+        }
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock(
+            join={
+                "!room:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
+            },
+        )
+
+        access.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=runtime)
+
+        refreshed_history = ThreadHistoryResult(
+            [_message(event_id="$thread", body="Root")],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+                THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: True,
+                THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: True,
+            },
+        )
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
+            new=AsyncMock(return_value=refreshed_history),
+        ) as mock_fetch_thread_history:
+            async with access.turn_scope():
+                history = await access.get_thread_history("!room:localhost", "$thread")
+
+        mock_fetch_thread_history.assert_awaited_once()
+        assert [message.event_id for message in history] == ["$thread"]
 
     @pytest.mark.asyncio
     async def test_get_thread_history_invalidates_resolved_cache_on_redaction(self, tmp_path: Path) -> None:

@@ -2,7 +2,7 @@
 
 import os
 import re
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
@@ -127,22 +127,12 @@ def make_event_cache_mock() -> AsyncMock:
     return event_cache
 
 
-def make_event_cache_write_coordinator_mock() -> MagicMock:
-    """Return a mock shaped like the event-cache write coordinator."""
-
-    async def _queue_room_update(
-        _room_id: str,
-        update_coro_factory: Callable[[], Awaitable[object]],
-        *,
-        name: str,
-    ) -> object:
-        del name
-        return await update_coro_factory()
-
-    coordinator = MagicMock(spec=_EventCacheWriteCoordinator)
-    coordinator.wait_for_room_idle = AsyncMock(return_value=None)
-    coordinator.queue_room_update = AsyncMock(side_effect=_queue_room_update)
-    return coordinator
+def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> _EventCacheWriteCoordinator:
+    """Return a coordinator-shaped runtime helper with the real synchronous queue contract."""
+    return _EventCacheWriteCoordinator(
+        logger=MagicMock(),
+        background_task_owner=object() if owner is None else owner,
+    )
 
 
 def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
@@ -150,7 +140,7 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
     if bot._runtime_view.event_cache is None:
         bot.event_cache = make_event_cache_mock()
     if bot._runtime_view.event_cache_write_coordinator is None:
-        bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
+        bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
     sync_bot_runtime_state(bot)
     return bot
 
