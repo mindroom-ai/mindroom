@@ -156,7 +156,11 @@ class ConversationResolver:
             self.deps.runtime_paths,
             room_id=room_id,
         )
-        safe_thread_root = EventInfo.from_event(event_source).safe_thread_root if event_source is not None else None
+        safe_thread_root = None
+        if event_source is not None:
+            event_info = EventInfo.from_event(event_source)
+            if event_info.relation_type in ("m.replace", "m.annotation", "m.reference"):
+                safe_thread_root = event_info.safe_thread_root
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,

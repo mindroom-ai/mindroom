@@ -525,6 +525,19 @@ class TestCreateSessionIdWithNoneThread:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
+    def test_message_target_plain_reply_keeps_room_level_session(self) -> None:
+        """Plain reply targets should not derive thread or session identity."""
+        target = MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$event456",
+            safe_thread_root=None,
+            room_mode=False,
+        )
+        assert target.reply_to_event_id == "$event456"
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
+
 
 class TestExtractMessageContextRoomMode:
     """Test _extract_message_context skips thread derivation in room mode."""
@@ -775,6 +788,46 @@ class TestExtractMessageContextRoomMode:
 
         assert threaded_target.resolved_thread_id == "$thread123"
         assert room_mode_target.resolved_thread_id is None
+
+    def test_build_message_target_plain_reply_does_not_infer_thread_identity(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Resolver target building should keep plain replies out of thread/session routing."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$reply-event:localhost",
+            event_source={
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$target:localhost"}},
+                },
+                "event_id": "$reply-event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.reply_to_event_id == "$reply-event:localhost"
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
 
 
 class TestSendResponseRoomMode:

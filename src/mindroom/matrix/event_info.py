@@ -165,10 +165,6 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
             # For edits, reactions, and references, use the target event
             if relates_to_event_id:
                 safe_thread_root = str(relates_to_event_id)
-        elif is_reply and reply_to_event_id:
-            # For rich replies, use the event being replied to
-            safe_thread_root = str(reply_to_event_id)
-
     return EventInfo(
         # Thread info
         is_thread=is_thread,

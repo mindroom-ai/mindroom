@@ -75,6 +75,28 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
+def test_plain_reply_event_info_has_no_safe_thread_root_for_routing() -> None:
+    """Plain replies should not populate a synthetic safe thread root."""
+    event_info = EventInfo.from_event(
+        {
+            "content": {
+                "body": "plain reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$target:localhost"}},
+            },
+            "event_id": "$reply:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": "!test:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+    assert event_info.is_reply is True
+    assert event_info.reply_to_event_id == "$target:localhost"
+    assert event_info.safe_thread_root is None
+
+
 def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> ResolvedVisibleMessage:
     """Build one typed visible message for thread-history mocks."""
     return ResolvedVisibleMessage.synthetic(
