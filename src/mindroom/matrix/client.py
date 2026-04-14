@@ -1821,21 +1821,6 @@ async def _fetch_thread_history_via_room_messages(
     return (await _fetch_thread_history_via_room_messages_with_events(client, room_id, thread_id)).history
 
 
-async def fetch_thread_snapshot(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-) -> ThreadHistoryResult:
-    """Fetch thread context for dispatch decisions through the authoritative refresh path."""
-    return await refresh_thread_history_from_source(
-        client,
-        room_id,
-        thread_id,
-        event_cache,
-    )
-
-
 async def get_room_threads_page(
     client: nio.AsyncClient,
     room_id: str,

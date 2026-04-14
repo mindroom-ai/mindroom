@@ -13,6 +13,7 @@ import pytest
 from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
+import mindroom.matrix.client as matrix_client_module
 from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -33,12 +34,6 @@ from mindroom.matrix.client import (
 from mindroom.matrix.client import (
     build_threaded_edit_content as _build_threaded_edit_content_impl,
 )
-from mindroom.matrix.client import (
-    fetch_thread_history as _fetch_thread_history_impl,
-)
-from mindroom.matrix.client import (
-    fetch_thread_snapshot as _fetch_thread_snapshot_impl,
-)
 from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:
@@ -53,13 +48,13 @@ def _event_cache() -> AsyncMock:
 async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistoryResult:
     """Inject a concrete event cache for test-local calls into the real helper."""
     kwargs.setdefault("event_cache", _event_cache())
-    return await _fetch_thread_history_impl(*args, **kwargs)
+    return await matrix_client_module.fetch_thread_history(*args, **kwargs)
 
 
 async def fetch_thread_snapshot(*args: object, **kwargs: object) -> ThreadHistoryResult:
     """Inject a concrete event cache for test-local snapshot helpers."""
     kwargs.setdefault("event_cache", _event_cache())
-    return await _fetch_thread_snapshot_impl(*args, **kwargs)
+    return await matrix_client_module.refresh_thread_history_from_source(*args, **kwargs)
 
 
 def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
