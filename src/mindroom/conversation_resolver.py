@@ -320,16 +320,13 @@ class ConversationResolver:
         allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
         """Derive conversation context from explicit Matrix threads only."""
-        thread_id = await self._explicit_thread_id_for_event(room_id, event_info)
-        if thread_id is None:
-            return False, None, []
-
-        thread_history = await self.deps.conversation_cache.get_thread_history(
+        is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
             room_id,
-            thread_id,
+            event_info,
+            full_history=True,
             allow_durable_cache=allow_durable_cache,
         )
-        return True, thread_id, list(thread_history)
+        return is_thread, thread_id, thread_history
 
     async def derive_conversation_target(
         self,
@@ -339,9 +336,33 @@ class ConversationResolver:
         allow_durable_cache: bool = False,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
         """Derive dispatch target using explicit-thread snapshots only."""
+        return await self._resolve_thread_context(
+            room_id,
+            event_info,
+            full_history=False,
+            allow_durable_cache=allow_durable_cache,
+        )
+
+    async def _resolve_thread_context(
+        self,
+        room_id: str,
+        event_info: EventInfo,
+        *,
+        full_history: bool,
+        allow_durable_cache: bool = False,
+    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
+        """Resolve one explicit-thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(room_id, event_info)
         if thread_id is None:
             return False, None, [], False
+
+        if full_history:
+            thread_history = await self.deps.conversation_cache.get_thread_history(
+                room_id,
+                thread_id,
+                allow_durable_cache=allow_durable_cache,
+            )
+            return True, thread_id, list(thread_history), False
 
         snapshot = await self.deps.conversation_cache.get_thread_snapshot(
             room_id,
@@ -407,20 +428,18 @@ class ConversationResolver:
             thread_id = None
             thread_history: list[ResolvedVisibleMessage] = []
             requires_full_thread_history = False
-        elif full_history:
-            is_thread, thread_id, thread_history = await self.derive_conversation_context(
-                room.room_id,
-                event_info,
-                allow_durable_cache=False,
-            )
-            requires_full_thread_history = False
         else:
             (
                 is_thread,
                 thread_id,
                 thread_history,
                 requires_full_thread_history,
-            ) = await self.derive_conversation_target(room.room_id, event_info)
+            ) = await self._resolve_thread_context(
+                room.room_id,
+                event_info,
+                full_history=full_history,
+                allow_durable_cache=False,
+            )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
