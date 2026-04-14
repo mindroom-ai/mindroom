@@ -780,9 +780,9 @@ async def test_cleanup_uses_latest_thread_event_for_threaded_edit_fallback(tmp_p
 
     with (
         patch(
-            "mindroom.matrix.stale_stream_cleanup.build_threaded_edit_content",
-            new=AsyncMock(return_value={"body": "cleanup", "msgtype": "m.text"}),
-        ) as mock_build,
+            "mindroom.matrix.stale_stream_cleanup.format_message_with_mentions",
+            return_value={"body": "cleanup", "msgtype": "m.text"},
+        ) as mock_format,
         patch(
             "mindroom.matrix.stale_stream_cleanup.edit_message",
             new=AsyncMock(return_value="$edit"),
@@ -792,7 +792,7 @@ async def test_cleanup_uses_latest_thread_event_for_threaded_edit_fallback(tmp_p
 
     assert cleaned == 1
     assert len(interrupted) == 1
-    assert mock_build.await_args.kwargs["latest_thread_event_id"] == "$later-user-message"
+    assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$later-user-message"
 
 
 @pytest.mark.asyncio

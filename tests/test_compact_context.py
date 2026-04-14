@@ -35,7 +35,7 @@ from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, make_event_cache_mock
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -801,6 +801,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
         active_model_name="large",
         session_id="session-1",
     )
@@ -878,6 +879,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
         active_model_name=None,
         session_id="session-1",
     )
@@ -951,6 +953,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
         active_model_name=None,
         session_id="session-1",
     )

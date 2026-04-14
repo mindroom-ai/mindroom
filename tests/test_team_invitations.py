@@ -93,7 +93,13 @@ class TestTeamRoomMembership:
         monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
         # Mock restore_scheduled_tasks
-        async def mock_restore_scheduled_tasks(_client: object, _room_id: str, _config: Config) -> int:
+        async def mock_restore_scheduled_tasks(
+            _client: object,
+            _room_id: str,
+            _config: Config,
+            _runtime_paths: object,
+            _event_cache: object,
+        ) -> int:
             return 0
 
         monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

@@ -24,7 +24,11 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import orchestrator_runtime_paths
+from tests.conftest import (
+    make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
+    orchestrator_runtime_paths,
+)
 
 
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
@@ -384,8 +388,8 @@ async def test_full_state_only_after_successful_first_sync() -> None:
         config=MagicMock(spec=Config),
         enable_streaming=True,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
+        event_cache=make_event_cache_mock(),
+        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
 
     # Call the real sync_forever method

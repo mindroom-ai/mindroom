@@ -21,7 +21,6 @@ from mindroom.matrix.reply_chain import (
     derive_conversation_context,
     derive_conversation_target,
 )
-from mindroom.matrix.room_cache import cached_room
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import check_agent_mentioned
 
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import MatrixConversationAccess
+    from mindroom.matrix.conversation_cache import MatrixConversationCache
 
 type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type MediaDispatchEvent = (
@@ -81,7 +80,7 @@ class ConversationResolverDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
-    conversation_access: MatrixConversationAccess
+    conversation_cache: MatrixConversationCache
 
 
 @dataclass
@@ -298,7 +297,7 @@ class ConversationResolver:
             self._client(),
             room.room_id,
             relation_seed,
-            access=self.deps.conversation_access,
+            access=self.deps.conversation_cache,
             caches=self.reply_chain,
         )
 
@@ -314,7 +313,7 @@ class ConversationResolver:
             event_info,
             self.reply_chain,
             self.deps.logger,
-            self.deps.conversation_access,
+            self.deps.conversation_cache,
         )
         return is_thread, thread_id, thread_history
 
@@ -330,7 +329,7 @@ class ConversationResolver:
             event_info,
             self.reply_chain,
             self.deps.logger,
-            self.deps.conversation_access,
+            self.deps.conversation_cache,
         )
 
     async def extract_dispatch_context(
@@ -436,12 +435,15 @@ class ConversationResolver:
         client = self.deps.runtime.client
         if client is None:
             return None
-        return cached_room(client, room_id)
+        rooms = client.rooms
+        if not isinstance(rooms, dict):
+            return None
+        return rooms.get(room_id)
 
     @asynccontextmanager
     async def turn_thread_cache_scope(self) -> AsyncIterator[None]:
         """Initialize per-turn conversation lookup memoization."""
-        async with self.deps.conversation_access.turn_scope():
+        async with self.deps.conversation_cache.turn_scope():
             yield
 
     async def fetch_thread_history(
@@ -450,5 +452,5 @@ class ConversationResolver:
         room_id: str,
         thread_id: str,
     ) -> list[ResolvedVisibleMessage]:
-        """Fetch thread history through the shared conversation-access policy."""
-        return await self.deps.conversation_access.get_thread_history(room_id, thread_id)
+        """Fetch thread history through the shared conversation-cache policy."""
+        return await self.deps.conversation_cache.get_thread_history(room_id, thread_id)

@@ -8,7 +8,6 @@ import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
-from mindroom.matrix.room_cache import cached_room, cached_rooms
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -114,7 +113,9 @@ async def is_user_online(
         False if offline or presence check fails
 
     """
-    candidate_rooms = [cached_room(client, room_id)] if room_id is not None else cached_rooms(client).values()
+    rooms = client.rooms
+    cached_rooms = rooms if isinstance(rooms, dict) else {}
+    candidate_rooms = [cached_rooms.get(room_id)] if room_id is not None else cached_rooms.values()
     for room in candidate_rooms:
         if room is None or user_id not in room.users:
             continue

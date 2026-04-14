@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from mindroom import interactive
+from mindroom import constants, interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.message_target import MessageTarget
@@ -25,9 +25,10 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult
+    from mindroom.handled_turns import HandledTurnState
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.stop import StopManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -52,6 +53,7 @@ class ResponseOutcome:
     strip_transient_enrichment_after_run: bool = False
     strip_transient_enrichment_before_effects: bool = False
     dispatch_compaction_when_suppressed: bool = False
+    handled_turn: HandledTurnState | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ class PostResponseEffectsDeps:
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
+    record_handled_turn: Callable[[HandledTurnState], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,7 @@ class PostResponseEffectsSupport:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway
-    conversation_access: ConversationReadAccess
+    conversation_cache: ConversationCacheProtocol
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -180,17 +183,18 @@ class PostResponseEffectsSupport:
         message_count_hint: int | None,
     ) -> None:
         """Queue background thread summarization with timing instrumentation."""
+        summary_coro = maybe_generate_thread_summary(
+            client=self._client(),
+            room_id=room_id,
+            thread_id=thread_id,
+            config=self.runtime.config,
+            runtime_paths=self.runtime_paths,
+            conversation_cache=self.conversation_cache,
+            message_count_hint=message_count_hint,
+        )
         create_background_task(
             self._timed_thread_summary(
-                summary_coro=maybe_generate_thread_summary(
-                    client=self._client(),
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    config=self.runtime.config,
-                    runtime_paths=self.runtime_paths,
-                    conversation_access=self.conversation_access,
-                    message_count_hint=message_count_hint,
-                ),
+                summary_coro=summary_coro,
             ),
             name=f"thread_summary_{room_id}_{thread_id}",
             owner=self.runtime,
@@ -206,6 +210,7 @@ class PostResponseEffectsSupport:
         strip_transient_enrichment: Callable[[], None] | None = None,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
+        record_handled_turn: Callable[[HandledTurnState], None] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -245,7 +250,22 @@ class PostResponseEffectsSupport:
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
+            record_handled_turn=record_handled_turn,
         )
+
+
+def matrix_run_metadata_for_handled_turn(
+    handled_turn: HandledTurnState,
+) -> dict[str, Any] | None:
+    """Build persisted run metadata for one handled turn."""
+    if not handled_turn.is_coalesced:
+        return None
+    metadata: dict[str, Any] = {
+        constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(handled_turn.source_event_ids),
+    }
+    if handled_turn.source_event_prompts:
+        metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
+    return metadata
 
 
 def clear_tracked_response_message(
@@ -368,3 +388,6 @@ async def apply_post_response_effects(  # noqa: C901
             outcome.thread_summary_thread_id,
             outcome.thread_summary_message_count_hint,
         )
+
+    if outcome.handled_turn is not None and deps.record_handled_turn is not None:
+        deps.record_handled_turn(outcome.handled_turn)

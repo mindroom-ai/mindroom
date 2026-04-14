@@ -13,6 +13,7 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
+from mindroom.matrix._event_cache import _EventCache
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 from mindroom.scheduling import (
@@ -288,6 +289,7 @@ async def update_schedule(
     resolved_room_id = _resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
     client = await _get_router_client(runtime_paths)
+    event_cache = _EventCache(runtime_config.cache.resolve_db_path(runtime_paths))
     try:
         existing_task = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
         if not existing_task:
@@ -302,6 +304,7 @@ async def update_schedule(
                 workflow=updated_workflow,
                 config=runtime_config,
                 runtime_paths=runtime_paths,
+                event_cache=event_cache,
                 existing_task=existing_task,
                 restart_task=False,
             )
@@ -310,6 +313,7 @@ async def update_schedule(
 
         return _to_response_task(updated_task, runtime_paths)
     finally:
+        await event_cache.close()
         await client.close()
 
 

@@ -25,7 +25,7 @@ from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.sender import send_hook_message
 from mindroom.hooks.types import EVENT_AGENT_STARTED, EVENT_AGENT_STOPPED, EVENT_BOT_READY, EVENT_REACTION_RECEIVED
-from mindroom.matrix.conversation_access import MatrixConversationAccess
+from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.health import (
     clear_matrix_sync_state,
@@ -99,6 +99,7 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
+from .handled_turns import HandledTurnLedger
 from .inbound_turn_normalizer import (
     DispatchPayload,
     InboundTurnNormalizer,
@@ -122,8 +123,9 @@ from .response_runner import (
 )
 from .runtime_support import (
     StandaloneRuntimeSupport,
+    build_standalone_runtime_support,
     close_standalone_runtime_support,
-    create_standalone_runtime_support,
+    initialize_standalone_runtime_support,
 )
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -150,8 +152,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.event_cache import ConversationEventCache
-    from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
+    from mindroom.matrix.conversation_cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -165,6 +166,21 @@ _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 _JOINED_ROOM_CACHE_WAIT_ATTEMPTS = 20
 _JOINED_ROOM_CACHE_WAIT_SECONDS = 0.1
+
+
+def _thread_summary_message_count_hint(
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> int:
+    """Return a lower-bound post-response thread size without refetching history.
+
+    The summary task runs only after this bot has already appended one visible
+    reply to the thread, so the hint must account for that new non-summary
+    message. Existing summary notices do not count toward the thresholds.
+    """
+    existing_non_summary_messages = sum(
+        1 for message in thread_history if not isinstance(message.content.get("io.mindroom.thread_summary"), dict)
+    )
+    return existing_non_summary_messages + 1
 
 
 def _create_task_wrapper(
@@ -312,7 +328,7 @@ class AgentBot:
     _turn_policy: TurnPolicy
     _conversation_resolver: ConversationResolver
     _conversation_state_writer: ConversationStateWriter
-    _conversation_access: MatrixConversationAccess
+    _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
     _turn_store: TurnStore
@@ -322,8 +338,9 @@ class AgentBot:
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
-    _standalone_runtime_support: StandaloneRuntimeSupport | None
+    _standalone_runtime_support: StandaloneRuntimeSupport
     _turn_controller: TurnController
+    _handled_turn_ledger: HandledTurnLedger
 
     def __init__(
         self,
@@ -349,16 +366,26 @@ class AgentBot:
         self._first_sync_done = False
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
+        self._standalone_runtime_support = build_standalone_runtime_support(
+            config=config,
+            runtime_paths=self.runtime_paths,
+            logger=self.logger,
+            background_task_owner=self,
+        )
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
             enable_streaming=enable_streaming,
             orchestrator=None,
-            event_cache=None,
-            event_cache_write_coordinator=None,
+            event_cache=self._standalone_runtime_support.event_cache,
+            event_cache_write_coordinator=self._standalone_runtime_support.event_cache_write_coordinator,
             last_sync_activity_monotonic=None,
         )
-        self._standalone_runtime_support = None
+        self._handled_turn_ledger = HandledTurnLedger(
+            self.agent_name,
+            base_path=self.storage_path / "tracking",
+        )
+        self._standalone_runtime_support.event_cache_write_coordinator.background_task_owner = self._runtime_view
         self._deferred_overdue_task_drain_task = None
         self._init_runtime_components()
 
@@ -389,7 +416,7 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
         )
-        self._conversation_access = MatrixConversationAccess(
+        self._conversation_cache = MatrixConversationCache(
             logger=self.logger,
             runtime=self._runtime_view,
         )
@@ -408,9 +435,10 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_access=self._conversation_access,
+                conversation_cache=self._conversation_cache,
             ),
         )
+        self._conversation_cache.bind_reply_chain_caches(lambda: self._conversation_resolver.reply_chain)
         self._inbound_turn_normalizer = InboundTurnNormalizer(
             InboundTurnNormalizerDeps(
                 runtime=self._runtime_view,
@@ -448,7 +476,7 @@ class AgentBot:
         self._turn_store = TurnStore(
             TurnStoreDeps(
                 agent_name=self.agent_name,
-                tracking_base_path=self.storage_path / "tracking",
+                handled_turn_ledger=self._handled_turn_ledger,
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
@@ -459,7 +487,7 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
             delivery_gateway=self._delivery_gateway,
-            conversation_access=self._conversation_access,
+            conversation_cache=self._conversation_cache,
         )
         self._response_runner = ResponseRunner(
             ResponseRunnerDeps(
@@ -510,13 +538,14 @@ class AgentBot:
                 storage_path=self.storage_path,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_access=self._conversation_access,
+                conversation_cache=self._conversation_cache,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 turn_policy=self._turn_policy,
                 ingress_hook_runner=self._ingress_hook_runner,
                 response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
+                state_writer=self._conversation_state_writer,
                 tool_runtime=self._tool_runtime_support,
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
@@ -565,22 +594,22 @@ class AgentBot:
         self._runtime_view.orchestrator = value
 
     @property
-    def event_cache(self) -> ConversationEventCache | None:
+    def event_cache(self) -> ConversationEventCache:
         """Return the advisory event cache."""
         return self._runtime_view.event_cache
 
     @event_cache.setter
-    def event_cache(self, value: ConversationEventCache | None) -> None:
+    def event_cache(self, value: ConversationEventCache) -> None:
         """Update the advisory event cache."""
         self._runtime_view.event_cache = value
 
     @property
-    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator | None:
+    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator:
         """Return the advisory event-cache write coordinator."""
         return self._runtime_view.event_cache_write_coordinator
 
     @event_cache_write_coordinator.setter
-    def event_cache_write_coordinator(self, value: EventCacheWriteCoordinator | None) -> None:
+    def event_cache_write_coordinator(self, value: EventCacheWriteCoordinator) -> None:
         """Update the advisory event-cache write coordinator."""
         self._runtime_view.event_cache_write_coordinator = value
 
@@ -641,7 +670,7 @@ class AgentBot:
         normalized_target_event_id = event.reacts_to.strip()
         thread_id: str | None = None
         if normalized_target_event_id:
-            response = await self._conversation_access.get_event(room_id, normalized_target_event_id)
+            response = await self._conversation_cache.get_event(room_id, normalized_target_event_id)
             if isinstance(response, nio.RoomGetEventResponse):
                 target_info = EventInfo.from_event(response.event.source)
                 if target_info.thread_id:
@@ -768,7 +797,13 @@ class AgentBot:
 
         assert self.client is not None
 
-        restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config, self.runtime_paths)
+        restored_tasks = await restore_scheduled_tasks(
+            self.client,
+            room_id,
+            self.config,
+            self.runtime_paths,
+            self.event_cache,
+        )
         if restored_tasks > 0:
             self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
 
@@ -944,45 +979,42 @@ class AgentBot:
         await self.leave_unconfigured_rooms()
 
     async def _initialize_runtime_support_services(self) -> None:
-        """Initialize standalone runtime support services with an all-or-nothing injection contract."""
-        if self._standalone_runtime_support is not None:
+        """Initialize standalone runtime support services or accept a full injected pair."""
+        binding_state = self._runtime_support_binding_state()
+        if binding_state == "injected":
             return
-        injected_service_count = self._runtime_support_injection_count()
-        if injected_service_count == 2:
-            return
-        if injected_service_count != 0:
+        if binding_state == "mixed":
             msg = self._partial_runtime_support_injection_error()
             raise RuntimeError(msg)
-
-        support = await create_standalone_runtime_support(
-            config=self.config,
-            runtime_paths=self.runtime_paths,
+        await initialize_standalone_runtime_support(
+            self._standalone_runtime_support,
             logger=self.logger,
-            background_task_owner=self._runtime_view,
         )
-        self._standalone_runtime_support = support
-        self.event_cache = support.event_cache
-        self.event_cache_write_coordinator = support.event_cache_write_coordinator
 
     async def _close_runtime_support_services(self) -> None:
-        """Clear runtime support bindings and close standalone-owned services when present."""
-        support = self._standalone_runtime_support
-        self._standalone_runtime_support = None
-        self.event_cache = None
-        self.event_cache_write_coordinator = None
-        if support is None:
+        """Close standalone-owned services and detach any injected shared support."""
+        binding_state = self._runtime_support_binding_state()
+        if binding_state == "mixed":
+            msg = self._partial_runtime_support_injection_error()
+            raise RuntimeError(msg)
+        if binding_state == "injected":
+            await close_standalone_runtime_support(self._standalone_runtime_support, logger=self.logger)
+            self.event_cache = self._standalone_runtime_support.event_cache
+            self.event_cache_write_coordinator = self._standalone_runtime_support.event_cache_write_coordinator
             return
-        await close_standalone_runtime_support(support, logger=self.logger)
+        await close_standalone_runtime_support(self._standalone_runtime_support, logger=self.logger)
 
-    def _runtime_support_injection_count(self) -> int:
-        """Return how many runtime support services are currently injected."""
-        return sum(
-            service is not None
-            for service in (
-                self.event_cache,
-                self.event_cache_write_coordinator,
-            )
+    def _runtime_support_binding_state(self) -> Literal["standalone", "injected", "mixed"]:
+        """Classify whether runtime support is local, injected, or inconsistently mixed."""
+        uses_standalone_event_cache = self.event_cache is self._standalone_runtime_support.event_cache
+        uses_standalone_coordinator = (
+            self.event_cache_write_coordinator is self._standalone_runtime_support.event_cache_write_coordinator
         )
+        if uses_standalone_event_cache and uses_standalone_coordinator:
+            return "standalone"
+        if not uses_standalone_event_cache and not uses_standalone_coordinator:
+            return "injected"
+        return "mixed"
 
     @staticmethod
     def _partial_runtime_support_injection_error() -> str:
@@ -991,8 +1023,7 @@ class AgentBot:
 
     def _validate_runtime_support_injection_contract_for_startup(self) -> None:
         """Reject mixed runtime support injection before startup side effects begin."""
-        injected_service_count = self._runtime_support_injection_count()
-        if injected_service_count in {0, 2}:
+        if self._runtime_support_binding_state() != "mixed":
             return
         raise PermanentMatrixStartupError(self._partial_runtime_support_injection_error())
 
@@ -1238,7 +1269,12 @@ class AgentBot:
         assert self.client is not None
 
         try:
-            drained_count = await drain_deferred_overdue_tasks(self.client, self.config, self.runtime_paths)
+            drained_count = await drain_deferred_overdue_tasks(
+                self.client,
+                self.config,
+                self.runtime_paths,
+                self.event_cache,
+            )
             if drained_count > 0:
                 self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
         except asyncio.CancelledError:
@@ -1294,7 +1330,7 @@ class AgentBot:
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
-        await self._conversation_access.apply_redaction(room.room_id, event)
+        await self._conversation_cache.apply_redaction(room.room_id, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -1762,7 +1798,7 @@ class TeamBot(AgentBot):
 
         media_inputs = media or MediaInputs()
 
-        return await self._generate_team_response_helper(
+        event_id = await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
@@ -1799,3 +1835,10 @@ class TeamBot(AgentBot):
             matrix_run_metadata=matrix_run_metadata,
             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )
+        if thread_id is not None and event_id is not None:
+            self._post_response_effects_support.queue_thread_summary(
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count_hint=_thread_summary_message_count_hint(thread_history),
+            )
+        return event_id

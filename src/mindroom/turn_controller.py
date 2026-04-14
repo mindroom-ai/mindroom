@@ -90,7 +90,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import MatrixConversationAccess
+    from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_runner import ResponseRunner
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -146,7 +146,7 @@ class TurnControllerDeps:
     storage_path: Path
     agent_name: str
     matrix_id: MatrixID
-    conversation_access: MatrixConversationAccess
+    conversation_cache: MatrixConversationCache
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
     turn_policy: TurnPolicy
@@ -581,7 +581,8 @@ class TurnController:
             storage_path=self.deps.storage_path,
             logger=self.deps.logger,
             derive_conversation_context=self.deps.resolver.derive_conversation_context,
-            conversation_access=self.deps.resolver.deps.conversation_access,
+            conversation_cache=self.deps.resolver.deps.conversation_cache,
+            event_cache=self.deps.runtime.event_cache,
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
             record_handled_turn=self.deps.turn_store.record_turn,
@@ -1093,7 +1094,7 @@ class TurnController:
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         event_info = EventInfo.from_event(event.source)
-        await self.deps.conversation_access.append_live_event(room.room_id, event, event_info=event_info)
+        await self.deps.conversation_cache.append_live_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None

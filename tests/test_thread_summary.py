@@ -399,9 +399,9 @@ class TestMaybeGenerateThreadSummary:
     """Integration tests for the threshold-gated summary pipeline."""
 
     @pytest.fixture(autouse=True)
-    def _conversation_access(self) -> None:
-        """Provide one explicit conversation-access mock per test."""
-        self.conversation_access = MagicMock()
+    def _conversation_cache(self) -> None:
+        """Provide one explicit conversation-cache mock per test."""
+        self.conversation_cache = MagicMock()
 
     async def _maybe_generate(
         self,
@@ -418,7 +418,7 @@ class TestMaybeGenerateThreadSummary:
             "$thread1",
             config,
             rp,
-            conversation_access=self.conversation_access,
+            conversation_cache=self.conversation_cache,
             message_count_hint=message_count_hint,
         )
 
@@ -664,7 +664,7 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp, message_count_hint=4)
 
-        mock_fetch.assert_awaited_once_with(self.conversation_access, "!room:x", "$thread1")
+        mock_fetch.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
         mock_gen.assert_awaited_once_with(thread_history, config, rp)
         client.room_send.assert_awaited_once()
 
@@ -683,7 +683,7 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp, message_count_hint=5)
 
-        mock_fetch.assert_awaited_once_with(self.conversation_access, "!room:x", "$thread1")
+        mock_fetch.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
         mock_gen.assert_awaited_once_with(thread_history, config, rp)
         client.room_send.assert_awaited_once()
 

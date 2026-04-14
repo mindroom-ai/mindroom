@@ -19,6 +19,7 @@ from mindroom.tool_system.runtime_context import (
     list_tool_runtime_attachment_ids,
     tool_runtime_context,
 )
+from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,6 +38,7 @@ def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> To
         client=client,
         config=MagicMock(),
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )

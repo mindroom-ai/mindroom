@@ -12,7 +12,7 @@ import nio
 import pytest
 
 import mindroom.thread_tags as thread_tags_module
-from mindroom.matrix.conversation_access import MatrixConversationAccess
+from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.reply_chain import canonicalize_related_event_id
 from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
@@ -23,19 +23,20 @@ from mindroom.thread_tags import (
     remove_thread_tag,
     set_thread_tag,
 )
+from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
 
 
-def _conversation_access(client: AsyncMock) -> MatrixConversationAccess:
-    """Build one explicit conversation-access seam for thread-tag tests."""
+def _conversation_cache(client: AsyncMock) -> MatrixConversationCache:
+    """Build one explicit conversation-cache seam for thread-tag tests."""
     runtime = SimpleNamespace(
         client=client,
-        event_cache=None,
-        event_cache_write_coordinator=None,
+        event_cache=make_event_cache_mock(),
+        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    return MatrixConversationAccess(logger=MagicMock(), runtime=runtime)
+    return MatrixConversationCache(logger=MagicMock(), runtime=runtime)
 
 
 def _message_event_response(
@@ -1423,7 +1424,7 @@ async def test_normalize_thread_root_event_id_returns_root_for_root_event() -> N
         client,
         "!room:localhost",
         "$thread-root:localhost",
-        access=_conversation_access(client),
+        access=_conversation_cache(client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -1457,7 +1458,7 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_thread_rep
         client,
         "!room:localhost",
         "$thread-reply:localhost",
-        access=_conversation_access(client),
+        access=_conversation_cache(client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -1473,7 +1474,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_blank_input(event
         client,
         "!room:localhost",
         event_id,
-        access=_conversation_access(client),
+        access=_conversation_cache(client),
     )
 
     assert normalized is None
@@ -1531,7 +1532,7 @@ async def test_normalize_thread_root_event_id_walks_plain_reply_chain() -> None:
         client,
         "!room:localhost",
         "$reply-two:localhost",
-        access=_conversation_access(client),
+        access=_conversation_cache(client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -1566,7 +1567,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_cycle() -> None:
         client,
         "!room:localhost",
         "$reply-one:localhost",
-        access=_conversation_access(client),
+        access=_conversation_cache(client),
     )
 
     assert normalized is None
@@ -1609,7 +1610,7 @@ async def test_normalize_thread_root_event_id_returns_none_when_depth_limit_is_h
         client,
         "!room:localhost",
         "$reply-two:localhost",
-        access=_conversation_access(client),
+        access=_conversation_cache(client),
     )
 
     assert normalized is None
@@ -1663,7 +1664,7 @@ async def test_normalize_thread_root_event_id_resolves_thread_edit_via_original_
         client,
         "!room:localhost",
         "$edit:localhost",
-        access=_conversation_access(client),
+        access=_conversation_cache(client),
     )
 
     assert normalized == "$thread-root:localhost"

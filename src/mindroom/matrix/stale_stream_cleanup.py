@@ -23,7 +23,6 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
-    build_threaded_edit_content,
     edit_message,
     get_joined_rooms,
     resolve_latest_visible_messages,
@@ -31,6 +30,7 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.streaming import (
@@ -1031,15 +1031,13 @@ async def _edit_stale_message(
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
     extra_content = _preserved_cleanup_content(preserved_content)
-    content = await build_threaded_edit_content(
-        client,
-        room_id=room_id,
-        new_text=new_text,
-        thread_id=thread_id,
-        latest_thread_event_id=latest_thread_event_id,
-        config=config,
-        runtime_paths=runtime_paths,
+    content = format_message_with_mentions(
+        config,
+        runtime_paths,
+        new_text,
         sender_domain=sender_domain,
+        thread_event_id=thread_id,
+        latest_thread_event_id=latest_thread_event_id,
         extra_content=extra_content,
     )
 

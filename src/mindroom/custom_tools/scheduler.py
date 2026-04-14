@@ -40,7 +40,7 @@ class SchedulerTools(Toolkit):
 
         """
         context = get_tool_runtime_context()
-        if context is None or context.room is None or context.conversation_access is None:
+        if context is None or context.room is None or context.conversation_cache is None:
             return "❌ Scheduler tool is unavailable in this context."
 
         _, response_text = await schedule_task(
@@ -52,7 +52,8 @@ class SchedulerTools(Toolkit):
             config=context.config,
             runtime_paths=context.runtime_paths,
             room=context.room,
-            conversation_access=context.conversation_access,
+            conversation_cache=context.conversation_cache,
+            event_cache=context.event_cache,
             new_thread=new_thread,
         )
         return response_text
@@ -69,7 +70,7 @@ class SchedulerTools(Toolkit):
 
         """
         context = get_tool_runtime_context()
-        if context is None or context.room is None or context.conversation_access is None:
+        if context is None or context.room is None or context.conversation_cache is None:
             return "❌ Scheduler tool is unavailable in this context."
 
         return await edit_scheduled_task(
@@ -81,7 +82,8 @@ class SchedulerTools(Toolkit):
             config=context.config,
             runtime_paths=context.runtime_paths,
             room=context.room,
-            conversation_access=context.conversation_access,
+            conversation_cache=context.conversation_cache,
+            event_cache=context.event_cache,
             thread_id=context.resolved_thread_id,
         )
 

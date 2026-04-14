@@ -57,8 +57,8 @@ class ThreadSummaryTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_access = context.conversation_access
-        if conversation_access is None:
+        conversation_cache = context.conversation_cache
+        if conversation_cache is None:
             return self._context_error()
 
         if room_id is None:
@@ -120,7 +120,7 @@ class ThreadSummaryTools(Toolkit):
                     context.client,
                     resolved_room_id,
                     effective_thread_id,
-                    access=conversation_access,
+                    access=conversation_cache,
                 )
             except Exception:
                 error_thread_id = effective_thread_id
@@ -132,7 +132,7 @@ class ThreadSummaryTools(Toolkit):
                 else:
                     async with thread_summary_lock(resolved_room_id, normalized_thread_id):
                         try:
-                            thread_history = await conversation_access.get_thread_history(
+                            thread_history = await conversation_cache.get_thread_history(
                                 resolved_room_id,
                                 normalized_thread_id,
                             )

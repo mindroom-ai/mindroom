@@ -20,7 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
-from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix._event_cache_write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -35,6 +35,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_send_response_mock,
+    make_event_cache_mock,
     runtime_paths_for,
     sync_bot_runtime_state,
     unwrap_extracted_collaborator,
@@ -83,7 +84,7 @@ def _agent_bot(
 
 def _install_static_logger_deps(bot: AgentBot, logger: MagicMock) -> None:
     """Rebuild extracted collaborators with one fixed logger dependency."""
-    bot._conversation_access.logger = logger
+    bot._conversation_cache.logger = logger
     resolver = replace(
         unwrap_extracted_collaborator(bot._conversation_resolver),
         deps=replace(unwrap_extracted_collaborator(bot._conversation_resolver).deps, logger=logger),
@@ -931,6 +932,7 @@ class TestSendStreamingResponseRoomMode:
                 config,
                 runtime_paths_for(config),
                 empty_stream(),
+                event_cache=make_event_cache_mock(),
                 room_mode=True,
             )
 
@@ -1132,7 +1134,7 @@ class TestExtractedModuleLoggerRebinding:
         event_cache = AsyncMock()
         event_cache.append_event.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -1154,7 +1156,7 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        await bot._conversation_access.append_live_event(
+        await bot._conversation_cache.append_live_event(
             "!room:localhost",
             event,
             event_info=EventInfo.from_event(event.source),
@@ -1169,12 +1171,12 @@ class TestExtractedModuleLoggerRebinding:
         )
         rebound_logger.warning.assert_not_called()
 
-    def test_conversation_resolver_fetch_path_uses_conversation_access_api(
+    def test_conversation_resolver_fetch_path_uses_conversation_cache_api(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Resolver full-history fetches should go through the explicit access layer."""
+        """Resolver full-history fetches should go through the explicit conversation-cache layer."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1188,7 +1190,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        bot._conversation_access.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
@@ -1198,13 +1200,13 @@ class TestExtractedModuleLoggerRebinding:
             ),
         )
 
-        bot._conversation_access.get_thread_history.assert_awaited_once_with(
+        bot._conversation_cache.get_thread_history.assert_awaited_once_with(
             "!room:localhost",
             "$threadroot",
         )
 
     @pytest.mark.asyncio
-    async def test_conversation_access_fetch_path_passes_explicit_event_cache(
+    async def test_conversation_cache_fetch_path_passes_explicit_event_cache(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1227,11 +1229,11 @@ class TestExtractedModuleLoggerRebinding:
 
         client = MagicMock()
         with patch(
-            "mindroom.matrix.conversation_access.fetch_thread_history",
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
             new=AsyncMock(return_value=[]),
         ) as fetch_thread_history_mock:
             bot.client = client
-            await bot._conversation_access.get_thread_history(
+            await bot._conversation_cache.get_thread_history(
                 "!room:localhost",
                 "$threadroot",
             )
@@ -1245,7 +1247,7 @@ class TestExtractedModuleLoggerRebinding:
         )
 
     @pytest.mark.asyncio
-    async def test_conversation_access_reloads_non_full_snapshot_for_history(
+    async def test_conversation_cache_reloads_non_full_snapshot_for_history(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1270,21 +1272,21 @@ class TestExtractedModuleLoggerRebinding:
         hydrated_history = ThreadHistoryResult([], is_full_history=True)
         with (
             patch(
-                "mindroom.matrix.conversation_access.fetch_thread_snapshot",
+                "mindroom.matrix.conversation_cache.fetch_thread_snapshot",
                 new=AsyncMock(return_value=preview_snapshot),
             ) as fetch_thread_snapshot_mock,
             patch(
-                "mindroom.matrix.conversation_access.fetch_thread_history",
+                "mindroom.matrix.conversation_cache.fetch_thread_history",
                 new=AsyncMock(return_value=hydrated_history),
             ) as fetch_thread_history_mock,
         ):
             bot.client = MagicMock()
-            async with bot._conversation_access.turn_scope():
-                snapshot_history = await bot._conversation_access.get_thread_snapshot(
+            async with bot._conversation_cache.turn_scope():
+                snapshot_history = await bot._conversation_cache.get_thread_snapshot(
                     "!room:localhost",
                     "$threadroot",
                 )
-                full_history = await bot._conversation_access.get_thread_history(
+                full_history = await bot._conversation_cache.get_thread_history(
                     "!room:localhost",
                     "$threadroot",
                 )
@@ -1351,16 +1353,16 @@ class TestExtractedModuleLoggerRebinding:
             bot.client,
             room.room_id,
             "$reply-seed:localhost",
-            access=bot._conversation_access,
+            access=bot._conversation_cache,
             caches=bot._conversation_resolver.reply_chain,
         )
 
 
-class TestConversationAccessArchitecture:
-    """Architecture guards for the explicit conversation-access seam."""
+class TestConversationCacheArchitecture:
+    """Architecture guards for the explicit conversation-cache seam."""
 
     def test_hot_path_modules_do_not_call_raw_matrix_history_apis(self) -> None:
-        """Hot-path conversation modules should use the explicit access layer."""
+        """Hot-path conversation modules should use the explicit conversation-cache layer."""
         repo_root = Path(__file__).resolve().parents[1]
         banned_calls = (
             "room_get_event(",
@@ -1379,10 +1381,10 @@ class TestConversationAccessArchitecture:
                 assert banned_call not in file_text, f"{relative_path} should not call {banned_call}"
 
     def test_hot_path_modules_do_not_reference_event_cache_directly(self) -> None:
-        """Hot-path conversation modules should not bypass the access layer for cache state."""
+        """Hot-path conversation modules should not bypass the conversation-cache layer for cache state."""
         repo_root = Path(__file__).resolve().parents[1]
         banned_tokens = (
-            "EventCache(",
+            "_EventCache(",
             "event_cache.",
         )
         for relative_path in (

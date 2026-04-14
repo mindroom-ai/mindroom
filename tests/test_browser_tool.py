@@ -18,6 +18,7 @@ from mindroom.custom_tools.browser import (
     _clean_str,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.conftest import make_event_cache_mock
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
@@ -109,6 +110,7 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
         client=MagicMock(),
         config=MagicMock(),
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
         storage_path=context_storage_path,
     )
 

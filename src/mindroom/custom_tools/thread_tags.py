@@ -107,8 +107,8 @@ class ThreadTagsTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_access = context.conversation_access
-        if conversation_access is None:
+        conversation_cache = context.conversation_cache
+        if conversation_cache is None:
             return self._context_error()
 
         resolved_room_id = room_id or context.room_id
@@ -148,7 +148,7 @@ class ThreadTagsTools(Toolkit):
             context.client,
             resolved_room_id,
             effective_thread_id,
-            access=conversation_access,
+            access=conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(
@@ -200,8 +200,8 @@ class ThreadTagsTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_access = context.conversation_access
-        if conversation_access is None:
+        conversation_cache = context.conversation_cache
+        if conversation_cache is None:
             return self._context_error()
 
         resolved_room_id = room_id or context.room_id
@@ -244,7 +244,7 @@ class ThreadTagsTools(Toolkit):
                 context.client,
                 resolved_room_id,
                 effective_thread_id,
-                access=conversation_access,
+                access=conversation_cache,
             )
             if target_thread_id is None:
                 return self._payload(
@@ -295,8 +295,8 @@ class ThreadTagsTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_access = context.conversation_access
-        if conversation_access is None:
+        conversation_cache = context.conversation_cache
+        if conversation_cache is None:
             return self._context_error()
 
         resolved_room_id = room_id or context.room_id
@@ -371,7 +371,7 @@ class ThreadTagsTools(Toolkit):
             context.client,
             resolved_room_id,
             effective_thread_id,
-            access=conversation_access,
+            access=conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(

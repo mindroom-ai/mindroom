@@ -38,6 +38,7 @@ from mindroom.streaming import (
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    make_event_cache_mock,
     patch_response_runner_module,
     replace_response_runner_deps,
     runtime_paths_for,
@@ -762,6 +763,7 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=empty_stream(),
+                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 room_mode=True,
@@ -998,6 +1000,7 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
+                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1039,6 +1042,7 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
+                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1082,6 +1086,7 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
+                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1132,6 +1137,7 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
+                event_cache=make_event_cache_mock(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
             )
@@ -1198,6 +1204,7 @@ class TestStreamingConfig:
                 config=config,
                 runtime_paths=runtime_paths,
                 response_stream=empty_stream(),
+                event_cache=make_event_cache_mock(),
                 streaming_cls=CapturingStreamingResponse,
                 room_mode=True,
             )

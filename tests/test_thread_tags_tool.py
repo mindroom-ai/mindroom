@@ -17,7 +17,7 @@ from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 
 def _make_context(
@@ -40,7 +40,8 @@ def _make_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_access=AsyncMock(),
+        conversation_cache=AsyncMock(),
+        event_cache=make_event_cache_mock(),
         room=None,
         reply_to_event_id=reply_to_event_id,
         storage_path=None,
@@ -139,7 +140,7 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -177,7 +178,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -215,7 +216,7 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -255,7 +256,7 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -291,7 +292,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -327,7 +328,7 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -365,7 +366,7 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -400,7 +401,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -482,7 +483,7 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -568,7 +569,7 @@ async def test_list_thread_tags_falls_back_to_reply_to_event_id_for_room_timelin
         context.client,
         context.room_id,
         "$root-event:localhost",
-        access=context.conversation_access,
+        access=context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,

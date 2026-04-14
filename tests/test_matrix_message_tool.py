@@ -23,13 +23,20 @@ from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_event_cache_mock,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
 _DEFAULT_RESOLVED_THREAD_ID = object()
+_DEFAULT_EVENT_CACHE = object()
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +67,7 @@ def _make_context(
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
     agent_thread_mode: str = "thread",
-    event_cache: object | None = None,
+    event_cache: object = _DEFAULT_EVENT_CACHE,
 ) -> ToolRuntimeContext:
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -89,8 +96,8 @@ def _make_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_access=AsyncMock(),
-        event_cache=event_cache,
+        conversation_cache=AsyncMock(),
+        event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
         reply_to_event_id=reply_to_event_id,
         storage_path=storage_path,
@@ -371,7 +378,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         ctx.room_id,
         attachment.local_path,
         thread_id="$evt",
-        event_cache=None,
+        event_cache=ctx.event_cache,
         latest_thread_event_id="$evt",
     )
 
@@ -424,7 +431,7 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         ctx.room_id,
         attachment.local_path,
         thread_id=None,
-        event_cache=None,
+        event_cache=ctx.event_cache,
         latest_thread_event_id=None,
     )
 
@@ -474,7 +481,7 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         ctx.room_id,
         attachment.local_path,
         thread_id=ctx.thread_id,
-        event_cache=None,
+        event_cache=ctx.event_cache,
         latest_thread_event_id=ctx.thread_id,
     )
 
@@ -532,7 +539,7 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         ctx.room_id,
         attachment.local_path,
         thread_id=explicit_thread_id,
-        event_cache=None,
+        event_cache=ctx.event_cache,
         latest_thread_event_id=explicit_thread_id,
     )
 
@@ -579,7 +586,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         ctx.room_id,
         attachment.local_path,
         thread_id=None,
-        event_cache=None,
+        event_cache=ctx.event_cache,
         latest_thread_event_id=None,
     )
 
@@ -639,6 +646,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         ctx.room_id,
         first_attachment.local_path,
         thread_id=None,
+        event_cache=ctx.event_cache,
     )
     mock_send_attachment_paths.assert_awaited_once()
     assert mock_send_attachment_paths.await_args.args == (ctx,)
@@ -710,9 +718,17 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     first_call = mock_send_file.await_args_list[0]
     second_call = mock_send_file.await_args_list[1]
     assert first_call.args == (ctx.client, ctx.room_id, first_attachment.local_path)
-    assert first_call.kwargs == {"thread_id": None, "event_cache": None, "latest_thread_event_id": None}
+    assert first_call.kwargs == {
+        "thread_id": None,
+        "event_cache": ctx.event_cache,
+        "latest_thread_event_id": None,
+    }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
-    assert second_call.kwargs == {"thread_id": None, "event_cache": None, "latest_thread_event_id": "$file_one"}
+    assert second_call.kwargs == {
+        "thread_id": None,
+        "event_cache": ctx.event_cache,
+        "latest_thread_event_id": "$file_one",
+    }
 
 
 @pytest.mark.asyncio
@@ -752,7 +768,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         ctx.room_id,
         generated_file,
         thread_id="$evt",
-        event_cache=None,
+        event_cache=ctx.event_cache,
         latest_thread_event_id="$evt",
     )
 
@@ -856,6 +872,7 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
         ctx.room_id,
         first_attachment.local_path,
         thread_id=None,
+        event_cache=ctx.event_cache,
     )
     mock_send_attachment_paths.assert_not_awaited()
 
@@ -1018,7 +1035,7 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
 }
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with (
         patch(
@@ -1069,7 +1086,7 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
     thread_messages = [
         make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     interactive.register_interactive_question(
         "$target",
         ctx.room_id,
@@ -1111,7 +1128,7 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
 }
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with (
         patch(
@@ -1173,7 +1190,7 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     thread_messages = [
         make_visible_message(event_id=f"${index}", timestamp=index, body=f"m{index}") for index in range(100)
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read", limit=999))
@@ -1182,7 +1199,7 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     assert payload["limit"] == MatrixMessageTools._MAX_READ_LIMIT
     assert len(payload["messages"]) == MatrixMessageTools._MAX_READ_LIMIT
     assert "edit_options" in payload
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, ctx.thread_id)
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, ctx.thread_id)
 
 
 @pytest.mark.asyncio
@@ -1200,7 +1217,7 @@ async def test_matrix_message_read_thread_includes_edit_options() -> None:
             body="latest message",
         ),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read"))
@@ -1240,7 +1257,7 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
         make_visible_message(event_id="$one", timestamp=1, sender="@mindroom_general:localhost", body="first"),
         make_visible_message(event_id="$two", timestamp=2, sender="@alice:localhost", body="second"),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1256,7 +1273,7 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
     assert payload["edit_options"][0]["event_id"] == "$two"
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
 
 
 @pytest.mark.asyncio
@@ -1274,7 +1291,7 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
             content={"body": "Compacted 12 messages", "msgtype": "m.notice"},
         ),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1288,7 +1305,7 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
     assert payload["status"] == "ok"
     assert payload["messages"] == [message.to_dict() for message in thread_messages]
     assert payload["messages"][1]["msgtype"] == "m.notice"
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
 
 
 @pytest.mark.asyncio
@@ -1960,7 +1977,7 @@ async def test_matrix_message_read_room_sentinel_uses_room_timeline() -> None:
         message_filter={"types": ["m.room.message"]},
     )
     mock_extract.assert_awaited_once()
-    ctx.conversation_access.get_thread_history.assert_not_awaited()
+    ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1972,7 +1989,7 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
         make_visible_message(event_id="$one", timestamp=1, body="first"),
         make_visible_message(event_id="$two", timestamp=2, body="second"),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1983,7 +2000,7 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
     assert payload["action"] == "read"
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
     ctx.client.room_messages.assert_not_awaited()
 
 
@@ -2027,7 +2044,7 @@ async def test_matrix_message_edit_happy_path() -> None:
         "$ctx-thread:localhost",
         event_cache=event_cache,
     )
-    ctx.conversation_access.get_thread_history.assert_not_awaited()
+    ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio

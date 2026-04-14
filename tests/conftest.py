@@ -20,6 +20,8 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.matrix._event_cache import _EventCache
+from mindroom.matrix._event_cache_write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.turn_controller import TurnController
@@ -39,6 +41,8 @@ __all__ = [
     "install_generate_response_mock",
     "install_send_response_mock",
     "install_send_skill_command_response_mock",
+    "make_event_cache_mock",
+    "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
     "normalize_console_output",
@@ -107,6 +111,16 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     return client
+
+
+def make_event_cache_mock() -> AsyncMock:
+    """Return an async mock shaped like the event cache protocol."""
+    return AsyncMock(spec=_EventCache)
+
+
+def make_event_cache_write_coordinator_mock() -> MagicMock:
+    """Return a mock shaped like the event-cache write coordinator."""
+    return MagicMock(spec=_EventCacheWriteCoordinator)
 
 
 def normalize_console_output(text: str) -> str:
@@ -358,9 +372,20 @@ def sync_bot_runtime_state(bot: RuntimeBot) -> None:
     runtime.orchestrator = bot.orchestrator
 
 
+def _sync_turn_store_ledger(bot: RuntimeBot) -> None:
+    """Keep the extracted turn store aligned with direct test ledger swaps."""
+    store = unwrap_extracted_collaborator(bot._turn_store)
+    if store.deps.handled_turn_ledger is bot._handled_turn_ledger:
+        return
+    rebuilt = TurnStore(replace(store.deps, handled_turn_ledger=bot._handled_turn_ledger))
+    bot._turn_store = rebuilt
+    wrap_extracted_collaborators(bot, "_turn_store")
+
+
 def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:
     """Rebuild the turn policy after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
+    _sync_turn_store_ledger(bot)
     policy = unwrap_extracted_collaborator(bot._turn_policy)
     policy_field_names = set(policy.deps.__dataclass_fields__)
     policy_changes = {name: value for name, value in changes.items() if name in policy_field_names}
@@ -419,6 +444,7 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
     sync_bot_runtime_state(bot)
+    _sync_turn_store_ledger(bot)
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
     rebuilt_changes = {
@@ -442,17 +468,19 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
 def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
     """Rebuild the turn controller after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
+    _sync_turn_store_ledger(bot)
     controller = unwrap_extracted_collaborator(bot._turn_controller)
     controller_field_names = set(controller.deps.__dataclass_fields__)
     rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
     default_collaborators = {
-        "conversation_access": "_conversation_access",
+        "conversation_cache": "_conversation_cache",
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
         "turn_policy": "_turn_policy",
         "ingress_hook_runner": "_ingress_hook_runner",
         "response_runner": "_response_runner",
         "delivery_gateway": "_delivery_gateway",
+        "state_writer": "_conversation_state_writer",
         "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
         "edit_regenerator": "_edit_regenerator",
@@ -485,12 +513,7 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
     """Patch module-level response coordinator seams on the real current owner."""
     with ExitStack() as stack:
         for name, replacement in changes.items():
-            target = (
-                f"mindroom.response_lifecycle.{name}"
-                if name == "apply_post_response_effects"
-                else f"mindroom.response_runner.{name}"
-            )
-            stack.enter_context(patch(target, new=replacement))
+            stack.enter_context(patch(f"mindroom.response_runner.{name}", new=replacement))
         yield
 
 

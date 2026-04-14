@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from mindroom.matrix.reply_chain import canonicalize_related_event_id
 
 if TYPE_CHECKING:
-    from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
@@ -755,7 +755,7 @@ async def normalize_thread_root_event_id(
     room_id: str,
     event_id: str,
     *,
-    access: ConversationReadAccess,
+    access: ConversationCacheProtocol,
 ) -> str | None:
     """Resolve a room event or related reply into the canonical thread root ID."""
     normalized_event_id = _normalize_non_empty_string(event_id)

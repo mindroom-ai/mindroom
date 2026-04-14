@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.matrix.client import _msgtype_for_mimetype, _upload_file_as_mxc, send_file_message, send_message
+from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -155,7 +156,12 @@ class TestSendFileMessage:
         file.write_bytes(b"%PDF")
 
         with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
-            event_id = await send_file_message(client, "!room:localhost", file)
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                event_cache=make_event_cache_mock(),
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None
@@ -197,7 +203,12 @@ class TestSendFileMessage:
             ),
             patch("mindroom.matrix.client.send_message", side_effect=capture_send),
         ):
-            event_id = await send_file_message(client, "!room:localhost", file)
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                event_cache=make_event_cache_mock(),
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None
@@ -234,6 +245,7 @@ class TestSendFileMessage:
                 "!room:localhost",
                 file,
                 thread_id="$root:localhost",
+                event_cache=make_event_cache_mock(),
             )
 
         assert event_id == "$evt:localhost"
@@ -270,6 +282,7 @@ class TestSendFileMessage:
                 file,
                 thread_id="$root:localhost",
                 latest_thread_event_id="$precomputed:localhost",
+                event_cache=make_event_cache_mock(),
             )
 
         assert event_id == "$evt:localhost"
@@ -281,7 +294,12 @@ class TestSendFileMessage:
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
         """Should return None when the file doesn't exist."""
         client = _mock_client()
-        result = await send_file_message(client, "!room:localhost", tmp_path / "gone.txt")
+        result = await send_file_message(
+            client,
+            "!room:localhost",
+            tmp_path / "gone.txt",
+            event_cache=make_event_cache_mock(),
+        )
         assert result is None
 
     @pytest.mark.asyncio
@@ -296,7 +314,12 @@ class TestSendFileMessage:
             patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
             patch("mindroom.matrix.client._upload_file_as_mxc", new_callable=AsyncMock) as mock_upload,
         ):
-            result = await send_file_message(client, "!room:localhost", file)
+            result = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                event_cache=make_event_cache_mock(),
+            )
 
         assert result is None
         mock_upload.assert_not_awaited()
@@ -323,6 +346,7 @@ class TestSendFileMessage:
                 "!room:localhost",
                 file,
                 caption="Q4 Report",
+                event_cache=make_event_cache_mock(),
             )
 
         assert sent_content is not None
@@ -388,7 +412,12 @@ class TestSendFileMessageMsgtype:
         file.write_bytes(b"\x89PNG\r\n\x1a\n")
 
         with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
-            event_id = await send_file_message(client, "!room:localhost", file)
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                event_cache=make_event_cache_mock(),
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None
@@ -414,7 +443,12 @@ class TestSendFileMessageMsgtype:
         file.write_bytes(b"\x00\x00\x00\x1cftyp")
 
         with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
-            event_id = await send_file_message(client, "!room:localhost", file)
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                event_cache=make_event_cache_mock(),
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None

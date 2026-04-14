@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class EventCacheWriteCoordinator:
+class _EventCacheWriteCoordinator:
     """Serialize same-room advisory cache writes across the whole runtime."""
 
     logger: structlog.stdlib.BoundLogger

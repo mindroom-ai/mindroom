@@ -91,7 +91,7 @@ class ConversationEventCache(Protocol):
         """Delete one cached event after a redaction."""
 
 
-class EventCache:
+class _EventCache:
     """SQLite-backed ConversationEventCache implementation."""
 
     def __init__(self, db_path: Path) -> None:
@@ -109,6 +109,11 @@ class EventCache:
     def db_path(self) -> Path:
         """Return the SQLite database path for this cache instance."""
         return self._db_path
+
+    @property
+    def is_initialized(self) -> bool:
+        """Return whether the SQLite connection is currently open."""
+        return self._db is not None
 
     def _prune_room_locks(self) -> None:
         while len(self._room_locks) > _MAX_CACHED_ROOM_LOCKS:
@@ -147,7 +152,7 @@ class EventCache:
             wait_time = time.perf_counter() - wait_started
             if wait_time > _LOCK_WAIT_LOG_THRESHOLD_SECONDS:
                 logger.debug(
-                    "Waited for EventCache room lock",
+                    "Waited for _EventCache room lock",
                     room_id=room_id,
                     operation=operation,
                     wait_time_ms=round(wait_time * 1000, 2),
@@ -168,6 +173,8 @@ class EventCache:
         operation: str,
     ) -> AsyncIterator[aiosqlite.Connection]:
         """Serialize one DB operation with lifecycle changes and room ordering."""
+        if self._db is None:
+            await self.initialize()
         async with self._db_lock, self._acquire_room_lock(room_id, operation=operation):
             yield self._require_db()
 
@@ -586,7 +593,7 @@ class EventCache:
 
     def _require_db(self) -> aiosqlite.Connection:
         if self._db is None:
-            msg = "EventCache has not been initialized"
+            msg = "_EventCache has not been initialized"
             raise RuntimeError(msg)
         return self._db
 

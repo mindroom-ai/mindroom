@@ -579,6 +579,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
     ) -> int:
         return 0
 
@@ -661,6 +662,7 @@ async def test_router_updates_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
     ) -> int:
         return 0
 
@@ -745,6 +747,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
     ) -> int:
         return 0
 
@@ -818,6 +821,7 @@ async def test_team_room_changes_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
     ) -> int:
         return 0
 
@@ -1026,6 +1030,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
     ) -> int:
         return 0
 

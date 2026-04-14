@@ -38,7 +38,7 @@ from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     StreamingResponse,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 _VISIBLE_MESSAGE_IDS = count(1)
 
@@ -632,7 +632,12 @@ class TestThreadHistoryStreamStatus:
         response.end = None
         client.room_messages.return_value = response
 
-        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+        history = await fetch_thread_history(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=make_event_cache_mock(),
+        )
 
         assert history[1].body == "Final answer"
         assert history[1].stream_status == "completed"

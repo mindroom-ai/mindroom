@@ -716,7 +716,7 @@ class ResponseRunner:
         request_thread_version = (
             request.thread_history.thread_version if isinstance(request.thread_history, ThreadHistoryResult) else None
         )
-        current_thread_version = self.deps.resolver.deps.conversation_access.thread_version(
+        current_thread_version = self.deps.resolver.deps.conversation_cache.thread_version(
             request.room_id,
             request.thread_id,
         )

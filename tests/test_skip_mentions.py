@@ -24,6 +24,7 @@ from mindroom.message_target import MessageTarget
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    make_event_cache_mock,
     runtime_paths_for,
     sync_bot_runtime_state,
     test_runtime_paths,
@@ -272,7 +273,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
                 config=config,
                 enable_streaming=True,
                 orchestrator=None,
-                event_cache=None,
+                event_cache=make_event_cache_mock(),
             ),
             runtime_paths=runtime_paths,
             agent_name="email_agent",

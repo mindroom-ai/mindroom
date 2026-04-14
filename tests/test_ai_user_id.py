@@ -78,7 +78,11 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
-from tests.conftest import bind_runtime_paths, resolve_response_thread_root_for_test
+from tests.conftest import (
+    bind_runtime_paths,
+    make_event_cache_mock,
+    resolve_response_thread_root_for_test,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator
@@ -288,7 +292,7 @@ def _build_response_runner(
         config=config,
         enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
-        event_cache=None,
+        event_cache=make_event_cache_mock(),
     )
     hook_context = HookContextSupport(
         runtime=runtime,
@@ -314,7 +318,7 @@ def _build_response_runner(
         logger=bot.logger,
         runtime_paths=runtime_paths,
         delivery_gateway=delivery_gateway,
-        conversation_access=bot._conversation_resolver.deps.conversation_access,
+        conversation_cache=bot._conversation_resolver.deps.conversation_cache,
     )
     bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
 

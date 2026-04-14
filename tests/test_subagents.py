@@ -19,6 +19,7 @@ from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,6 +65,7 @@ def _make_context(
         client=MagicMock(),
         config=config or _make_config(),
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
         room=None,
         reply_to_event_id=None,
         storage_path=tmp_path,

@@ -19,12 +19,12 @@ from mindroom.matrix.message_content import resolve_event_source_content, visibl
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     import structlog
 
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 type _HistoryMessage = ResolvedVisibleMessage
 
@@ -91,6 +91,46 @@ class ReplyChainCaches:
     nodes: _LRUCache[_ReplyChainNode] = field(default_factory=lambda: _LRUCache(4096))
     roots: _LRUCache[_ReplyChainRoot] = field(default_factory=lambda: _LRUCache(4096))
     traversal_limit: int = 500
+
+    def _invalidate_nodes(self, room_id: str, pending_event_ids: set[str]) -> bool:
+        added_event_ids = False
+        for (cached_room_id, event_id), node in list(self.nodes._data.items()):
+            if cached_room_id != room_id:
+                continue
+            if (
+                event_id not in pending_event_ids
+                and node.parent_event_id not in pending_event_ids
+                and node.thread_root_id not in pending_event_ids
+            ):
+                continue
+            self.nodes._data.pop((cached_room_id, event_id), None)
+            if event_id in pending_event_ids:
+                continue
+            pending_event_ids.add(event_id)
+            added_event_ids = True
+        return added_event_ids
+
+    def _invalidate_roots(self, room_id: str, pending_event_ids: set[str]) -> bool:
+        added_event_ids = False
+        for (cached_room_id, event_id), root in list(self.roots._data.items()):
+            if cached_room_id != room_id:
+                continue
+            if event_id not in pending_event_ids and root.root_event_id not in pending_event_ids:
+                continue
+            self.roots._data.pop((cached_room_id, event_id), None)
+            if event_id in pending_event_ids:
+                continue
+            pending_event_ids.add(event_id)
+            added_event_ids = True
+        return added_event_ids
+
+    def invalidate(self, room_id: str, event_ids: Iterable[str | None]) -> None:
+        """Drop cached reply-chain entries affected by one or more event changes."""
+        pending_event_ids = {event_id for event_id in event_ids if isinstance(event_id, str) and event_id}
+        if not pending_event_ids:
+            return
+        while self._invalidate_nodes(room_id, pending_event_ids) or self._invalidate_roots(room_id, pending_event_ids):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +355,7 @@ def _first_cached_root(caches: ReplyChainCaches, room_id: str, event_ids: list[s
 
 async def _fetch_node(
     client: nio.AsyncClient,
-    access: ConversationReadAccess,
+    access: ConversationCacheProtocol,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
     room_id: str,
@@ -358,7 +398,7 @@ async def _fetch_node(
 
 
 async def _resolve_direct_thread_root(
-    access: ConversationReadAccess,
+    access: ConversationCacheProtocol,
     caches: ReplyChainCaches,
     room_id: str,
     event_id: str,
@@ -395,7 +435,7 @@ async def canonicalize_related_event_id(
     room_id: str,
     event_id: str,
     *,
-    access: ConversationReadAccess,
+    access: ConversationCacheProtocol,
     caches: ReplyChainCaches | None = None,
     traversal_limit: int | None = None,
 ) -> str | None:
@@ -465,7 +505,7 @@ def _build_context_result(
 
 async def _resolve_reply_chain(
     client: nio.AsyncClient,
-    access: ConversationReadAccess,
+    access: ConversationCacheProtocol,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
     room_id: str,
@@ -578,7 +618,7 @@ async def derive_conversation_context(
     event_info: EventInfo,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    access: ConversationReadAccess,
+    access: ConversationCacheProtocol,
 ) -> tuple[bool, str | None, list[_HistoryMessage]]:
     """Derive conversation context from threads or reply chains."""
     thread_root_id = _thread_root_id_from_event_info(event_info)
@@ -623,7 +663,7 @@ async def derive_conversation_target(
     event_info: EventInfo,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    access: ConversationReadAccess,
+    access: ConversationCacheProtocol,
 ) -> tuple[bool, str | None, list[_HistoryMessage], bool]:
     """Derive the conversation target with lightweight history for dispatch.
 

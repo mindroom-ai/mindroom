@@ -12,11 +12,11 @@ import nio
 import pytest
 from nio.api import RelationshipType
 
-from mindroom.matrix import event_cache as event_cache_module
+import mindroom.matrix._event_cache as event_cache_module
+from mindroom.matrix._event_cache import _EventCache
 from mindroom.matrix.client import fetch_thread_history
-from mindroom.matrix.event_cache import EventCache
+from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_cache import cached_room_get_event
 from mindroom.timing import DispatchPipelineTiming
 
 if TYPE_CHECKING:
@@ -114,7 +114,7 @@ def _make_relations_client(
 @pytest.mark.asyncio
 async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
     """Stored events should round-trip in timestamp order."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     try:
@@ -156,7 +156,7 @@ async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_individual_event_cache_store_and_retrieve(tmp_path: Path) -> None:
     """Individually cached events should round-trip by event ID."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     try:
@@ -189,7 +189,7 @@ async def test_individual_event_cache_store_and_retrieve(tmp_path: Path) -> None
 
 def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     """Idle per-room locks should be evicted instead of growing without bound."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
 
     for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
         cache._room_lock(f"!room-{index}:localhost")
@@ -201,7 +201,7 @@ def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path: Path) -> None:
     """Queued waiters must keep a room lock alive across pruning churn."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     room_id = "!busy:localhost"
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
@@ -265,7 +265,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
 @pytest.mark.asyncio
 async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp_path: Path) -> None:
     """A newly acquired room lock must survive pruning when the cache is already full of active rooms."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     release_active_rooms = asyncio.Event()
     active_rooms_registered = asyncio.Event()
     release_new_room_holder = asyncio.Event()
@@ -323,7 +323,7 @@ async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp
 @pytest.mark.asyncio
 async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -> None:
     """Closing the cache should wait for active DB work instead of closing mid-query."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
     await cache.store_event(
         "$reply",
@@ -372,7 +372,7 @@ async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_individual_event_cache_strips_runtime_timing_marker(tmp_path: Path) -> None:
     """Batch event caching should drop in-memory timing objects before serialization."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     reply_event = _make_text_event(
@@ -402,7 +402,7 @@ async def test_individual_event_cache_strips_runtime_timing_marker(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_thread_cache_store_populates_individual_event_lookup(tmp_path: Path) -> None:
     """Thread cache writes should also populate the individual event table."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     root_event = _make_text_event(
@@ -441,7 +441,7 @@ async def test_thread_cache_store_populates_individual_event_lookup(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_thread_event_cache_strips_runtime_timing_marker(tmp_path: Path) -> None:
     """Thread cache writes should strip runtime-only timing markers before JSON storage."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     reply_event = _make_text_event(
@@ -476,7 +476,7 @@ async def test_thread_event_cache_strips_runtime_timing_marker(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_cached_room_get_event_cache_hit_avoids_network_call(tmp_path: Path) -> None:
     """Cached room get event lookups should reconstruct nio responses without I/O."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     reply_event = _make_text_event(
@@ -504,7 +504,7 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(tmp_path: Path) -> None:
     """Point-event cache hits should surface the latest edited content for originals."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     original_event = _make_text_event(
@@ -553,7 +553,7 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(tmp_p
 @pytest.mark.asyncio
 async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(tmp_path: Path) -> None:
     """Network fetches should still project originals through cached latest edits."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     original_event = _make_text_event(
@@ -592,7 +592,7 @@ async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(tmp
 @pytest.mark.asyncio
 async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(tmp_path: Path) -> None:
     """Removing the newest edit should expose the previous cached visible state."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     original_event = _make_text_event(
@@ -652,7 +652,7 @@ async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(tmp_path
 @pytest.mark.asyncio
 async def test_redaction_removes_individual_event_cache_entry(tmp_path: Path) -> None:
     """Redactions should also remove individually cached events."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     root_event = _make_text_event(
@@ -691,7 +691,7 @@ async def test_redaction_removes_individual_event_cache_entry(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_redacting_original_removes_dependent_cached_edits_from_thread_history(tmp_path: Path) -> None:
     """Redacting an original must also remove cached edits that would resurrect it."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     root_event = _make_text_event(
@@ -761,7 +761,7 @@ async def test_redacting_original_removes_dependent_cached_edits_from_thread_his
 @pytest.mark.asyncio
 async def test_invalidate_thread_preserves_separately_cached_latest_edit(tmp_path: Path) -> None:
     """Thread invalidation should not sever edit projection for separately cached edits."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     root_event = _make_text_event(
@@ -866,7 +866,7 @@ async def test_initialize_backfills_event_edit_index_from_old_schema(tmp_path: P
         )
         db.commit()
 
-    cache = EventCache(db_path)
+    cache = _EventCache(db_path)
     await cache.initialize()
     try:
         latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
@@ -885,7 +885,7 @@ async def test_initialize_backfills_event_edit_index_from_old_schema(tmp_path: P
 @pytest.mark.asyncio
 async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(tmp_path: Path) -> None:
     """Cache hits should bypass the full root-plus-relations fetch path."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     root_event = _make_text_event(
@@ -928,7 +928,7 @@ async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(tmp_path: 
 @pytest.mark.asyncio
 async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -> None:
     """Cache misses should fetch from the homeserver and populate the cache."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
     await cache.initialize()
 
     root_event = _make_text_event(
@@ -972,7 +972,7 @@ async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -
 
 def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
     """Event cache should keep independent locks per room."""
-    cache = EventCache(tmp_path / "event_cache.db")
+    cache = _EventCache(tmp_path / "event_cache.db")
 
     assert cache._room_lock("!room:localhost") is cache._room_lock("!room:localhost")
     assert cache._room_lock("!room:localhost") is not cache._room_lock("!other:localhost")
@@ -1006,7 +1006,7 @@ async def test_fetch_thread_history_gracefully_falls_back_on_db_error() -> None:
             _relation_key("$reply", RelationshipType.replacement): [],
         },
     )
-    broken_cache = MagicMock(spec=EventCache)
+    broken_cache = MagicMock(spec=_EventCache)
     broken_cache.get_thread_events = AsyncMock(side_effect=RuntimeError("db broken"))
     broken_cache.invalidate_thread = AsyncMock()
     broken_cache.store_thread_events = AsyncMock()

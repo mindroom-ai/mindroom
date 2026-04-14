@@ -310,6 +310,7 @@ class MatrixMessageTools(Toolkit):
                     room_id,
                     first_attachment_path,
                     thread_id=effective_thread_id,
+                    event_cache=context.event_cache,
                 )
                 if first_attachment_event_id is None:
                     return self._payload(
@@ -689,10 +690,10 @@ class MatrixMessageTools(Toolkit):
         thread_id: str,
         read_limit: int,
     ) -> str:
-        conversation_access = context.conversation_access
-        if conversation_access is None:
+        conversation_cache = context.conversation_cache
+        if conversation_cache is None:
             return self._context_error()
-        thread_messages = await conversation_access.get_thread_history(room_id, thread_id)
+        thread_messages = await conversation_cache.get_thread_history(room_id, thread_id)
         recent_messages = thread_messages[-read_limit:]
         return self._payload(
             "ok",

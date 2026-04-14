@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_cache import ConversationEventCache, normalize_event_source_for_cache
+from mindroom.matrix._event_cache import ConversationEventCache, normalize_event_source_for_cache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -32,7 +32,6 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     visible_body_from_event_source,
 )
-from mindroom.matrix.room_cache import cached_room
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
@@ -1044,7 +1043,8 @@ async def _upload_file_as_mxc(
         return None, None
 
     info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
-    room = cached_room(client, room_id)
+    rooms = client.rooms
+    room = rooms.get(room_id) if isinstance(rooms, dict) else None
     if room is None:
         logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
         return None, None
@@ -1122,7 +1122,7 @@ async def send_file_message(
     *,
     thread_id: str | None = None,
     caption: str | None = None,
-    event_cache: ConversationEventCache | None = None,
+    event_cache: ConversationEventCache,
     latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
@@ -1376,24 +1376,6 @@ async def resolve_thread_history_delta(
             "sidecar_hydration_ms": sidecar_hydration_ms,
         },
     )
-
-
-async def _fetch_thread_history_without_cache(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch thread history directly from the homeserver when no cache is active."""
-    try:
-        return await _fetch_thread_history_via_relations(client, room_id, thread_id)
-    except _ThreadHistoryFastPathUnavailableError as exc:
-        logger.info(
-            "Falling back to room scan for thread history",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=str(exc),
-        )
-        return await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
 
 
 async def _load_cached_thread_history(
@@ -1944,25 +1926,11 @@ async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    event_cache: ConversationEventCache | None = None,
+    event_cache: ConversationEventCache,
     *,
     refresh_cache: bool = True,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
-    if event_cache is None:
-        resolution_started = time.perf_counter()
-        history = await _fetch_thread_history_without_cache(client, room_id, thread_id)
-        return _thread_history_result(
-            history,
-            is_full_history=True,
-            diagnostics={
-                "cache_read_ms": 0.0,
-                "incremental_refresh_ms": 0.0,
-                "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
-                "sidecar_hydration_ms": 0.0,
-            },
-        )
-
     cached_history = await _load_cached_thread_history(
         client,
         room_id=room_id,
@@ -2224,20 +2192,19 @@ async def fetch_thread_snapshot(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    event_cache: ConversationEventCache | None = None,
+    event_cache: ConversationEventCache,
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context for dispatch decisions."""
-    if event_cache is not None:
-        cached_snapshot = await _load_cached_thread_result(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=False,
-            refresh_cache=False,
-        )
-        if cached_snapshot is not None:
-            return cached_snapshot
+    cached_snapshot = await _load_cached_thread_result(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+        hydrate_sidecars=False,
+        refresh_cache=False,
+    )
+    if cached_snapshot is not None:
+        return cached_snapshot
 
     try:
         return _thread_history_result(
@@ -2290,7 +2257,7 @@ async def _latest_thread_event_id(
     room_id: str,
     thread_id: str,
     *,
-    event_cache: ConversationEventCache | None = None,
+    event_cache: ConversationEventCache,
 ) -> str:
     """Get the latest visible event ID in a thread for MSC3440 fallback compliance."""
     latest_history_event_id = await _latest_thread_history_event_id(
@@ -2328,35 +2295,31 @@ async def _latest_thread_history_event_id(
     *,
     room_id: str,
     thread_id: str,
-    event_cache: ConversationEventCache | None,
+    event_cache: ConversationEventCache,
 ) -> str | None:
     """Read the latest visible thread event from cache or history fetches."""
-    if event_cache is not None:
-        cached_history = await _load_cached_thread_history(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=False,
-            refresh_cache=True,
-        )
-        cached_event_id = _last_visible_event_id(cached_history)
-        if cached_event_id is not None:
-            return cached_event_id
-        if cached_history is not None:
-            # The refresh above already consulted homeserver deltas for this cache entry.
-            return None
+    cached_history = await _load_cached_thread_history(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+        hydrate_sidecars=False,
+        refresh_cache=True,
+    )
+    cached_event_id = _last_visible_event_id(cached_history)
+    if cached_event_id is not None:
+        return cached_event_id
+    if cached_history is not None:
+        # The refresh above already consulted homeserver deltas for this cache entry.
+        return None
 
     try:
-        if event_cache is None:
-            thread_messages = await fetch_thread_history(client, room_id, thread_id)
-        else:
-            thread_messages = await fetch_thread_history(
-                client,
-                room_id,
-                thread_id,
-                event_cache=event_cache,
-            )
+        thread_messages = await fetch_thread_history(
+            client,
+            room_id,
+            thread_id,
+            event_cache=event_cache,
+        )
     except Exception:
         return None
     return _last_visible_event_id(thread_messages)
@@ -2395,7 +2358,8 @@ async def get_latest_thread_event_id_if_needed(
     thread_id: str | None,
     reply_to_event_id: str | None = None,
     existing_event_id: str | None = None,
-    event_cache: ConversationEventCache | None = None,
+    *,
+    event_cache: ConversationEventCache,
 ) -> str | None:
     """Get the latest thread event ID only when needed for MSC3440 compliance.
 
@@ -2436,7 +2400,7 @@ async def build_threaded_edit_content(
     tool_trace: list[Any] | None = None,
     extra_content: dict[str, Any] | None = None,
     latest_thread_event_id: str | None = None,
-    event_cache: ConversationEventCache | None = None,
+    event_cache: ConversationEventCache,
 ) -> dict[str, Any]:
     """Build edit content that preserves thread fallback semantics when needed."""
     latest_visible_thread_event_id = latest_thread_event_id

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.event_cache import ConversationEventCache
+    from mindroom.matrix.conversation_cache import ConversationEventCache
 
 
 def resolve_hook_sender_domain(
@@ -46,7 +46,7 @@ async def send_hook_message(
     *,
     trigger_dispatch: bool = False,
     sender_domain: str | None = None,
-    event_cache: ConversationEventCache | None = None,
+    event_cache: ConversationEventCache,
 ) -> str | None:
     """Send one hook-originated Matrix message."""
     resolved_sender_domain = resolve_hook_sender_domain(client, sender_domain=sender_domain)
@@ -81,7 +81,7 @@ def build_hook_message_sender(
     runtime_paths: RuntimePaths,
     *,
     sender_domain: str | None = None,
-    event_cache: ConversationEventCache | None = None,
+    event_cache: ConversationEventCache,
 ) -> HookMessageSender | None:
     """Return a sender bound to one Matrix client, if enough identity is available."""
     resolved_sender_domain = resolve_hook_sender_domain(client, sender_domain=sender_domain)

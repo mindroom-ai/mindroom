@@ -27,8 +27,8 @@ from mindroom.ai import (
     queued_message_signal_context,
     stream_agent_response,
 )
-from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -55,6 +55,8 @@ from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -64,8 +66,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
-
-    from agno.session.team import TeamSession
 
 
 def _config(tmp_path: Path) -> Config:
@@ -287,16 +287,16 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         config=config,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
+        event_cache=make_event_cache_mock(),
+        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_access = MagicMock()
+    conversation_cache = MagicMock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_access=conversation_access,
+        conversation_cache=conversation_cache,
     )
     deps = support.build_deps(
         room_id="!room:localhost",
@@ -352,7 +352,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_fetch.assert_awaited_once_with(conversation_access, "!room:localhost", "$thread")
+    mock_fetch.assert_awaited_once_with(conversation_cache, "!room:localhost", "$thread")
     mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths)
     mock_send.assert_awaited_once_with(
         client,
@@ -539,7 +539,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             ) as mock_run_cancellable_response,
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.reprioritize_auto_flush_sessions", new=MagicMock()),
-            patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+            patch("mindroom.response_runner.apply_post_response_effects", new=AsyncMock()),
         ):
             task = asyncio.create_task(
                 bot._generate_response(
@@ -597,8 +597,8 @@ async def test_refresh_thread_history_after_lock_skips_when_thread_version_is_un
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
-    bot._conversation_access._resolved_thread_cache.bump_version("!room:localhost", "$thread")
-    bot._conversation_access._resolved_thread_cache.bump_version("!room:localhost", "$thread")
+    bot._conversation_cache._resolved_thread_cache.bump_version("!room:localhost", "$thread")
+    bot._conversation_cache._resolved_thread_cache.bump_version("!room:localhost", "$thread")
     cached_history = thread_history_result([], is_full_history=True, thread_version=2)
 
     with patch.object(
@@ -832,7 +832,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )
 
-    assert bot._turn_store.is_handled("$older")
+    assert bot._handled_turn_ledger.has_responded("$older")
     mock_plan.assert_not_awaited()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert coordinator._thread_queued_signals == {}

@@ -12,25 +12,67 @@ import pytest
 from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
+from mindroom.matrix._event_cache import _EventCache
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
     ThreadHistoryResult,
     _fetch_thread_history_via_room_messages,
-    _latest_thread_event_id,
-    _latest_thread_history_event_id,
     _ThreadHistoryFastPathUnavailableError,
-    build_threaded_edit_content,
-    fetch_thread_history,
-    fetch_thread_snapshot,
     get_room_threads_page,
 )
-from mindroom.matrix.event_cache import EventCache
-from tests.conftest import make_matrix_client_mock
+from mindroom.matrix.client import (
+    _latest_thread_event_id as _latest_thread_event_id_impl,
+)
+from mindroom.matrix.client import (
+    _latest_thread_history_event_id as _latest_thread_history_event_id_impl,
+)
+from mindroom.matrix.client import (
+    build_threaded_edit_content as _build_threaded_edit_content_impl,
+)
+from mindroom.matrix.client import (
+    fetch_thread_history as _fetch_thread_history_impl,
+)
+from mindroom.matrix.client import (
+    fetch_thread_snapshot as _fetch_thread_snapshot_impl,
+)
+from tests.conftest import make_event_cache_mock, make_matrix_client_mock
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
+
+
+def _event_cache() -> AsyncMock:
+    return make_event_cache_mock()
+
+
+async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistoryResult:
+    """Inject a concrete event cache for test-local calls into the real helper."""
+    kwargs.setdefault("event_cache", _event_cache())
+    return await _fetch_thread_history_impl(*args, **kwargs)
+
+
+async def fetch_thread_snapshot(*args: object, **kwargs: object) -> list[ResolvedVisibleMessage]:
+    """Inject a concrete event cache for test-local snapshot helpers."""
+    kwargs.setdefault("event_cache", _event_cache())
+    return await _fetch_thread_snapshot_impl(*args, **kwargs)
+
+
+async def _latest_thread_event_id(*args: object, **kwargs: object) -> str | None:
+    kwargs.setdefault("event_cache", _event_cache())
+    return await _latest_thread_event_id_impl(*args, **kwargs)
+
+
+async def _latest_thread_history_event_id(*args: object, **kwargs: object) -> str | None:
+    kwargs.setdefault("event_cache", _event_cache())
+    return await _latest_thread_history_event_id_impl(*args, **kwargs)
+
+
+async def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
+    """Inject a concrete event cache for threaded edit-content construction."""
+    kwargs.setdefault("event_cache", _event_cache())
+    return await _build_threaded_edit_content_impl(*args, **kwargs)
 
 
 class TestThreadHistory:
@@ -161,16 +203,39 @@ class TestThreadHistory:
     async def test_fetch_thread_history_delegates_to_room_scan_fallback_helper(self) -> None:
         """Preserve the legacy room-scan path behind an explicit helper."""
         client = AsyncMock()
+        event_cache = make_event_cache_mock()
         expected_history = [{"event_id": "$thread_root", "body": "root"}]
 
-        with patch(
-            "mindroom.matrix.client._fetch_thread_history_via_room_messages",
-            new=AsyncMock(return_value=expected_history),
-        ) as mock_fallback:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+        with (
+            patch("mindroom.matrix.client._load_cached_thread_history", new=AsyncMock(return_value=None)),
+            patch(
+                "mindroom.matrix.client._fetch_thread_history_with_events",
+                new=AsyncMock(
+                    return_value=MagicMock(
+                        history=expected_history,
+                        event_sources=[{"event_id": "$thread_root"}],
+                        resolution_ms=0.0,
+                        sidecar_hydration_ms=0.0,
+                    ),
+                ),
+            ) as mock_fallback,
+            patch("mindroom.matrix.client._store_thread_history_cache", new=AsyncMock()) as mock_store,
+        ):
+            history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=event_cache,
+            )
 
         assert history == expected_history
         mock_fallback.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+        mock_store.assert_awaited_once_with(
+            event_cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[{"event_id": "$thread_root"}],
+        )
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_prefers_relations_fast_path(self) -> None:
@@ -429,14 +494,31 @@ class TestThreadHistory:
         )
         fallback_history = [{"event_id": "$thread_root", "body": "fallback"}]
 
-        with patch(
-            "mindroom.matrix.client._fetch_thread_history_via_room_messages",
-            new=AsyncMock(return_value=fallback_history),
-        ) as mock_fallback:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+        with (
+            patch("mindroom.matrix.client._load_cached_thread_history", new=AsyncMock(return_value=None)),
+            patch(
+                "mindroom.matrix.client._fetch_thread_history_via_room_messages_with_events",
+                new=AsyncMock(
+                    return_value=MagicMock(
+                        history=fallback_history,
+                        event_sources=[{"event_id": "$thread_root"}],
+                        resolution_ms=0.0,
+                        sidecar_hydration_ms=0.0,
+                    ),
+                ),
+            ) as mock_fallback,
+            patch("mindroom.matrix.client._store_thread_history_cache", new=AsyncMock()) as mock_store,
+        ):
+            history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=make_event_cache_mock(),
+            )
 
         assert history == fallback_history
         mock_fallback.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+        mock_store.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_marks_room_scan_fallback_as_full_history(self) -> None:
@@ -588,7 +670,7 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_uses_cached_thread_history_when_available(self, tmp_path: Path) -> None:
         """Latest-thread lookup should refresh cached history before using the cached tail."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -656,7 +738,7 @@ class TestThreadHistory:
     async def test_latest_thread_event_id_fetches_history_after_cache_miss(self) -> None:
         """Cache misses should fall through to the full thread-history fetch path."""
         client = AsyncMock()
-        event_cache = MagicMock(spec=EventCache)
+        event_cache = MagicMock(spec=_EventCache)
         thread_history = [
             ResolvedVisibleMessage.synthetic(
                 sender="@agent:localhost",
@@ -708,7 +790,7 @@ class TestThreadHistory:
     async def test_latest_thread_history_event_id_does_not_refetch_when_refreshed_cache_is_empty(self) -> None:
         """An empty refreshed cache result should not trigger a second history refresh."""
         client = AsyncMock()
-        event_cache = MagicMock(spec=EventCache)
+        event_cache = MagicMock(spec=_EventCache)
 
         with (
             patch(
@@ -878,6 +960,7 @@ class TestThreadHistory:
     async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
         """Threaded edits should preserve MSC3440 fallback semantics through the latest visible event."""
         client = AsyncMock()
+        event_cache = make_event_cache_mock()
 
         with (
             patch(
@@ -897,10 +980,16 @@ class TestThreadHistory:
                 config=MagicMock(),
                 runtime_paths=MagicMock(),
                 sender_domain="localhost",
+                event_cache=event_cache,
             )
 
         assert content == {"body": "edited"}
-        mock_latest.assert_awaited_once_with(client, "!room:localhost", "$thread_root", event_cache=None)
+        mock_latest.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=event_cache,
+        )
         assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$latest"
 
     @pytest.mark.asyncio
@@ -964,15 +1053,26 @@ class TestThreadHistory:
     async def test_latest_thread_event_id_returns_thread_root_on_history_failure(self) -> None:
         """The helper should degrade to the thread root when visible-history lookup fails."""
         client = make_matrix_client_mock()
+        event_cache = make_event_cache_mock()
 
         with patch(
             "mindroom.matrix.client.fetch_thread_history",
             new=AsyncMock(side_effect=RuntimeError("boom")),
         ) as mock_fetch_history:
-            event_id = await _latest_thread_event_id(client, "!room:localhost", "$thread_root")
+            event_id = await _latest_thread_event_id(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=event_cache,
+            )
 
         assert event_id == "$thread_root"
-        mock_fetch_history.assert_awaited_once_with(client, "!room:localhost", "$thread_root")
+        mock_fetch_history.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=event_cache,
+        )
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_includes_root_message(self) -> None:
@@ -2002,7 +2102,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_hit_returns_stored_events(self, tmp_path: Path) -> None:
         """Cache hits should resolve visible history from SQLite without a homeserver fetch."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2048,7 +2148,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_hit_skips_incremental_refresh_when_disabled(self, tmp_path: Path) -> None:
         """Fresh-sync callers should be able to trust cached thread history without a room scan."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2097,7 +2197,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_cache_hit_keeps_non_text_root(self, tmp_path: Path) -> None:
         """Cached snapshots should preserve non-text room-message roots without network fetches."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = TestThreadHistory._make_audio_event(
@@ -2150,7 +2250,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_miss_populates_cache(self, tmp_path: Path) -> None:
         """Cache misses should fall through to the homeserver and persist the result."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2191,7 +2291,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_appends_new_cached_events(self, tmp_path: Path) -> None:
         """Incremental refreshes should append newer thread events to the cache."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2249,7 +2349,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_appends_backfilled_event_before_cached_boundary(self, tmp_path: Path) -> None:
         """Incremental refresh should stop at the latest cached event in stream order, not by timestamp."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2315,7 +2415,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_latest_thread_event_id_refreshes_stale_cached_tail(self, tmp_path: Path) -> None:
         """Latest-thread lookup should return the refreshed tail when cache lags behind sync."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2382,7 +2482,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_incremental_edit_to_cached_event(self, tmp_path: Path) -> None:
         """New edit events should update the visible cached message state."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2441,7 +2541,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_incremental_redaction_to_cached_event(self, tmp_path: Path) -> None:
         """Redactions should remove cached events from visible thread history."""
-        cache = EventCache(tmp_path / "event_cache.db")
+        cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2516,7 +2616,7 @@ class TestThreadHistoryCache:
         client.room_get_event = AsyncMock()
         client.room_get_event_relations = MagicMock()
 
-        cache = MagicMock(spec=EventCache)
+        cache = MagicMock(spec=_EventCache)
         cache.get_thread_events = AsyncMock(return_value=cached_event_sources)
         cache.store_thread_events = AsyncMock()
         cache.redact_event = AsyncMock()
@@ -2560,7 +2660,7 @@ class TestThreadHistoryCache:
                 self._relation_key("$reply", RelationshipType.replacement): [],
             },
         )
-        broken_cache = MagicMock(spec=EventCache)
+        broken_cache = MagicMock(spec=_EventCache)
         broken_cache.get_thread_events = AsyncMock(side_effect=RuntimeError("db broken"))
         broken_cache.get_latest_timestamp = AsyncMock()
         broken_cache.invalidate_thread = AsyncMock()
