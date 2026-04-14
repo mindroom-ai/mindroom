@@ -16,13 +16,14 @@ Response generation stops trusting pre-lock `thread_history`, latest-thread fall
 
 ## Status
 
-This plan intentionally supersedes the extraction-first plan in `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`.
-The approved spec for this work is `docs/superpowers/specs/2026-04-13-matrix-conversation-cache-response-path-simplification-design.md`.
-This plan now covers the three remaining correctness seams that keep surfacing together in review:
-- reply-path authority,
-- durable `_event_cache` truth,
-- authoritative latest-thread fallback resolution.
-Only after those invariants are complete should we reconsider any file-splitting refactor.
+This plan is now historical context, not the current implementation checklist.
+The response-path simplification landed only partially:
+- `ResponseRunner` no longer trusts the old post-lock currentness shortcut.
+- authoritative reply execution now refreshes thread history after the lifecycle lock.
+- incomplete planning snapshots are still hydrated before responder or team policy runs when policy needs stronger thread state.
+
+The later `thread_reads.py` / `thread_writes.py` extraction has already landed, so the file-splitting work described here is no longer future work.
+For current architecture guidance, use `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md` together with the updated response-path spec.
 
 ## Non-Goals
 
@@ -30,13 +31,13 @@ Only after those invariants are complete should we reconsider any file-splitting
 - Do not remove cache-aware latest-thread-event lookup for outbound MSC3440 fallback.
 - Do not remove cross-turn resolved thread reuse.
 - Do not delete `get_thread_snapshot()` everywhere in this plan.
-- Do not do `thread_reads.py` or `thread_writes.py` extraction in this plan.
+- The `thread_reads.py` / `thread_writes.py` extraction has already happened outside this historical plan.
 
 ## Success Criteria
 
 - Normal agent and team reply generation do one authoritative full-thread read after the lifecycle lock.
 - `ResponseRunner` no longer relies on `is_thread_history_current()` to reuse a pre-lock `ThreadHistoryResult`.
-- Normal dispatch no longer hydrates full thread history before the lock just to feed the eventual reply.
+- Normal dispatch may still hydrate full history before the lock when the planning snapshot is incomplete and policy needs stronger thread state.
 - Durable `_event_cache` writes are all-or-nothing and keep derived indexes consistent with stored payload rows.
 - Redacted events cannot be resurrected by late edits.
 - Latest-thread fallback is edit-aware, authoritative, and immediately correct after local sends or edits.
@@ -148,6 +149,11 @@ git commit -m "refactor: always refresh thread history after lifecycle lock"
 ```
 
 ## Task 3: Stop Pre-Lock Full-History Hydration For Normal Replies
+
+Historical note:
+This task did not land exactly as originally written.
+Current code intentionally hydrates full history before responder or team policy when the lightweight planning snapshot is marked incomplete.
+That is a conscious semantic choice, not an accident.
 
 **Files:**
 - Modify: `src/mindroom/conversation_resolver.py`

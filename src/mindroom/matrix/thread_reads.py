@@ -167,6 +167,16 @@ class ThreadReadPolicy:
         thread_version: int,
     ) -> frozenset[str]:
         source_event_ids = await self._cached_thread_source_event_ids(room_id, thread_id)
+        if history and not source_event_ids:
+            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
+            self._log_resolved_thread_cache(
+                "resolved_thread_cache_skip_store",
+                room_id=room_id,
+                thread_id=thread_id,
+                reason="missing_source_event_ids",
+                thread_version=thread_version,
+            )
+            return source_event_ids
         self.cache._resolved_thread_cache.store(
             room_id,
             thread_id,
@@ -352,6 +362,15 @@ class ThreadReadPolicy:
                     reason="repair_required",
                     thread_version=current_thread_version,
                 )
+        elif not entry.source_event_ids:
+            self._log_resolved_thread_cache(
+                "resolved_thread_cache_invalidate",
+                room_id=room_id,
+                thread_id=thread_id,
+                reason="missing_source_event_ids",
+                thread_version=current_thread_version,
+            )
+            self.cache._resolved_thread_cache.invalidate(room_id, thread_id)
         elif entry.thread_version == current_thread_version and not repair_required:
             self._log_resolved_thread_cache(
                 "resolved_thread_cache_hit",

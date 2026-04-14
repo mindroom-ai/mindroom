@@ -60,7 +60,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Sequence
     from pathlib import Path
 
 
@@ -297,6 +297,10 @@ class TestResolvedThreadCache:
         access._resolved_thread_cache = ResolvedThreadCache(max_entries=1, generation_retention_seconds=0)
         thread_a_key = ("!room:localhost", "$thread-a")
         thread_b_key = ("!room:localhost", "$thread-b")
+        access.runtime.event_cache.get_thread_events.side_effect = [
+            [{"event_id": "$thread-a"}],
+            [{"event_id": "$thread-b"}],
+        ]
         access._resolved_thread_cache.bump_version(*thread_a_key)
         access._resolved_thread_cache.bump_version(*thread_b_key)
 
@@ -1996,6 +2000,97 @@ class TestThreadingBehavior:
         assert reply_chain.roots.get("!test:localhost", "$reply:localhost") is None
 
     @pytest.mark.asyncio
+    async def test_sync_redaction_invalidates_cached_reply_chain_for_durable_cached_edit_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Sync redactions should inspect the durable cache when the edit is absent from reply-chain nodes."""
+        event_cache = _EventCache(tmp_path / "event_cache.db")
+        await event_cache.initialize()
+        try:
+            access = MatrixConversationCache(
+                logger=MagicMock(),
+                runtime=_conversation_runtime(event_cache=event_cache),
+            )
+            reply_chain = ReplyChainCaches()
+            access.bind_reply_chain_caches(lambda: reply_chain)
+
+            await event_cache.store_event(
+                "$edit:localhost",
+                "!test:localhost",
+                {
+                    "content": {
+                        "body": "* updated",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$original:localhost"},
+                    },
+                    "event_id": "$edit:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            )
+
+            reply_chain.nodes.put(
+                "!test:localhost",
+                "$original:localhost",
+                _ReplyChainNode(
+                    message=_message(event_id="$original:localhost", body="original"),
+                    parent_event_id=None,
+                    thread_root_id=None,
+                    has_relations=False,
+                ),
+            )
+            reply_chain.nodes.put(
+                "!test:localhost",
+                "$reply:localhost",
+                _ReplyChainNode(
+                    message=_message(event_id="$reply:localhost", body="reply"),
+                    parent_event_id="$original:localhost",
+                    thread_root_id=None,
+                    has_relations=True,
+                ),
+            )
+            reply_chain.roots.put(
+                "!test:localhost",
+                "$reply:localhost",
+                _ReplyChainRoot(root_event_id="$original:localhost", points_to_thread=False),
+            )
+
+            redaction_event = MagicMock(spec=nio.RedactionEvent)
+            redaction_event.event_id = "$redaction:localhost"
+            redaction_event.redacts = "$edit:localhost"
+            redaction_event.sender = "@user:localhost"
+            redaction_event.server_timestamp = 1234567891
+            redaction_event.source = {
+                "content": {},
+                "event_id": "$redaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "redacts": "$edit:localhost",
+                "room_id": "!test:localhost",
+                "type": "m.room.redaction",
+            }
+
+            sync_response = MagicMock()
+            sync_response.__class__ = nio.SyncResponse
+            sync_response.rooms = MagicMock()
+            sync_response.rooms.join = {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
+            }
+
+            access.cache_sync_timeline(sync_response)
+            await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+
+            assert reply_chain.nodes.get("!test:localhost", "$original:localhost") is None
+            assert reply_chain.nodes.get("!test:localhost", "$reply:localhost") is None
+            assert reply_chain.roots.get("!test:localhost", "$reply:localhost") is None
+        finally:
+            await event_cache.close()
+
+    @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:
         """A failed same-room cache update should not block the next queued write."""
         first_update_started = asyncio.Event()
@@ -2218,7 +2313,17 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_get_thread_history_reuses_resolved_cache_across_turns(self) -> None:
         """A second turn on the same thread should hit the resolved cache instead of rebuilding."""
-        runtime = _conversation_runtime(client=_make_client_mock())
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_events = AsyncMock(
+            return_value=[
+                {"event_id": "$thread"},
+                {"event_id": "$reply"},
+            ],
+        )
+        runtime = _conversation_runtime(
+            client=_make_client_mock(),
+            event_cache=event_cache,
+        )
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=runtime,
@@ -2458,27 +2563,25 @@ class TestThreadingBehavior:
 
             write_started = asyncio.Event()
             release_write = asyncio.Event()
-            original_persist = access._persist_room_sync_timeline_updates
+            original_persist = access._writes._persist_room_sync_timeline_updates
 
             async def blocked_persist(
-                event_cache: _EventCache,
                 room_id: str,
-                cached_events: list[tuple[str, str, dict[str, object]]],
-                redacted_event_ids: list[str],
-                room_threaded_events: list[dict[str, object]],
+                plain_events: Sequence[dict[str, object]],
+                room_threaded_events: Sequence[dict[str, object]],
+                redacted_event_ids: Sequence[str],
             ) -> None:
                 write_started.set()
                 await release_write.wait()
                 await original_persist(
-                    event_cache,
                     room_id,
-                    cached_events,
-                    redacted_event_ids,
+                    plain_events,
                     room_threaded_events,
+                    redacted_event_ids,
                 )
 
             with (
-                patch.object(access, "_persist_room_sync_timeline_updates", new=blocked_persist),
+                patch.object(access._writes, "_persist_room_sync_timeline_updates", new=blocked_persist),
                 patch(
                     "mindroom.matrix.conversation_cache.fetch_thread_history",
                     new=AsyncMock(side_effect=AssertionError("should use incremental resolved cache refresh")),
@@ -2765,23 +2868,21 @@ class TestThreadingBehavior:
 
             write_started = asyncio.Event()
             release_write = asyncio.Event()
-            original_persist = access._persist_room_sync_timeline_updates
+            original_persist = access._writes._persist_room_sync_timeline_updates
 
             async def blocked_persist(
-                event_cache: _EventCache,
                 room_id: str,
-                cached_events: list[tuple[str, str, dict[str, object]]],
-                redacted_event_ids: list[str],
-                room_threaded_events: list[dict[str, object]],
+                plain_events: Sequence[dict[str, object]],
+                room_threaded_events: Sequence[dict[str, object]],
+                redacted_event_ids: Sequence[str],
             ) -> None:
                 write_started.set()
                 await release_write.wait()
                 await original_persist(
-                    event_cache,
                     room_id,
-                    cached_events,
-                    redacted_event_ids,
+                    plain_events,
                     room_threaded_events,
+                    redacted_event_ids,
                 )
 
             refreshed_history = ThreadHistoryResult(
@@ -2789,7 +2890,7 @@ class TestThreadingBehavior:
                 is_full_history=True,
             )
             with (
-                patch.object(access, "_persist_room_sync_timeline_updates", new=blocked_persist),
+                patch.object(access._writes, "_persist_room_sync_timeline_updates", new=blocked_persist),
                 patch(
                     "mindroom.matrix.conversation_cache.fetch_thread_history",
                     new=AsyncMock(return_value=refreshed_history),
@@ -2903,9 +3004,34 @@ class TestThreadingBehavior:
                     THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: True,
                 },
             )
+
+            async def authoritative_refill(
+                client: nio.AsyncClient,
+                room_id: str,
+                thread_id: str,
+                *,
+                event_cache: _EventCache,
+                refresh_cache: bool,
+            ) -> ThreadHistoryResult:
+                assert client is runtime.client
+                assert room_id == "!room:localhost"
+                assert thread_id == "$thread"
+                assert event_cache is runtime.event_cache
+                assert refresh_cache is True
+                await event_cache.store_thread_events(
+                    room_id,
+                    thread_id,
+                    [
+                        root_event,
+                        first_reply,
+                        second_reply_event.source,
+                    ],
+                )
+                return refreshed_history
+
             with patch(
                 "mindroom.matrix.conversation_cache.fetch_thread_history",
-                new=AsyncMock(return_value=refreshed_history),
+                new=AsyncMock(side_effect=authoritative_refill),
             ) as mock_fetch_thread_history:
                 async with access.turn_scope():
                     history = await access.get_thread_history("!room:localhost", "$thread")
@@ -3060,6 +3186,39 @@ class TestThreadingBehavior:
         assert [message.event_id for message in first_history] == ["$thread"]
         assert [message.event_id for message in second_history] == ["$thread", "$reply"]
         assert mock_fetch_thread_history.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_thread_history_does_not_cache_result_without_source_event_ids(self) -> None:
+        """Resolved-thread reuse should be skipped when durable source-event IDs cannot be recovered."""
+        runtime = _conversation_runtime(
+            client=AsyncMock(spec=nio.AsyncClient),
+            event_cache=_runtime_event_cache(),
+        )
+        runtime.event_cache.get_thread_events = AsyncMock(return_value=None)
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+        authoritative_history = ThreadHistoryResult(
+            [_message(event_id="$thread", body="Root")],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+                THREAD_HISTORY_AUTHORITATIVE_REFILL_DIAGNOSTIC: True,
+                THREAD_HISTORY_CACHE_REFILLED_DIAGNOSTIC: True,
+            },
+        )
+
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
+            new=AsyncMock(return_value=authoritative_history),
+        ) as mock_fetch_thread_history:
+            async with access.turn_scope():
+                first_history = await access.get_thread_history("!room:localhost", "$thread")
+            async with access.turn_scope():
+                second_history = await access.get_thread_history("!room:localhost", "$thread")
+
+        assert [message.event_id for message in first_history] == ["$thread"]
+        assert [message.event_id for message in second_history] == ["$thread"]
+        assert mock_fetch_thread_history.await_count == 2
+        assert access._resolved_thread_cache.lookup("!room:localhost", "$thread").entry is None
 
     @pytest.mark.asyncio
     async def test_live_edit_lookup_failure_invalidates_matching_resolved_thread_cache(self) -> None:

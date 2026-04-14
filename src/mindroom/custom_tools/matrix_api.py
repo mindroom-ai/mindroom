@@ -383,7 +383,10 @@ class MatrixApiTools(Toolkit):
         return None
 
     @staticmethod
-    def _requires_conversation_cache_write(
+    async def _requires_conversation_cache_write(
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
         event_type: str,
         content: dict[str, object],
     ) -> bool:
@@ -391,7 +394,42 @@ class MatrixApiTools(Toolkit):
         if event_type != "m.room.message":
             return False
         event_info = EventInfo.from_event({"type": event_type, "content": content})
-        return isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str)
+        if isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str):
+            return True
+        if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
+            return False
+        try:
+            return isinstance(
+                await context.event_cache.get_thread_id_for_event(room_id, event_info.original_event_id),
+                str,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve edit target thread mapping for matrix_api send_event",
+                room_id=room_id,
+                original_event_id=event_info.original_event_id,
+                error=str(exc),
+            )
+            return True
+
+    @staticmethod
+    async def _redaction_requires_conversation_cache_write(
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        event_id: str,
+    ) -> bool:
+        """Return whether one redact payload must update threaded conversation cache state."""
+        try:
+            return isinstance(await context.event_cache.get_thread_id_for_event(room_id, event_id), str)
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve redaction target thread mapping for matrix_api redact",
+                room_id=room_id,
+                target_event_id=event_id,
+                error=str(exc),
+            )
+            return True
 
     @staticmethod
     async def _record_send_event_outbound_cache_write(
@@ -455,9 +493,11 @@ class MatrixApiTools(Toolkit):
             policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)
         ) is not None:
             return policy_error
-        requires_conversation_cache_write = self._requires_conversation_cache_write(
-            normalized_event_type,
-            normalized_content,
+        requires_conversation_cache_write = await self._requires_conversation_cache_write(
+            context,
+            room_id=room_id,
+            event_type=normalized_event_type,
+            content=normalized_content,
         )
         if requires_conversation_cache_write and context.conversation_cache is None:
             return self._error_payload(
@@ -793,15 +833,24 @@ class MatrixApiTools(Toolkit):
             event_id,
             field_name="event_id",
         )
-        if event_id_error is not None:
+        normalized_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+        error_message = event_id_error if event_id_error is not None else None
+        if error_message is not None:
             return self._error_payload(
                 action="redact",
                 room_id=room_id,
-                message=event_id_error,
+                message=error_message,
             )
-        normalized_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
 
         assert normalized_event_id is not None
+
+        requires_conversation_cache_write = await self._redaction_requires_conversation_cache_write(
+            context,
+            room_id=room_id,
+            event_id=normalized_event_id,
+        )
+        if requires_conversation_cache_write and context.conversation_cache is None:
+            error_message = "Conversation cache is required for threaded Matrix message redactions."
 
         if dry_run:
             return self._payload(
@@ -818,11 +867,14 @@ class MatrixApiTools(Toolkit):
             )
 
         if (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
+            error_message = limit_error
+
+        if error_message is not None:
             return self._error_payload(
                 action="redact",
                 room_id=room_id,
                 target_event_id=normalized_event_id,
-                message=limit_error,
+                message=error_message,
             )
 
         try:

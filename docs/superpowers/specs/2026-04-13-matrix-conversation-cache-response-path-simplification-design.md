@@ -1,6 +1,6 @@
 # Matrix Conversation Cache Response-Path Simplification Design
 
-**Status:** Proposed.
+**Status:** Partly implemented, with follow-on architecture extraction already landed.
 **Date:** 2026-04-13.
 **Owner:** Codex.
 
@@ -140,7 +140,6 @@ This simplification makes it explicit.
 
 - Deleting `get_thread_snapshot()` entirely.
 - Deleting `is_thread_history_current()` entirely.
-- Extracting `thread_reads.py` or `thread_writes.py`.
 - Wider cleanup of non-response callers that may still use snapshots appropriately.
 
 ## Testing Strategy
@@ -158,8 +157,14 @@ Where tests need a conversation cache, they should install the real required run
 ## Relationship To The Existing Plan
 
 This design intentionally narrowed and partly superseded the earlier extraction-first plan in `docs/superpowers/plans/2026-04-13-matrix-conversation-cache-architecture.md`.
-The reply-path simplification has now landed.
-The remaining work is to decompose `conversation_cache.py` on top of that simplified reply contract and to close the last write-through gaps that the review cycle exposed.
+The reply-path simplification has landed in its important form:
+- locked reply execution refreshes authoritative thread history after the lifecycle lock,
+- `ResponseRunner` no longer relies on the old currentness shortcut,
+- incomplete planning snapshots are still hydrated before policy when stronger thread state is required.
+
+The later `thread_reads.py` / `thread_writes.py` extraction has also already landed.
+The remaining work is therefore not "split the file later".
+It is to preserve the same authority rules across the extracted modules and close any remaining bypasses.
 
 The decomposition step should preserve the reply-path invariant from this spec.
 - Normal reply generation trusts one authoritative post-lock `get_thread_history(...)` read.

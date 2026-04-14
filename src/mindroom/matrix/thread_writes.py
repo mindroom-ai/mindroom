@@ -801,9 +801,10 @@ class ThreadWritePolicy:
         redacted_event_ids: Sequence[str],
     ) -> None:
         for redacted_event_id in redacted_event_ids:
-            reply_chain_invalidation_ids = self.cache._reply_chain_invalidation_ids_for_sync_redaction(
+            reply_chain_invalidation_ids = await self.cache._reply_chain_invalidation_ids_for_sync_redaction(
                 room_id,
                 redacted_event_id,
+                event_cache=event_cache,
                 event_source=None,
             )
             self.cache._invalidate_reply_chain(room_id, *reply_chain_invalidation_ids)
@@ -951,28 +952,20 @@ class ThreadWritePolicy:
     def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
-        event_cache = self.cache.runtime.event_cache
         for room_id in set(room_plain_events) | set(room_threaded_events) | set(room_redactions):
             plain_events = room_plain_events.get(room_id, ())
             threaded_events = room_threaded_events.get(room_id, ())
             redacted_event_ids = room_redactions.get(room_id, ())
-            cached_events = [
-                (event_id, room_id, event_source)
-                for event_source in [*plain_events, *threaded_events]
-                if isinstance((event_id := event_source.get("event_id")), str) and event_id
-            ]
             self.cache._queue_room_cache_update(
                 room_id,
-                lambda event_cache=event_cache,
-                room_id=room_id,
-                cached_events=cached_events,
-                redacted_event_ids=redacted_event_ids,
-                threaded_events=threaded_events: self.cache._persist_room_sync_timeline_updates(
-                    event_cache,
+                lambda room_id=room_id,
+                plain_events=plain_events,
+                threaded_events=threaded_events,
+                redacted_event_ids=redacted_event_ids: self._persist_room_sync_timeline_updates(
                     room_id,
-                    cached_events,
-                    redacted_event_ids,
+                    plain_events,
                     threaded_events,
+                    redacted_event_ids,
                 ),
                 name="matrix_cache_sync_timeline",
             )

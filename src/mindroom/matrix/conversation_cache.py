@@ -317,11 +317,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
             invalidation_ids.add(original_event_id)
         return invalidation_ids
 
-    def _reply_chain_invalidation_ids_for_sync_redaction(
+    async def _reply_chain_invalidation_ids_for_sync_redaction(
         self,
         room_id: str,
         redacted_event_id: str,
         *,
+        event_cache: ConversationEventCache,
         event_source: dict[str, object] | None,
     ) -> set[str]:
         invalidation_ids = {redacted_event_id}
@@ -332,6 +333,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 cached_node = reply_chain_caches.nodes.get(room_id, redacted_event_id)
                 if cached_node is not None and isinstance(cached_node.event_source, dict):
                     candidate_event_source = cached_node.event_source
+        if candidate_event_source is None:
+            return await self._reply_chain_invalidation_ids_for_redaction(
+                room_id,
+                redacted_event_id,
+                event_cache=event_cache,
+            )
         if not isinstance(candidate_event_source, dict):
             return invalidation_ids
         original_event_id = EventInfo.from_event(candidate_event_source).original_event_id
@@ -763,85 +770,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._writes.apply_redaction(room_id, event)
-
-    async def _resolve_sync_thread_id(
-        self,
-        event_cache: ConversationEventCache,
-        *,
-        room_id: str,
-        event_source: dict[str, object],
-    ) -> str | None:
-        return await self._writes._resolve_sync_thread_id(
-            event_cache,
-            room_id=room_id,
-            event_source=event_source,
-        )
-
-    async def _append_sync_thread_event(
-        self,
-        event_cache: ConversationEventCache,
-        *,
-        room_id: str,
-        event_source: dict[str, object],
-    ) -> tuple[str | None, bool]:
-        return await self._writes._append_sync_thread_event(
-            event_cache,
-            room_id=room_id,
-            event_source=event_source,
-        )
-
-    async def _persist_threaded_sync_events(
-        self,
-        event_cache: ConversationEventCache,
-        room_id: str,
-        threaded_events: Sequence[dict[str, object]],
-    ) -> None:
-        await self._writes._persist_threaded_sync_events(event_cache, room_id, threaded_events)
-
-    async def _mark_failed_sync_thread_store(
-        self,
-        event_cache: ConversationEventCache,
-        room_id: str,
-        threaded_events: Sequence[dict[str, object]],
-    ) -> None:
-        await self._writes._mark_failed_sync_thread_store(
-            event_cache,
-            room_id,
-            threaded_events,
-        )
-
-    async def _apply_sync_redactions(
-        self,
-        event_cache: ConversationEventCache,
-        room_id: str,
-        redacted_event_ids: Sequence[str],
-    ) -> None:
-        await self._writes._apply_sync_redactions(event_cache, room_id, redacted_event_ids)
-
-    async def _persist_room_sync_timeline_updates(
-        self,
-        _event_cache: ConversationEventCache,
-        room_id: str,
-        cached_events: Sequence[tuple[str, str, dict[str, object]]],
-        redacted_event_ids: Sequence[str],
-        room_threaded_events: Sequence[dict[str, object]],
-    ) -> None:
-        threaded_event_ids = {
-            event_id
-            for event_source in room_threaded_events
-            if isinstance((event_id := event_source.get("event_id")), str) and event_id
-        }
-        plain_events = [
-            event_source
-            for event_id, _cached_room_id, event_source in cached_events
-            if event_id not in threaded_event_ids
-        ]
-        await self._writes._persist_room_sync_timeline_updates(
-            room_id,
-            plain_events,
-            room_threaded_events,
-            redacted_event_ids,
-        )
 
     def _track_sync_cached_event(
         self,

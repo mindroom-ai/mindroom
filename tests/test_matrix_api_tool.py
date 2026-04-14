@@ -339,6 +339,33 @@ async def test_matrix_api_send_event_allows_room_mode_edit_without_conversation_
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_rejects_threaded_edit_without_conversation_cache() -> None:
+    """Threaded edits must require cache write-through even when only the cached original reveals the thread."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    ctx.event_cache.get_thread_id_for_event.return_value = "$thread:localhost"
+    content = {
+        "body": "* updated",
+        "msgtype": "m.text",
+        "m.new_content": {"body": "updated", "msgtype": "m.text"},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply:localhost"},
+    }
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Conversation cache is required" in payload["message"]
+    ctx.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_get_state_happy_path() -> None:
     """get_state should return the fetched content."""
     tool = MatrixApiTools()
@@ -448,6 +475,27 @@ async def test_matrix_api_redact_happy_path() -> None:
         ctx.room_id,
         "$target:localhost",
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_redact_rejects_threaded_target_without_conversation_cache() -> None:
+    """Threaded redactions must require cache write-through when the cached target belongs to a thread."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    ctx.event_cache.get_thread_id_for_event.return_value = "$thread:localhost"
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$target:localhost",
+                reason="cleanup",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Conversation cache is required" in payload["message"]
+    ctx.client.room_redact.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,11 @@ The split also closes the remaining bypasses so authoritative thread reads, loca
 This plan intentionally replaces the earlier umbrella plan and the completed boundary-retention cleanup plan.
 The remaining work is narrower than those older documents described.
 The current code already has the corrected ownership model for durable repair state, process-local reuse state, outbound fallback ownership, and restart cleanup.
-What is still missing is the decomposition step that makes `conversation_cache.py` materially easier to reason about and removes the last correctness bypasses that the review cycle surfaced.
+The `thread_reads.py` / `thread_writes.py` decomposition step has now landed.
+What remains is keeping the extracted ownership lines honest:
+- authoritative thread questions must go through the repair-aware read path,
+- local thread-affecting sends, edits, and redactions must go through one write-through path,
+- degraded or source-less results must not become reusable authoritative cache entries.
 
 ## Non-Goals
 
