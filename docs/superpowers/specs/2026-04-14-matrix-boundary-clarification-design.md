@@ -200,11 +200,17 @@ Move any necessary logging to the scheduled task boundary so caller paths stay c
 ### Outbound Callers
 
 Update:
+- `src/mindroom/hooks/sender.py`
 - `src/mindroom/delivery_gateway.py`
 - `src/mindroom/streaming.py`
 - `src/mindroom/custom_tools/matrix_api.py`
+- `src/mindroom/custom_tools/matrix_message.py`
+- `src/mindroom/custom_tools/subagents.py`
 - `src/mindroom/scheduling.py`
 - `src/mindroom/thread_summary.py`
+- `src/mindroom/matrix/stale_stream_cleanup.py`
+- `src/mindroom/matrix/client.py`
+- `src/mindroom/bot.py`
 
 These callers should treat advisory cache bookkeeping as detached notification, not part of successful delivery.
 
@@ -231,6 +237,10 @@ Add targeted regressions for:
 - outbound notify methods swallowing `CancelledError`
 - dispatch preview and post-lock refresh using strict dispatch reads
 - normal non-dispatch callers still using advisory durable-cache reads and stale-cache fallback when appropriate
+
+Verify the two largest rename and fallout surfaces explicitly before implementation:
+- `rg -n "record_outbound_message\\(|record_outbound_redaction\\(" src tests`
+- `rg -n "safe_thread_root=|\\.safe_thread_root\\b" src tests`
 
 Delete or rewrite tests that only prove the old overloaded semantics.
 Prefer end-to-end contract tests over shape tests.

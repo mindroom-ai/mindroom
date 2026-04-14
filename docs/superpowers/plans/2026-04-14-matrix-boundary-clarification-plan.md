@@ -19,12 +19,22 @@
 - Modify: `src/mindroom/matrix/cache/thread_reads.py`
 - Modify: `src/mindroom/matrix/client.py`
 - Modify: `src/mindroom/matrix/cache/thread_writes.py`
+- Modify: `src/mindroom/hooks/sender.py`
 - Modify: `src/mindroom/delivery_gateway.py`
 - Modify: `src/mindroom/streaming.py`
 - Modify: `src/mindroom/custom_tools/matrix_api.py`
+- Modify: `src/mindroom/custom_tools/matrix_message.py`
+- Modify: `src/mindroom/custom_tools/subagents.py`
 - Modify: `src/mindroom/scheduling.py`
 - Modify: `src/mindroom/thread_summary.py`
+- Modify: `src/mindroom/matrix/stale_stream_cleanup.py`
+- Modify: `src/mindroom/bot.py`
 - Modify: `src/mindroom/response_runner.py`
+- Test: `tests/test_event_relations.py`
+- Test: `tests/test_hook_sender.py`
+- Test: `tests/test_workloop_thread_scope.py`
+- Test: `tests/test_dm_functionality.py`
+- Test: `tests/test_streaming_behavior.py`
 - Test: `tests/test_threading_error.py`
 - Test: `tests/test_thread_mode.py`
 - Test: `tests/test_multi_agent_bot.py`
@@ -34,6 +44,11 @@
 - Test: `tests/test_workflow_scheduling.py`
 - Test: `tests/test_thread_summary.py`
 - Test: `tests/test_queued_message_notify.py`
+- Test: `tests/test_large_messages_integration.py`
+- Test: `tests/test_skip_mentions.py`
+- Test: `tests/test_stale_stream_cleanup.py`
+- Test: `tests/test_restore_dedup.py`
+- Test: `tests/test_hook_schedule.py`
 
 ### Task 1: Freeze The Boundary Bugs In Tests
 
@@ -77,6 +92,11 @@ git commit -m "test: lock matrix boundary contracts"
 - Modify: `src/mindroom/matrix/event_info.py`
 - Modify: `src/mindroom/message_target.py`
 - Modify: `src/mindroom/conversation_resolver.py`
+- Modify: `tests/test_event_relations.py`
+- Modify: `tests/test_hook_sender.py`
+- Modify: `tests/test_workloop_thread_scope.py`
+- Modify: `tests/test_dm_functionality.py`
+- Modify: `tests/test_streaming_behavior.py`
 - Modify: `tests/test_threading_error.py`
 - Modify: `tests/test_thread_mode.py`
 
@@ -105,14 +125,20 @@ Do not pass relation-target metadata into thread identity.
 
 - [ ] **Step 4: Run focused target-resolution tests**
 
-Run: `uv run pytest tests/test_threading_error.py tests/test_thread_mode.py -k 'resolved_thread_id or session_id or plain reply or reaction or reference' -x -n 0 --no-cov -q`
+Run: `uv run pytest tests/test_threading_error.py tests/test_thread_mode.py tests/test_event_relations.py tests/test_hook_sender.py tests/test_workloop_thread_scope.py tests/test_dm_functionality.py tests/test_streaming_behavior.py -k 'resolved_thread_id or session_id or safe_thread_root or plain reply or reaction or reference' -x -n 0 --no-cov -q`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit the target-model checkpoint**
+- [ ] **Step 5: Clear all direct `safe_thread_root` fallout**
+
+Run: `rg -n "safe_thread_root=|\\.safe_thread_root\\b" src tests`
+
+Update every remaining hit or deliberately rename it to the new explicit field before moving on.
+
+- [ ] **Step 6: Commit the target-model checkpoint**
 
 ```bash
-git add src/mindroom/matrix/event_info.py src/mindroom/message_target.py src/mindroom/conversation_resolver.py tests/test_threading_error.py tests/test_thread_mode.py
+git add src/mindroom/matrix/event_info.py src/mindroom/message_target.py src/mindroom/conversation_resolver.py tests/test_event_relations.py tests/test_hook_sender.py tests/test_workloop_thread_scope.py tests/test_dm_functionality.py tests/test_streaming_behavior.py tests/test_threading_error.py tests/test_thread_mode.py
 git commit -m "refactor: separate thread identity from reply anchors"
 ```
 
@@ -173,17 +199,28 @@ git commit -m "refactor: make dispatch cache reads explicit"
 **Files:**
 - Modify: `src/mindroom/matrix/conversation_cache.py`
 - Modify: `src/mindroom/matrix/cache/thread_writes.py`
+- Modify: `src/mindroom/hooks/sender.py`
 - Modify: `src/mindroom/delivery_gateway.py`
 - Modify: `src/mindroom/streaming.py`
 - Modify: `src/mindroom/custom_tools/matrix_api.py`
+- Modify: `src/mindroom/custom_tools/matrix_message.py`
+- Modify: `src/mindroom/custom_tools/subagents.py`
 - Modify: `src/mindroom/scheduling.py`
 - Modify: `src/mindroom/thread_summary.py`
+- Modify: `src/mindroom/matrix/stale_stream_cleanup.py`
+- Modify: `src/mindroom/bot.py`
 - Modify: `tests/test_threading_error.py`
+- Modify: `tests/test_hook_sender.py`
 - Modify: `tests/test_matrix_api_tool.py`
 - Modify: `tests/test_send_file_message.py`
 - Modify: `tests/test_scheduling.py`
 - Modify: `tests/test_workflow_scheduling.py`
 - Modify: `tests/test_thread_summary.py`
+- Modify: `tests/test_large_messages_integration.py`
+- Modify: `tests/test_skip_mentions.py`
+- Modify: `tests/test_stale_stream_cleanup.py`
+- Modify: `tests/test_restore_dedup.py`
+- Modify: `tests/test_hook_schedule.py`
 
 - [ ] **Step 1: Rename the public bookkeeping methods to notify-style names**
 
@@ -204,22 +241,28 @@ Log task failures at the scheduled task boundary.
 Ensure `CancelledError` from detached advisory bookkeeping is logged and swallowed just like ordinary exceptions.
 Do not let caller-visible success depend on local cache bookkeeping.
 
-- [ ] **Step 4: Rewrite misleading caller-side tests**
+- [ ] **Step 4: Rewrite every real caller in one pass**
+
+Run: `rg -n "record_outbound_message\\(|record_outbound_redaction\\(" src tests`
+
+Update every runtime caller and every affected test to the notify-style API before moving on.
+
+- [ ] **Step 5: Rewrite misleading caller-side tests**
 
 Replace tests that only assert a method was awaited.
 Use mocks that actually raise `RuntimeError` and `asyncio.CancelledError`.
 Assert the outward send/edit/redact result still succeeds.
 
-- [ ] **Step 5: Run focused advisory-bookkeeping tests**
+- [ ] **Step 6: Run focused advisory-bookkeeping tests**
 
-Run: `uv run pytest tests/test_threading_error.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py -k 'cancelled or fail open or outbound message or outbound redaction' -x -n 0 --no-cov -q`
+Run: `uv run pytest tests/test_threading_error.py tests/test_hook_sender.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_large_messages_integration.py tests/test_skip_mentions.py tests/test_stale_stream_cleanup.py tests/test_restore_dedup.py tests/test_hook_schedule.py -k 'cancelled or fail open or outbound message or outbound redaction' -x -n 0 --no-cov -q`
 
 Expected: PASS
 
-- [ ] **Step 6: Commit the advisory-bookkeeping checkpoint**
+- [ ] **Step 7: Commit the advisory-bookkeeping checkpoint**
 
 ```bash
-git add src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thread_writes.py src/mindroom/delivery_gateway.py src/mindroom/streaming.py src/mindroom/custom_tools/matrix_api.py src/mindroom/scheduling.py src/mindroom/thread_summary.py tests/test_threading_error.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py
+git add src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thread_writes.py src/mindroom/hooks/sender.py src/mindroom/delivery_gateway.py src/mindroom/streaming.py src/mindroom/custom_tools/matrix_api.py src/mindroom/custom_tools/matrix_message.py src/mindroom/custom_tools/subagents.py src/mindroom/scheduling.py src/mindroom/thread_summary.py src/mindroom/matrix/stale_stream_cleanup.py src/mindroom/bot.py tests/test_threading_error.py tests/test_hook_sender.py tests/test_matrix_api_tool.py tests/test_send_file_message.py tests/test_scheduling.py tests/test_workflow_scheduling.py tests/test_thread_summary.py tests/test_large_messages_integration.py tests/test_skip_mentions.py tests/test_stale_stream_cleanup.py tests/test_restore_dedup.py tests/test_hook_schedule.py
 git commit -m "refactor: detach advisory matrix cache bookkeeping"
 ```
 
