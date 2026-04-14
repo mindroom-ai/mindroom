@@ -830,6 +830,51 @@ class TestExtractMessageContextRoomMode:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
+    @pytest.mark.parametrize("relation_type", ["m.replace", "m.annotation", "m.reference"])
+    def test_build_message_target_plain_reply_relation_does_not_infer_thread_identity(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+        relation_type: str,
+    ) -> None:
+        """Edits, reactions, and references to plain replies must stay room-scoped."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$relation-event:localhost",
+            event_source={
+                "content": {
+                    "body": "relation on plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": relation_type,
+                        "event_id": "$plain-reply:localhost",
+                    },
+                },
+                "event_id": "$relation-event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.reply_to_event_id == "$relation-event:localhost"
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
+
 
 class TestSendResponseRoomMode:
     """Test _send_response skips thread relation in room mode."""
@@ -1243,7 +1288,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
@@ -1253,7 +1298,7 @@ class TestExtractedModuleLoggerRebinding:
             ),
         )
 
-        bot._conversation_cache.get_thread_history.assert_awaited_once_with(
+        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with(
             "!room:localhost",
             "$threadroot",
         )
@@ -1495,11 +1540,13 @@ class TestExtractedModuleLoggerRebinding:
             is_full_history=False,
         )
 
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=preview_snapshot)
+
         with patch.object(
             bot._conversation_cache,
             "get_thread_snapshot",
-            AsyncMock(return_value=preview_snapshot),
-        ) as mock_snapshot:
+            AsyncMock(side_effect=AssertionError("dispatch preview should use strict dispatch snapshot reads")),
+        ):
             context = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
         assert context.is_thread is True
@@ -1509,10 +1556,9 @@ class TestExtractedModuleLoggerRebinding:
             "$thread-msg:localhost",
         ]
         assert context.requires_full_thread_history is True
-        mock_snapshot.assert_awaited_once_with(
+        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
             room.room_id,
             "$thread-root:localhost",
-            allow_durable_cache=False,
         )
 
 
