@@ -69,68 +69,31 @@ class ThreadReadPolicy:
             )
         return thread_history_result(list(history), is_full_history=True)
 
-    async def _load_full_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        fetcher: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
-    ) -> ThreadHistoryResult:
-        return self._full_history_result(
-            await fetcher(room_id, thread_id),
-        )
-
-    async def _load_thread_history_under_room_barrier(
+    async def _run_thread_read(
         self,
         room_id: str,
         thread_id: str,
         *,
         fetcher: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
         name: str,
+        full_history: bool,
     ) -> ThreadHistoryResult:
+        async def load() -> ThreadHistoryResult:
+            thread_history = await fetcher(room_id, thread_id)
+            if full_history:
+                return self._full_history_result(thread_history)
+            return thread_history
+
         coordinator = self._coordinator()
         if coordinator is None:
-            return await self._load_full_thread_history(
-                room_id,
-                thread_id,
-                fetcher=fetcher,
-            )
+            return await load()
         return typing.cast(
             "ThreadHistoryResult",
             await coordinator.run_room_update(
                 room_id,
-                lambda: self._load_full_thread_history(room_id, thread_id, fetcher=fetcher),
+                load,
                 name=name,
             ),
-        )
-
-    def _read_fetcher(
-        self,
-        *,
-        full_history: bool,
-        dispatch_safe: bool,
-    ) -> tuple[
-        typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
-        str,
-    ]:
-        if dispatch_safe:
-            if full_history:
-                return (
-                    self.fetch_dispatch_thread_history_from_client,
-                    "matrix_cache_refresh_dispatch_thread_history",
-                )
-            return (
-                self.fetch_dispatch_thread_snapshot_from_client,
-                "matrix_cache_refresh_dispatch_thread_snapshot",
-            )
-        if full_history:
-            return (
-                self.fetch_thread_history_from_client,
-                "matrix_cache_refresh_thread_history",
-            )
-        return (
-            self.fetch_thread_snapshot_from_client,
-            "matrix_cache_refresh_thread_snapshot",
         )
 
     async def read_thread(
@@ -143,27 +106,36 @@ class ThreadReadPolicy:
     ) -> ThreadHistoryResult:
         """Resolve one thread read through the shared barrier and fetch selection path."""
         await self._wait_for_pending_room_cache_updates(room_id)
-        fetcher, name = self._read_fetcher(
-            full_history=full_history,
-            dispatch_safe=dispatch_safe,
-        )
-        if full_history:
-            return await self._load_thread_history_under_room_barrier(
+        if full_history and dispatch_safe:
+            return await self._run_thread_read(
                 room_id,
                 thread_id,
-                fetcher=fetcher,
-                name=name,
+                fetcher=self.fetch_dispatch_thread_history_from_client,
+                name="matrix_cache_refresh_dispatch_thread_history",
+                full_history=True,
             )
-        coordinator = self._coordinator()
-        if coordinator is None:
-            return await fetcher(room_id, thread_id)
-        return typing.cast(
-            "ThreadHistoryResult",
-            await coordinator.run_room_update(
+        if full_history:
+            return await self._run_thread_read(
                 room_id,
-                lambda: fetcher(room_id, thread_id),
-                name=name,
-            ),
+                thread_id,
+                fetcher=self.fetch_thread_history_from_client,
+                name="matrix_cache_refresh_thread_history",
+                full_history=True,
+            )
+        if dispatch_safe:
+            return await self._run_thread_read(
+                room_id,
+                thread_id,
+                fetcher=self.fetch_dispatch_thread_snapshot_from_client,
+                name="matrix_cache_refresh_dispatch_thread_snapshot",
+                full_history=False,
+            )
+        return await self._run_thread_read(
+            room_id,
+            thread_id,
+            fetcher=self.fetch_thread_snapshot_from_client,
+            name="matrix_cache_refresh_thread_snapshot",
+            full_history=False,
         )
 
     async def get_thread_snapshot(
