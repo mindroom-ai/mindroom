@@ -15,7 +15,9 @@ from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_SAMPLE_SIZE,
     THREAD_SUMMARY_MAX_LENGTH,
+    ThreadSummaryWriteError,
     _build_conversation_text,
+    _count_non_summary_messages,
     _generate_summary,
     _is_thread_summary_message,
     _last_summary_counts,
@@ -27,6 +29,7 @@ from mindroom.thread_summary import (
     next_thread_summary_threshold,
     normalize_thread_summary_text,
     send_thread_summary_event,
+    set_manual_thread_summary,
     should_queue_thread_summary,
     thread_summary_cache_key,
     thread_summary_message_count_hint,
@@ -1183,6 +1186,85 @@ class TestSendSummaryEvent:
         assert relates_to["event_id"] == "$root1"
         assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
         conversation_cache.notify_outbound_message.assert_called_once()
+
+
+@pytest.mark.asyncio
+class TestSetManualThreadSummary:
+    """Direct tests for the shared manual summary write path."""
+
+    async def test_sets_summary_and_updates_cache(self) -> None:
+        """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
+        client = _mock_client()
+        conversation_cache = AsyncMock()
+        conversation_cache.get_thread_history.return_value = [
+            *_make_thread_history(3),
+            _make_summary_notice_message("$root1", message_count=2),
+        ]
+
+        with patch(
+            "mindroom.thread_summary.send_thread_summary_event",
+            new=AsyncMock(return_value="$summary1"),
+        ) as mock_send:
+            result = await set_manual_thread_summary(
+                client,
+                "!room:x",
+                "$root1",
+                "  # **Fix** [ISSUE-116](http://example.com)  ",
+                conversation_cache=conversation_cache,
+            )
+
+        assert result.event_id == "$summary1"
+        assert result.summary == "Fix ISSUE-116"
+        assert result.message_count == _count_non_summary_messages(conversation_cache.get_thread_history.return_value)
+        mock_send.assert_awaited_once_with(
+            client,
+            "!room:x",
+            "$root1",
+            "Fix ISSUE-116",
+            3,
+            "manual",
+            conversation_cache,
+        )
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$root1")] == 3
+
+    async def test_send_failure_raises_and_leaves_cache_unchanged(self) -> None:
+        """A failed manual summary send should not advance the cached threshold baseline."""
+        client = _mock_client()
+        conversation_cache = AsyncMock()
+        conversation_cache.get_thread_history.return_value = _make_thread_history(5)
+        update_last_summary_count("!room:x", "$root1", 2)
+
+        with (
+            patch(
+                "mindroom.thread_summary.send_thread_summary_event",
+                new=AsyncMock(return_value=None),
+            ),
+            pytest.raises(ThreadSummaryWriteError, match=r"Failed to send thread summary event\."),
+        ):
+            await set_manual_thread_summary(
+                client,
+                "!room:x",
+                "$root1",
+                "failed write",
+                conversation_cache=conversation_cache,
+            )
+
+        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$root1")] == 2
+
+    async def test_fetch_failure_raises_before_send(self) -> None:
+        """A failed history fetch should raise the shared manual-summary fetch error."""
+        client = _mock_client()
+        conversation_cache = AsyncMock()
+        conversation_cache.get_thread_history.side_effect = TimeoutError("timed out")
+
+        with pytest.raises(ThreadSummaryWriteError, match=r"Failed to fetch thread history for the target thread\."):
+            await set_manual_thread_summary(
+                client,
+                "!room:x",
+                "$root1",
+                "done",
+                conversation_cache=conversation_cache,
+            )
 
 
 class TestBuildConversationText:

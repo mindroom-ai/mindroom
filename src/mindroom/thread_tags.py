@@ -375,30 +375,6 @@ def _thread_tags_state_from_tags(
     )
 
 
-def _collect_thread_tag_room_state_event(
-    room_id: str,
-    event: Mapping[str, object],
-    *,
-    legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]],
-    per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]],
-    per_tag_tombstones_by_thread: dict[str, set[str]],
-) -> None:
-    """Parse one room-state event into either legacy or per-tag storage."""
-    if event.get("type") != THREAD_TAGS_EVENT_TYPE:
-        return
-
-    state_key = event.get("state_key")
-    content = event.get("content")
-    _collect_thread_tag_state_entry(
-        room_id,
-        state_key,
-        content,
-        legacy_tags_by_thread=legacy_tags_by_thread,
-        per_tag_records_by_thread=per_tag_records_by_thread,
-        per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
-    )
-
-
 def _collect_thread_tag_state_entry(
     room_id: str,
     state_key: object,
@@ -645,9 +621,12 @@ async def _get_room_thread_tags_states(
     per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
     per_tag_tombstones_by_thread: dict[str, set[str]] = {}
     for event in response.events:
-        _collect_thread_tag_room_state_event(
+        if event.get("type") != THREAD_TAGS_EVENT_TYPE:
+            continue
+        _collect_thread_tag_state_entry(
             room_id,
-            event,
+            event.get("state_key"),
+            event.get("content"),
             legacy_tags_by_thread=legacy_tags_by_thread,
             per_tag_records_by_thread=per_tag_records_by_thread,
             per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,

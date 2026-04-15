@@ -13,10 +13,8 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
-from mindroom.matrix.thread_membership import (
-    conversation_cache_thread_membership_access_for_client,
+from mindroom.matrix.thread_bookkeeping import (
     event_requires_thread_bookkeeping,
-    fetch_event_info_from_conversation_cache,
     redaction_requires_thread_bookkeeping,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
@@ -444,13 +442,11 @@ class MatrixApiTools(Toolkit):
 
         try:
             requires_conversation_cache_write = await event_requires_thread_bookkeeping(
+                context.client,
                 room_id=room_id,
                 event_type=normalized_event_type,
                 content=normalized_content,
-                access=conversation_cache_thread_membership_access_for_client(
-                    context.client,
-                    conversation_cache=context.conversation_cache,
-                ),
+                conversation_cache=context.conversation_cache,
             )
         except Exception as exc:
             logger.warning(
@@ -804,20 +800,11 @@ class MatrixApiTools(Toolkit):
         assert normalized_event_id is not None
 
         try:
-            target_event_info = await fetch_event_info_from_conversation_cache(
-                context.conversation_cache,
-                room_id,
-                normalized_event_id,
-                strict=True,
-            )
             requires_conversation_cache_write = await redaction_requires_thread_bookkeeping(
+                context.client,
                 room_id=room_id,
                 event_id=normalized_event_id,
-                access=conversation_cache_thread_membership_access_for_client(
-                    context.client,
-                    conversation_cache=context.conversation_cache,
-                ),
-                target_event_info=target_event_info,
+                conversation_cache=context.conversation_cache,
             )
         except Exception as exc:
             logger.warning(
