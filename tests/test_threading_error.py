@@ -12,6 +12,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
@@ -65,6 +66,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
     make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -922,6 +924,36 @@ class TestThreadingBehavior:
         assert bot._runtime_view.event_cache is None
         assert bot._runtime_view.event_cache_write_coordinator is None
         start_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_standalone_runtime_support_uses_shared_sync_flow(self, bot: AgentBot) -> None:
+        """Standalone startup should delegate ownership lifecycle to the shared sync helper."""
+        bot.event_cache = None
+        bot.event_cache_write_coordinator = None
+        synced_support = SimpleNamespace(
+            event_cache=make_event_cache_mock(),
+            event_cache_write_coordinator=make_event_cache_write_coordinator_mock(owner=bot._runtime_view),
+        )
+
+        with patch(
+            "mindroom.bot.sync_owned_runtime_support",
+            new=AsyncMock(return_value=synced_support),
+            create=True,
+        ) as sync_owned_runtime_support:
+            await bot._initialize_runtime_support_services()
+
+        sync_owned_runtime_support.assert_awaited_once()
+        assert sync_owned_runtime_support.await_args.args == (None,)
+        assert sync_owned_runtime_support.await_args.kwargs == {
+            "db_path": bot.config.cache.resolve_db_path(bot.runtime_paths),
+            "logger": bot.logger,
+            "background_task_owner": bot._runtime_view,
+            "init_failure_reason_prefix": "standalone_runtime_init_failed",
+            "log_db_path_change": False,
+        }
+        assert bot._standalone_runtime_support is synced_support
+        assert bot._runtime_view.event_cache is synced_support.event_cache
+        assert bot._runtime_view.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
 
     @pytest.mark.asyncio
     async def test_injected_shared_event_cache_stays_open_for_other_bots(self, bot: AgentBot, tmp_path: Path) -> None:

@@ -19,8 +19,8 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import EventCacheWriteCoordinator
 
 
 class ThreadReadPolicy:

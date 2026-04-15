@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -8991,14 +8991,63 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch("mindroom.orchestrator._EventCache.initialize", new=AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("mindroom.runtime_support._EventCache.initialize", new=AsyncMock(side_effect=RuntimeError("boom"))),
             patch.object(MultiAgentOrchestrator, "_create_managed_bot") as mock_create_managed_bot,
         ):
             await orchestrator.initialize()
 
         assert orchestrator.config is config
         assert mock_create_managed_bot.call_count == 2
-        assert orchestrator._event_cache.is_initialized is False
+        assert orchestrator._runtime_support.event_cache.is_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_sync_event_cache_service_uses_shared_runtime_support_sync(self, tmp_path: Path) -> None:
+        """Shared runtime cache lifecycle should route through the shared sync helper."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
+                },
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
+        )
+        router_bot = _mock_managed_bot(config)
+        general_bot = _mock_managed_bot(config)
+        orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+        initial_support = orchestrator._runtime_support
+        synced_support = SimpleNamespace(
+            event_cache=make_event_cache_mock(),
+            event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
+        )
+
+        with patch(
+            "mindroom.orchestrator.sync_owned_runtime_support",
+            new=AsyncMock(return_value=synced_support),
+            create=True,
+        ) as sync_owned_runtime_support:
+            await orchestrator._sync_event_cache_service(config)
+
+        sync_owned_runtime_support.assert_awaited_once()
+        assert sync_owned_runtime_support.await_args.args == (initial_support,)
+        assert sync_owned_runtime_support.await_args.kwargs == {
+            "db_path": config.cache.resolve_db_path(orchestrator.runtime_paths),
+            "logger": ANY,
+            "background_task_owner": orchestrator._event_cache_write_task_owner,
+            "init_failure_reason_prefix": "shared_runtime_init_failed",
+            "log_db_path_change": True,
+        }
+        assert orchestrator._runtime_support is synced_support
+        assert router_bot.event_cache is synced_support.event_cache
+        assert general_bot.event_cache is synced_support.event_cache
+        assert router_bot.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
+        assert general_bot.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
 
     @pytest.mark.asyncio
     async def test_initialize_does_not_activate_hook_runtime_before_user_account_succeeds(
@@ -9771,13 +9820,18 @@ class TestMultiAgentOrchestrator:
             try:
                 updated = await orchestrator.update_config()
                 assert updated is False
-                assert router_bot.event_cache is orchestrator._event_cache
-                assert general_bot.event_cache is orchestrator._event_cache
-                assert router_bot.event_cache_write_coordinator is orchestrator._event_cache_write_coordinator
-                assert general_bot.event_cache_write_coordinator is orchestrator._event_cache_write_coordinator
+                assert router_bot.event_cache is orchestrator._runtime_support.event_cache
+                assert general_bot.event_cache is orchestrator._runtime_support.event_cache
+                assert (
+                    router_bot.event_cache_write_coordinator
+                    is orchestrator._runtime_support.event_cache_write_coordinator
+                )
+                assert (
+                    general_bot.event_cache_write_coordinator
+                    is orchestrator._runtime_support.event_cache_write_coordinator
+                )
             finally:
-                await orchestrator._close_event_cache_write_coordinator()
-                await orchestrator._close_event_cache()
+                await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_shared_event_cache_when_db_path_changes(self, tmp_path: Path) -> None:
@@ -9821,7 +9875,7 @@ class TestMultiAgentOrchestrator:
         general_bot = _mock_managed_bot(old_config)
         orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
         await orchestrator._sync_event_cache_service(old_config)
-        old_cache = orchestrator._event_cache
+        old_cache = orchestrator._runtime_support.event_cache
         assert old_cache is not None
 
         with (
@@ -9834,16 +9888,21 @@ class TestMultiAgentOrchestrator:
             try:
                 updated = await orchestrator.update_config()
                 assert updated is False
-                assert orchestrator._event_cache is old_cache
+                assert orchestrator._runtime_support.event_cache is old_cache
                 assert old_cache.db_path == old_config.cache.resolve_db_path(orchestrator.runtime_paths)
                 assert router_bot.event_cache is old_cache
                 assert general_bot.event_cache is old_cache
-                assert orchestrator._event_cache_write_coordinator is not None
-                assert router_bot.event_cache_write_coordinator is orchestrator._event_cache_write_coordinator
-                assert general_bot.event_cache_write_coordinator is orchestrator._event_cache_write_coordinator
+                assert orchestrator._runtime_support.event_cache_write_coordinator is not None
+                assert (
+                    router_bot.event_cache_write_coordinator
+                    is orchestrator._runtime_support.event_cache_write_coordinator
+                )
+                assert (
+                    general_bot.event_cache_write_coordinator
+                    is orchestrator._runtime_support.event_cache_write_coordinator
+                )
             finally:
-                await orchestrator._close_event_cache_write_coordinator()
-                await orchestrator._close_event_cache()
+                await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:

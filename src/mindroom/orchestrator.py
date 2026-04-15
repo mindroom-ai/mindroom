@@ -35,12 +35,6 @@ from mindroom.matrix.client import (
     get_room_members,
     invite_to_room,
 )
-from mindroom.matrix.conversation_cache import (
-    EventCache as _EventCache,
-)
-from mindroom.matrix.conversation_cache import (
-    EventCacheWriteCoordinator as _EventCacheWriteCoordinator,
-)
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import (
@@ -103,6 +97,12 @@ from .orchestration.runtime import (
     stop_entities,
     sync_forever_with_restart,
     wait_for_matrix_homeserver,
+)
+from .runtime_support import (
+    OwnedRuntimeSupport,
+    build_owned_runtime_support,
+    close_owned_runtime_support,
+    sync_owned_runtime_support,
 )
 
 if TYPE_CHECKING:
@@ -217,8 +217,7 @@ class MultiAgentOrchestrator:
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _event_cache: _EventCache = field(init=False)
-    _event_cache_write_coordinator: _EventCacheWriteCoordinator = field(init=False)
+    _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
@@ -226,8 +225,8 @@ class MultiAgentOrchestrator:
         """Store canonical derived paths from the explicit runtime context."""
         self.storage_path = self.runtime_paths.storage_root
         self.config_path = self.runtime_paths.config_path
-        self._event_cache = _EventCache(self.storage_path / "event_cache.db")
-        self._event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        self._runtime_support = build_owned_runtime_support(
+            db_path=self.storage_path / "event_cache.db",
             logger=logger,
             background_task_owner=self._event_cache_write_task_owner,
         )
@@ -269,8 +268,8 @@ class MultiAgentOrchestrator:
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
-        bot.event_cache = self._event_cache
-        bot.event_cache_write_coordinator = self._event_cache_write_coordinator
+        bot.event_cache = self._runtime_support.event_cache
+        bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
 
     def _rebind_runtime_support_services(self) -> None:
         """Rebind the current runtime support services to every managed bot."""
@@ -279,36 +278,19 @@ class MultiAgentOrchestrator:
 
     async def _sync_event_cache_service(self, config: Config) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
-        desired_db_path = config.cache.resolve_db_path(self.runtime_paths)
-        cache = self._event_cache
-        if not cache.is_initialized and cache.db_path != desired_db_path:
-            cache = _EventCache(desired_db_path)
-            self._event_cache = cache
-        elif cache.db_path != desired_db_path:
-            logger.info(
-                "Event cache db_path change will apply after restart",
-                active_db_path=str(cache.db_path),
-                configured_db_path=str(desired_db_path),
-            )
-        if not cache.is_initialized:
-            try:
-                await cache.initialize()
-            except Exception as exc:
-                cache.disable(f"shared_runtime_init_failed:{exc}")
-                logger.warning(
-                    "Shared event cache init failed; continuing without advisory cache",
-                    db_path=str(cache.db_path),
-                    error=str(exc),
-                )
+        self._runtime_support = await sync_owned_runtime_support(
+            self._runtime_support,
+            db_path=config.cache.resolve_db_path(self.runtime_paths),
+            logger=logger,
+            background_task_owner=self._event_cache_write_task_owner,
+            init_failure_reason_prefix="shared_runtime_init_failed",
+            log_db_path_change=True,
+        )
         self._rebind_runtime_support_services()
 
-    async def _close_event_cache_write_coordinator(self) -> None:
-        """Drain the shared event-cache write coordinator."""
-        await self._event_cache_write_coordinator.close()
-
-    async def _close_event_cache(self) -> None:
-        """Close the shared event cache."""
-        await self._event_cache.close()
+    async def _close_runtime_support_services(self) -> None:
+        """Close the shared runtime-owned cache services."""
+        await close_owned_runtime_support(self._runtime_support, logger=logger)
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -1513,8 +1495,7 @@ class MultiAgentOrchestrator:
 
         stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
-        await self._close_event_cache_write_coordinator()
-        await self._close_event_cache()
+        await self._close_runtime_support_services()
         logger.info("All agent bots stopped")
 
 

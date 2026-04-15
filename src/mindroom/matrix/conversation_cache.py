@@ -16,15 +16,9 @@ from mindroom.matrix.cache.event_cache import (
     ConversationEventCache,
     normalize_nio_event_for_cache,
 )
-from mindroom.matrix.cache.event_cache import (
-    _EventCache as EventCache,
-)
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
 from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
-from mindroom.matrix.cache.write_coordinator import (
-    _EventCacheWriteCoordinator as EventCacheWriteCoordinator,
-)
 from mindroom.matrix.client import (
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
@@ -61,8 +55,6 @@ class _TurnEventLookup:
 __all__ = [
     "ConversationCacheProtocol",
     "ConversationEventCache",
-    "EventCache",
-    "EventCacheWriteCoordinator",
     "EventLookupResult",
     "MatrixConversationCache",
     "ThreadReadResult",

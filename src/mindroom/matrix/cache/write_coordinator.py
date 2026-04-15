@@ -6,12 +6,41 @@ import asyncio
 import typing
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 
 if TYPE_CHECKING:
     import structlog
+
+
+class EventCacheWriteCoordinator(Protocol):
+    """Runtime-facing coordinator contract for ordered advisory cache writes."""
+
+    def queue_room_update(
+        self,
+        room_id: str,
+        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
+        *,
+        name: str,
+        log_exceptions: bool = True,
+    ) -> asyncio.Task[object]:
+        """Queue one room-scoped update behind any active predecessor."""
+
+    async def run_room_update(
+        self,
+        room_id: str,
+        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
+        *,
+        name: str,
+    ) -> object:
+        """Run one room-scoped update through the same ordered barrier."""
+
+    async def wait_for_room_idle(self, room_id: str) -> None:
+        """Wait for one room's queued updates to drain."""
+
+    async def close(self) -> None:
+        """Drain and tear down the coordinator."""
 
 
 @dataclass
