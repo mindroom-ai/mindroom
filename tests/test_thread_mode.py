@@ -961,7 +961,7 @@ class TestSendResponseRoomMode:
 
 
 class TestStreamingResponseRoomMode:
-    """Test StreamingResponse skips thread and reply relations when room_mode=True."""
+    """Test StreamingResponse keeps plain reply relations while suppressing thread relations in room mode."""
 
     @pytest.fixture
     def streaming_config(self) -> Config:
@@ -988,8 +988,8 @@ class TestStreamingResponseRoomMode:
         assert sr.room_mode is False
 
     @pytest.mark.asyncio
-    async def test_room_mode_no_relations(self, streaming_config: Config) -> None:
-        """In room mode, _send_or_edit_message should emit no m.relates_to."""
+    async def test_room_mode_keeps_plain_reply_relation(self, streaming_config: Config) -> None:
+        """In room mode, _send_or_edit_message should emit a plain reply relation only."""
         sr = _streaming_response(
             streaming_config,
             room_id="!room:localhost",
@@ -1011,7 +1011,7 @@ class TestStreamingResponseRoomMode:
         with patch("mindroom.streaming.send_message_result", side_effect=mock_send):
             await sr._send_or_edit_message(client, is_final=True)
 
-        assert "m.relates_to" not in captured
+        assert captured["m.relates_to"] == {"m.in_reply_to": {"event_id": "$event123"}}
 
     @pytest.mark.asyncio
     async def test_thread_mode_has_relations(self, streaming_config: Config) -> None:
@@ -1042,7 +1042,7 @@ class TestStreamingResponseRoomMode:
 
 
 class TestSendStreamingResponseRoomMode:
-    """Test send_streaming_response skips thread lookup and relations in room mode."""
+    """Test send_streaming_response skips thread lookup in room mode."""
 
     @pytest.mark.asyncio
     async def test_room_mode_skips_latest_thread_lookup(self) -> None:
@@ -1083,7 +1083,11 @@ class TestSendStreamingResponseRoomMode:
                 room_mode=True,
             )
 
-        assert "m.relates_to" not in captured
+        assert captured["m.relates_to"] == {
+            "m.in_reply_to": {
+                "event_id": "$event123",
+            },
+        }
 
 
 class TestCommandThreadContextRoomMode:

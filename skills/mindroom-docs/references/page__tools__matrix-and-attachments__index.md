@@ -123,7 +123,7 @@ set_thread_summary(
 
 ### Notes
 
-- `summary` must be a non-empty string up to 500 characters after whitespace normalization.
+- `summary` must be a non-empty string up to 300 characters after whitespace normalization.
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
 

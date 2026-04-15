@@ -305,6 +305,7 @@ class ConversationResolver:
                 event_info.original_event_id,
                 dispatch_safe=dispatch_safe,
                 allow_root_snapshot_fallback=True,
+                allow_reply_hop=True,
             )
 
         if event_info.reply_to_event_id is not None:
@@ -312,7 +313,8 @@ class ConversationResolver:
                 room_id,
                 event_info.reply_to_event_id,
                 dispatch_safe=dispatch_safe,
-                allow_root_snapshot_fallback=False,
+                allow_root_snapshot_fallback=True,
+                allow_reply_hop=True,
             )
 
         return None
@@ -324,39 +326,43 @@ class ConversationResolver:
         *,
         dispatch_safe: bool,
         allow_root_snapshot_fallback: bool,
+        allow_reply_hop: bool,
     ) -> str | None:
         """Resolve thread identity for one directly related target event."""
         resolved_thread_id = await self.deps.conversation_cache.get_thread_id_for_event(
             room_id,
             target_event_id,
         )
-        if resolved_thread_id is not None:
-            return resolved_thread_id
+        if resolved_thread_id is None:
+            target_event = await self.deps.conversation_cache.get_event(room_id, target_event_id)
+            if not isinstance(target_event, nio.RoomGetEventResponse):
+                return None
 
-        target_event = await self.deps.conversation_cache.get_event(room_id, target_event_id)
-        if not isinstance(target_event, nio.RoomGetEventResponse):
-            return None
-
-        target_info = EventInfo.from_event(target_event.event.source)
-        explicit_thread_id = target_info.thread_id or target_info.thread_id_from_edit
-        if explicit_thread_id is not None:
-            return explicit_thread_id
-
-        if target_info.is_edit and target_info.original_event_id is not None:
-            return await self._thread_id_for_target_event(
-                room_id,
-                target_info.original_event_id,
-                dispatch_safe=dispatch_safe,
-                allow_root_snapshot_fallback=allow_root_snapshot_fallback,
-            )
-
-        if allow_root_snapshot_fallback and target_info.can_be_thread_root:
-            return await self._thread_root_id_from_snapshot(
-                room_id,
-                target_event_id,
-                dispatch_safe=dispatch_safe,
-            )
-        return None
+            target_info = EventInfo.from_event(target_event.event.source)
+            resolved_thread_id = target_info.thread_id or target_info.thread_id_from_edit
+            if resolved_thread_id is None and target_info.is_edit and target_info.original_event_id is not None:
+                resolved_thread_id = await self._thread_id_for_target_event(
+                    room_id,
+                    target_info.original_event_id,
+                    dispatch_safe=dispatch_safe,
+                    allow_root_snapshot_fallback=allow_root_snapshot_fallback,
+                    allow_reply_hop=allow_reply_hop,
+                )
+            elif resolved_thread_id is None and allow_reply_hop and target_info.reply_to_event_id is not None:
+                resolved_thread_id = await self._thread_id_for_target_event(
+                    room_id,
+                    target_info.reply_to_event_id,
+                    dispatch_safe=dispatch_safe,
+                    allow_root_snapshot_fallback=True,
+                    allow_reply_hop=False,
+                )
+            elif resolved_thread_id is None and allow_root_snapshot_fallback and target_info.can_be_thread_root:
+                resolved_thread_id = await self._thread_root_id_from_snapshot(
+                    room_id,
+                    target_event_id,
+                    dispatch_safe=dispatch_safe,
+                )
+        return resolved_thread_id
 
     async def _thread_root_id_from_snapshot(
         self,

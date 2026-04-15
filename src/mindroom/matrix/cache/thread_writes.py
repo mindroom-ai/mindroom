@@ -93,9 +93,50 @@ async def _resolve_thread_id_for_cached_event_append(
     for related_event_id in (event_info.original_event_id, event_info.reply_to_event_id):
         if not isinstance(related_event_id, str):
             continue
-        thread_id = await event_cache.get_thread_id_for_event(room_id, related_event_id)
+        thread_id = await _resolve_thread_id_for_related_cached_event(
+            room_id,
+            related_event_id=related_event_id,
+            event_cache=event_cache,
+            allow_reply_hop=True,
+        )
         if thread_id is not None:
             return thread_id
+    return None
+
+
+async def _resolve_thread_id_for_related_cached_event(
+    room_id: str,
+    *,
+    related_event_id: str,
+    event_cache: ConversationEventCache,
+    allow_reply_hop: bool,
+) -> str | None:
+    thread_id = await event_cache.get_thread_id_for_event(room_id, related_event_id)
+    if thread_id is not None:
+        return thread_id
+
+    related_event = await event_cache.get_event(room_id, related_event_id)
+    if not isinstance(related_event, dict):
+        return None
+
+    related_event_info = EventInfo.from_event(related_event)
+    explicit_thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit
+    if explicit_thread_id is not None:
+        return explicit_thread_id
+    if related_event_info.is_edit and related_event_info.original_event_id is not None:
+        return await _resolve_thread_id_for_related_cached_event(
+            room_id,
+            related_event_id=related_event_info.original_event_id,
+            event_cache=event_cache,
+            allow_reply_hop=allow_reply_hop,
+        )
+    if allow_reply_hop and related_event_info.reply_to_event_id is not None:
+        return await _resolve_thread_id_for_related_cached_event(
+            room_id,
+            related_event_id=related_event_info.reply_to_event_id,
+            event_cache=event_cache,
+            allow_reply_hop=False,
+        )
     return None
 
 

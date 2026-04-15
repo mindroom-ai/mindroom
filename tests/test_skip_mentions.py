@@ -417,6 +417,41 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_delivery_gateway_edit_text_preserves_plain_reply_relation_in_room_mode(tmp_path: Path) -> None:
+    """Room-mode edits should keep the plain reply relation in replacement content."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway.deps.runtime.config.agents["email_agent"].thread_mode = "room"
+    target = MessageTarget.resolve("!test:server", "$thread", "$event123", room_mode=True)
+
+    captured_content: dict[str, object] = {}
+
+    async def record_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, object],
+        _new_text: str,
+    ) -> object:
+        captured_content.update(new_content)
+        return await delivered_matrix_side_effect("$edit-event")(_client, _room_id, new_content)
+
+    with patch(
+        "mindroom.delivery_gateway.edit_message_result",
+        new=AsyncMock(side_effect=record_edit),
+    ):
+        edited = await gateway.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id="$original",
+                new_text="updated response",
+            ),
+        )
+
+    assert edited is True
+    assert captured_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$event123"}}
+
+
+@pytest.mark.asyncio
 async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tmp_path: Path) -> None:
     """Final delivery should route fresh sends through the gateway's native send helper."""
     gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)

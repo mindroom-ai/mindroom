@@ -1154,6 +1154,30 @@ class TestSendSummaryEvent:
         assert result is None
         conversation_cache.notify_outbound_message.assert_not_called()
 
+    async def test_latest_thread_lookup_failure_falls_back_to_thread_root(self) -> None:
+        """Summary sending should remain threaded when latest-event lookup fails."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(side_effect=RuntimeError("lookup boom"))
+        conversation_cache.notify_outbound_message = Mock()
+
+        result = await send_thread_summary_event(
+            client,
+            room_id="!room:x",
+            thread_id="$root1",
+            summary="test",
+            message_count=5,
+            model_name="default",
+            conversation_cache=conversation_cache,
+        )
+
+        assert result == "$s1"
+        relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
+        assert relates_to["event_id"] == "$root1"
+        assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
+        conversation_cache.notify_outbound_message.assert_called_once()
+
 
 class TestBuildConversationText:
     """Tests for conversation text building and truncation."""

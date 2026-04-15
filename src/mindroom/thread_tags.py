@@ -787,16 +787,62 @@ async def normalize_thread_root_event_id(
     if normalized_thread_id is not None:
         return normalized_thread_id
     if event_info.is_edit and event_info.original_event_id is not None:
-        original_info = await _event_info_for_event_id(client, room_id, event_info.original_event_id)
-        return (
-            None
-            if original_info is None
-            else _canonical_thread_id(original_info, fallback_root=event_info.original_event_id)
+        return await _thread_root_id_for_edit_original(
+            client,
+            room_id,
+            original_event_id=event_info.original_event_id,
         )
     if event_info.reply_to_event_id is not None:
-        reply_info = await _event_info_for_event_id(client, room_id, event_info.reply_to_event_id)
-        return None if reply_info is None else _canonical_thread_id(reply_info)
+        return await _thread_root_id_for_reply_target(
+            client,
+            room_id,
+            reply_to_event_id=event_info.reply_to_event_id,
+        )
     return None
+
+
+async def _thread_root_id_for_edit_original(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    original_event_id: str,
+) -> str | None:
+    original_info = await _event_info_for_event_id(client, room_id, original_event_id)
+    if original_info is None:
+        return None
+
+    normalized_original_thread_id = _canonical_thread_id(original_info, fallback_root=original_event_id)
+    if normalized_original_thread_id is not None:
+        return normalized_original_thread_id
+    if original_info.reply_to_event_id is None:
+        return None
+    return await _thread_root_id_for_reply_target(
+        client,
+        room_id,
+        reply_to_event_id=original_info.reply_to_event_id,
+    )
+
+
+async def _thread_root_id_for_reply_target(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    reply_to_event_id: str,
+) -> str | None:
+    reply_info = await _event_info_for_event_id(client, room_id, reply_to_event_id)
+    if reply_info is None:
+        return None
+
+    normalized_reply_thread_id = _canonical_thread_id(reply_info)
+    if normalized_reply_thread_id is not None:
+        return normalized_reply_thread_id
+    if reply_info.reply_to_event_id is None:
+        return None
+
+    second_reply_info = await _event_info_for_event_id(client, room_id, reply_info.reply_to_event_id)
+    if second_reply_info is None:
+        return None
+    return _canonical_thread_id(second_reply_info)
 
 
 async def get_thread_tags(

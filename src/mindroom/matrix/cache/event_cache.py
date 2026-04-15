@@ -183,9 +183,6 @@ class _EventCache:
         self._prune_room_locks()
         return entry
 
-    def _room_lock(self, room_id: str) -> asyncio.Lock:
-        return self._room_lock_entry(room_id).lock
-
     @asynccontextmanager
     async def _acquire_room_lock(self, room_id: str, *, operation: str) -> AsyncIterator[None]:
         entry = self._room_lock_entry(room_id, active_user_increment=1)

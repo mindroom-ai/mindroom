@@ -326,14 +326,23 @@ async def send_thread_summary_event(
         if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
         else normalized_summary
     )
-    latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-        room_id,
-        thread_id,
-    )
+    try:
+        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
+            room_id,
+            thread_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Falling back to thread root for summary send after latest-event lookup failure",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        latest_thread_event_id = None
     content = build_message_content(
         truncated_summary,
         thread_event_id=thread_id,
-        latest_thread_event_id=latest_thread_event_id,
+        latest_thread_event_id=latest_thread_event_id or thread_id,
         extra_content={
             "msgtype": "m.notice",
             "io.mindroom.thread_summary": {

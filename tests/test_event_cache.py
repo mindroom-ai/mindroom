@@ -220,7 +220,7 @@ def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     cache = _EventCache(tmp_path / "event_cache.db")
 
     for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-        cache._room_lock(f"!room-{index}:localhost")
+        _ = cache._room_lock_entry(f"!room-{index}:localhost").lock
 
     assert len(cache._room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
     assert "!room-0:localhost" not in cache._room_locks
@@ -243,7 +243,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
             holder_entered.set()
             await release_holder.wait()
         for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-            cache._room_lock(f"!churn-{index}:localhost")
+            _ = cache._room_lock_entry(f"!churn-{index}:localhost").lock
         entry = cache._room_locks.get(room_id)
         post_release_snapshot["room_present"] = entry is not None
         post_release_snapshot["active_users"] = entry.active_users if entry is not None else None
@@ -274,7 +274,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
     await asyncio.wait_for(holder_entered.wait(), timeout=1.0)
     await wait_for_waiter_registration()
 
-    busy_lock = cache._room_lock(room_id)
+    busy_lock = cache._room_lock_entry(room_id).lock
     release_holder.set()
     await asyncio.wait_for(pruned_after_release.wait(), timeout=1.0)
 
@@ -283,7 +283,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
         "active_users": 1,
         "lock_locked": False,
     }
-    assert cache._room_lock(room_id) is busy_lock
+    assert cache._room_lock_entry(room_id).lock is busy_lock
 
     await asyncio.wait_for(waiter_acquired.wait(), timeout=1.0)
     allow_waiter_exit.set()
@@ -1234,5 +1234,5 @@ def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
     """Event cache should keep independent locks per room."""
     cache = _EventCache(tmp_path / "event_cache.db")
 
-    assert cache._room_lock("!room:localhost") is cache._room_lock("!room:localhost")
-    assert cache._room_lock("!room:localhost") is not cache._room_lock("!other:localhost")
+    assert cache._room_lock_entry("!room:localhost").lock is cache._room_lock_entry("!room:localhost").lock
+    assert cache._room_lock_entry("!room:localhost").lock is not cache._room_lock_entry("!other:localhost").lock

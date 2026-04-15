@@ -362,6 +362,7 @@ class DeliveryGateway:
                 self.deps.runtime_paths,
                 request.new_text,
                 sender_domain=self.deps.sender_domain,
+                reply_to_event_id=target.reply_to_event_id,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )

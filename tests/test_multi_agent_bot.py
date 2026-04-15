@@ -912,6 +912,7 @@ class TestAgentBot:
         mock_client = AsyncMock()
         # add_event_callback is a sync method, not async
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_response_callback = MagicMock()
         mock_login.return_value = mock_client
 
         # Mock ensure_user_account to not change the agent_user
@@ -949,6 +950,7 @@ class TestAgentBot:
         call_order: list[str] = []
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_response_callback = MagicMock()
 
         async def _sync_forever(*_args: object, **_kwargs: object) -> None:
             call_order.append("sync")

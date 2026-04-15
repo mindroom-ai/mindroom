@@ -1500,6 +1500,54 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
 
 
 @pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_reply_to_promoted_plain_reply() -> None:
+    """One extra reply hop should recover the explicit thread root for promoted plain replies."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$plain-reply-2:localhost",
+                content={
+                    "body": "Second bridge reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-reply-1:localhost"}},
+                },
+            ),
+            _message_event_response(
+                "$plain-reply-1:localhost",
+                content={
+                    "body": "First bridge reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
+                },
+            ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                    },
+                },
+            ),
+        ],
+    )
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$plain-reply-2:localhost",
+    )
+
+    assert normalized == "$thread-root:localhost"
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply-2:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-reply-1:localhost")
+    assert client.room_get_event.await_args_list[2].args == ("!room:localhost", "$thread-reply:localhost")
+
+
+@pytest.mark.asyncio
 async def test_normalize_thread_root_event_id_returns_none_for_plain_reply() -> None:
     """Plain replies should no longer be promoted into synthetic thread roots."""
     client = AsyncMock()
@@ -1628,6 +1676,61 @@ async def test_normalize_thread_root_event_id_resolves_thread_reply_edit_via_ori
     assert normalized == "$thread-root:localhost"
     assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
     assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
+
+
+@pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_resolves_edit_of_promoted_plain_reply_via_original_reply_target() -> None:
+    """Edits of promoted plain replies should reuse the same one-hop explicit-thread inheritance."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$edit:localhost",
+                content={
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "edited",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$plain-reply:localhost",
+                    },
+                },
+            ),
+            _message_event_response(
+                "$plain-reply:localhost",
+                content={
+                    "body": "Bridge reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
+                },
+            ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                    },
+                },
+            ),
+        ],
+    )
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$edit:localhost",
+    )
+
+    assert normalized == "$thread-root:localhost"
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-reply:localhost")
+    assert client.room_get_event.await_args_list[2].args == ("!room:localhost", "$thread-reply:localhost")
 
 
 @pytest.mark.asyncio
