@@ -10,14 +10,15 @@ from typing import ClassVar
 
 import nio
 from agno.tools import Toolkit
+from nio.responses import RoomGetEventError
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
-    resolve_event_thread_id_best_effort,
-    resolve_related_event_thread_id_best_effort,
+    resolve_event_thread_id,
+    resolve_related_event_thread_id,
     room_scan_thread_membership_access_for_client,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
@@ -411,7 +412,11 @@ class MatrixApiTools(Toolkit):
             response = await context.conversation_cache.get_event(room_id, event_id)
             if isinstance(response, nio.RoomGetEventResponse):
                 return EventInfo.from_event(response.event.source)
-            return None
+            if isinstance(response, RoomGetEventError) and response.status_code == "M_NOT_FOUND":
+                return None
+            detail = response.message if isinstance(response, RoomGetEventError) else "unknown error"
+            msg = f"Failed to resolve Matrix event {event_id}: {detail}"
+            raise RuntimeError(msg)
 
         event = await context.event_cache.get_event(room_id, event_id)
         if not isinstance(event, dict):
@@ -430,25 +435,15 @@ class MatrixApiTools(Toolkit):
         if event_type != "m.room.message":
             return False
         event_info = EventInfo.from_event({"type": event_type, "content": content})
-        try:
-            access = MatrixApiTools._thread_membership_access(context)
-            return isinstance(
-                await resolve_event_thread_id_best_effort(
-                    room_id,
-                    event_info,
-                    access=access,
-                ),
-                str,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to resolve threaded send_event target for matrix_api",
-                room_id=room_id,
-                reply_to_event_id=event_info.reply_to_event_id,
-                original_event_id=event_info.original_event_id,
-                error=str(exc),
-            )
-            return False
+        access = MatrixApiTools._thread_membership_access(context)
+        return isinstance(
+            await resolve_event_thread_id(
+                room_id,
+                event_info,
+                access=access,
+            ),
+            str,
+        )
 
     @staticmethod
     async def _redaction_requires_conversation_cache_write(
@@ -458,31 +453,22 @@ class MatrixApiTools(Toolkit):
         event_id: str,
     ) -> bool:
         """Return whether one redact payload must update threaded conversation cache state."""
-        try:
-            target_event_info = await MatrixApiTools._event_info_for_event(
-                context,
-                room_id=room_id,
-                event_id=event_id,
-            )
-            if target_event_info is not None and target_event_info.is_reaction:
-                return False
-            access = MatrixApiTools._thread_membership_access(context)
-            return isinstance(
-                await resolve_related_event_thread_id_best_effort(
-                    room_id,
-                    event_id,
-                    access=access,
-                ),
-                str,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to resolve redaction target thread mapping for matrix_api redact",
-                room_id=room_id,
-                target_event_id=event_id,
-                error=str(exc),
-            )
+        target_event_info = await MatrixApiTools._event_info_for_event(
+            context,
+            room_id=room_id,
+            event_id=event_id,
+        )
+        if target_event_info is not None and target_event_info.is_reaction:
             return False
+        access = MatrixApiTools._thread_membership_access(context)
+        return isinstance(
+            await resolve_related_event_thread_id(
+                room_id,
+                event_id,
+                access=access,
+            ),
+            str,
+        )
 
     @staticmethod
     def _thread_membership_access(context: ToolRuntimeContext) -> ThreadMembershipAccess:
@@ -567,6 +553,34 @@ class MatrixApiTools(Toolkit):
         ) is not None:
             return policy_error
 
+        try:
+            requires_conversation_cache_write = await self._requires_conversation_cache_write(
+                context,
+                room_id=room_id,
+                event_type=normalized_event_type,
+                content=normalized_content,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve threaded send_event target for matrix_api",
+                room_id=room_id,
+                event_type=normalized_event_type,
+                error=str(exc),
+            )
+            return self._error_payload(
+                action="send_event",
+                room_id=room_id,
+                event_type=normalized_event_type,
+                message="Failed to resolve threaded Matrix message send target.",
+            )
+        if requires_conversation_cache_write and context.conversation_cache is None:
+            return self._error_payload(
+                action="send_event",
+                room_id=room_id,
+                event_type=normalized_event_type,
+                message="Conversation cache is required for threaded Matrix message sends.",
+            )
+
         if dry_run:
             return self._payload(
                 "ok",
@@ -578,20 +592,6 @@ class MatrixApiTools(Toolkit):
                     "event_type": normalized_event_type,
                     "content": normalized_content,
                 },
-            )
-
-        requires_conversation_cache_write = await self._requires_conversation_cache_write(
-            context,
-            room_id=room_id,
-            event_type=normalized_event_type,
-            content=normalized_content,
-        )
-        if requires_conversation_cache_write and context.conversation_cache is None:
-            return self._error_payload(
-                action="send_event",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                message="Conversation cache is required for threaded Matrix message sends.",
             )
 
         if (limit_error := self._check_rate_limit(context, room_id, action="send_event")) is not None:
@@ -895,7 +895,7 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
-    async def _redact(  # noqa: PLR0911
+    async def _redact(  # noqa: C901,PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -919,13 +919,24 @@ class MatrixApiTools(Toolkit):
 
         assert normalized_event_id is not None
 
-        requires_conversation_cache_write = await self._redaction_requires_conversation_cache_write(
-            context,
-            room_id=room_id,
-            event_id=normalized_event_id,
-        )
-        if requires_conversation_cache_write and context.conversation_cache is None:
-            error_message = "Conversation cache is required for threaded Matrix message redactions."
+        try:
+            requires_conversation_cache_write = await self._redaction_requires_conversation_cache_write(
+                context,
+                room_id=room_id,
+                event_id=normalized_event_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve redaction target thread mapping for matrix_api redact",
+                room_id=room_id,
+                target_event_id=normalized_event_id,
+                error=str(exc),
+            )
+            error_message = "Failed to resolve redaction target thread mapping."
+            requires_conversation_cache_write = False
+        else:
+            if requires_conversation_cache_write and context.conversation_cache is None:
+                error_message = "Conversation cache is required for threaded Matrix message redactions."
 
         if dry_run:
             if error_message is not None:

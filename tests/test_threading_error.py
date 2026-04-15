@@ -317,13 +317,14 @@ class TestMatrixConversationCacheThreadReads:
         )
 
     @pytest.mark.asyncio
-    async def test_notify_outbound_message_plain_edit_lookup_miss_does_not_invalidate_room_threads(self) -> None:
-        """Plain room-mode edits should not stale-mark every cached thread when no thread mapping exists."""
+    async def test_notify_outbound_message_plain_edit_lookup_miss_invalidates_room_threads(self) -> None:
+        """Plain room-mode edits should fail closed when mutation lookup cannot prove room-level state."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        client = _make_client_mock()
         access = MatrixConversationCache(
             logger=MagicMock(),
-            runtime=_conversation_runtime(event_cache=event_cache),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
         )
 
         access.notify_outbound_message(
@@ -338,13 +339,16 @@ class TestMatrixConversationCacheThreadReads:
         )
         await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
 
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!room:localhost",
+            reason="outbound_thread_lookup_unavailable",
+        )
         event_cache.mark_thread_stale.assert_not_awaited()
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_notify_outbound_redaction_lookup_miss_does_not_invalidate_room_threads(self) -> None:
-        """Plain redactions should not stale-mark every cached thread when no thread mapping exists."""
+    async def test_notify_outbound_redaction_lookup_miss_invalidates_room_threads(self) -> None:
+        """Plain redactions should fail closed when mutation lookup cannot prove room-level state."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         access = MatrixConversationCache(
@@ -355,9 +359,12 @@ class TestMatrixConversationCacheThreadReads:
         access.notify_outbound_redaction("!room:localhost", "$room-message:localhost")
         await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
 
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!room:localhost",
+            reason="outbound_redaction_lookup_unavailable",
+        )
         event_cache.mark_thread_stale.assert_not_awaited()
-        event_cache.redact_event.assert_not_awaited()
+        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$room-message:localhost")
 
     @pytest.mark.asyncio
     async def test_notify_outbound_message_plain_reply_to_threaded_target_updates_thread_cache(self) -> None:
@@ -1450,11 +1457,11 @@ class TestThreadingBehavior:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_cache_sync_timeline_plain_edit_lookup_miss_does_not_invalidate_room_threads(
+    async def test_cache_sync_timeline_plain_edit_lookup_miss_invalidates_room_threads(
         self,
         bot: AgentBot,
     ) -> None:
-        """Sync room-mode edits should not stale-mark every cached thread on lookup miss."""
+        """Sync room-mode edits should fail closed when lookup certainty is unavailable."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
         event_cache.append_event = AsyncMock(return_value=False)
@@ -1501,15 +1508,18 @@ class TestThreadingBehavior:
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$room_msg:localhost")
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="sync_thread_lookup_unavailable",
+        )
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_cache_sync_timeline_plain_edit_missing_original_does_not_invalidate_room_threads(
+    async def test_cache_sync_timeline_plain_edit_missing_original_invalidates_room_threads(
         self,
         bot: AgentBot,
     ) -> None:
-        """Sync plain edits without a cached original should skip thread bookkeeping instead of flushing the room."""
+        """Sync plain edits without enough local proof should invalidate room thread snapshots once."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
         event_cache.append_event = AsyncMock(return_value=False)
@@ -1549,8 +1559,79 @@ class TestThreadingBehavior:
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="sync_thread_lookup_unavailable",
+        )
         event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cache_sync_timeline_unknown_thread_mutations_invalidate_room_threads_once_without_room_scan(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Sync mutation fallback should invalidate once per room and avoid room-history scans."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(return_value=None)
+        bot.event_cache = event_cache
+        bot.client = _make_client_mock()
+        bot.client.room_messages = AsyncMock(side_effect=AssertionError("should not room-scan during sync mutations"))
+        _install_runtime_write_coordinator(bot)
+
+        first_edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* Updated room message",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "Updated room message",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing-room-msg-1:localhost"},
+                },
+                "event_id": "$room_edit_1:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        second_edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* Updated room message again",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "Updated room message again",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing-room-msg-2:localhost"},
+                },
+                "event_id": "$room_edit_2:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567892,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[first_edit_event, second_edit_event])),
+        }
+
+        bot._conversation_cache.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="sync_thread_lookup_unavailable",
+        )
+        bot.client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_serializes_same_room_updates_in_order(self, bot: AgentBot) -> None:
@@ -2042,8 +2123,8 @@ class TestThreadingBehavior:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_live_plain_edit_lookup_miss_does_not_invalidate_room_threads(self, bot: AgentBot) -> None:
-        """Live room-mode edits should not stale-mark every cached thread on lookup miss."""
+    async def test_live_plain_edit_lookup_miss_invalidates_room_threads(self, bot: AgentBot) -> None:
+        """Live room-mode edits should fail closed when lookup certainty is unavailable."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         event_cache.get_event = AsyncMock(
@@ -2086,12 +2167,15 @@ class TestThreadingBehavior:
         await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$room_msg:localhost")
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="live_thread_lookup_unavailable",
+        )
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_live_plain_edit_missing_original_does_not_invalidate_room_threads(self, bot: AgentBot) -> None:
-        """Live plain edits without a cached original should not flush unrelated thread snapshots."""
+    async def test_live_plain_edit_missing_original_invalidates_room_threads(self, bot: AgentBot) -> None:
+        """Live plain edits without enough local proof should invalidate room thread snapshots."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         event_cache.get_event = AsyncMock(return_value=None)
@@ -2127,7 +2211,10 @@ class TestThreadingBehavior:
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="live_thread_lookup_unavailable",
+        )
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2637,6 +2724,98 @@ class TestThreadingBehavior:
         assert resolved_thread_id == thread_root_id
 
     @pytest.mark.asyncio
+    async def test_room_scan_thread_membership_access_does_not_treat_root_edit_as_child_proof(
+        self,
+    ) -> None:
+        """A root edit alone should not prove that plain replies to the root belong to a thread."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        plain_reply_id = "$plain_reply:localhost"
+        root_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "root",
+                    "msgtype": "m.text",
+                },
+                "event_id": thread_root_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        plain_reply_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": thread_root_id}},
+                },
+                "event_id": plain_reply_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            if event_id == thread_root_id:
+                return root_event_info
+            if event_id == plain_reply_id:
+                return plain_reply_event_info
+            return None
+
+        async def fetch_thread_event_sources(
+            lookup_room_id: str,
+            requested_thread_root_id: str,
+        ) -> tuple[list[dict[str, object]], bool]:
+            assert lookup_room_id == room_id
+            assert requested_thread_root_id == thread_root_id
+            return [
+                {
+                    "event_id": thread_root_id,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "root",
+                        "msgtype": "m.text",
+                    },
+                },
+                {
+                    "event_id": "$root_edit:localhost",
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "* root edited",
+                        "msgtype": "m.text",
+                        "m.new_content": {
+                            "body": "root edited",
+                            "msgtype": "m.text",
+                        },
+                        "m.relates_to": {
+                            "rel_type": "m.replace",
+                            "event_id": thread_root_id,
+                        },
+                    },
+                },
+            ], True
+
+        resolved_thread_id = await resolve_event_thread_id(
+            room_id,
+            plain_reply_event_info,
+            event_id=plain_reply_id,
+            access=room_scan_thread_membership_access(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                fetch_thread_event_sources=fetch_thread_event_sources,
+            ),
+        )
+
+        assert resolved_thread_id is None
+
+    @pytest.mark.asyncio
     async def test_snapshot_thread_membership_access_treats_root_with_children_as_threaded(
         self,
     ) -> None:
@@ -2731,6 +2910,65 @@ class TestThreadingBehavior:
                     fetch_thread_snapshot=fetch_thread_snapshot,
                 ),
             )
+
+    @pytest.mark.asyncio
+    async def test_related_thread_resolution_propagates_event_lookup_failure(
+        self,
+    ) -> None:
+        """Strict resolution should fail closed when related-event lookup is unavailable."""
+        room_id = "!test:localhost"
+        related_event_id = "$related:localhost"
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            msg = "lookup unavailable"
+            raise RuntimeError(msg)
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            return ThreadRootProof.not_a_thread_root()
+
+        with pytest.raises(RuntimeError, match="lookup unavailable"):
+            await resolve_related_event_thread_id(
+                room_id,
+                related_event_id,
+                access=ThreadMembershipAccess(
+                    lookup_thread_id=lookup_thread_id,
+                    fetch_event_info=fetch_event_info,
+                    prove_thread_root=prove_thread_root,
+                ),
+            )
+
+    @pytest.mark.asyncio
+    async def test_best_effort_related_thread_resolution_degrades_when_event_lookup_fails(
+        self,
+    ) -> None:
+        """Best-effort resolution should degrade when related-event lookup is unavailable."""
+        room_id = "!test:localhost"
+        related_event_id = "$related:localhost"
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            msg = "lookup unavailable"
+            raise RuntimeError(msg)
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            return ThreadRootProof.not_a_thread_root()
+
+        resolved_thread_id = await resolve_related_event_thread_id_best_effort(
+            room_id,
+            related_event_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolved_thread_id is None
 
     @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_root_proof_fails(
@@ -3026,11 +3264,11 @@ class TestThreadingBehavior:
         restarted_client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_lookup_miss_sync_plain_edit_leaves_room_cache_state_usable(
+    async def test_lookup_miss_sync_plain_edit_invalidates_room_cache_state(
         self,
         tmp_path: Path,
     ) -> None:
-        """Plain sync edits with missing originals should not stale-mark unrelated cached threads."""
+        """Plain sync edits with missing originals should invalidate cached room thread state."""
         event_cache = _EventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = _text_event(
@@ -3080,8 +3318,8 @@ class TestThreadingBehavior:
             await event_cache.close()
 
         assert cache_state is not None
-        assert cache_state.room_invalidation_reason is None
-        assert cache_state.room_invalidated_at is None
+        assert cache_state.room_invalidation_reason == "sync_thread_lookup_unavailable"
+        assert cache_state.room_invalidated_at is not None
 
     @pytest.mark.asyncio
     async def test_get_thread_history_raises_when_refresh_fails(self) -> None:

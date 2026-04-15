@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import nio
+from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import PreparedTextEvent
@@ -355,7 +356,15 @@ class ConversationResolver:
     ) -> EventInfo | None:
         target_event = await self.deps.conversation_cache.get_event(room_id, event_id)
         if not isinstance(target_event, nio.RoomGetEventResponse):
-            return None
+            if isinstance(target_event, RoomGetEventError) and target_event.status_code == "M_NOT_FOUND":
+                return None
+            detail = (
+                target_event.message
+                if isinstance(target_event, RoomGetEventError) and isinstance(target_event.message, str)
+                else "unknown error"
+            )
+            msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
+            raise RuntimeError(msg)
         return EventInfo.from_event(target_event.event.source)
 
     async def derive_conversation_context(

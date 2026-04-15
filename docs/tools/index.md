@@ -68,8 +68,9 @@ Today `matrix_message` implies `attachments`, so the effective tool set includes
 ## Tool Runtime Context
 
 When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
-This context carries the current `room_id`, `thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
-Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use this context to act on the correct room and thread without the caller passing explicit IDs.
+This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
+`thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
+Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
 `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.

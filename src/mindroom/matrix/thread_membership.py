@@ -101,6 +101,10 @@ class ThreadMembershipProofError(RuntimeError):
     """Raised when strict thread-membership resolution cannot prove one candidate root."""
 
 
+class ThreadMembershipLookupError(RuntimeError):
+    """Raised when related-event lookup cannot determine thread membership from available data."""
+
+
 def _next_related_event_target(
     event_info: EventInfo,
     *,
@@ -180,6 +184,7 @@ async def resolve_related_event_thread_membership(
     """Return canonical thread membership for one related target event."""
     current_event_id = related_event_id
     visited_event_ids: set[str] = set()
+    resolution = ThreadResolution.room_level()
 
     for _ in range(_MAX_THREAD_MEMBERSHIP_HOPS):
         if current_event_id in visited_event_ids:
@@ -188,15 +193,21 @@ async def resolve_related_event_thread_membership(
 
         thread_id = await access.lookup_thread_id(room_id, current_event_id)
         if thread_id is not None:
-            return ThreadResolution.threaded(thread_id)
+            resolution = ThreadResolution.threaded(thread_id)
+            break
 
-        related_event_info = await access.fetch_event_info(room_id, current_event_id)
+        try:
+            related_event_info = await access.fetch_event_info(room_id, current_event_id)
+        except Exception as exc:
+            resolution = ThreadResolution.indeterminate(exc)
+            break
         if related_event_info is None:
-            return ThreadResolution.room_level()
+            break
 
         thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit
         if thread_id is not None:
-            return ThreadResolution.threaded(thread_id)
+            resolution = ThreadResolution.threaded(thread_id)
+            break
 
         next_target = _next_related_event_target(
             related_event_info,
@@ -207,13 +218,13 @@ async def resolve_related_event_thread_membership(
             continue
 
         if related_event_info.can_be_thread_root:
-            return _resolution_from_root_proof(
+            resolution = _resolution_from_root_proof(
                 current_event_id,
                 await access.prove_thread_root(room_id, current_event_id),
             )
-        return ThreadResolution.room_level()
+        break
 
-    return ThreadResolution.room_level()
+    return resolution
 
 
 async def resolve_event_thread_id(
@@ -371,8 +382,27 @@ async def room_scan_thread_root_proof(
         return ThreadRootProof.proof_unavailable(exc)
     if not root_found:
         return ThreadRootProof.not_a_thread_root()
-    has_children = any(event_source.get("event_id") != thread_root_id for event_source in event_sources)
+    has_children = any(
+        _room_scan_event_source_counts_as_thread_child_proof(
+            thread_root_id,
+            event_source=event_source,
+        )
+        for event_source in event_sources
+    )
     return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
+
+
+def _room_scan_event_source_counts_as_thread_child_proof(
+    thread_root_id: str,
+    *,
+    event_source: Mapping[str, object],
+) -> bool:
+    """Return whether one room-scan source proves the root has real threaded descendants."""
+    event_id = event_source.get("event_id")
+    if event_id == thread_root_id:
+        return False
+    event_info = EventInfo.from_event(dict(event_source))
+    return not (event_info.is_edit and event_info.original_event_id == thread_root_id)
 
 
 def thread_messages_thread_membership_access(
