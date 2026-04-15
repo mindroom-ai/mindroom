@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Protocol
 
+import nio
+
 from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
-    import nio
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 type ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
@@ -487,6 +489,187 @@ def room_scan_thread_membership_access_for_client(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
         fetch_thread_event_sources=fetch_thread_event_sources,
+    )
+
+
+async def lookup_thread_id_from_conversation_cache(
+    conversation_cache: ConversationCacheProtocol | None,
+    room_id: str,
+    event_id: str,
+) -> str | None:
+    """Return one cached thread root when a conversation cache is available."""
+    if conversation_cache is None:
+        return None
+    return await conversation_cache.get_thread_id_for_event(room_id, event_id)
+
+
+def _event_info_from_lookup_response(
+    response: object,
+    *,
+    event_id: str,
+    strict: bool,
+) -> EventInfo | None:
+    """Normalize one room-get-event style response into EventInfo when available."""
+    if isinstance(response, nio.RoomGetEventResponse):
+        return EventInfo.from_event(response.event.source)
+    if not strict:
+        return None
+    if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
+        return None
+    detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
+    msg = f"Failed to resolve Matrix event {event_id}: {detail}"
+    raise RuntimeError(msg)
+
+
+async def fetch_event_info_from_conversation_cache(
+    conversation_cache: ConversationCacheProtocol,
+    room_id: str,
+    event_id: str,
+    *,
+    strict: bool,
+) -> EventInfo | None:
+    """Fetch one event through the conversation cache and parse its relation metadata."""
+    response = await conversation_cache.get_event(room_id, event_id)
+    return _event_info_from_lookup_response(
+        response,
+        event_id=event_id,
+        strict=strict,
+    )
+
+
+async def fetch_event_info_for_client(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    *,
+    strict: bool,
+) -> EventInfo | None:
+    """Fetch one event directly from Matrix and parse its relation metadata."""
+    response = await client.room_get_event(room_id, event_id)
+    return _event_info_from_lookup_response(
+        response,
+        event_id=event_id,
+        strict=strict,
+    )
+
+
+def conversation_cache_thread_membership_access_for_client(
+    client: nio.AsyncClient,
+    *,
+    conversation_cache: ConversationCacheProtocol | None,
+    fetch_event_info: EventInfoLookup | None = None,
+    strict_event_fetch: bool = True,
+) -> ThreadMembershipAccess:
+    """Build room-scan membership access backed by conversation-cache lookups when available."""
+
+    async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
+        return await lookup_thread_id_from_conversation_cache(
+            conversation_cache,
+            lookup_room_id,
+            lookup_event_id,
+        )
+
+    async def resolved_fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
+        if fetch_event_info is not None:
+            return await fetch_event_info(lookup_room_id, lookup_event_id)
+        if conversation_cache is None:
+            return None
+        return await fetch_event_info_from_conversation_cache(
+            conversation_cache,
+            lookup_room_id,
+            lookup_event_id,
+            strict=strict_event_fetch,
+        )
+
+    return room_scan_thread_membership_access_for_client(
+        client,
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=resolved_fetch_event_info,
+    )
+
+
+async def resolve_thread_root_event_id_for_client(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    *,
+    conversation_cache: ConversationCacheProtocol | None = None,
+) -> str | None:
+    """Resolve one event ID into a canonical thread root when thread membership can prove one."""
+    normalized_event_id = event_id.strip() if isinstance(event_id, str) else ""
+    if not normalized_event_id:
+        return None
+
+    event_info = await fetch_event_info_for_client(
+        client,
+        room_id,
+        normalized_event_id,
+        strict=False,
+    )
+    if event_info is None:
+        return await lookup_thread_id_from_conversation_cache(
+            conversation_cache,
+            room_id,
+            normalized_event_id,
+        )
+
+    return await resolve_event_thread_id(
+        room_id,
+        event_info,
+        event_id=normalized_event_id,
+        allow_current_root=True,
+        access=conversation_cache_thread_membership_access_for_client(
+            client,
+            conversation_cache=conversation_cache,
+            fetch_event_info=lambda lookup_room_id, lookup_event_id: fetch_event_info_for_client(
+                client,
+                lookup_room_id,
+                lookup_event_id,
+                strict=False,
+            ),
+            strict_event_fetch=False,
+        ),
+    )
+
+
+async def event_requires_thread_bookkeeping(
+    room_id: str,
+    *,
+    event_type: str,
+    content: Mapping[str, object],
+    access: ThreadMembershipAccess,
+) -> bool:
+    """Return whether one outbound event payload targets a thread."""
+    if event_type != "m.room.message":
+        return False
+    event_info = EventInfo.from_event({"type": event_type, "content": dict(content)})
+    return isinstance(
+        await resolve_event_thread_id(
+            room_id,
+            event_info,
+            access=access,
+        ),
+        str,
+    )
+
+
+async def redaction_requires_thread_bookkeeping(
+    room_id: str,
+    *,
+    event_id: str,
+    access: ThreadMembershipAccess,
+    target_event_info: EventInfo | None,
+) -> bool:
+    """Return whether one redaction target can affect thread-scoped cache state."""
+    if target_event_info is not None and target_event_info.is_reaction:
+        return False
+    return isinstance(
+        await resolve_related_event_thread_id(
+            room_id,
+            event_id,
+            access=access,
+        ),
+        str,
     )
 
 

@@ -337,6 +337,35 @@ async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thre
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_delegates_thread_classification_to_shared_helper() -> None:
+    """send_event should call the shared thread-membership helper instead of inlining cache policy."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$send:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_api.event_requires_thread_bookkeeping",
+            new=AsyncMock(return_value=True),
+        ) as mock_requires_thread_bookkeeping,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content={"body": "hello", "msgtype": "m.text"},
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    mock_requires_thread_bookkeeping.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_send_event_room_message_preserves_matrix_error_details() -> None:
     """Low-level m.room.message send errors should surface the actual homeserver failure."""
     tool = MatrixApiTools()
@@ -597,6 +626,35 @@ async def test_matrix_api_redact_happy_path() -> None:
         reason="cleanup",
     )
     ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(ctx.room_id, "$target:localhost")
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_redact_delegates_thread_classification_to_shared_helper() -> None:
+    """Redact should call the shared thread-membership helper instead of inlining cache policy."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client.room_redact.return_value = nio.RoomRedactResponse(
+        event_id="$redaction:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_api.redaction_requires_thread_bookkeeping",
+            new=AsyncMock(return_value=True),
+        ) as mock_requires_thread_bookkeeping,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$target:localhost",
+                reason="cleanup",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    mock_requires_thread_bookkeeping.assert_awaited_once()
 
 
 @pytest.mark.asyncio

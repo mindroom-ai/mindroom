@@ -7,6 +7,7 @@ import json
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
+from mindroom.matrix.thread_membership import resolve_thread_root_event_id_for_client
 from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
     _count_non_summary_messages,
@@ -15,7 +16,6 @@ from mindroom.thread_summary import (
     thread_summary_lock,
     update_last_summary_count,
 )
-from mindroom.thread_tags import normalize_thread_root_event_id
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 _MAX_THREAD_SUMMARY_LENGTH = THREAD_SUMMARY_MAX_LENGTH
@@ -113,11 +113,11 @@ class ThreadSummaryTools(Toolkit):
             error_message = "thread_id is required when no active thread context is available for the target room."
         else:
             try:
-                normalized_thread_id = await normalize_thread_root_event_id(
+                normalized_thread_id = await resolve_thread_root_event_id_for_client(
                     context.client,
                     resolved_room_id,
                     effective_thread_id,
-                    context.conversation_cache,
+                    conversation_cache=context.conversation_cache,
                 )
             except Exception:
                 error_thread_id = effective_thread_id
