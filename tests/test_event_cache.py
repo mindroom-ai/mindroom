@@ -463,7 +463,7 @@ async def test_event_cache_initialize_clears_half_initialized_connection_on_fail
 
     with (
         patch(
-            "mindroom.matrix.cache.event_cache.aiosqlite.connect",
+            "mindroom.matrix.cache.event_cache_lifecycle.aiosqlite.connect",
             AsyncMock(return_value=broken_connection),
         ),
         pytest.raises(RuntimeError, match="pragma boom"),
