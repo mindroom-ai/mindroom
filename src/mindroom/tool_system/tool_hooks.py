@@ -129,6 +129,7 @@ def _resolve_tool_context(
 ) -> _ResolvedToolContext:
     runtime_context = get_tool_runtime_context()
     resolved_execution_identity = active_tool_execution_identity(execution_identity)
+    request_runtime_context = runtime_context if execution_identity is None else None
     bindings = resolve_tool_runtime_hook_bindings(runtime_context) if runtime_context is not None else None
     return _ResolvedToolContext(
         agent_name=(
@@ -141,18 +142,18 @@ def _resolve_tool_context(
         ),
         room_id=_coalesce(
             room_id,
-            runtime_context.room_id if runtime_context is not None else None,
+            request_runtime_context.room_id if request_runtime_context is not None else None,
             resolved_execution_identity.room_id if resolved_execution_identity is not None else None,
         ),
-        thread_id=_resolved_thread_id(thread_id, resolved_execution_identity, runtime_context),
+        thread_id=_resolved_thread_id(thread_id, resolved_execution_identity, request_runtime_context),
         requester_id=_coalesce(
             requester_id,
-            runtime_context.requester_id if runtime_context is not None else None,
+            request_runtime_context.requester_id if request_runtime_context is not None else None,
             resolved_execution_identity.requester_id if resolved_execution_identity is not None else None,
         ),
         session_id=_coalesce(
             session_id,
-            runtime_context.session_id if runtime_context is not None else None,
+            request_runtime_context.session_id if request_runtime_context is not None else None,
             resolved_execution_identity.session_id if resolved_execution_identity is not None else None,
         ),
         channel=resolved_execution_identity.channel if resolved_execution_identity is not None else None,
