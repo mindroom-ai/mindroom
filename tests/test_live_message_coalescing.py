@@ -195,6 +195,36 @@ def _text_event(
     )
 
 
+def _reply_event(
+    *,
+    event_id: str,
+    body: str,
+    reply_to_event_id: str,
+    sender: str = "@user:localhost",
+    server_timestamp: int = 1000,
+) -> nio.RoomMessageText:
+    """Build a synthetic inbound plain reply event for coalescing tests."""
+    return cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": body,
+                    "m.relates_to": {
+                        "m.in_reply_to": {"event_id": reply_to_event_id},
+                    },
+                },
+            },
+        ),
+    )
+
+
 def _image_event(
     *,
     event_id: str,
@@ -780,6 +810,52 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         await asyncio.sleep(0.03)
 
     assert sorted(calls) == [["$m1"], ["$m2"]]
+
+
+@pytest.mark.asyncio
+async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_together(tmp_path: Path) -> None:
+    """Inherited-thread plain replies must not batch with unrelated room-level messages."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    room_message = _text_event(event_id="$roommsg", body="room message", server_timestamp=1000)
+    threaded_plain_reply = _reply_event(
+        event_id="$reply",
+        body="bridged follow-up",
+        reply_to_event_id="$thread-seed",
+        server_timestamp=1001,
+    )
+    bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$thread-seed" else None,
+    )
+    calls: list[list[str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+    ) -> None:
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+
+    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_controller._enqueue_for_dispatch(
+            room_message,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_controller._enqueue_for_dispatch(
+            threaded_plain_reply,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await asyncio.sleep(0.03)
+
+    assert sorted(calls) == [["$reply"], ["$roommsg"]]
 
 
 @pytest.mark.asyncio

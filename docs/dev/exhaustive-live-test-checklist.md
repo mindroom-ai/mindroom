@@ -130,9 +130,9 @@ Expected outcome: Orphaned MindRoom bots are cleaned up safely without ejecting 
 - [ ] `ROOM-007` Enable root space management and managed avatars when the config uses them.
 Expected outcome: Root space creation, room grouping, and avatar propagation behave consistently and do not regress room access or membership.
 
-## 4. Message Dispatch, DMs, Threads, And Reply Chains
+## 4. Message Dispatch, DMs, Threads, And Plain-Reply Inheritance
 
-Source anchors: `src/mindroom/bot.py`, `src/mindroom/routing.py`, `src/mindroom/thread_utils.py`, `src/mindroom/matrix/reply_chain.py`, `src/mindroom/matrix/event_info.py`, `src/mindroom/response_tracker.py`.
+Source anchors: `src/mindroom/bot.py`, `src/mindroom/routing.py`, `src/mindroom/thread_utils.py`, `src/mindroom/conversation_resolver.py`, `src/mindroom/matrix/event_info.py`, `src/mindroom/matrix/thread_membership.py`, `src/mindroom/response_tracker.py`.
 
 - [ ] `MSG-001` Send a non-command message in a single-agent room without any mention.
 Expected outcome: The sole configured agent responds directly without invoking AI router selection.
@@ -156,7 +156,7 @@ Expected outcome: Agents stay silent until explicitly mentioned and do not injec
 Expected outcome: Listed bot accounts do not count as extra humans for mention-protection rules.
 
 - [ ] `MSG-008` Use a client flow that sends plain replies instead of native thread metadata.
-Expected outcome: Reply-chain recovery maps the new message back to the correct conversation root and keeps history coherent.
+Expected outcome: A plain reply inherits an existing explicit thread only from its direct reply target, stays in the correct thread, and never creates a new thread root on its own.
 
 - [ ] `MSG-009` Force a reconnect or retry during an active conversation and then inspect the room or thread history.
 Expected outcome: Duplicate-response prevention suppresses repeated agent output for the same triggering event.

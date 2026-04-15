@@ -119,6 +119,7 @@ class ThreadSummaryTools(Toolkit):
                     context.client,
                     resolved_room_id,
                     effective_thread_id,
+                    context.conversation_cache,
                 )
             except Exception:
                 error_thread_id = effective_thread_id

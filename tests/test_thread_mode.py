@@ -1486,12 +1486,12 @@ class TestExtractedModuleLoggerRebinding:
         assert [message.event_id for message in full_history] == ["$threadroot", "$reply"]
 
     @pytest.mark.asyncio
-    async def test_coalescing_thread_id_ignores_plain_reply_relations(
+    async def test_explicit_thread_id_inherits_known_thread_for_plain_reply_target(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Pre-gate coalescing should not infer a thread from plain reply relations."""
+        """Direct plain replies should inherit a known thread from the resolver boundary."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1524,9 +1524,16 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
+            side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
+        )
+        thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
+            room.room_id,
+            EventInfo.from_event(event.source),
+            dispatch_safe=True,
+        )
 
-        assert thread_id is None
+        assert thread_id == "$threadroot"
 
     @pytest.mark.asyncio
     async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(

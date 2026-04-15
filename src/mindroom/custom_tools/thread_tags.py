@@ -144,6 +144,7 @@ class ThreadTagsTools(Toolkit):
             context.client,
             resolved_room_id,
             effective_thread_id,
+            context.conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(
@@ -236,6 +237,7 @@ class ThreadTagsTools(Toolkit):
                 context.client,
                 resolved_room_id,
                 effective_thread_id,
+                context.conversation_cache,
             )
             if target_thread_id is None:
                 return self._payload(
@@ -359,6 +361,7 @@ class ThreadTagsTools(Toolkit):
             context.client,
             resolved_room_id,
             effective_thread_id,
+            context.conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(

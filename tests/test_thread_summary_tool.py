@@ -151,6 +151,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
+        context.conversation_cache,
     )
     context.conversation_cache.get_thread_history.assert_awaited_once_with(
         context.room_id,
@@ -241,6 +242,7 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
+        context.conversation_cache,
     )
 
 

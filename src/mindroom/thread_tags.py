@@ -7,12 +7,16 @@ import math
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_membership import resolve_event_thread_id
+
+if TYPE_CHECKING:
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
@@ -773,6 +777,7 @@ async def normalize_thread_root_event_id(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Resolve one event ID to an explicit thread root when possible."""
     normalized_event_id = _normalize_non_empty_string(event_id)
@@ -787,70 +792,54 @@ async def normalize_thread_root_event_id(
     if normalized_thread_id is not None:
         return normalized_thread_id
     if event_info.is_edit and event_info.original_event_id is not None:
-        return await _thread_root_id_for_edit_original(
-            client,
-            room_id,
-            original_event_id=event_info.original_event_id,
-        )
-    if event_info.reply_to_event_id is not None:
-        return await _thread_root_id_for_reply_target(
-            client,
-            room_id,
-            reply_to_event_id=event_info.reply_to_event_id,
-        )
-    return None
+        original_info = await _event_info_for_event_id(client, room_id, event_info.original_event_id)
+        if original_info is not None:
+            normalized_original_thread_id = _canonical_thread_id(
+                original_info,
+                fallback_root=event_info.original_event_id,
+            )
+            if normalized_original_thread_id is not None:
+                return normalized_original_thread_id
 
-
-async def _thread_root_id_for_edit_original(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    original_event_id: str,
-) -> str | None:
-    original_info = await _event_info_for_event_id(client, room_id, original_event_id)
-    if original_info is None:
-        return None
-
-    normalized_original_thread_id = _canonical_thread_id(original_info, fallback_root=original_event_id)
-    if normalized_original_thread_id is not None:
-        return normalized_original_thread_id
-    if original_info.reply_to_event_id is None:
-        return None
-    return await _thread_root_id_for_reply_target(
-        client,
+    return await resolve_event_thread_id(
         room_id,
-        reply_to_event_id=original_info.reply_to_event_id,
+        event_info,
+        lookup_thread_id=(
+            lambda lookup_room_id, lookup_event_id: _lookup_thread_id_from_cache(
+                conversation_cache,
+                lookup_room_id,
+                lookup_event_id,
+            )
+        ),
+        fetch_event_info=lambda lookup_room_id, lookup_event_id: _event_info_for_event_id(
+            client,
+            lookup_room_id,
+            lookup_event_id,
+        ),
+        thread_root_has_children=lambda lookup_room_id, thread_root_id: _thread_root_has_children(
+            client,
+            lookup_room_id,
+            thread_root_id=thread_root_id,
+        ),
     )
 
 
-async def _thread_root_id_for_reply_target(
-    client: nio.AsyncClient,
+async def _lookup_thread_id_from_cache(
+    conversation_cache: ConversationCacheProtocol | None,
     room_id: str,
-    *,
-    reply_to_event_id: str,
+    event_id: str,
 ) -> str | None:
-    reply_info = await _event_info_for_event_id(client, room_id, reply_to_event_id)
-    if reply_info is None:
+    if conversation_cache is None:
         return None
-
-    normalized_reply_thread_id = _canonical_thread_id(reply_info)
-    if normalized_reply_thread_id is not None:
-        return normalized_reply_thread_id
-    if not reply_info.can_be_thread_root:
-        return None
-    return await _thread_root_id_from_room_scan(
-        client,
-        room_id,
-        thread_root_id=reply_to_event_id,
-    )
+    return await conversation_cache.get_thread_id_for_event(room_id, event_id)
 
 
-async def _thread_root_id_from_room_scan(
+async def _thread_root_has_children(
     client: nio.AsyncClient,
     room_id: str,
     *,
     thread_root_id: str,
-) -> str | None:
+) -> bool:
     from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
 
     try:
@@ -860,8 +849,8 @@ async def _thread_root_id_from_room_scan(
             thread_root_id,
         )
     except Exception:
-        return None
-    return thread_root_id if any(event.get("event_id") != thread_root_id for event in event_sources) else None
+        return False
+    return any(event.get("event_id") != thread_root_id for event in event_sources)
 
 
 async def get_thread_tags(

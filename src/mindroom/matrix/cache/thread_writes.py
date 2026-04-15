@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, normalize_nio_event_for_cache
+from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_membership import resolve_event_thread_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
@@ -18,7 +20,6 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.matrix.cache.event_cache import ConversationEventCache
 
 
 def _collect_sync_timeline_cache_updates(
@@ -78,73 +79,6 @@ def _threaded_sync_event_cache_update(
 
 def _has_explicit_thread_relation(event_info: EventInfo) -> bool:
     return isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str)
-
-
-async def _resolve_thread_id_for_cached_event_append(
-    room_id: str,
-    *,
-    event_info: EventInfo,
-    event_cache: ConversationEventCache,
-) -> str | None:
-    if isinstance(event_info.thread_id, str):
-        return event_info.thread_id
-    if isinstance(event_info.thread_id_from_edit, str):
-        return event_info.thread_id_from_edit
-    if isinstance(event_info.original_event_id, str):
-        thread_id = await _resolve_thread_id_for_related_cached_event(
-            room_id,
-            related_event_id=event_info.original_event_id,
-            event_cache=event_cache,
-            allow_reply_hop=True,
-        )
-        if thread_id is not None:
-            return thread_id
-    if isinstance(event_info.reply_to_event_id, str):
-        thread_id = await _resolve_thread_id_for_related_cached_event(
-            room_id,
-            related_event_id=event_info.reply_to_event_id,
-            event_cache=event_cache,
-            allow_reply_hop=False,
-        )
-        if thread_id is not None:
-            return thread_id
-    return None
-
-
-async def _resolve_thread_id_for_related_cached_event(
-    room_id: str,
-    *,
-    related_event_id: str,
-    event_cache: ConversationEventCache,
-    allow_reply_hop: bool,
-) -> str | None:
-    thread_id = await event_cache.get_thread_id_for_event(room_id, related_event_id)
-    if thread_id is not None:
-        return thread_id
-
-    related_event = await event_cache.get_event(room_id, related_event_id)
-    if not isinstance(related_event, dict):
-        return None
-
-    related_event_info = EventInfo.from_event(related_event)
-    explicit_thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit
-    if explicit_thread_id is not None:
-        return explicit_thread_id
-    if related_event_info.is_edit and related_event_info.original_event_id is not None:
-        return await _resolve_thread_id_for_related_cached_event(
-            room_id,
-            related_event_id=related_event_info.original_event_id,
-            event_cache=event_cache,
-            allow_reply_hop=allow_reply_hop,
-        )
-    if allow_reply_hop and related_event_info.reply_to_event_id is not None:
-        return await _resolve_thread_id_for_related_cached_event(
-            room_id,
-            related_event_id=related_event_info.reply_to_event_id,
-            event_cache=event_cache,
-            allow_reply_hop=False,
-        )
-    return None
 
 
 class ThreadWritePolicy:
@@ -353,10 +287,12 @@ class ThreadWritePolicy:
         context: str,
     ) -> str | None:
         try:
-            thread_id = await _resolve_thread_id_for_cached_event_append(
+            thread_id = await resolve_event_thread_id(
                 room_id,
-                event_info=event_info,
-                event_cache=self.runtime.event_cache,
+                event_info,
+                lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
+                fetch_event_info=self._cached_event_info_for_event_id,
+                thread_root_has_children=self._thread_root_has_children,
             )
         except Exception as exc:
             self.logger.warning(
@@ -373,6 +309,31 @@ class ThreadWritePolicy:
         if _has_explicit_thread_relation(event_info):
             return event_info.thread_id or event_info.thread_id_from_edit
         return None
+
+    async def _cached_event_info_for_event_id(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> EventInfo | None:
+        related_event = await self.runtime.event_cache.get_event(room_id, event_id)
+        if not isinstance(related_event, dict):
+            return None
+        return EventInfo.from_event(related_event)
+
+    async def _thread_root_has_children(
+        self,
+        room_id: str,
+        thread_root_id: str,
+    ) -> bool:
+        try:
+            event_sources, _root_found = await _fetch_thread_event_sources_via_room_messages(
+                self.require_client(),
+                room_id,
+                thread_root_id,
+            )
+        except Exception:
+            return False
+        return any(event.get("event_id") != thread_root_id for event in event_sources)
 
     async def _append_event_to_cache(
         self,

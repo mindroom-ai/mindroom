@@ -140,6 +140,7 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -177,6 +178,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         context.client,
         context.room_id,
         "$explicit-event:localhost",
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -214,6 +216,7 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -253,6 +256,7 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
+        context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -288,6 +292,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.client,
         context.room_id,
         "$explicit-event:localhost",
+        context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -323,6 +328,7 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
+        context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -360,6 +366,7 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
+        context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -394,6 +401,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         context.client,
         context.room_id,
         "$explicit-event:localhost",
+        context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -475,6 +483,7 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,

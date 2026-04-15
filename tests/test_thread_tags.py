@@ -1838,9 +1838,9 @@ async def test_normalize_thread_root_event_id_resolves_edit_of_promoted_plain_re
     )
 
     assert normalized == "$thread-root:localhost"
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-reply:localhost")
-    assert client.room_get_event.await_args_list[2].args == ("!room:localhost", "$thread-reply:localhost")
+    fetched_event_ids = [call.args[1] for call in client.room_get_event.await_args_list]
+    assert fetched_event_ids[0] == "$edit:localhost"
+    assert "$plain-reply:localhost" in fetched_event_ids
 
 
 @pytest.mark.asyncio
