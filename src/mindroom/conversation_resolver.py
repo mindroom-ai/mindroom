@@ -334,19 +334,31 @@ class ConversationResolver:
         dispatch_safe: bool,
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver."""
-        fetch_thread_messages = (
-            self.deps.conversation_cache.get_dispatch_thread_history
-            if full_history and dispatch_safe
-            else self.deps.conversation_cache.get_thread_history
-            if full_history
-            else self.deps.conversation_cache.get_dispatch_thread_snapshot
-            if dispatch_safe
-            else self.deps.conversation_cache.get_thread_snapshot
-        )
         return thread_messages_thread_membership_access(
             lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
             fetch_event_info=self._event_info_for_event_id,
-            fetch_thread_messages=fetch_thread_messages,
+            fetch_thread_messages=lambda room_id, thread_id: self._read_thread_messages(
+                room_id,
+                thread_id,
+                full_history=full_history,
+                dispatch_safe=dispatch_safe,
+            ),
+        )
+
+    async def _read_thread_messages(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        full_history: bool,
+        dispatch_safe: bool,
+    ) -> list[ResolvedVisibleMessage]:
+        """Resolve one thread read through the shared cache entrypoint."""
+        return await self.deps.conversation_cache.get_thread_messages(
+            room_id,
+            thread_id,
+            full_history=full_history,
+            dispatch_safe=dispatch_safe,
         )
 
     async def _event_info_for_event_id(
@@ -404,22 +416,16 @@ class ConversationResolver:
         if thread_id is None:
             return False, None, [], False
 
-        if full_history:
-            fetch_history = (
-                self.deps.conversation_cache.get_dispatch_thread_history
-                if dispatch_safe
-                else self.deps.conversation_cache.get_thread_history
-            )
-            thread_history = await fetch_history(room_id, thread_id)
-            return True, thread_id, list(thread_history), False
-
-        fetch_snapshot = (
-            self.deps.conversation_cache.get_dispatch_thread_snapshot
-            if dispatch_safe
-            else self.deps.conversation_cache.get_thread_snapshot
+        thread_messages = await self._read_thread_messages(
+            room_id,
+            thread_id,
+            full_history=full_history,
+            dispatch_safe=dispatch_safe,
         )
-        snapshot = await fetch_snapshot(room_id, thread_id)
-        return True, thread_id, list(snapshot), not snapshot.is_full_history
+        if full_history:
+            return True, thread_id, list(thread_messages), False
+
+        return True, thread_id, list(thread_messages), not thread_messages.is_full_history
 
     async def extract_dispatch_context(
         self,
@@ -555,4 +561,9 @@ class ConversationResolver:
         thread_id: str,
     ) -> list[ResolvedVisibleMessage]:
         """Fetch strict post-lock thread history through the shared conversation-cache policy."""
-        return await self.deps.conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+        return await self._read_thread_messages(
+            room_id,
+            thread_id,
+            full_history=True,
+            dispatch_safe=True,
+        )

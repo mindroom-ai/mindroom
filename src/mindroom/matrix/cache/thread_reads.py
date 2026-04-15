@@ -69,39 +69,73 @@ class ThreadReadPolicy:
             )
         return thread_history_result(list(history), is_full_history=True)
 
-    async def _load_full_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        fetcher: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
-    ) -> ThreadHistoryResult:
-        return self._full_history_result(
-            await fetcher(room_id, thread_id),
-        )
-
-    async def _load_thread_history_under_room_barrier(
+    async def _run_thread_read(
         self,
         room_id: str,
         thread_id: str,
         *,
         fetcher: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
         name: str,
+        full_history: bool,
     ) -> ThreadHistoryResult:
+        async def load() -> ThreadHistoryResult:
+            thread_history = await fetcher(room_id, thread_id)
+            if full_history:
+                return self._full_history_result(thread_history)
+            return thread_history
+
         coordinator = self._coordinator()
         if coordinator is None:
-            return await self._load_full_thread_history(
-                room_id,
-                thread_id,
-                fetcher=fetcher,
-            )
+            return await load()
         return typing.cast(
             "ThreadHistoryResult",
             await coordinator.run_room_update(
                 room_id,
-                lambda: self._load_full_thread_history(room_id, thread_id, fetcher=fetcher),
+                load,
                 name=name,
             ),
+        )
+
+    async def read_thread(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        full_history: bool,
+        dispatch_safe: bool,
+    ) -> ThreadHistoryResult:
+        """Resolve one thread read through the shared barrier and fetch selection path."""
+        await self._wait_for_pending_room_cache_updates(room_id)
+        if full_history and dispatch_safe:
+            return await self._run_thread_read(
+                room_id,
+                thread_id,
+                fetcher=self.fetch_dispatch_thread_history_from_client,
+                name="matrix_cache_refresh_dispatch_thread_history",
+                full_history=True,
+            )
+        if full_history:
+            return await self._run_thread_read(
+                room_id,
+                thread_id,
+                fetcher=self.fetch_thread_history_from_client,
+                name="matrix_cache_refresh_thread_history",
+                full_history=True,
+            )
+        if dispatch_safe:
+            return await self._run_thread_read(
+                room_id,
+                thread_id,
+                fetcher=self.fetch_dispatch_thread_snapshot_from_client,
+                name="matrix_cache_refresh_dispatch_thread_snapshot",
+                full_history=False,
+            )
+        return await self._run_thread_read(
+            room_id,
+            thread_id,
+            fetcher=self.fetch_thread_snapshot_from_client,
+            name="matrix_cache_refresh_thread_snapshot",
+            full_history=False,
         )
 
     async def get_thread_snapshot(
@@ -110,17 +144,11 @@ class ThreadReadPolicy:
         thread_id: str,
     ) -> ThreadHistoryResult:
         """Resolve advisory lightweight thread context for one thread under the room-scoped barrier."""
-        await self._wait_for_pending_room_cache_updates(room_id)
-        coordinator = self._coordinator()
-        if coordinator is None:
-            return await self.fetch_thread_snapshot_from_client(room_id, thread_id)
-        return typing.cast(
-            "ThreadHistoryResult",
-            await coordinator.run_room_update(
-                room_id,
-                lambda: self.fetch_thread_snapshot_from_client(room_id, thread_id),
-                name="matrix_cache_refresh_thread_snapshot",
-            ),
+        return await self.read_thread(
+            room_id,
+            thread_id,
+            full_history=False,
+            dispatch_safe=False,
         )
 
     async def get_thread_history(
@@ -129,12 +157,11 @@ class ThreadReadPolicy:
         thread_id: str,
     ) -> ThreadHistoryResult:
         """Resolve advisory full thread history for one conversation root."""
-        await self._wait_for_pending_room_cache_updates(room_id)
-        return await self._load_thread_history_under_room_barrier(
+        return await self.read_thread(
             room_id,
             thread_id,
-            fetcher=self.fetch_thread_history_from_client,
-            name="matrix_cache_refresh_thread_history",
+            full_history=True,
+            dispatch_safe=False,
         )
 
     async def get_dispatch_thread_snapshot(
@@ -143,17 +170,11 @@ class ThreadReadPolicy:
         thread_id: str,
     ) -> ThreadHistoryResult:
         """Resolve strict lightweight thread context for dispatch under the room-scoped barrier."""
-        await self._wait_for_pending_room_cache_updates(room_id)
-        coordinator = self._coordinator()
-        if coordinator is None:
-            return await self.fetch_dispatch_thread_snapshot_from_client(room_id, thread_id)
-        return typing.cast(
-            "ThreadHistoryResult",
-            await coordinator.run_room_update(
-                room_id,
-                lambda: self.fetch_dispatch_thread_snapshot_from_client(room_id, thread_id),
-                name="matrix_cache_refresh_dispatch_thread_snapshot",
-            ),
+        return await self.read_thread(
+            room_id,
+            thread_id,
+            full_history=False,
+            dispatch_safe=True,
         )
 
     async def get_dispatch_thread_history(
@@ -162,12 +183,11 @@ class ThreadReadPolicy:
         thread_id: str,
     ) -> ThreadHistoryResult:
         """Resolve strict full thread history for dispatch."""
-        await self._wait_for_pending_room_cache_updates(room_id)
-        return await self._load_thread_history_under_room_barrier(
+        return await self.read_thread(
             room_id,
             thread_id,
-            fetcher=self.fetch_dispatch_thread_history_from_client,
-            name="matrix_cache_refresh_dispatch_thread_history",
+            full_history=True,
+            dispatch_safe=True,
         )
 
     async def get_latest_thread_event_id_if_needed(
@@ -181,7 +201,12 @@ class ThreadReadPolicy:
         if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
             return None
         try:
-            thread_history = await self.get_thread_history(room_id, thread_id)
+            thread_history = await self.read_thread(
+                room_id,
+                thread_id,
+                full_history=True,
+                dispatch_safe=False,
+            )
         except Exception as exc:
             self.logger.warning(
                 "Failed to refresh latest thread event ID; falling back to thread root",
