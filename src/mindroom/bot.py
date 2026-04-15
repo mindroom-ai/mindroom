@@ -121,10 +121,9 @@ from .response_runner import (
     prepare_memory_and_model_context,
 )
 from .runtime_support import (
-    StandaloneRuntimeSupport,
-    close_standalone_runtime_support,
-    create_standalone_runtime_support,
-    initialize_standalone_runtime_support,
+    OwnedRuntimeSupport,
+    close_owned_runtime_support,
+    sync_owned_runtime_support,
 )
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -150,8 +149,9 @@ if TYPE_CHECKING:
     from agno.agent import Agent
 
     from mindroom.config.main import Config
+    from mindroom.matrix.cache.event_cache import ConversationEventCache
+    from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -320,7 +320,7 @@ class AgentBot:
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
-    _standalone_runtime_support: StandaloneRuntimeSupport | None
+    _standalone_runtime_support: OwnedRuntimeSupport | None
     _turn_controller: TurnController
 
     def __init__(
@@ -956,21 +956,17 @@ class AgentBot:
             msg = self._partial_runtime_support_injection_error()
             raise RuntimeError(msg)
         self._runtime_view.mark_runtime_started()
-        if binding_state == "uninitialized":
-            support = await create_standalone_runtime_support(
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                logger=self.logger,
-                background_task_owner=self._runtime_view,
-            )
-            self._standalone_runtime_support = support
-            self.event_cache = support.event_cache
-            self.event_cache_write_coordinator = support.event_cache_write_coordinator
-            return
-        support = self._standalone_runtime_support
-        assert support is not None
-        support.event_cache_write_coordinator.background_task_owner = self._runtime_view
-        await initialize_standalone_runtime_support(support, logger=self.logger)
+        support = await sync_owned_runtime_support(
+            self._standalone_runtime_support,
+            db_path=self.config.cache.resolve_db_path(self.runtime_paths),
+            logger=self.logger,
+            background_task_owner=self._runtime_view,
+            init_failure_reason_prefix="standalone_runtime_init_failed",
+            log_db_path_change=False,
+        )
+        self._standalone_runtime_support = support
+        self.event_cache = support.event_cache
+        self.event_cache_write_coordinator = support.event_cache_write_coordinator
 
     async def _close_runtime_support_services(self) -> None:
         """Close standalone-owned services and detach any injected shared support."""
@@ -984,7 +980,7 @@ class AgentBot:
             return
         support = self._standalone_runtime_support
         assert support is not None
-        await close_standalone_runtime_support(support, logger=self.logger)
+        await close_owned_runtime_support(support, logger=self.logger)
         self.event_cache = None
         self.event_cache_write_coordinator = None
         self._standalone_runtime_support = None

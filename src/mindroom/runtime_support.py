@@ -1,38 +1,36 @@
-"""Standalone runtime support service lifecycle helpers."""
+"""Shared ownership and lifecycle helpers for runtime Matrix event-cache services."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.conversation_cache import EventCache as _EventCache
-from mindroom.matrix.conversation_cache import EventCacheWriteCoordinator as _EventCacheWriteCoordinator
+from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 
 if TYPE_CHECKING:
-    import structlog
+    from pathlib import Path
 
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
+    import structlog
 
 
 @dataclass(slots=True)
-class StandaloneRuntimeSupport:
-    """Concrete standalone-owned runtime support services for one bot."""
+class OwnedRuntimeSupport:
+    """Concrete event-cache services owned by one runtime lifecycle."""
 
     event_cache: _EventCache
     event_cache_write_coordinator: _EventCacheWriteCoordinator
 
 
-def _build_standalone_runtime_support(
+def build_owned_runtime_support(
     *,
-    config: Config,
-    runtime_paths: RuntimePaths,
+    db_path: Path,
     logger: structlog.stdlib.BoundLogger,
     background_task_owner: object,
-) -> StandaloneRuntimeSupport:
-    """Build standalone runtime support without initializing the event cache."""
-    return StandaloneRuntimeSupport(
-        event_cache=_EventCache(config.cache.resolve_db_path(runtime_paths)),
+) -> OwnedRuntimeSupport:
+    """Build one owned runtime-support bundle without initializing the cache."""
+    return OwnedRuntimeSupport(
+        event_cache=_EventCache(db_path),
         event_cache_write_coordinator=_EventCacheWriteCoordinator(
             logger=logger,
             background_task_owner=background_task_owner,
@@ -40,71 +38,64 @@ def _build_standalone_runtime_support(
     )
 
 
-async def initialize_standalone_runtime_support(
-    support: StandaloneRuntimeSupport,
+async def sync_owned_runtime_support(
+    support: OwnedRuntimeSupport | None,
     *,
+    db_path: Path,
     logger: structlog.stdlib.BoundLogger,
-) -> None:
-    """Initialize the standalone-owned event cache, degrading to no-cache on SQLite errors."""
+    background_task_owner: object,
+    init_failure_reason_prefix: str,
+    log_db_path_change: bool,
+) -> OwnedRuntimeSupport:
+    """Build, rebind, and initialize one owned runtime-support bundle."""
+    if support is None:
+        support = build_owned_runtime_support(
+            db_path=db_path,
+            logger=logger,
+            background_task_owner=background_task_owner,
+        )
+    else:
+        support.event_cache_write_coordinator.background_task_owner = background_task_owner
+        if not support.event_cache.is_initialized and support.event_cache.db_path != db_path:
+            support = build_owned_runtime_support(
+                db_path=db_path,
+                logger=logger,
+                background_task_owner=background_task_owner,
+            )
+        elif support.event_cache.db_path != db_path and log_db_path_change:
+            logger.info(
+                "Event cache db_path change will apply after restart",
+                active_db_path=str(support.event_cache.db_path),
+                configured_db_path=str(db_path),
+            )
+
+    if support.event_cache.is_initialized:
+        return support
+
     try:
         await support.event_cache.initialize()
     except Exception as exc:
-        support.event_cache.disable(f"standalone_runtime_init_failed:{exc}")
+        support.event_cache.disable(f"{init_failure_reason_prefix}:{exc}")
         logger.warning(
             "Event cache init failed; continuing without advisory cache",
             db_path=str(support.event_cache.db_path),
             error=str(exc),
         )
-
-
-async def create_standalone_runtime_support(
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    logger: structlog.stdlib.BoundLogger,
-    background_task_owner: object,
-) -> StandaloneRuntimeSupport:
-    """Build and initialize the standalone runtime support services for one direct bot runtime."""
-    support = _build_standalone_runtime_support(
-        config=config,
-        runtime_paths=runtime_paths,
-        logger=logger,
-        background_task_owner=background_task_owner,
-    )
-    await initialize_standalone_runtime_support(support, logger=logger)
     return support
 
 
-async def close_standalone_runtime_support(
-    support: StandaloneRuntimeSupport,
+async def close_owned_runtime_support(
+    support: OwnedRuntimeSupport,
     *,
     logger: structlog.stdlib.BoundLogger,
 ) -> None:
-    """Close one standalone-owned runtime support bundle in dependency order."""
-    await _close_standalone_event_cache_write_coordinator(
-        support.event_cache_write_coordinator,
-        logger=logger,
-    )
-    await _close_standalone_event_cache(support.event_cache, logger=logger)
-
-
-async def _close_standalone_event_cache_write_coordinator(
-    event_cache_write_coordinator: _EventCacheWriteCoordinator,
-    *,
-    logger: structlog.stdlib.BoundLogger,
-) -> None:
+    """Close one owned runtime-support bundle in dependency order."""
     try:
-        await event_cache_write_coordinator.close()
+        await support.event_cache_write_coordinator.close()
     except Exception as exc:
         logger.warning("Failed to close event cache write coordinator", error=str(exc))
 
-
-async def _close_standalone_event_cache(
-    event_cache: _EventCache,
-    *,
-    logger: structlog.stdlib.BoundLogger,
-) -> None:
     try:
-        await event_cache.close()
+        await support.event_cache.close()
     except Exception as exc:
         logger.warning("Failed to close event cache", error=str(exc))
