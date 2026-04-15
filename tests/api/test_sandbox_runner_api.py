@@ -140,6 +140,36 @@ def _invalid_plugin_config_path(tmp_path: Path) -> Path:
     return config_path
 
 
+def _missing_plugin_path_config_path(tmp_path: Path) -> Path:
+    """Write one config that references a plugin unavailable in the worker runtime."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents:\n"
+        "  mind:\n"
+        "    display_name: Mind\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - shell\n"
+        "  saguaro:\n"
+        "    display_name: Saguaro\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - agentspace_slack_search\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/agentspace-slack-search\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -665,6 +695,37 @@ def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(
         "Invalid plugin name: 'BadName'. Plugin names must use lowercase ASCII letters, digits, "
         "hyphens, or underscores. (" + str((tmp_path / "plugins" / "bad-name" / "mindroom.plugin.json").resolve()) + ")"
     )
+
+
+def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker startup should not fail on plugin paths missing from the worker filesystem."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(_missing_plugin_path_config_path(tmp_path)))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+
+    runtime_paths, config = _refresh_runner_app_from_env()
+
+    assert runtime_paths.config_path.exists()
+    assert config.plugins == []
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "calculator",
+                "function_name": "add",
+                "args": [1, 2],
+                "kwargs": {},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert '"result": 3' in response.json()["result"]
 
 
 def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_refresh(
