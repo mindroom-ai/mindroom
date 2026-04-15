@@ -1885,7 +1885,7 @@ async def _resolve_scanned_thread_message_sources(
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
-    resolved_thread_ids: dict[str, str] = {thread_id: thread_id}
+    resolved_thread_ids: dict[str, str] = {}
 
     async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
         return resolved_thread_ids.get(event_id)
@@ -1896,12 +1896,14 @@ async def _resolve_scanned_thread_message_sources(
     async def thread_root_has_children(_room_id: str, thread_root_id: str) -> bool:
         return any(
             event_id != thread_root_id
-            and thread_root_id
-            in {
-                event_info.thread_id,
-                event_info.thread_id_from_edit,
-                resolved_thread_ids.get(event_id),
-            }
+            and any(
+                candidate_thread_id == thread_root_id
+                for candidate_thread_id in (
+                    event_info.thread_id,
+                    event_info.thread_id_from_edit,
+                    resolved_thread_ids.get(event_id),
+                )
+            )
             for event_id, event_info in event_infos.items()
         )
 
@@ -1921,20 +1923,24 @@ async def _resolve_scanned_thread_message_sources(
         ),
     )
 
-    for event_source in ordered_sources:
-        event_id = event_source.get("event_id")
-        if not isinstance(event_id, str) or event_id == thread_id:
-            continue
-        event_info = event_infos[event_id]
-        event_thread_id = await resolve_event_thread_id(
-            room_id,
-            event_info,
-            access=access,
-        )
-        if event_thread_id != thread_id:
-            continue
-        resolved_thread_ids[event_id] = thread_id
-        relevant_message_sources[event_id] = event_source
+    progress_made = True
+    while progress_made:
+        progress_made = False
+        for event_source in ordered_sources:
+            event_id = event_source.get("event_id")
+            if not isinstance(event_id, str) or event_id == thread_id or event_id in relevant_message_sources:
+                continue
+            event_info = event_infos[event_id]
+            event_thread_id = await resolve_event_thread_id(
+                room_id,
+                event_info,
+                access=access,
+            )
+            if event_thread_id != thread_id:
+                continue
+            resolved_thread_ids[event_id] = thread_id
+            relevant_message_sources[event_id] = event_source
+            progress_made = True
 
     return relevant_message_sources
 

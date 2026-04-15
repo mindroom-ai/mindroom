@@ -1240,7 +1240,7 @@ class AgentBot:
         # Room has other messages, don't send welcome
 
     async def _wait_for_joined_room_cache(self, room_id: str) -> bool:
-        """Wait briefly for a newly joined room to appear in nio's local room cache."""
+        """Wait briefly for one newly joined room to appear in the Matrix client's local room cache."""
         assert self.client is not None
         if room_id in self.client.rooms:
             return True

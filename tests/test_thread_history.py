@@ -30,6 +30,7 @@ from mindroom.matrix.client import (
     ThreadHistoryResult,
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
+    _resolve_scanned_thread_message_sources,
     _resolve_thread_history_from_event_sources_timed,
     get_room_threads_page,
 )
@@ -1229,6 +1230,72 @@ class TestThreadHistory:
             "$thread_reply",
             "$plain_reply",
         ]
+
+    @pytest.mark.asyncio
+    async def test_room_scan_does_not_promote_plain_reply_to_non_thread_root(self) -> None:
+        """Cold room scans must not treat arbitrary room replies as threaded."""
+        resolved = await _resolve_scanned_thread_message_sources(
+            room_id="!room:localhost",
+            thread_id="$room_root",
+            scanned_message_sources={
+                "$room_root": {
+                    "event_id": "$room_root",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"msgtype": "m.text", "body": "root"},
+                },
+                "$plain_reply": {
+                    "event_id": "$plain_reply",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "plain reply",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$room_root"}},
+                    },
+                },
+            },
+        )
+
+        assert list(resolved) == ["$room_root"]
+
+    @pytest.mark.asyncio
+    async def test_room_scan_revisits_inherited_replies_until_fixpoint(self) -> None:
+        """Cold room scans should retain descendants even when they sort before their threaded parent."""
+        resolved = await _resolve_scanned_thread_message_sources(
+            room_id="!room:localhost",
+            thread_id="$root",
+            scanned_message_sources={
+                "$root": {
+                    "event_id": "$root",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"msgtype": "m.text", "body": "root"},
+                },
+                "$z-parent": {
+                    "event_id": "$z-parent",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "parent",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+                    },
+                },
+                "$a-child": {
+                    "event_id": "$a-child",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "child",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$z-parent"}},
+                    },
+                },
+            },
+        )
+
+        assert set(resolved) == {"$root", "$z-parent", "$a-child"}
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:
