@@ -786,7 +786,7 @@ async def normalize_thread_root_event_id(
 
     event_info = await _event_info_for_event_id(client, room_id, normalized_event_id)
     if event_info is None:
-        return None
+        return await _lookup_thread_id_from_cache(conversation_cache, room_id, normalized_event_id)
 
     normalized_thread_id = _canonical_thread_id(event_info, fallback_root=normalized_event_id)
     if normalized_thread_id is not None:

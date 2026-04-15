@@ -4471,6 +4471,41 @@ class TestAgentBot:
         assert context.resolved_thread_id is None
         assert context.attachment_ids == ("att_1",)
 
+    def test_build_tool_runtime_context_preserves_room_mode_source_thread_id(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Tool runtime context should preserve source thread provenance when delivery is room-level."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot.event_cache = MagicMock()
+        target = MessageTarget(
+            room_id="!test:localhost",
+            source_thread_id="$raw-thread",
+            resolved_thread_id=None,
+            reply_to_event_id="$root_event",
+            session_id="!test:localhost",
+        )
+
+        context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
+
+        assert context is not None
+        assert context.thread_id == "$raw-thread"
+        assert context.resolved_thread_id is None
+        assert MessageTarget.from_runtime_context(context).source_thread_id == "$raw-thread"
+
     def test_response_lifecycle_lock_uses_resolved_thread_root(
         self,
         mock_agent_user: AgentMatrixUser,

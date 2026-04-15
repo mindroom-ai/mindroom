@@ -1705,6 +1705,28 @@ async def test_normalize_thread_root_event_id_returns_none_when_lookup_fails() -
 
 
 @pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_uses_cache_when_event_lookup_misses() -> None:
+    """Cache-backed normalization should still work when the homeserver lookup misses."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(return_value=object())
+    conversation_cache = MagicMock()
+    conversation_cache.get_thread_id_for_event = AsyncMock(return_value="$thread-root:localhost")
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$fresh-local-reply:localhost",
+        conversation_cache=conversation_cache,
+    )
+
+    assert normalized == "$thread-root:localhost"
+    conversation_cache.get_thread_id_for_event.assert_awaited_once_with(
+        "!room:localhost",
+        "$fresh-local-reply:localhost",
+    )
+
+
+@pytest.mark.asyncio
 async def test_normalize_thread_root_event_id_resolves_thread_edit_via_original_event() -> None:
     """Thread edits should normalize directly from explicit thread metadata."""
     client = AsyncMock()
@@ -1880,3 +1902,40 @@ async def test_normalize_thread_root_event_id_resolves_thread_root_edit_via_orig
     assert normalized == "$thread-root:localhost"
     assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
     assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-root:localhost")
+
+
+@pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_returns_none_for_cyclic_edit_chain() -> None:
+    """Cyclic edit chains should fail closed instead of recursing until crash."""
+    client = AsyncMock()
+    responses = {
+        "$edit-a:localhost": _message_event_response(
+            "$edit-a:localhost",
+            content={
+                "body": "* a",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "a", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-b:localhost"},
+            },
+        ),
+        "$edit-b:localhost": _message_event_response(
+            "$edit-b:localhost",
+            content={
+                "body": "* b",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "b", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-a:localhost"},
+            },
+        ),
+    }
+    client.room_get_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: responses[event_id],
+    )
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$edit-a:localhost",
+    )
+
+    assert normalized is None

@@ -132,7 +132,7 @@ class ToolRuntimeSupport:
         if event_cache is None:
             return None
         target_room_id = target.room_id
-        target_thread_id = target.resolved_thread_id
+        target_thread_id = target.source_thread_id
         target_resolved_thread_id = target.resolved_thread_id
         target_reply_to_event_id = target.reply_to_event_id
         return ToolRuntimeContext(

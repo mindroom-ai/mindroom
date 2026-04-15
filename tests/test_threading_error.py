@@ -347,6 +347,42 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.redact_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_notify_outbound_message_plain_reply_to_threaded_target_updates_thread_cache(self) -> None:
+        """Plain replies to known threaded targets should still do outbound thread bookkeeping."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(
+            side_effect=lambda room_id, event_id: (
+                "$thread-root:localhost"
+                if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost")
+                else None
+            ),
+        )
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@agent:localhost"
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+
+        access.notify_outbound_message(
+            "!room:localhost",
+            "$plain-reply:localhost",
+            {
+                "body": "bridged reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
+            },
+        )
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread-root:localhost",
+            reason="outbound_thread_mutation",
+        )
+        event_cache.append_event.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:
         """Thread invalidation must delete cached rows when the stale marker cannot be persisted."""
         event_cache = _runtime_event_cache()
@@ -3720,6 +3756,68 @@ class TestThreadingBehavior:
         assert context.thread_id is None
         assert context.thread_history == []
         mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_thread_id_returns_none_for_cyclic_edit_chain(self, bot: AgentBot) -> None:
+        """Cyclic edit chains should fail closed instead of raising from the shared resolver."""
+        bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        bot._conversation_resolver.deps.conversation_cache.get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "* a",
+                            "msgtype": "m.text",
+                            "m.new_content": {"body": "a", "msgtype": "m.text"},
+                            "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-b:localhost"},
+                        },
+                        "event_id": "$edit-a:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "* b",
+                            "msgtype": "m.text",
+                            "m.new_content": {"body": "b", "msgtype": "m.text"},
+                            "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-a:localhost"},
+                        },
+                        "event_id": "$edit-b:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 2,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+        event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "* incoming",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "incoming", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-a:localhost"},
+                },
+                "event_id": "$incoming-edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
+            "!test:localhost",
+            event_info,
+            dispatch_safe=False,
+        )
+
+        assert thread_id is None
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_plain_reply_inherits_thread_and_marks_full_history_required(

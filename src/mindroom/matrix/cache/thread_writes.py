@@ -431,10 +431,7 @@ class ThreadWritePolicy:
             origin_server_ts=origin_server_ts,
         )
         event_info = EventInfo.from_event(event_source)
-        is_thread_candidate = isinstance(event_info.thread_id, str) or (
-            event_info.is_edit
-            and (isinstance(event_info.thread_id_from_edit, str) or isinstance(event_info.original_event_id, str))
-        )
+        is_thread_candidate = event_info.is_thread or event_info.is_edit or event_info.is_reply
         if not is_thread_candidate:
             return
 
