@@ -1490,42 +1490,6 @@ async def _invalidate_thread_cache_entry(
         )
 
 
-async def _mark_thread_stale_fail_closed(
-    event_cache: ConversationEventCache,
-    *,
-    room_id: str,
-    thread_id: str,
-    reason: str,
-    failure_log: str,
-) -> None:
-    """Fail closed when a durable stale marker cannot be written."""
-    try:
-        await event_cache.mark_thread_stale(room_id, thread_id, reason=reason)
-    except Exception as exc:
-        logger.warning(
-            failure_log,
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=reason,
-            error=str(exc),
-        )
-    else:
-        return
-    try:
-        await event_cache.invalidate_thread(room_id, thread_id)
-    except Exception as invalidate_exc:
-        logger.warning(
-            "Failed to delete thread cache rows after stale-marker failure; disabling cache",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=reason,
-            error=str(invalidate_exc),
-        )
-    else:
-        return
-    event_cache.disable(f"thread_stale_marker_failed:{room_id}:{thread_id}:{reason}")
-
-
 async def _fetch_thread_history_with_events(
     client: nio.AsyncClient,
     room_id: str,
