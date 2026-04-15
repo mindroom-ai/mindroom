@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import typing
 import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -65,11 +67,15 @@ _MISSED_TASK_MAX_AGE_SECONDS = 86400  # 24 hours
 # Small pause between draining overdue one-time tasks after sync is ready.
 _DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
 
+# Filename for the local persistent scheduled-task store.
+_LOCAL_SCHEDULED_TASK_STORE_FILENAME = "scheduled_tasks.json"
+
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
 _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
 _ACTIVE_HOOK_REGISTRY: HookRegistry = HookRegistry.empty()
+_local_scheduled_task_store_lock = asyncio.Lock()
 
 
 class _AgentValidationResult(NamedTuple):
@@ -84,6 +90,158 @@ def _raise_scheduled_workflow_send_error() -> typing.NoReturn:
     """Raise when a scheduled workflow message cannot be sent."""
     msg = "Failed to send scheduled workflow message to Matrix"
     raise RuntimeError(msg)
+
+
+def _local_scheduled_task_store_path(runtime_paths: RuntimePaths | None = None) -> Path | None:
+    """Return the local scheduled-task store path when runtime storage is configured."""
+    if runtime_paths is not None:
+        return runtime_paths.storage_root / _LOCAL_SCHEDULED_TASK_STORE_FILENAME
+    raw_storage_path = os.environ.get("MINDROOM_STORAGE_PATH", "").strip()
+    if not raw_storage_path:
+        return None
+    return Path(raw_storage_path).expanduser().resolve() / _LOCAL_SCHEDULED_TASK_STORE_FILENAME
+
+
+def _read_local_scheduled_task_store(path: Path | None) -> dict[str, dict[str, typing.Any]]:
+    """Read the local scheduled-task store from disk."""
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        logger.exception("Failed to read local scheduled-task store", path=str(path))
+        return {}
+    if not isinstance(payload, dict):
+        logger.warning("Ignoring invalid local scheduled-task store payload", path=str(path), payload_type=type(payload).__name__)
+        return {}
+    result: dict[str, dict[str, typing.Any]] = {}
+    for task_id, content in payload.items():
+        if isinstance(task_id, str) and isinstance(content, dict):
+            result[task_id] = content
+    return result
+
+
+def _write_local_scheduled_task_store(path: Path | None, data: dict[str, dict[str, typing.Any]]) -> None:
+    """Atomically write the local scheduled-task store to disk."""
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    temp_path.replace(path)
+
+
+def _scheduled_task_content(
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    status: str,
+    created_at: datetime | str | None = None,
+) -> dict[str, typing.Any]:
+    """Build the canonical persisted payload for one scheduled task."""
+    if isinstance(created_at, datetime):
+        created_at_value = created_at.isoformat()
+    elif isinstance(created_at, str) and created_at:
+        created_at_value = created_at
+    else:
+        created_at_value = datetime.now(UTC).isoformat()
+    return {
+        "task_id": task_id,
+        "workflow": workflow.model_dump_json(),
+        "status": status,
+        "created_at": created_at_value,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def _write_local_scheduled_task(
+    task_id: str,
+    content: dict[str, typing.Any],
+    runtime_paths: RuntimePaths | None = None,
+) -> None:
+    """Persist one scheduled task to the local store."""
+    path = _local_scheduled_task_store_path(runtime_paths)
+    if path is None:
+        return
+    async with _local_scheduled_task_store_lock:
+        data = _read_local_scheduled_task_store(path)
+        data[task_id] = content
+        _write_local_scheduled_task_store(path, data)
+
+
+async def _load_local_task_record(
+    room_id: str,
+    task_id: str,
+    runtime_paths: RuntimePaths | None = None,
+) -> ScheduledTaskRecord | None:
+    """Load one scheduled task from the local store."""
+    path = _local_scheduled_task_store_path(runtime_paths)
+    if path is None:
+        return None
+    async with _local_scheduled_task_store_lock:
+        data = _read_local_scheduled_task_store(path)
+    content = data.get(task_id)
+    if not isinstance(content, dict):
+        return None
+    workflow_blob = content.get("workflow")
+    if isinstance(workflow_blob, str):
+        try:
+            workflow_data = json.loads(workflow_blob)
+        except Exception:
+            logger.exception("Failed to parse workflow from local scheduled-task store", task_id=task_id, room_id=room_id)
+            return None
+        stored_room_id = workflow_data.get("room_id")
+        if isinstance(stored_room_id, str) and stored_room_id != room_id:
+            return None
+    return _parse_scheduled_task_record(room_id, task_id, content)
+
+
+async def _load_local_task_records_for_room(
+    room_id: str,
+    include_non_pending: bool = False,
+    runtime_paths: RuntimePaths | None = None,
+) -> list[ScheduledTaskRecord]:
+    """Load all locally persisted scheduled tasks for one room."""
+    path = _local_scheduled_task_store_path(runtime_paths)
+    if path is None:
+        return []
+    async with _local_scheduled_task_store_lock:
+        data = _read_local_scheduled_task_store(path)
+    records: list[ScheduledTaskRecord] = []
+    for task_id, content in data.items():
+        if not isinstance(task_id, str) or not isinstance(content, dict):
+            continue
+        record = _parse_scheduled_task_record(room_id, task_id, content)
+        if record is None:
+            continue
+        if record.workflow.room_id != room_id:
+            continue
+        if include_non_pending or record.status == "pending":
+            records.append(record)
+    return records
+
+
+async def _persist_task_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    content: dict[str, typing.Any],
+    runtime_paths: RuntimePaths | None = None,
+) -> None:
+    """Persist scheduled-task content locally and best-effort to Matrix state."""
+    await _write_local_scheduled_task(task_id=task_id, content=content, runtime_paths=runtime_paths)
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        content=content,
+        state_key=task_id,
+    )
+    if not isinstance(response, nio.RoomPutStateResponse):
+        logger.warning(
+            "Failed to persist scheduled task in Matrix state; relying on local store",
+            room_id=room_id,
+            task_id=task_id,
+            response=str(response),
+        )
 
 
 def set_scheduling_hook_registry(hook_registry: HookRegistry) -> None:
@@ -452,12 +610,18 @@ async def get_scheduled_tasks_for_room(
     include_non_pending: bool = False,
 ) -> list[ScheduledTaskRecord]:
     """Fetch and parse scheduled tasks for a room."""
+    merged_records: dict[str, ScheduledTaskRecord] = {
+        record.task_id: record
+        for record in await _load_local_task_records_for_room(room_id, include_non_pending=include_non_pending)
+    }
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         logger.error("Failed to get room state", response=str(response), room_id=room_id)
-        return []
+        return list(merged_records.values())
 
-    return _parse_task_records_from_state(room_id, response, include_non_pending)
+    for record in _parse_task_records_from_state(room_id, response, include_non_pending):
+        merged_records.setdefault(record.task_id, record)
+    return list(merged_records.values())
 
 
 async def get_scheduled_task(
@@ -466,6 +630,9 @@ async def get_scheduled_task(
     task_id: str,
 ) -> ScheduledTaskRecord | None:
     """Fetch and parse a single scheduled task from Matrix state."""
+    local_record = await _load_local_task_record(room_id=room_id, task_id=task_id)
+    if local_record is not None:
+        return local_record
     response = await client.room_get_state_event(
         room_id=room_id,
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
@@ -510,18 +677,13 @@ async def _persist_scheduled_task_state(
     status: str = "pending",
     created_at: datetime | str | None = None,
 ) -> None:
-    """Persist scheduled task state to Matrix."""
-    await client.room_put_state(
+    """Persist scheduled task state."""
+    content = _scheduled_task_content(task_id=task_id, workflow=workflow, status=status, created_at=created_at)
+    await _persist_task_content(
+        client=client,
         room_id=room_id,
-        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-        content={
-            "task_id": task_id,
-            "workflow": workflow.model_dump_json(),
-            "status": status,
-            "created_at": _serialize_scheduled_task_created_at(created_at),
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
-        state_key=task_id,
+        task_id=task_id,
+        content=content,
     )
 
 
@@ -1420,12 +1582,18 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
 ) -> str:
     """List scheduled tasks in human-readable format."""
     # Pre-check: surface Matrix errors as user-facing messages
+    local_task_records = await _load_local_task_records_for_room(room_id, include_non_pending=False)
     state_response = await client.room_get_state(room_id)
     if not isinstance(state_response, nio.RoomGetStateResponse):
         logger.error("Failed to get room state", response=str(state_response), room_id=room_id, thread_id=thread_id)
-        return "Unable to retrieve scheduled tasks."
-
-    task_records = _parse_task_records_from_state(room_id, state_response, include_non_pending=False)
+        if not local_task_records:
+            return "Unable to retrieve scheduled tasks."
+        task_records = local_task_records
+    else:
+        task_records_by_id = {record.task_id: record for record in local_task_records}
+        for record in _parse_task_records_from_state(room_id, state_response, include_non_pending=False):
+            task_records_by_id.setdefault(record.task_id, record)
+        task_records = list(task_records_by_id.values())
 
     tasks: list[ScheduledTaskRecord] = []
     tasks_in_other_threads: list[ScheduledTaskRecord] = []
@@ -1501,23 +1669,23 @@ async def cancel_scheduled_task(
     if cancel_in_memory:
         _cancel_running_task(task_id)
 
-    # First check if task exists
-    response = await client.room_get_state_event(
-        room_id=room_id,
-        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-        state_key=task_id,
-    )
-
-    if not isinstance(response, nio.RoomGetStateEventResponse):
+    existing = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
+    if existing is None:
         return f"❌ Task `{task_id}` not found."
 
-    # Update to cancelled
-    existing_content = response.content if isinstance(response.content, dict) else None
-    await client.room_put_state(
+    await _persist_task_content(
+        client=client,
         room_id=room_id,
-        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-        content=_cancelled_task_content(task_id, existing_content),
-        state_key=task_id,
+        task_id=task_id,
+        content=_cancelled_task_content(
+            task_id,
+            _scheduled_task_content(
+                task_id=existing.task_id,
+                workflow=existing.workflow,
+                status=existing.status,
+                created_at=existing.created_at,
+            ),
+        ),
     )
 
     return f"✅ Cancelled task `{task_id}`"
@@ -1528,39 +1696,50 @@ async def cancel_all_scheduled_tasks(
     room_id: str,
 ) -> str:
     """Cancel all scheduled tasks in a room."""
-    # Get all scheduled tasks
+    task_records_by_id: dict[str, ScheduledTaskRecord] = {
+        record.task_id: record
+        for record in await _load_local_task_records_for_room(room_id, include_non_pending=False)
+    }
     response = await client.room_get_state(room_id)
 
-    if not isinstance(response, nio.RoomGetStateResponse):
+    if isinstance(response, nio.RoomGetStateResponse):
+        for record in _parse_task_records_from_state(room_id, response, include_non_pending=False):
+            task_records_by_id.setdefault(record.task_id, record)
+    elif not task_records_by_id:
         logger.error("Failed to get room state", response=str(response))
         return "❌ Unable to retrieve scheduled tasks."
 
     cancelled_count = 0
     failed_count = 0
 
-    for event in response.events:
-        if event["type"] == _SCHEDULED_TASK_EVENT_TYPE:
-            content = event["content"]
-            if content.get("status") == "pending":
-                task_id = event["state_key"]
+    for record in task_records_by_id.values():
+        if record.status != "pending":
+            continue
+        task_id = record.task_id
 
-                # Cancel the asyncio task if running
-                _cancel_running_task(task_id)
+        # Cancel the asyncio task if running
+        _cancel_running_task(task_id)
 
-                # Update to cancelled in Matrix state
-                try:
-                    existing_content = content if isinstance(content, dict) else None
-                    await client.room_put_state(
-                        room_id=room_id,
-                        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-                        content=_cancelled_task_content(task_id, existing_content),
-                        state_key=task_id,
-                    )
-                    cancelled_count += 1
-                    logger.info("scheduled_task_cancelled", task_id=task_id)
-                except Exception:
-                    logger.exception("scheduled_task_cancel_failed", task_id=task_id)
-                    failed_count += 1
+        try:
+            await _persist_task_content(
+                client=client,
+                room_id=room_id,
+                task_id=task_id,
+                content=_cancelled_task_content(
+                    task_id,
+                    _scheduled_task_content(
+                        task_id=record.task_id,
+                        workflow=record.workflow,
+                        status=record.status,
+                        created_at=record.created_at,
+                    ),
+                ),
+            )
+            cancelled_count += 1
+            logger.info("scheduled_task_cancelled", task_id=task_id)
+        except Exception:
+            logger.exception("scheduled_task_cancel_failed", task_id=task_id)
+            failed_count += 1
 
     if cancelled_count == 0:
         return "No scheduled tasks to cancel."
@@ -1580,31 +1759,45 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
 ) -> int:
-    """Restore scheduled tasks from Matrix state after bot restart.
+    """Restore scheduled tasks from persisted state after bot restart.
 
     Returns:
         Number of tasks restored
 
     """
+    task_records_by_id: dict[str, ScheduledTaskRecord] = {
+        record.task_id: record
+        for record in await _load_local_task_records_for_room(
+            room_id,
+            include_non_pending=True,
+            runtime_paths=runtime_paths,
+        )
+    }
     response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
+    if isinstance(response, nio.RoomGetStateResponse):
+        for record in _parse_task_records_from_state(room_id, response, include_non_pending=True):
+            task_records_by_id.setdefault(record.task_id, record)
+    elif not task_records_by_id:
         return 0
 
     restored_count = 0
-    for event in response.events:
-        if event["type"] != _SCHEDULED_TASK_EVENT_TYPE:
-            continue
-
-        content = event["content"]
-        if content.get("status") != "pending":
+    for record in task_records_by_id.values():
+        if record.status != "pending":
             continue
 
         try:
-            task_id: str = event["state_key"]
-
-            # Parse the workflow
-            workflow_data = json.loads(content["workflow"])
-            workflow = ScheduledWorkflow(**workflow_data)
+            task_id: str = record.task_id
+            workflow = record.workflow
+            await _write_local_scheduled_task(
+                task_id=task_id,
+                content=_scheduled_task_content(
+                    task_id=task_id,
+                    workflow=workflow,
+                    status=record.status,
+                    created_at=record.created_at,
+                ),
+                runtime_paths=runtime_paths,
+            )
 
             # Validate workflow has required fields
             if workflow.schedule_type == "once":
@@ -1627,7 +1820,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                                 task_id=task_id,
                                 workflow=workflow,
                                 status="failed",
-                                created_at=content.get("created_at"),
+                                created_at=record.created_at,
                             )
                         except Exception:
                             logger.exception("Failed to mark ancient task as failed", task_id=task_id)
@@ -1653,7 +1846,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                 restored_count += 1
 
         except (KeyError, ValueError, json.JSONDecodeError):
-            logger.exception("Failed to restore task")
+            logger.exception("Failed to restore task", task_id=record.task_id)
             continue
 
     if restored_count > 0:

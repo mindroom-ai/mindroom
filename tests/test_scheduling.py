@@ -19,10 +19,12 @@ from mindroom.scheduling import (
     ScheduledWorkflow,
     _run_cron_task,
     _run_once_task,
+    _save_pending_scheduled_task,
     cancel_all_scheduled_tasks,
     clear_deferred_overdue_tasks,
     drain_deferred_overdue_tasks,
     edit_scheduled_task,
+    get_scheduled_task,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     restore_scheduled_tasks,
@@ -793,11 +795,60 @@ async def test_run_once_task_tolerates_initial_missing_pending_state() -> None:
         ),
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
     ):
-        await _run_once_task(client, "task_once_missing_initial_state", workflow, config, _runtime_paths())
+        await _run_once_task(
+            client,
+            "task_once_missing_initial_state",
+            workflow,
+            config,
+            _runtime_paths(),
+            MagicMock(),
+            MagicMock(),
+        )
 
     execute_mock.assert_awaited_once()
     client.room_put_state.assert_awaited_once()
     assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_get_scheduled_task_falls_back_to_local_store_when_matrix_state_write_is_forbidden(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted tasks should still be readable when Matrix state writes are forbidden."""
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
+    runtime_paths = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={"MINDROOM_STORAGE_PATH": str(tmp_path)})
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(return_value=object())
+    client.room_get_state_event = AsyncMock(side_effect=AssertionError("Matrix read should not be needed"))
+
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Run from local store",
+        description="Forbidden Matrix state write fallback",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+
+    with patch("mindroom.scheduling._start_scheduled_task") as start_mock:
+        await _save_pending_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task_local_fallback",
+            workflow=workflow,
+            config=MagicMock(),
+            runtime_paths=runtime_paths,
+            event_cache=MagicMock(),
+            conversation_cache=MagicMock(),
+        )
+    start_mock.assert_called_once()
+
+    record = await get_scheduled_task(client=client, room_id="!test:server", task_id="task_local_fallback")
+
+    assert record is not None
+    assert record.workflow.message == "Run from local store"
+    assert record.status == "pending"
 
 
 @pytest.mark.asyncio
