@@ -9,15 +9,17 @@ import json
 import mimetypes
 import ssl as ssl_module
 import time
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, MutableMapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import nio
 from aiohttp import ClientError
 from nio import crypto
+from nio.api import Api
 from nio.responses import RoomThreadsResponse
 
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
@@ -868,7 +870,7 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
         rooms = client.rooms
-        if isinstance(rooms, dict) and response.room_id not in rooms:
+        if isinstance(rooms, MutableMapping) and response.room_id not in rooms:
             rooms[response.room_id] = nio.MatrixRoom(
                 room_id=response.room_id,
                 own_user_id=client.user_id or "",
@@ -978,10 +980,10 @@ def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
     return cached_rooms(client).get(room_id)
 
 
-def cached_rooms(client: nio.AsyncClient) -> dict[str, nio.MatrixRoom]:
+def cached_rooms(client: nio.AsyncClient) -> Mapping[str, nio.MatrixRoom]:
     """Return the client room cache when nio has initialized it."""
     rooms = client.rooms
-    return rooms if isinstance(rooms, dict) else {}
+    return rooms if isinstance(rooms, Mapping) else {}
 
 
 def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
@@ -1020,17 +1022,70 @@ async def send_message_result(
     if not _can_send_to_encrypted_room(client, room_id, operation="send_message"):
         return None
 
-    content_sent = await prepare_large_message(client, room_id, content)
+    rooms = client.rooms
+    room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
+    cache_bypass = isinstance(rooms, Mapping) and room is None
+    if cache_bypass:
+        encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
+        if isinstance(encryption_state, nio.RoomGetStateEventResponse):
+            logger.error(
+                "matrix_encrypted_room_send_requires_synced_room_cache",
+                room_id=room_id,
+                operation="send_message",
+                hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
+            )
+            return None
+        if not (
+            isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND"
+        ):
+            logger.error(
+                "matrix_room_send_requires_known_encryption_state",
+                room_id=room_id,
+                operation="send_message",
+                hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
+            )
+            return None
 
-    response = await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=content_sent,
-    )
+    content_sent = await prepare_large_message(client, room_id, content)
+    if cache_bypass:
+        access_token = client.access_token
+        if not access_token:
+            msg = "Matrix client access token is required to send a message."
+            raise nio.LocalProtocolError(msg)
+        method, path, data = Api.room_send(
+            access_token,
+            room_id,
+            "m.room.message",
+            content_sent,
+            uuid4(),
+        )
+        response = await client._send(
+            nio.RoomSendResponse,
+            method,
+            path,
+            data,
+            response_data=(room_id,),
+        )
+    else:
+        response = await client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content_sent,
+        )
     if isinstance(response, nio.RoomSendResponse):
-        logger.debug("matrix_message_sent", room_id=room_id, event_id=str(response.event_id))
+        logger.debug(
+            "matrix_message_sent",
+            room_id=room_id,
+            event_id=str(response.event_id),
+            cache_bypass=cache_bypass,
+        )
         return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
-    logger.error("matrix_message_send_failed", room_id=room_id, error=str(response))
+    logger.error(
+        "matrix_message_send_failed",
+        room_id=room_id,
+        error=str(response),
+        cache_bypass=cache_bypass,
+    )
     return None
 
 
@@ -1054,8 +1109,7 @@ async def _upload_file_as_mxc(
         return None, None
 
     info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
-    rooms = client.rooms
-    room = rooms.get(room_id) if isinstance(rooms, dict) else None
+    room = cached_room(client, room_id)
     if room is None:
         logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
         return None, None

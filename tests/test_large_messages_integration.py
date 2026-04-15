@@ -27,7 +27,12 @@ class MockClient:
     """Mock Matrix client for testing."""
 
     def __init__(self, should_upload_succeed: bool = True) -> None:
-        self.rooms = {}
+        room = MagicMock()
+        room.encrypted = False
+        self.rooms = {
+            "!room:server": room,
+            "!test:room": room,
+        }
         self.messages_sent = []
         self.uploads: list[dict] = []
         self.should_upload_succeed = should_upload_succeed

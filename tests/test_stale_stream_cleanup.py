@@ -131,6 +131,11 @@ def _make_reaction_event(
     return event
 
 
+def _joined_room_cache(room_id: str = ROOM_ID, *, own_user_id: str = BOT_USER_ID) -> dict[str, nio.MatrixRoom]:
+    room = nio.MatrixRoom(room_id, own_user_id)
+    return {room_id: room}
+
+
 def _room_messages_response(*events: object, end: str | None = None) -> nio.RoomMessagesResponse:
     response = MagicMock()
     response.__class__ = nio.RoomMessagesResponse
@@ -1364,7 +1369,7 @@ async def test_cleanup_repairs_pending_stream_status_on_restart_note_messages(tm
     """Restart-note messages should still get a metadata-only repair when status is pending."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
     interrupted_body = build_restart_interrupted_body("Working ⋯")
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
@@ -1403,7 +1408,7 @@ async def test_cleanup_preserves_tool_trace_and_ai_run_metadata(tmp_path: Path) 
     """Cleanup edits should preserve Cinny-facing run metadata in both edit payload layers."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$message",
@@ -1437,7 +1442,7 @@ async def test_cleanup_preserves_multiple_mindroom_metadata_keys(tmp_path: Path)
     """Cleanup edits should preserve every io.mindroom.* key, not just one special case."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
     input_keys = {
         "io.mindroom.stream_status": "streaming",
         "io.mindroom.compaction": {"version": 1, "compacted": False},
@@ -1467,7 +1472,7 @@ async def test_cleanup_prefers_latest_mindroom_metadata_from_edit_chain(tmp_path
     """Cleanup should use the canonical io.mindroom.* keys from the newest edit's m.new_content."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
     original = _make_message_event(
         event_id="$original",
         body="Initial partial ⋯",
@@ -1508,7 +1513,7 @@ async def test_cleanup_sets_terminal_stream_status(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
 
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$msg-streaming",
@@ -1534,7 +1539,7 @@ async def test_cleanup_sets_terminal_stream_status(tmp_path: Path) -> None:
     assert new_content["io.mindroom.tool_trace"] == {"version": 1}
 
     client2 = AsyncMock(spec=nio.AsyncClient)
-    client2.rooms = {}
+    client2.rooms = _joined_room_cache()
     client2.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$msg-pending",
@@ -1562,7 +1567,7 @@ async def test_cleanup_preserves_tool_trace_from_v2_sidecar(tmp_path: Path) -> N
     """Cleanup should hydrate a v2 sidecar and preserve metadata that only exists there."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
 
     sidecar_tool_trace = {"version": 1, "events": [{"tool": "web_search"}]}
     sidecar_payload = {
@@ -1612,7 +1617,7 @@ async def test_cleanup_does_not_hydrate_sidecars_for_unrelated_user_messages(tmp
     """Cleanup should resolve visible message state only for the current bot's messages."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
 
     user_sidecar_event = _make_message_event(
         event_id="$user-preview",
@@ -1651,7 +1656,7 @@ async def test_cleanup_sidecar_hydration_failure_falls_back_gracefully(tmp_path:
     """Cleanup should still work when sidecar hydration fails."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
 
     preview_event = _make_message_event(
         event_id="$message",
@@ -1693,7 +1698,7 @@ async def test_cleanup_preserves_sidecar_tool_trace_from_edit_chain(tmp_path: Pa
     """For edit-based sidecars, tool_trace should come from the latest edit sidecar."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
+    client.rooms = _joined_room_cache()
 
     sidecar_tool_trace = {"version": 1, "events": [{"tool": "shell"}, {"tool": "file"}]}
     sidecar_inner = {
