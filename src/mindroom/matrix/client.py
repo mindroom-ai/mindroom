@@ -1938,22 +1938,6 @@ async def _fetch_thread_event_sources_via_room_messages(
     return event_sources, root_message_found
 
 
-async def _fetch_thread_history_via_room_messages(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch all thread messages by scanning room history pages."""
-    return (
-        await _fetch_thread_history_via_room_messages_with_events(
-            client,
-            room_id,
-            thread_id,
-            hydrate_sidecars=True,
-        )
-    ).history
-
-
 async def get_room_threads_page(
     client: nio.AsyncClient,
     room_id: str,

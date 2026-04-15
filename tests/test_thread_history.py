@@ -29,7 +29,7 @@ from mindroom.matrix.client import (
     RoomThreadsPageError,
     ThreadHistoryResult,
     _event_source_for_cache,
-    _fetch_thread_history_via_room_messages,
+    _fetch_thread_history_via_room_messages_with_events,
     _resolve_thread_history_from_event_sources_timed,
     get_room_threads_page,
 )
@@ -1102,7 +1102,14 @@ class TestThreadHistory:
         response.end = None
         client.room_messages.return_value = response
 
-        history = await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+        history = (
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                hydrate_sidecars=True,
+            )
+        ).history
         serialized = [message.to_dict() for message in history]
 
         assert [msg["event_id"] for msg in serialized] == ["$thread_root", "$notice_reply"]
@@ -1153,7 +1160,14 @@ class TestThreadHistory:
         response.end = None
         client.room_messages.return_value = response
 
-        history = await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+        history = (
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                hydrate_sidecars=True,
+            )
+        ).history
         serialized = [message.to_dict() for message in history]
 
         assert [msg["event_id"] for msg in serialized] == ["$thread_root", "$agent_msg"]
@@ -1551,7 +1565,12 @@ class TestThreadHistory:
         client.room_messages = AsyncMock(return_value=object())
 
         with pytest.raises(RuntimeError, match="room scan failed"):
-            await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                hydrate_sidecars=True,
+            )
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_room_scan_raises_when_root_is_missing(self) -> None:
@@ -1573,7 +1592,12 @@ class TestThreadHistory:
         client.room_messages = AsyncMock(return_value=response)
 
         with pytest.raises(RuntimeError, match="not found during room scan"):
-            await _fetch_thread_history_via_room_messages(client, "!room:localhost", "$thread_root")
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                hydrate_sidecars=True,
+            )
 
 
 @pytest.mark.asyncio
