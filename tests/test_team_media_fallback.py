@@ -26,6 +26,7 @@ from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
+from mindroom.media_fallback import clear_inline_audio_capability_cache
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
     ResolvedExactTeamMembers,
@@ -62,13 +63,14 @@ def _make_test_team(
     return AgnoTeam(name=name, id=team_id, model=_TEST_MODEL, members=[], tools=[])
 
 
-def _build_test_config() -> Config:
+def _build_test_config(model_config: ModelConfig | None = None) -> Config:
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     return bind_runtime_paths(
         Config(
             agents={
                 "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
             },
+            models={"default": model_config} if model_config else {},
         ),
         runtime_paths,
     )
@@ -87,6 +89,11 @@ def _prepared_team_execution_context(
         replays_persisted_history=replays_persisted_history,
         compaction_outcomes=[],
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_inline_audio_cache() -> None:
+    clear_inline_audio_capability_cache()
 
 
 def test_resolve_live_shared_agent_names_returns_none_when_runtime_availability_is_unknown() -> None:
@@ -1241,8 +1248,14 @@ async def test_team_stream_rejects_request_time_materialization_failure() -> Non
 
 @pytest.mark.asyncio
 async def test_team_stream_retries_without_inline_media_on_setup_error() -> None:
-    """Team streaming should retry when stream setup fails before any output is emitted."""
-    config = _build_test_config()
+    """Unknown capability paths should keep first audio attempt and rely on existing retry behavior."""
+    config = _build_test_config(
+        ModelConfig(
+            provider="openai",
+            id="gpt-4o",
+            extra_kwargs={"base_url": "https://api.openai.com/v1"},
+        ),
+    )
     orchestrator = MagicMock()
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
@@ -1285,6 +1298,136 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered setup stream" in rendered_output
+
+
+@pytest.mark.asyncio
+async def test_team_stream_does_not_preflight_inline_audio_for_ollama() -> None:
+    """Ollama should keep the first inline-audio attempt and rely on the retry path."""
+    config = _build_test_config(
+        ModelConfig(
+            provider="ollama",
+            id="llama3",
+        ),
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    media_validation_error = "Error code: 500 - audio input is not supported"
+
+    async def successful_stream() -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Recovered ollama stream")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(side_effect=[Exception(media_validation_error), successful_stream()])
+    audio_input = MagicMock(name="audio_input")
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                media=MediaInputs(audio=[audio_input]),
+            )
+        ]
+
+    assert mock_team.arun.call_count == 2
+    first_call = mock_team.arun.call_args_list[0]
+    second_call = mock_team.arun.call_args_list[1]
+    assert list(first_call.kwargs["audio"]) == [audio_input]
+    assert list(second_call.kwargs["audio"]) == []
+    assert "Inline media unavailable for this model" in second_call.args[0]
+    rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "Recovered ollama stream" in rendered_output
+
+
+@pytest.mark.asyncio
+async def test_team_stream_preflight_strips_inline_audio_after_learning_unsupported_model() -> None:
+    """A learned inline-audio rejection should preflight-drop audio on the next stream."""
+    config = _build_test_config(
+        ModelConfig(
+            provider="openai",
+            id="gpt-4o",
+            extra_kwargs={"base_url": "https://api.openai.com/v1"},
+        ),
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    media_validation_error = "Error code: 500 - audio input is not supported"
+
+    async def recovered_stream() -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Recovered stream")
+
+    async def preflight_stream() -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Preflight stream")
+
+    mock_team_first = _make_test_team()
+    mock_team_first.arun = MagicMock(side_effect=[Exception(media_validation_error), recovered_stream()])
+    mock_team_second = _make_test_team()
+    mock_team_second.arun = MagicMock(return_value=preflight_stream())
+    audio_input = MagicMock(name="audio_input")
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", side_effect=[mock_team_first, mock_team_second]),
+    ):
+        first_chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                media=MediaInputs(audio=[audio_input]),
+            )
+        ]
+        second_chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                media=MediaInputs(audio=[audio_input]),
+            )
+        ]
+
+    assert mock_team_first.arun.call_count == 2
+    first_run_call = mock_team_first.arun.call_args_list[0]
+    first_run_retry = mock_team_first.arun.call_args_list[1]
+    assert list(first_run_call.kwargs["audio"]) == [audio_input]
+    assert list(first_run_retry.kwargs["audio"]) == []
+    assert "Inline media unavailable for this model" in first_run_retry.args[0]
+    first_rendered_output = "".join(
+        chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in first_chunks
+    )
+    assert "Recovered stream" in first_rendered_output
+
+    assert mock_team_second.arun.call_count == 1
+    second_run_call = mock_team_second.arun.call_args_list[0]
+    assert list(second_run_call.kwargs["audio"]) == []
+    assert "Inline media unavailable for this model" in second_run_call.args[0]
+    rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in second_chunks)
+    assert "Preflight stream" in rendered_output
 
 
 @pytest.mark.asyncio

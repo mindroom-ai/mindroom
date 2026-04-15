@@ -66,6 +66,7 @@ from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.identity import MatrixID
+from mindroom.media_fallback import clear_inline_audio_capability_cache
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
@@ -1764,6 +1765,10 @@ async def test_send_skill_command_response_locked_emits_session_started_after_pe
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_inline_audio_cache(self) -> None:
+        clear_inline_audio_capability_cache()
+
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond passes user_id through to ai_response."""
@@ -2474,6 +2479,95 @@ class TestUserIdPassthrough:
         assert seen_run_ids[1] is not None
         assert seen_run_ids[1] != "run-123"
         assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
+
+    @pytest.mark.asyncio
+    async def test_ai_response_preflights_audio_for_other_agent_sharing_model(self, tmp_path: Path) -> None:
+        """Model-level learned audio capability should apply across agents using the same model."""
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent"),
+                },
+                models={
+                    "default": ModelConfig(
+                        provider="openai",
+                        id="gpt-4o",
+                        extra_kwargs={"base_url": "https://api.openai.com/v1"},
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
+
+        mock_agent_general = MagicMock()
+        mock_agent_general.model = MagicMock()
+        mock_agent_general.model.__class__.__name__ = "OpenAIChat"
+        mock_agent_general.model.id = "gpt-4o"
+        mock_agent_general.name = "GeneralAgent"
+        mock_agent_general.add_history_to_context = False
+        general_recovered_output = MagicMock()
+        general_recovered_output.content = "Recovered general response"
+        general_recovered_output.status = RunStatus.completed
+        general_recovered_output.tools = None
+        mock_agent_general.arun = AsyncMock(
+            side_effect=[
+                Exception("Error code: 500 - audio input is not supported"),
+                general_recovered_output,
+            ],
+        )
+
+        mock_agent_research = MagicMock()
+        mock_agent_research.model = MagicMock()
+        mock_agent_research.model.__class__.__name__ = "OpenAIChat"
+        mock_agent_research.model.id = "gpt-4o"
+        mock_agent_research.name = "ResearchAgent"
+        mock_agent_research.add_history_to_context = False
+        research_output = MagicMock()
+        research_output.content = "Preflight research response"
+        research_output.status = RunStatus.completed
+        research_output.tools = None
+        mock_agent_research.arun = AsyncMock(return_value=research_output)
+
+        audio_input = MagicMock(name="audio_input")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(mock_agent_general, prompt="general prompt"),
+                _prepared_prompt_result(mock_agent_research, prompt="research prompt"),
+            ]
+            response_general = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=runtime_paths,
+                config=config,
+                media=MediaInputs(audio=[audio_input]),
+            )
+            response_research = await ai_response(
+                agent_name="research",
+                prompt="test",
+                session_id="session2",
+                runtime_paths=runtime_paths,
+                config=config,
+                media=MediaInputs(audio=[audio_input]),
+            )
+
+        assert response_general == "Recovered general response"
+        assert response_research == "Preflight research response"
+
+        assert mock_agent_general.arun.await_count == 2
+        general_first_call = mock_agent_general.arun.await_args_list[0]
+        general_retry_call = mock_agent_general.arun.await_args_list[1]
+        assert list(general_first_call.kwargs["audio"]) == [audio_input]
+        assert list(general_retry_call.kwargs["audio"]) == []
+        assert "Inline media unavailable for this model" in general_retry_call.args[0]
+
+        assert mock_agent_research.arun.await_count == 1
+        research_call = mock_agent_research.arun.await_args_list[0]
+        assert list(research_call.kwargs["audio"]) == []
+        assert "Inline media unavailable for this model" in research_call.args[0]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:

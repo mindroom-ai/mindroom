@@ -54,7 +54,13 @@ from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
-from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
+from mindroom.media_fallback import (
+    append_inline_media_fallback_prompt,
+    remember_inline_audio_unsupported,
+    should_mark_inline_audio_unsupported,
+    should_preflight_skip_inline_audio,
+    should_retry_without_inline_media,
+)
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
     ResolvedExactTeamMembers,
@@ -1737,10 +1743,38 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             prepared_prompt = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
-            logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
             media_inputs = media or MediaInputs()
-            attempt_prompt = prepared_prompt
-            attempt_media_inputs = media_inputs
+            resolved_model_name = model_name or "default"
+            model_config = orchestrator.config.models.get(resolved_model_name)
+            model_provider = model_config.provider if model_config else None
+            model_id = model_config.id if model_config else None
+            model_base_url = None
+            if model_config and model_config.extra_kwargs:
+                base_url = model_config.extra_kwargs.get("base_url")
+                if isinstance(base_url, str):
+                    model_base_url = base_url
+            logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
+            if should_preflight_skip_inline_audio(
+                media_inputs,
+                provider=model_provider,
+                model_id=model_id,
+                base_url=model_base_url,
+            ):
+                logger.info(
+                    "Preflight dropping inline audio from learned capability cache",
+                    model=resolved_model_name,
+                    provider=model_provider,
+                    model_id=model_id,
+                )
+                attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
+                attempt_media_inputs = MediaInputs(
+                    images=media_inputs.images,
+                    files=media_inputs.files,
+                    videos=media_inputs.videos,
+                )
+            else:
+                attempt_prompt = prepared_prompt
+                attempt_media_inputs = media_inputs
             attempt_run_id = run_id
 
             per_member: dict[str, str] = {}
@@ -1920,6 +1954,12 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                         agents=", ".join(agent_names),
                                         error=error_text,
                                     )
+                                    if should_mark_inline_audio_unsupported(error_text, attempt_media_inputs):
+                                        remember_inline_audio_unsupported(
+                                            provider=model_provider,
+                                            model_id=model_id,
+                                            base_url=model_base_url,
+                                        )
                                     attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                                     attempt_media_inputs = MediaInputs()
                                     attempt_run_id = _next_retry_run_id(run_id)
@@ -1952,6 +1992,12 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     agents=", ".join(agent_names),
                                     error=error_text,
                                 )
+                                if should_mark_inline_audio_unsupported(error_text, attempt_media_inputs):
+                                    remember_inline_audio_unsupported(
+                                        provider=model_provider,
+                                        model_id=model_id,
+                                        base_url=model_base_url,
+                                    )
                                 attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                                 attempt_media_inputs = MediaInputs()
                                 attempt_run_id = _next_retry_run_id(run_id)
