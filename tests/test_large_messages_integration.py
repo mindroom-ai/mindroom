@@ -184,6 +184,37 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
         assert uploaded_payload["m.new_content"][key] == value
 
 
+@pytest.mark.asyncio
+async def test_threaded_edit_strips_nested_relations_from_replacement_payload() -> None:
+    """Threaded edits should keep the top-level replacement relation only."""
+    client = MockClient()
+    content = {
+        "body": "Updated reply",
+        "msgtype": "m.text",
+        "formatted_body": "<p>Updated reply</p>",
+        "m.relates_to": {
+            "rel_type": "m.thread",
+            "event_id": "$thread_root",
+            "m.in_reply_to": {"event_id": "$latest"},
+        },
+    }
+
+    await edit_message_result(
+        client,
+        "!room:server",
+        "$original",
+        content,
+        "Updated reply",
+    )
+
+    assert len(client.messages_sent) == 1
+    sent_content = client.messages_sent[0][2]
+    assert sent_content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$original"}
+    assert sent_content["m.new_content"]["body"] == "Updated reply"
+    assert sent_content["m.new_content"]["msgtype"] == "m.text"
+    assert "m.relates_to" not in sent_content["m.new_content"]
+
+
 # ============================================================================
 # Streaming Tests
 # ============================================================================
