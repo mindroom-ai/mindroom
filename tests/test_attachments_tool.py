@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.attachments import register_local_attachment
+from mindroom.attachments import load_attachment, register_local_attachment
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
 from mindroom.tool_system.runtime_context import (
@@ -52,6 +52,23 @@ def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> To
         conversation_cache=conversation_cache,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
+    )
+
+
+def _tool_context_with_thread_scope(
+    tmp_path: Path,
+    *,
+    thread_id: str | None,
+    resolved_thread_id: str | None,
+    attachment_ids: tuple[str, ...] = (),
+) -> ToolRuntimeContext:
+    """Build a tool context with explicit raw and resolved thread scope values."""
+    context = _tool_context(tmp_path, attachment_ids=attachment_ids)
+    return dataclasses.replace(
+        context,
+        thread_id=thread_id,
+        resolved_thread_id=resolved_thread_id,
+        session_id=(context.room_id if resolved_thread_id is None else f"{context.room_id}:{resolved_thread_id}"),
     )
 
 
@@ -309,6 +326,69 @@ async def test_send_context_attachments_cross_room_send_does_not_inherit_source_
     mocked.assert_awaited_once()
     call_kwargs = mocked.await_args.kwargs
     assert call_kwargs["thread_id"] is None  # must NOT inherit source thread
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_uses_resolved_thread_scope(tmp_path: Path) -> None:
+    """Registering from a thread-start context should persist the resolved thread root."""
+    tool = AttachmentTools()
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _tool_context_with_thread_scope(
+        tmp_path,
+        thread_id=None,
+        resolved_thread_id="$thread-root:localhost",
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "ok"
+    attachment = load_attachment(tmp_path, payload["attachment_id"])
+    assert attachment is not None
+    assert attachment.thread_id == "$thread-root:localhost"
+
+
+@pytest.mark.asyncio
+async def test_send_context_attachments_inherits_resolved_thread_scope(tmp_path: Path) -> None:
+    """Attachment sends should stay in the resolved thread even when raw thread_id is absent."""
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_threaded",
+        room_id="!room:localhost",
+        thread_id="$thread-root:localhost",
+    )
+    assert attachment is not None
+
+    ctx = _tool_context_with_thread_scope(
+        tmp_path,
+        thread_id=None,
+        resolved_thread_id="$thread-root:localhost",
+        attachment_ids=("att_threaded",),
+    )
+
+    with patch(
+        "mindroom.custom_tools.attachments.send_file_message",
+        new=AsyncMock(return_value="$file_evt"),
+    ) as mocked:
+        result, send_error = await send_context_attachments(
+            ctx,
+            attachment_ids=["att_threaded"],
+            attachment_file_paths=[],
+        )
+
+    assert send_error is None
+    assert result is not None
+    assert result.thread_id == "$thread-root:localhost"
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        ctx.room_id,
+        "$thread-root:localhost",
+    )
+    assert mocked.await_args.kwargs["thread_id"] == "$thread-root:localhost"
 
 
 @pytest.mark.asyncio

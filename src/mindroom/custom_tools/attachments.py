@@ -137,7 +137,7 @@ def _register_attachment_file_path(
         resolved_path,
         kind="file",
         room_id=context.room_id,
-        thread_id=context.thread_id,
+        thread_id=context.resolved_thread_id,
         sender=context.requester_id,
     )
     if attachment_record is None:
@@ -300,7 +300,7 @@ def _resolve_send_target(
     if thread_id is not None:
         return effective_room_id, thread_id, None
     if inherit_context_thread and effective_room_id == context.room_id:
-        return effective_room_id, context.thread_id, None
+        return effective_room_id, context.resolved_thread_id, None
     return effective_room_id, None, None
 
 

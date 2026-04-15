@@ -291,27 +291,39 @@ class ConversationResolver:
         self,
         room_id: str,
         event_info: EventInfo,
+        *,
+        dispatch_safe: bool,
     ) -> str | None:
         """Resolve explicit thread identity for one event without reply-chain inference."""
         resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
         original_event_id = event_info.original_event_id
-        if resolved_thread_id is not None:
+        if resolved_thread_id is not None or not event_info.is_edit or original_event_id is None:
             return resolved_thread_id
-        if not event_info.is_edit or original_event_id is None:
-            return None
 
         original_event = await self.deps.conversation_cache.get_event(room_id, original_event_id)
         if not isinstance(original_event, nio.RoomGetEventResponse):
             return None
 
         original_info = EventInfo.from_event(original_event.event.source)
-        if original_info.can_be_thread_root:
-            resolved_thread_id = await self.deps.conversation_cache.get_thread_id_for_event(
-                room_id,
-                original_event_id,
+        if not original_info.can_be_thread_root:
+            return original_info.thread_id or original_info.thread_id_from_edit
+
+        resolved_thread_id = await self.deps.conversation_cache.get_thread_id_for_event(
+            room_id,
+            original_event_id,
+        )
+        if resolved_thread_id is None:
+            fetch_snapshot = (
+                self.deps.conversation_cache.get_dispatch_thread_snapshot
+                if dispatch_safe
+                else self.deps.conversation_cache.get_thread_snapshot
             )
-        else:
-            resolved_thread_id = original_info.thread_id or original_info.thread_id_from_edit
+            try:
+                snapshot = await fetch_snapshot(room_id, original_event_id)
+            except Exception:
+                return None
+            if any(message.event_id != original_event_id for message in snapshot):
+                resolved_thread_id = original_event_id
         return resolved_thread_id
 
     async def derive_conversation_context(
@@ -350,7 +362,11 @@ class ConversationResolver:
         dispatch_safe: bool,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
         """Resolve one explicit-thread context using either snapshot or full history."""
-        thread_id = await self._explicit_thread_id_for_event(room_id, event_info)
+        thread_id = await self._explicit_thread_id_for_event(
+            room_id,
+            event_info,
+            dispatch_safe=dispatch_safe,
+        )
         if thread_id is None:
             return False, None, [], False
 
