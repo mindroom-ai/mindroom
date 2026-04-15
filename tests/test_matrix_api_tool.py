@@ -329,6 +329,41 @@ async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thread_bookkeeping() -> None:
+    """Plain replies to threaded targets should reuse the shared inherited-thread rule."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.side_effect = (
+        lambda room_id, event_id: "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
+    )
+    content = {
+        "body": "bridged reply",
+        "msgtype": "m.text",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply"}},
+    }
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$send:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
+        ctx.room_id,
+        "$send:localhost",
+        content,
+    )
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_send_event_room_message_preserves_matrix_error_details() -> None:
     """Low-level m.room.message send errors should surface the actual homeserver failure."""
     tool = MatrixApiTools()

@@ -15,7 +15,7 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.thread_membership import resolve_event_thread_id
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import check_agent_mentioned
 
@@ -295,9 +295,7 @@ class ConversationResolver:
         dispatch_safe: bool,
     ) -> str | None:
         """Resolve explicit thread identity with direct-target inheritance only."""
-        return await resolve_event_thread_id(
-            room_id,
-            event_info,
+        access = ThreadMembershipAccess(
             lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
             fetch_event_info=self._event_info_for_event_id,
             thread_root_has_children=(
@@ -307,6 +305,11 @@ class ConversationResolver:
                     dispatch_safe=dispatch_safe,
                 )
             ),
+        )
+        return await resolve_event_thread_id(
+            room_id,
+            event_info,
+            access=access,
         )
 
     async def _event_info_for_event_id(

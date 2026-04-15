@@ -26,7 +26,6 @@ from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.sender import send_hook_message
 from mindroom.hooks.types import EVENT_AGENT_STARTED, EVENT_AGENT_STOPPED, EVENT_BOT_READY, EVENT_REACTION_RECEIVED
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.health import (
     clear_matrix_sync_state,
     mark_matrix_sync_loop_started,
@@ -42,6 +41,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_related_event_thread_id
 from mindroom.matrix.users import (
     AgentMatrixUser,
     create_agent_user,
@@ -648,27 +648,30 @@ class AgentBot:
         normalized_target_event_id = event.reacts_to.strip()
         thread_id: str | None = None
         if normalized_target_event_id:
-            response = await self._conversation_cache.get_event(room_id, normalized_target_event_id)
-            if isinstance(response, nio.RoomGetEventResponse):
-                target_info = EventInfo.from_event(response.event.source)
-                if target_info.thread_id:
-                    thread_id = target_info.thread_id
-                elif target_info.thread_id_from_edit:
-                    thread_id = target_info.thread_id_from_edit
-                elif not target_info.has_relations:
-                    thread_history = await self._conversation_resolver.fetch_thread_history(
-                        self.client,
-                        room_id,
-                        normalized_target_event_id,
-                    )
-                    if len(thread_history) > 1:
-                        thread_id = normalized_target_event_id
-            else:
+            try:
+                access = ThreadMembershipAccess(
+                    lookup_thread_id=self._conversation_cache.get_thread_id_for_event,
+                    fetch_event_info=self._conversation_resolver._event_info_for_event_id,
+                    thread_root_has_children=(
+                        lambda lookup_room_id, thread_root_id: self._conversation_resolver._thread_root_has_children(
+                            lookup_room_id,
+                            thread_root_id,
+                            dispatch_safe=True,
+                        )
+                    ),
+                )
+                thread_id = await resolve_related_event_thread_id(
+                    room_id,
+                    normalized_target_event_id,
+                    access=access,
+                    allow_reply_hop=True,
+                )
+            except Exception as exc:
                 self.logger.debug(
-                    "Failed to fetch reaction target event for hook context",
+                    "Failed to resolve reaction target thread for hook context",
                     room_id=room_id,
                     target_event_id=normalized_target_event_id,
-                    error=str(response),
+                    error=str(exc),
                 )
 
         context = ReactionReceivedContext(

@@ -13,7 +13,7 @@ import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import resolve_event_thread_id
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
 
 if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -801,9 +801,7 @@ async def normalize_thread_root_event_id(
             if normalized_original_thread_id is not None:
                 return normalized_original_thread_id
 
-    return await resolve_event_thread_id(
-        room_id,
-        event_info,
+    access = ThreadMembershipAccess(
         lookup_thread_id=(
             lambda lookup_room_id, lookup_event_id: _lookup_thread_id_from_cache(
                 conversation_cache,
@@ -821,6 +819,11 @@ async def normalize_thread_root_event_id(
             lookup_room_id,
             thread_root_id=thread_root_id,
         ),
+    )
+    return await resolve_event_thread_id(
+        room_id,
+        event_info,
+        access=access,
     )
 
 

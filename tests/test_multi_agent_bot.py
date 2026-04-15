@@ -2720,6 +2720,65 @@ class TestAgentBot:
 
         assert seen == []
 
+    @pytest.mark.asyncio
+    async def test_reaction_hooks_inherit_thread_for_promoted_plain_reply_target(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """reaction:received hooks should reuse inherited thread membership for promoted plain replies."""
+        seen: list[tuple[str, str | None]] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append((ctx.target_event_id, ctx.thread_id))
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
+        bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+            side_effect=lambda room_id, event_id: (
+                "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
+            ),
+        )
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "bridged plain reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply"}},
+                    },
+                    "event_id": "$plain-reply",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.reacts_to = "$plain-reply"
+        event.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$plain-reply",
+                    "key": "👍",
+                },
+            },
+        }
+
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
+            await bot._on_reaction(room, event)
+
+        assert seen == [("$plain-reply", "$thread-root")]
+
     def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
         self,
         mock_agent_user: AgentMatrixUser,

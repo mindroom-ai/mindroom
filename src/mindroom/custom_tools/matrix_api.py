@@ -13,7 +13,9 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -395,6 +397,41 @@ class MatrixApiTools(Toolkit):
         return await context.event_cache.get_thread_id_for_event(room_id, event_id)
 
     @staticmethod
+    async def _event_info_for_event(
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        event_id: str,
+    ) -> EventInfo | None:
+        if context.conversation_cache is not None:
+            response = await context.conversation_cache.get_event(room_id, event_id)
+            if isinstance(response, nio.RoomGetEventResponse):
+                return EventInfo.from_event(response.event.source)
+            return None
+
+        event = await context.event_cache.get_event(room_id, event_id)
+        if not isinstance(event, dict):
+            return None
+        return EventInfo.from_event(event)
+
+    @staticmethod
+    async def _thread_root_has_children(
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        thread_root_id: str,
+    ) -> bool:
+        try:
+            event_sources, _root_found = await _fetch_thread_event_sources_via_room_messages(
+                context.client,
+                room_id,
+                thread_root_id,
+            )
+        except Exception:
+            return False
+        return any(event.get("event_id") != thread_root_id for event in event_sources)
+
+    @staticmethod
     async def _requires_conversation_cache_write(
         context: ToolRuntimeContext,
         *,
@@ -406,23 +443,39 @@ class MatrixApiTools(Toolkit):
         if event_type != "m.room.message":
             return False
         event_info = EventInfo.from_event({"type": event_type, "content": content})
-        if isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str):
-            return True
-        if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
-            return False
         try:
-            return isinstance(
-                await MatrixApiTools._get_thread_id_for_event(
+            access = ThreadMembershipAccess(
+                lookup_thread_id=lambda lookup_room_id, lookup_event_id: MatrixApiTools._get_thread_id_for_event(
                     context,
-                    room_id=room_id,
-                    event_id=event_info.original_event_id,
+                    room_id=lookup_room_id,
+                    event_id=lookup_event_id,
+                ),
+                fetch_event_info=lambda lookup_room_id, lookup_event_id: MatrixApiTools._event_info_for_event(
+                    context,
+                    room_id=lookup_room_id,
+                    event_id=lookup_event_id,
+                ),
+                thread_root_has_children=(
+                    lambda lookup_room_id, thread_root_id: MatrixApiTools._thread_root_has_children(
+                        context,
+                        room_id=lookup_room_id,
+                        thread_root_id=thread_root_id,
+                    )
+                ),
+            )
+            return isinstance(
+                await resolve_event_thread_id(
+                    room_id,
+                    event_info,
+                    access=access,
                 ),
                 str,
             )
         except Exception as exc:
             logger.warning(
-                "Failed to resolve edit target thread mapping for matrix_api send_event",
+                "Failed to resolve threaded send_event target for matrix_api",
                 room_id=room_id,
+                reply_to_event_id=event_info.reply_to_event_id,
                 original_event_id=event_info.original_event_id,
                 error=str(exc),
             )

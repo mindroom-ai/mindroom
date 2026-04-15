@@ -12,7 +12,7 @@ import nio
 from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, normalize_nio_event_for_cache
 from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import resolve_event_thread_id
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
@@ -287,12 +287,15 @@ class ThreadWritePolicy:
         context: str,
     ) -> str | None:
         try:
-            thread_id = await resolve_event_thread_id(
-                room_id,
-                event_info,
+            access = ThreadMembershipAccess(
                 lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
                 fetch_event_info=self._cached_event_info_for_event_id,
                 thread_root_has_children=self._thread_root_has_children,
+            )
+            thread_id = await resolve_event_thread_id(
+                room_id,
+                event_info,
+                access=access,
             )
         except Exception as exc:
             self.logger.warning(
