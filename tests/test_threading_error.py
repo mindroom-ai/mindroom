@@ -3657,6 +3657,35 @@ class TestThreadingBehavior:
             await access.get_dispatch_thread_snapshot("!test:localhost", "$thread:localhost")
 
     @pytest.mark.asyncio
+    async def test_get_thread_messages_routes_through_collapsed_read_primitive(self) -> None:
+        """Thread reads should route through one internal primitive with explicit mode flags."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+        expected = thread_history_result(
+            [_message(event_id="$thread:localhost", body="Root")],
+            is_full_history=True,
+        )
+
+        access._reads.read_thread = AsyncMock(return_value=expected)
+
+        result = await access.get_thread_messages(
+            "!test:localhost",
+            "$thread:localhost",
+            full_history=True,
+            dispatch_safe=True,
+        )
+
+        assert result == expected
+        access._reads.read_thread.assert_awaited_once_with(
+            "!test:localhost",
+            "$thread:localhost",
+            full_history=True,
+            dispatch_safe=True,
+        )
+
+    @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:
         """A failed same-room cache update should not block the next queued write."""
         first_update_started = asyncio.Event()
@@ -5071,6 +5100,62 @@ class TestThreadingBehavior:
             mock_lookup.assert_awaited_once_with(room.room_id, "$plain1:localhost")
             mock_snapshot.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
             mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_dispatch_context_routes_preview_reads_through_single_cache_entrypoint(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Dispatch preview resolution should select read mode through one cache helper."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        preview_snapshot = ThreadHistoryResult(
+            [
+                _message(event_id="$thread_root:localhost", body="Root"),
+                _message(event_id="$plain1:localhost", body="Preview"),
+            ],
+            is_full_history=False,
+        )
+
+        with (
+            patch.object(
+                bot._conversation_cache,
+                "get_thread_id_for_event",
+                AsyncMock(return_value="$thread_root:localhost"),
+            ),
+            patch.object(
+                bot._conversation_cache,
+                "get_thread_messages",
+                AsyncMock(return_value=preview_snapshot),
+                create=True,
+            ) as mock_read,
+        ):
+            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.requires_full_thread_history is True
+        mock_read.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root:localhost",
+            full_history=False,
+            dispatch_safe=True,
+        )
 
     @pytest.mark.asyncio
     async def test_full_history_thread_resolution_uses_full_history_to_prove_root(

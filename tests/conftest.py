@@ -201,6 +201,23 @@ def make_conversation_cache_mock() -> AsyncMock:
         return_value=thread_history_result([], is_full_history=False),
     )
     conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+
+    async def _get_thread_messages(
+        room_id: str,
+        thread_id: str,
+        *,
+        full_history: bool,
+        dispatch_safe: bool,
+    ) -> object:
+        if dispatch_safe:
+            if full_history:
+                return await conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+            return await conversation_cache.get_dispatch_thread_snapshot(room_id, thread_id)
+        if full_history:
+            return await conversation_cache.get_thread_history(room_id, thread_id)
+        return await conversation_cache.get_thread_snapshot(room_id, thread_id)
+
+    conversation_cache.get_thread_messages = AsyncMock(side_effect=_get_thread_messages)
     conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
     conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
     conversation_cache.append_live_event = AsyncMock()
