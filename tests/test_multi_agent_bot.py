@@ -21,7 +21,7 @@ import uvicorn
 from agno.db.base import SessionType
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
-from agno.media import Image
+from agno.media import Audio, Image
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
@@ -48,6 +48,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    VOICE_PREFIX,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -5085,6 +5086,48 @@ class TestAgentBot:
         assert list(payload.media.images) == [stored_image, fallback_image]
 
     @pytest.mark.asyncio
+    async def test_build_dispatch_payload_can_keep_voice_attachment_ids_without_inline_audio(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Successful router voice relays should preserve attachment IDs without auto-inlining audio."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        stored_audio = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        prompt = f"{VOICE_PREFIX}turn on the guest room lights"
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_attachment_media",
+                return_value=(["att_voice"], [stored_audio], [], [], []),
+            ),
+        ):
+            payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id="!test:localhost",
+                    prompt=prompt,
+                    current_attachment_ids=["att_voice"],
+                    thread_id="$thread_root",
+                    media_thread_id="$thread_root",
+                    thread_history=[],
+                    include_attachment_media=False,
+                    include_attachment_prompt=False,
+                ),
+            )
+
+        assert payload.prompt == prompt
+        assert "Available attachment IDs" not in payload.prompt
+        assert payload.attachment_ids == ["att_voice"]
+        assert list(payload.media.audio) == []
+
+    @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_leaves_event_retryable_when_terminal_error_cannot_be_sent(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -7298,6 +7341,108 @@ class TestAgentBot:
             )
 
         mock_execute_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_text_message_disables_inline_audio_for_successful_router_voice_relays(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Successful router voice relays should suppress attachment audio/prompt inlining."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$voice_relay"
+        event.sender = config.get_ids(runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id
+        event.body = f"{VOICE_PREFIX}turn on the guest room lights"
+        event.server_timestamp = 1234567890
+        event.source = {
+            "content": {
+                "body": event.body,
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                ATTACHMENT_IDS_KEY: ["att_voice"],
+            },
+        }
+
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$thread_root",
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="corr-voice-relay",
+            envelope=_hook_envelope(body=event.body, source_event_id=event.event_id),
+        )
+        captured_payload_request: DispatchPayloadWithAttachmentsRequest | None = None
+
+        async def fake_build_dispatch_payload(
+            request: DispatchPayloadWithAttachmentsRequest,
+        ) -> DispatchPayload:
+            nonlocal captured_payload_request
+            captured_payload_request = request
+            return DispatchPayload(prompt=event.body, attachment_ids=["att_voice"])
+
+        async def fake_execute_response_action(
+            _room: nio.MatrixRoom,
+            _event: nio.RoomMessageText,
+            _dispatch: PreparedDispatch,
+            _action: ResponseAction,
+            payload_builder: Any,
+            **_kwargs: Any,
+        ) -> None:
+            await payload_builder(dispatch.context)
+
+        with (
+            patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch.object(
+                bot._turn_policy,
+                "plan_turn",
+                new=AsyncMock(
+                    return_value=DispatchPlan(
+                        kind="respond",
+                        response_action=ResponseAction(kind="individual"),
+                    ),
+                ),
+            ),
+            patch.object(
+                bot._inbound_turn_normalizer,
+                "build_dispatch_payload_with_attachments",
+                new=AsyncMock(side_effect=fake_build_dispatch_payload),
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_execute_response_action",
+                new=AsyncMock(side_effect=fake_execute_response_action),
+            ),
+            patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
+
+        assert captured_payload_request is not None
+        assert captured_payload_request.current_attachment_ids == ["att_voice"]
+        assert captured_payload_request.include_attachment_media is False
+        assert captured_payload_request.include_attachment_prompt is False
 
     @pytest.mark.asyncio
     async def test_router_dispatch_marks_visible_echo_from_any_coalesced_source_event(

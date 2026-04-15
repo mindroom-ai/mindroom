@@ -39,6 +39,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
 )
@@ -215,6 +216,21 @@ class TurnController:
             return False
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         return isinstance(original_sender, str) and bool(original_sender)
+
+    def _is_successful_router_voice_relay_event(self, event: _TextDispatchEvent) -> bool:
+        """Return whether one router voice relay already includes a usable transcript."""
+        if event.sender != self.deps.runtime.config.get_ids(self.deps.runtime_paths)[ROUTER_AGENT_NAME].full_id:
+            return False
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if not isinstance(content, dict):
+            return False
+        body = content.get("body")
+        if not isinstance(body, str) or not body.startswith(VOICE_PREFIX):
+            return False
+        if bool(content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)):
+            return False
+        original_sender = content.get(ORIGINAL_SENDER_KEY)
+        return isinstance(original_sender, str) and bool(original_sender.strip())
 
     def _precheck_event(
         self,
@@ -1398,6 +1414,7 @@ class TurnController:
                     )
                     media_attachment_ids = media_result.attachment_ids
                     fallback_images = media_result.fallback_images
+                suppress_inline_voice_attachments = self._is_successful_router_voice_relay_event(event)
                 return await self.deps.normalizer.build_dispatch_payload_with_attachments(
                     DispatchPayloadWithAttachmentsRequest(
                         room_id=room.room_id,
@@ -1410,6 +1427,8 @@ class TurnController:
                         media_thread_id=effective_thread_id,
                         thread_history=context.thread_history,
                         fallback_images=fallback_images,
+                        include_attachment_media=not suppress_inline_voice_attachments,
+                        include_attachment_prompt=not suppress_inline_voice_attachments,
                     ),
                 )
 
