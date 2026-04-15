@@ -15,13 +15,11 @@ _MAX_THREAD_MEMBERSHIP_HOPS = 512
 
 def _next_related_event_target(
     event_info: EventInfo,
+    *,
+    current_event_id: str,
 ) -> str | None:
     """Return the next related event to inspect."""
-    if event_info.is_edit and event_info.original_event_id is not None:
-        return event_info.original_event_id
-    if event_info.reply_to_event_id is not None:
-        return event_info.reply_to_event_id
-    return None
+    return event_info.next_related_event_id(current_event_id)
 
 
 @dataclass(frozen=True)
@@ -88,7 +86,10 @@ async def resolve_related_event_thread_id(
             resolved_thread_id = thread_id
             break
 
-        next_target = _next_related_event_target(related_event_info)
+        next_target = _next_related_event_target(
+            related_event_info,
+            current_event_id=current_event_id,
+        )
         if next_target is not None:
             current_event_id = next_target
             continue
