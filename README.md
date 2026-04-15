@@ -188,10 +188,11 @@ See [Hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for full 
 # Clone and install
 git clone https://github.com/mindroom-ai/mindroom
 cd mindroom
-uv sync --all-extras
+uv sync
 ```
 
 MindRoom auto-installs the fully local sentence-transformers embedder runtime on first use when `memory.embedder.provider: sentence_transformers` is configured.
+Install `uv sync --extra matrix_e2ee` if you need Matrix E2EE support in encrypted rooms.
 
 ```bash
 # Start MindRoom (agents + API + web dashboard)
