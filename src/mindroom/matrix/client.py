@@ -1275,23 +1275,6 @@ def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, An
     return None
 
 
-async def _resolve_thread_history_from_event_sources(
-    client: nio.AsyncClient,
-    *,
-    thread_id: str,
-    event_sources: Sequence[dict[str, Any]],
-    hydrate_sidecars: bool = True,
-) -> list[ResolvedVisibleMessage]:
-    """Resolve visible thread history from cached raw event sources."""
-    messages, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
-        client,
-        thread_id=thread_id,
-        event_sources=event_sources,
-        hydrate_sidecars=hydrate_sidecars,
-    )
-    return messages
-
-
 async def _resolve_thread_history_from_event_sources_timed(
     client: nio.AsyncClient,
     *,

@@ -334,10 +334,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             turn_cache[cache_key] = response
         return response
 
-    def reset_runtime_state(self) -> None:
-        """Drop in-memory conversation state tied to one runtime lifetime."""
-        return
-
     async def _fetch_thread_history_from_client(
         self,
         room_id: str,

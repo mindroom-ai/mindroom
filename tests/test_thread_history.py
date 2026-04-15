@@ -30,7 +30,7 @@ from mindroom.matrix.client import (
     ThreadHistoryResult,
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages,
-    _resolve_thread_history_from_event_sources,
+    _resolve_thread_history_from_event_sources_timed,
     get_room_threads_page,
 )
 from mindroom.matrix.client import (
@@ -1318,7 +1318,7 @@ class TestThreadHistory:
             },
         )
 
-        history = await _resolve_thread_history_from_event_sources(
+        history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
             client,
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
@@ -1356,7 +1356,7 @@ class TestThreadHistory:
         )
 
         with patch("mindroom.matrix.client.extract_edit_body", new_callable=AsyncMock) as mock_extract_edit_body:
-            history = await _resolve_thread_history_from_event_sources(
+            history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
                 client,
                 thread_id="$thread_root",
                 event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(unrelated_edit)],
@@ -1398,7 +1398,7 @@ class TestThreadHistory:
             },
         )
 
-        history = await _resolve_thread_history_from_event_sources(
+        history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
             client,
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],

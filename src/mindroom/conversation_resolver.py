@@ -340,19 +340,6 @@ class ConversationResolver:
         )
         return is_thread, thread_id, thread_history
 
-    async def derive_conversation_target(
-        self,
-        room_id: str,
-        event_info: EventInfo,
-    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
-        """Derive dispatch target using explicit-thread snapshots only."""
-        return await self._resolve_thread_context(
-            room_id,
-            event_info,
-            full_history=False,
-            dispatch_safe=False,
-        )
-
     async def _resolve_thread_context(
         self,
         room_id: str,

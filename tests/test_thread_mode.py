@@ -1520,12 +1520,7 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        with patch.object(
-            bot._conversation_resolver,
-            "derive_conversation_target",
-            new=AsyncMock(side_effect=AssertionError("coalescing should not derive full dispatch target")),
-        ):
-            thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
         assert thread_id is None
 

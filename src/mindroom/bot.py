@@ -984,7 +984,6 @@ class AgentBot:
         if binding_state == "mixed":
             msg = self._partial_runtime_support_injection_error()
             raise RuntimeError(msg)
-        self._conversation_cache.reset_runtime_state()
         if binding_state == "injected":
             return
         if binding_state == "uninitialized":
