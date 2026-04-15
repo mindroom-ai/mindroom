@@ -53,7 +53,11 @@ from mindroom.matrix.identity import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
-from mindroom.tool_system.metadata import ToolConfigOverrideError, ToolMetadataValidationError
+from mindroom.tool_system.metadata import (
+    ToolConfigOverrideError,
+    ToolMetadataValidationError,
+    resolved_tool_state_for_runtime,
+)
 from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
@@ -1236,8 +1240,6 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool = False,
     ) -> None:
         """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
-        from mindroom.tool_system.metadata import resolved_tool_state_for_runtime  # noqa: PLC0415
-
         tool_registry, tool_metadata = resolved_tool_state_for_runtime(
             runtime_paths,
             self,
