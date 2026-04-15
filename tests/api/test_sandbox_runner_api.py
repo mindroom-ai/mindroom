@@ -107,6 +107,11 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _refresh_runner_app_from_env()
 
 
+def _set_allowed_worker_tool_names(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
+    """Set the upstream-approved tool names visible to one worker runtime."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON", json.dumps(list(tool_names)))
+
+
 def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
@@ -161,6 +166,36 @@ def _missing_plugin_path_config_path(tmp_path: Path) -> Path:
         "    include_default_tools: false\n"
         "    tools:\n"
         "      - agentspace_slack_search\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/agentspace-slack-search\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _missing_plugin_path_with_invalid_tool_config_path(tmp_path: Path) -> Path:
+    """Write one config that mixes a missing worker plugin with an unknown tool."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents:\n"
+        "  broken:\n"
+        "    display_name: Broken\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - agentspace_slack_search\n"
+        "  broken:\n"
+        "    display_name: Broken\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - definitely_not_a_tool\n"
         "router:\n"
         "  model: default\n"
         "plugins:\n"
@@ -702,6 +737,7 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     tmp_path: Path,
 ) -> None:
     """Worker startup should not fail on plugin paths missing from the worker filesystem."""
+    _set_allowed_worker_tool_names(monkeypatch, "agentspace_slack_search")
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(_missing_plugin_path_config_path(tmp_path)))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
@@ -726,6 +762,24 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert '"result": 3' in response.json()["result"]
+
+
+def test_sandbox_runner_still_rejects_invalid_tools_after_skipping_worker_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker plugin filtering must not weaken authored tool validation."""
+    _set_allowed_worker_tool_names(monkeypatch, "agentspace_slack_search")
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(_missing_plugin_path_with_invalid_tool_config_path(tmp_path)))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        _refresh_runner_app_from_env()
+
+    assert str(exc_info.value) == (
+        "agents.broken.tools[0].definitely_not_a_tool: Unknown tool 'definitely_not_a_tool'."
+    )
 
 
 def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_refresh(

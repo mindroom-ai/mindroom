@@ -59,7 +59,12 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from agno.tools.toolkit import Toolkit
+
     from mindroom.matrix.identity import MatrixID
+    from mindroom.tool_system.metadata import ToolMetadata
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
@@ -1238,6 +1243,18 @@ class Config(BaseModel):
             self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
+        self._validate_authored_tool_entries_with_state(
+            tool_registry=tool_registry,
+            tool_metadata=tool_metadata,
+        )
+
+    def _validate_authored_tool_entries_with_state(
+        self,
+        *,
+        tool_registry: dict[str, Callable[[], type[Toolkit]]],
+        tool_metadata: dict[str, ToolMetadata],
+    ) -> None:
+        """Validate authored tool references against one already-resolved tool state."""
         for index, entry in enumerate(self.defaults.tools):
             self._validate_authored_tool_entry(
                 entry,

@@ -260,6 +260,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_RUNTIME_PATHS_JSON" in env_names
+    assert "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON" in env_names
     assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" in env_names
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
@@ -267,6 +268,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
+    assert isinstance(json.loads(env_values["MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON"]), list)
     expected_dedicated_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root

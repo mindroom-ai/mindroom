@@ -58,6 +58,7 @@ _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
+_ALLOWED_TOOL_NAMES_ENV = "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -248,6 +249,7 @@ class KubernetesResourceManager:
         self._control_plane_node_name_loaded = False
         self._owner_reference: dict[str, object] | None = None
         self._owner_reference_loaded = False
+        self._worker_allowed_tool_names: list[str] | None = None
 
     @property
     def _apps(self) -> _AppsApiProtocol:
@@ -602,6 +604,10 @@ class KubernetesResourceManager:
                     sort_keys=True,
                 ),
             },
+            {
+                "name": _ALLOWED_TOOL_NAMES_ENV,
+                "value": json.dumps(self._validated_worker_tool_names(), separators=(",", ":")),
+            },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
             {"name": _SHARED_STORAGE_ROOT_ENV, "value": self.config.storage_mount_path},
@@ -636,6 +642,23 @@ class KubernetesResourceManager:
         for name, value in sorted(self.config.extra_env.items()):
             env.append({"name": name, "value": value})
         return env
+
+    def _validated_worker_tool_names(self) -> list[str]:
+        """Return the sorted tool names already validated in the primary runtime."""
+        if self._worker_allowed_tool_names is not None:
+            return self._worker_allowed_tool_names
+
+        from mindroom.config.main import load_config  # noqa: PLC0415
+        from mindroom.tool_system.metadata import resolved_tool_state_for_runtime  # noqa: PLC0415
+
+        if not self.runtime_paths.config_path.exists():
+            self._worker_allowed_tool_names = []
+            return self._worker_allowed_tool_names
+
+        config = load_config(self.runtime_paths)
+        _, tool_metadata = resolved_tool_state_for_runtime(self.runtime_paths, config)
+        self._worker_allowed_tool_names = sorted(tool_metadata)
+        return self._worker_allowed_tool_names
 
     def _worker_google_application_credentials_path(
         self,
