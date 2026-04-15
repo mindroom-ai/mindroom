@@ -2112,6 +2112,10 @@ async def _fetch_thread_history_via_room_messages_with_events(
     )
 
 
+class ThreadRoomScanRootNotFoundError(RuntimeError):
+    """Raised when a room scan finishes without ever seeing the requested root event."""
+
+
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
@@ -2226,7 +2230,7 @@ async def _fetch_thread_event_sources_via_room_messages(
             thread_id=thread_id,
             scanned_event_count=len(scanned_message_sources),
         )
-        raise RuntimeError(msg)
+        raise ThreadRoomScanRootNotFoundError(msg)
 
     relevant_message_sources = await _resolve_scanned_thread_message_sources(
         room_id=room_id,

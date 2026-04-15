@@ -51,8 +51,10 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
+    ThreadRootProof,
     resolve_event_thread_id,
     resolve_related_event_thread_id,
+    resolve_related_event_thread_id_best_effort,
     resolve_thread_ids_for_event_infos,
     room_scan_thread_membership_access,
     snapshot_thread_membership_access,
@@ -2415,8 +2417,8 @@ class TestThreadingBehavior:
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
             return event_infos.get(event_id)
 
-        async def thread_root_has_children(_room_id: str, _thread_root_id: str) -> bool:
-            return False
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            return ThreadRootProof.not_a_thread_root()
 
         resolved_thread_id = await resolve_event_thread_id(
             room_id,
@@ -2424,7 +2426,7 @@ class TestThreadingBehavior:
             access=ThreadMembershipAccess(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
-                thread_root_has_children=thread_root_has_children,
+                prove_thread_root=prove_thread_root,
             ),
         )
 
@@ -2569,8 +2571,8 @@ class TestThreadingBehavior:
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
             return event_infos.get(event_id)
 
-        async def thread_root_has_children(_room_id: str, _thread_root_id: str) -> bool:
-            return False
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            return ThreadRootProof.not_a_thread_root()
 
         resolved_thread_id = await resolve_event_thread_id(
             room_id,
@@ -2578,7 +2580,7 @@ class TestThreadingBehavior:
             access=ThreadMembershipAccess(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
-                thread_root_has_children=thread_root_has_children,
+                prove_thread_root=prove_thread_root,
             ),
         )
 
@@ -2729,6 +2731,49 @@ class TestThreadingBehavior:
                     fetch_thread_snapshot=fetch_thread_snapshot,
                 ),
             )
+
+    @pytest.mark.asyncio
+    async def test_best_effort_related_thread_resolution_degrades_when_root_proof_fails(
+        self,
+    ) -> None:
+        """Best-effort callers should treat proof failures as unknown instead of raising."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        root_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "root",
+                    "msgtype": "m.text",
+                },
+                "event_id": thread_root_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return root_event_info if event_id == thread_root_id else None
+
+        async def fetch_thread_snapshot(_room_id: str, _thread_root_id: str) -> list[object]:
+            msg = "snapshot unavailable"
+            raise RuntimeError(msg)
+
+        resolved_thread_id = await resolve_related_event_thread_id_best_effort(
+            room_id,
+            thread_root_id,
+            access=snapshot_thread_membership_access(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                fetch_thread_snapshot=fetch_thread_snapshot,
+            ),
+        )
+
+        assert resolved_thread_id is None
 
     @pytest.mark.asyncio
     async def test_live_edit_of_promoted_plain_reply_persists_event_thread_membership(

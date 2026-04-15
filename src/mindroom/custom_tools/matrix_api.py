@@ -16,8 +16,8 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
-    resolve_event_thread_id,
-    resolve_related_event_thread_id,
+    resolve_event_thread_id_best_effort,
+    resolve_related_event_thread_id_best_effort,
     room_scan_thread_membership_access_for_client,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
@@ -433,7 +433,7 @@ class MatrixApiTools(Toolkit):
         try:
             access = MatrixApiTools._thread_membership_access(context)
             return isinstance(
-                await resolve_event_thread_id(
+                await resolve_event_thread_id_best_effort(
                     room_id,
                     event_info,
                     access=access,
@@ -468,7 +468,7 @@ class MatrixApiTools(Toolkit):
                 return False
             access = MatrixApiTools._thread_membership_access(context)
             return isinstance(
-                await resolve_related_event_thread_id(
+                await resolve_related_event_thread_id_best_effort(
                     room_id,
                     event_id,
                     access=access,

@@ -13,8 +13,8 @@ from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, 
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
-    resolve_event_thread_id,
-    resolve_related_event_thread_id,
+    resolve_event_thread_id_best_effort,
+    resolve_related_event_thread_id_best_effort,
     room_scan_thread_membership_access_for_client,
 )
 
@@ -204,7 +204,7 @@ class ThreadWritePolicy:
             target_event_info = await self._event_info_for_thread_resolution(room_id, redacted_event_id)
             if target_event_info is not None and not _redaction_can_affect_thread_cache(target_event_info):
                 return None
-            return await resolve_related_event_thread_id(
+            return await resolve_related_event_thread_id_best_effort(
                 room_id,
                 redacted_event_id,
                 access=self._thread_membership_access(),
@@ -315,7 +315,7 @@ class ThreadWritePolicy:
         if explicit_thread_id is not None:
             return explicit_thread_id
         try:
-            thread_id = await resolve_event_thread_id(
+            thread_id = await resolve_event_thread_id_best_effort(
                 room_id,
                 event_info,
                 event_id=event_id,

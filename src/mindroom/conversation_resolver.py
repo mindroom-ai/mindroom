@@ -19,6 +19,7 @@ from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
+    resolve_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
@@ -286,13 +287,24 @@ class ConversationResolver:
             == "room"
         ):
             return None
-        return await self._explicit_thread_id_for_event(
-            room.room_id,
-            event.event_id,
-            EventInfo.from_event(event.source),
-            full_history=False,
-            dispatch_safe=True,
-        )
+        try:
+            return await resolve_event_thread_id_best_effort(
+                room.room_id,
+                EventInfo.from_event(event.source),
+                event_id=event.event_id,
+                access=self.thread_membership_access(
+                    full_history=False,
+                    dispatch_safe=True,
+                ),
+            )
+        except Exception as exc:
+            self.deps.logger.debug(
+                "Failed to resolve coalescing thread id; continuing room-level",
+                room_id=room.room_id,
+                event_id=event.event_id,
+                error=str(exc),
+            )
+            return None
 
     async def _explicit_thread_id_for_event(
         self,

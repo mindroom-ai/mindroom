@@ -1170,12 +1170,14 @@ class TurnController:
             envelope=envelope,
         ):
             return
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
         if should_handle_interactive_text_response(envelope):
             selection = await interactive.handle_text_response(
                 self._client(),
                 room,
                 prepared_event,
                 self.deps.agent_name,
+                resolved_thread_id=coalescing_thread_id,
             )
             if selection is not None:
                 await self.handle_interactive_selection(
@@ -1185,7 +1187,6 @@ class TurnController:
                     source_event_id=prepared_event.event_id,
                 )
                 return
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -1555,12 +1556,14 @@ class TurnController:
             envelope=envelope,
         ):
             return True
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_text_event)
         if should_handle_interactive_text_response(envelope):
             selection = await interactive.handle_text_response(
                 self._client(),
                 room,
                 prepared_text_event,
                 self.deps.agent_name,
+                resolved_thread_id=coalescing_thread_id,
             )
             if selection is not None:
                 await self.handle_interactive_selection(
