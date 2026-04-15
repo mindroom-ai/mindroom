@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1393,6 +1394,29 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
             HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_emit_custom_event_ignores_raw_room_mode_thread_id(tmp_path: Path) -> None:
+    """Custom tool events should not re-scope room-mode contexts from raw thread provenance."""
+    custom_event_name = "demo:room_mode_thread_guard"
+    seen_thread_ids: list[str | None] = []
+
+    @hook(custom_event_name)
+    async def on_custom_event(ctx: CustomEventContext) -> None:
+        seen_thread_ids.append(ctx.thread_id)
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
+    runtime_context = replace(
+        _tool_runtime_context(tmp_path, hook_registry=registry),
+        thread_id="$raw-thread",
+        resolved_thread_id=None,
+    )
+
+    with tool_runtime_context(runtime_context):
+        await emit_custom_event("tool-policy", custom_event_name, {"item_id": "123"})
+
+    assert seen_thread_ids == [None]
 
 
 @pytest.mark.asyncio

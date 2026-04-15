@@ -837,6 +837,67 @@ async def test_skill_command_tool_dispatch_uses_canonical_runtime_thread_identit
 
 
 @pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_ignores_raw_room_mode_thread_id() -> None:
+    """Skill tool dispatch should not re-scope room-mode calls from raw thread provenance."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            identity = get_tool_execution_identity()
+            assert identity is not None
+            return f"{identity.thread_id}:{identity.resolved_thread_id}:{identity.session_id}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id="$raw-thread",
+            resolved_thread_id=None,
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            reply_to_event_id="$reply:example.org",
+            session_id=create_session_id("!room:example.org", None),
+        )
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            runtime_context=runtime_context,
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == f"None:None:{create_session_id('!room:example.org', None)}"
+
+
+@pytest.mark.asyncio
 async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_context() -> None:
     """Skill tool dispatch should expose the provided ToolRuntimeContext to tool hooks."""
 

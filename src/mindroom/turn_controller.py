@@ -65,7 +65,6 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.message_target import MessageTarget
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import get_configured_agents_for_room
@@ -92,6 +91,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
@@ -555,7 +555,12 @@ class TurnController:
             runtime_context = None
             if room_id is not None:
                 runtime_context = self.deps.tool_runtime.build_context(
-                    MessageTarget.resolve(room_id, thread_id, event.event_id),
+                    self.deps.resolver.build_message_target(
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        reply_to_event_id=event.event_id,
+                        event_source=event.source,
+                    ),
                     user_id=requester_user_id,
                     agent_name=agent_name,
                     source_envelope=source_envelope,

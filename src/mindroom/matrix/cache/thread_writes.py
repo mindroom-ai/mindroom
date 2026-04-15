@@ -334,7 +334,7 @@ class ThreadWritePolicy:
         if not event_info.is_edit or not isinstance(original_event_id, str):
             return False
         try:
-            original_event = await self.runtime.event_cache.get_event(room_id, original_event_id)
+            await self.runtime.event_cache.get_event(room_id, original_event_id)
         except Exception as exc:
             self.logger.warning(
                 "Failed to resolve original event after thread lookup miss",
@@ -344,8 +344,8 @@ class ThreadWritePolicy:
                 context=context,
                 error=str(exc),
             )
-            return True
-        return original_event is None
+            return False
+        return False
 
     async def _append_event_to_cache(
         self,

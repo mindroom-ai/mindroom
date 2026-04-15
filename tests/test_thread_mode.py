@@ -523,6 +523,7 @@ class TestCreateSessionIdWithNoneThread:
             reply_to_event_id="$event456",
             room_mode=True,
         )
+        assert target.thread_id is None
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
@@ -793,9 +794,17 @@ class TestExtractMessageContextRoomMode:
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
+            event_source={
+                "event_id": "$event123",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "type": "m.room.message",
+                "content": {"body": "Hello", "msgtype": "m.text"},
+            },
         )
 
         assert threaded_target.resolved_thread_id == "$thread123"
+        assert room_mode_target.thread_id is None
         assert room_mode_target.resolved_thread_id is None
 
     def test_build_message_target_plain_reply_does_not_infer_thread_identity(

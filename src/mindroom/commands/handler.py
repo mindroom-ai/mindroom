@@ -410,8 +410,7 @@ async def _run_skill_command_tool(
     )
     resolved_requester_user_id = runtime_context.requester_id if runtime_context is not None else requester_user_id
     resolved_room_id = target.room_id if target is not None else room_id
-    resolved_thread_id = target.thread_id if target is not None else thread_id
-    resolved_reply_thread_id = target.resolved_thread_id if target is not None else thread_id
+    resolved_thread_id = target.resolved_thread_id if target is not None else thread_id
     session_id = target.session_id if target is not None else None
     execution_identity = build_tool_execution_identity(
         channel="matrix",
@@ -420,7 +419,7 @@ async def _run_skill_command_tool(
         requester_id=resolved_requester_user_id,
         room_id=resolved_room_id,
         thread_id=resolved_thread_id,
-        resolved_thread_id=resolved_reply_thread_id,
+        resolved_thread_id=resolved_thread_id,
         session_id=session_id,
     )
     effective_runtime_paths = (

@@ -1177,6 +1177,54 @@ class TestThreadingBehavior:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_cache_sync_timeline_plain_edit_missing_original_does_not_invalidate_room_threads(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Sync plain edits without a cached original should skip thread bookkeeping instead of flushing the room."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.redact_event = AsyncMock()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(return_value=None)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* Updated room message",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "Updated room message",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing-room-msg:localhost"},
+                },
+                "event_id": "$room_edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+        }
+
+        bot._conversation_cache.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_cache_sync_timeline_serializes_same_room_updates_in_order(self, bot: AgentBot) -> None:
         """Later sync updates for one room should wait for earlier queued cache writes."""
         store_started = asyncio.Event()
@@ -1714,6 +1762,47 @@ class TestThreadingBehavior:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_live_plain_edit_missing_original_does_not_invalidate_room_threads(self, bot: AgentBot) -> None:
+        """Live plain edits without a cached original should not flush unrelated thread snapshots."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(return_value=None)
+        event_cache.append_event = AsyncMock()
+        bot.event_cache = event_cache
+        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=bot._runtime_view,
+        )
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing-room-msg:localhost"},
+                },
+                "event_id": "$edit_event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        await bot._conversation_cache.append_live_event(
+            "!test:localhost",
+            edit_event,
+            event_info=EventInfo.from_event(edit_event.source),
+        )
+        await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+
+        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_get_event_queues_persistent_cache_fill_through_room_write_barrier(self) -> None:
         """Point-event cache fills should use the same room-ordered coordinator as other durable writes."""
         event_cache = _runtime_event_cache()
@@ -1874,11 +1963,11 @@ class TestThreadingBehavior:
         restarted_client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_lookup_miss_sync_edit_marks_room_stale_durably_and_forces_refetch(
+    async def test_lookup_miss_sync_plain_edit_leaves_room_cache_state_usable(
         self,
         tmp_path: Path,
     ) -> None:
-        """Ambiguous sync edits should invalidate every cached thread in the room durably across restarts."""
+        """Plain sync edits with missing originals should not stale-mark unrelated cached threads."""
         event_cache = _EventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = _text_event(
@@ -1894,13 +1983,6 @@ class TestThreadingBehavior:
             server_timestamp=2000,
             thread_id="$thread_root:localhost",
         )
-        refreshed_reply = _text_event(
-            event_id="$reply:localhost",
-            body="Refetched reply",
-            sender="@agent:localhost",
-            server_timestamp=2500,
-            thread_id="$thread_root:localhost",
-        )
         ambiguous_edit = _text_event(
             event_id="$unknown_edit:localhost",
             body="* Unknown edit",
@@ -1913,11 +1995,6 @@ class TestThreadingBehavior:
             root_event=root_event,
             thread_events=[original_reply],
             next_batch="s_initial",
-        )
-        restarted_client = _relations_client(
-            root_event=root_event,
-            thread_events=[refreshed_reply],
-            next_batch="s_refetch",
         )
 
         try:
@@ -1935,25 +2012,13 @@ class TestThreadingBehavior:
             }
             access.cache_sync_timeline(sync_response)
             await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
-            event_cache = await _reopen_event_cache(event_cache)
-
             cache_state = await event_cache.get_thread_cache_state("!test:localhost", "$thread_root:localhost")
-            restarted_access = MatrixConversationCache(
-                logger=MagicMock(),
-                runtime=_conversation_runtime(client=restarted_client, event_cache=event_cache),
-            )
-            refreshed_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
-            restarted_client.room_messages.reset_mock()
-            cached_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
         finally:
             await event_cache.close()
 
         assert cache_state is not None
-        assert cache_state.room_invalidation_reason == "sync_lookup_missing"
-        assert [message.body for message in refreshed_history] == ["Root", "Refetched reply"]
-        assert [message.body for message in cached_history] == ["Root", "Refetched reply"]
-        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
-        restarted_client.room_messages.assert_not_awaited()
+        assert cache_state.room_invalidation_reason is None
+        assert cache_state.room_invalidated_at is None
 
     @pytest.mark.asyncio
     async def test_get_thread_history_raises_when_refresh_fails(self) -> None:
