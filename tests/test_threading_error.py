@@ -1220,7 +1220,7 @@ class TestThreadingBehavior:
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
-        event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.get_event.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.append_event.assert_not_awaited()
 
@@ -1798,7 +1798,7 @@ class TestThreadingBehavior:
         await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
-        event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.get_event.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.append_event.assert_not_awaited()
 
