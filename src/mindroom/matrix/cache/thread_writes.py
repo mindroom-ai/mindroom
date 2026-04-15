@@ -12,7 +12,11 @@ import nio
 from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, normalize_nio_event_for_cache
 from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_id,
+    resolve_related_event_thread_id,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
@@ -38,7 +42,7 @@ def _collect_sync_timeline_cache_updates(
         return
 
     event_info = EventInfo.from_event(event_source)
-    if event_info.is_thread or event_info.is_edit or event_info.is_reply:
+    if _is_thread_affecting_relation(event_info):
         cache_update = _threaded_sync_event_cache_update(room_id, event)
         if cache_update is None:
             return
@@ -69,7 +73,7 @@ def _threaded_sync_event_cache_update(
 ) -> tuple[str, dict[str, object]] | None:
     event_source = event.source if isinstance(event.source, dict) else {}
     event_info = EventInfo.from_event(event_source)
-    if not (event_info.is_thread or event_info.is_edit or event_info.is_reply):
+    if not _is_thread_affecting_relation(event_info):
         return None
     event_id = event.event_id
     if not isinstance(event_id, str) or not event_id:
@@ -79,6 +83,18 @@ def _threaded_sync_event_cache_update(
 
 def _has_explicit_thread_relation(event_info: EventInfo) -> bool:
     return isinstance(event_info.thread_id, str) or isinstance(event_info.thread_id_from_edit, str)
+
+
+def _is_thread_affecting_relation(event_info: EventInfo) -> bool:
+    """Return whether one room message relation can affect thread-scoped cache state."""
+    return (
+        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
+    )
+
+
+def _redaction_can_affect_thread_cache(event_info: EventInfo) -> bool:
+    """Return whether redacting one related event can invalidate cached thread messages."""
+    return not event_info.is_reaction
 
 
 class ThreadWritePolicy:
@@ -185,7 +201,19 @@ class ThreadWritePolicy:
         event_id: str | None = None,
     ) -> str | None:
         try:
-            return await self.runtime.event_cache.get_thread_id_for_event(room_id, redacted_event_id)
+            target_event_info = await self._event_info_for_thread_resolution(room_id, redacted_event_id)
+            if target_event_info is not None and not _redaction_can_affect_thread_cache(target_event_info):
+                return None
+            access = ThreadMembershipAccess(
+                lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
+                fetch_event_info=self._event_info_for_thread_resolution,
+                thread_root_has_children=self._thread_root_has_children,
+            )
+            return await resolve_related_event_thread_id(
+                room_id,
+                redacted_event_id,
+                access=access,
+            )
         except Exception as exc:
             self.logger.warning(
                 failure_message,
@@ -430,7 +458,7 @@ class ThreadWritePolicy:
             origin_server_ts=origin_server_ts,
         )
         event_info = EventInfo.from_event(event_source)
-        is_thread_candidate = event_info.is_thread or event_info.is_edit or event_info.is_reply
+        is_thread_candidate = _is_thread_affecting_relation(event_info)
         if not is_thread_candidate:
             return
 

@@ -783,6 +783,83 @@ async def test_matrix_api_redact_dry_run_rejects_threaded_target_without_convers
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_redact_dry_run_reaction_target_stays_room_level() -> None:
+    """Reaction redactions should not require thread bookkeeping just because the reaction targets a thread."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    ctx.event_cache.get_thread_id_for_event.return_value = "$thread:localhost"
+    ctx.event_cache.get_event.return_value = {
+        "event_id": "$reaction:localhost",
+        "room_id": ctx.room_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 123,
+        "type": "m.reaction",
+        "content": {
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": "$thread-reply:localhost",
+                "key": "👍",
+            },
+        },
+    }
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$reaction:localhost",
+                reason="cleanup",
+                dry_run=True,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.client.room_redact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bookkeeping() -> None:
+    """Transitive-threaded redactions should reuse the shared resolver instead of cache-only lookup rows."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.conversation_cache.get_thread_id_for_event.side_effect = (
+        lambda room_id, event_id: "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
+    )
+    ctx.conversation_cache.get_event.side_effect = lambda room_id, event_id: _event_response(
+        event_id=event_id,
+        room_id=room_id,
+        sender="@bridge:localhost",
+        origin_server_ts=2000 if event_id == "$plain-one" else 3000,
+        content={
+            "body": "plain one" if event_id == "$plain-one" else "plain two",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "m.in_reply_to": {
+                    "event_id": "$thread-reply" if event_id == "$plain-one" else "$plain-one",
+                },
+            },
+        },
+    )
+    ctx.client.room_redact.return_value = nio.RoomRedactResponse(
+        event_id="$redaction:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$plain-two",
+                reason="cleanup",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.conversation_cache.get_event.assert_any_await(ctx.room_id, "$plain-two")
+    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(ctx.room_id, "$plain-two")
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_redact_ignores_cache_failure_after_successful_redact() -> None:
     """A successful threaded redact should delegate advisory bookkeeping through the cache facade."""
     tool = MatrixApiTools()

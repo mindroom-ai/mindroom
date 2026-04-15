@@ -23,6 +23,7 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
+    _sort_thread_history_root_first,
     edit_message_result,
     get_joined_rooms,
     resolve_latest_visible_messages,
@@ -33,6 +34,7 @@ from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -473,7 +475,7 @@ async def _scan_room_message_states(
     bot_resolved_messages = {
         event_id: message for event_id, message in resolved_messages.items() if message.sender == bot_user_id
     }
-    scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
+    scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
         client,
         resolved_messages=bot_resolved_messages,
@@ -488,6 +490,7 @@ async def _scan_room_message_states(
         bot_resolved_messages,
         bot_user_id=bot_user_id,
         requester_ids_by_event_id=requester_ids_by_event_id,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
     )
     _assign_latest_thread_event_ids(
         message_states,
@@ -505,31 +508,85 @@ def _assign_latest_thread_event_ids(
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> None:
     """Record the latest visible event ID seen for each explicit thread."""
-    all_messages = [
-        *resolved_messages.values(),
-        *scanned_message_data_by_event_id.values(),
-    ]
-    thread_root_ids = {message.thread_id for message in all_messages if message.thread_id is not None}
-    latest_event_id_by_thread: dict[str, tuple[int, str]] = {}
-
-    for message in all_messages:
-        thread_key = message.thread_id
-        if thread_key is None and message.event_id in thread_root_ids:
-            thread_key = message.event_id
-        if thread_key is None:
-            continue
-
-        candidate = (message.timestamp, message.visible_event_id)
-        current = latest_event_id_by_thread.get(thread_key)
-        if current is None or candidate > current:
-            latest_event_id_by_thread[thread_key] = candidate
+    all_messages = [*resolved_messages.values(), *scanned_message_data_by_event_id.values()]
+    latest_event_id_by_thread = _latest_thread_event_id_by_thread(all_messages)
 
     for state in message_states.values():
         if state.thread_id is None:
             continue
         latest_event = latest_event_id_by_thread.get(state.thread_id)
         if latest_event is not None:
-            state.latest_thread_event_id = latest_event[1]
+            state.latest_thread_event_id = latest_event
+
+
+def _latest_thread_event_id_by_thread(
+    messages: list[ResolvedVisibleMessage],
+) -> dict[str, str]:
+    """Return the latest visible event ID for each thread in one cleanup scan."""
+    return {
+        thread_key: _ordered_cleanup_thread_messages(thread_key, thread_messages)[-1].visible_event_id
+        for thread_key, thread_messages in _messages_by_thread_for_cleanup(messages).items()
+    }
+
+
+def _messages_by_thread_for_cleanup(
+    messages: list[ResolvedVisibleMessage],
+) -> dict[str, list[ResolvedVisibleMessage]]:
+    """Group visible messages by thread while preserving first-seen message order."""
+    thread_root_ids = {message.thread_id for message in messages if message.thread_id is not None}
+    messages_by_thread: dict[str, list[ResolvedVisibleMessage]] = {}
+    seen_visible_event_ids: set[str] = set()
+
+    for message in messages:
+        if message.visible_event_id in seen_visible_event_ids:
+            continue
+        seen_visible_event_ids.add(message.visible_event_id)
+        thread_key = _cleanup_thread_key(message, thread_root_ids)
+        if thread_key is None:
+            continue
+        messages_by_thread.setdefault(thread_key, []).append(message)
+    return messages_by_thread
+
+
+def _cleanup_thread_key(
+    message: ResolvedVisibleMessage,
+    thread_root_ids: set[str],
+) -> str | None:
+    """Return the cleanup thread bucket for one visible message."""
+    if message.thread_id is not None:
+        return message.thread_id
+    if message.event_id in thread_root_ids:
+        return message.event_id
+    return None
+
+
+def _ordered_cleanup_thread_messages(
+    thread_id: str,
+    messages: list[ResolvedVisibleMessage],
+) -> list[ResolvedVisibleMessage]:
+    """Return one ancestry-aware thread order for cleanup fallback targeting."""
+    ordered_messages = list(messages)
+    _sort_thread_history_root_first(
+        ordered_messages,
+        thread_id=thread_id,
+        input_order_by_event_id={message.visible_event_id: index for index, message in enumerate(messages)},
+        related_event_id_by_event_id=_cleanup_related_event_id_by_event_id(messages),
+    )
+    return ordered_messages
+
+
+def _cleanup_related_event_id_by_event_id(
+    messages: list[ResolvedVisibleMessage],
+) -> dict[str, str]:
+    """Return same-thread relation edges used for cleanup ordering ties."""
+    related_event_id_by_event_id: dict[str, str] = {}
+    for message in messages:
+        related_event_id = EventInfo.from_event({"content": message.content}).next_related_event_id(
+            message.visible_event_id,
+        )
+        if isinstance(related_event_id, str):
+            related_event_id_by_event_id[message.visible_event_id] = related_event_id
+    return related_event_id_by_event_id
 
 
 async def _collect_room_history_events(
@@ -596,17 +653,20 @@ def _merge_bot_resolved_message_states(
     *,
     bot_user_id: str,
     requester_ids_by_event_id: dict[str, str],
+    scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> None:
     """Merge resolved bot-authored messages into cleanup state."""
     for target_event_id, message in resolved_messages.items():
         if message.sender != bot_user_id:
             continue
         requester_user_id = requester_ids_by_event_id.get(target_event_id)
+        scanned_message = scanned_message_data_by_event_id.get(target_event_id)
         _merge_resolved_message_state(
             message_states,
             target_event_id=target_event_id,
             message=message,
             requester_user_id=requester_user_id,
+            fallback_thread_id=scanned_message.thread_id if scanned_message is not None else None,
         )
 
 
@@ -616,6 +676,7 @@ def _merge_resolved_message_state(
     target_event_id: str,
     message: ResolvedVisibleMessage,
     requester_user_id: str | None,
+    fallback_thread_id: str | None = None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
@@ -624,13 +685,69 @@ def _merge_resolved_message_state(
     state.latest_timestamp = message.timestamp
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
-    state.thread_id = message.thread_id
+    state.thread_id = message.thread_id or fallback_thread_id
     state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
 
 
-def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText]) -> dict[str, ResolvedVisibleMessage]:
+async def _scanned_message_data_by_event_id(
+    message_events: list[nio.RoomMessageText],
+) -> dict[str, ResolvedVisibleMessage]:
     """Return raw scanned room-history messages keyed by exact event ID."""
+    event_infos = {
+        event.event_id: EventInfo.from_event(event.source)
+        for event in message_events
+        if isinstance(event.event_id, str)
+    }
+    resolved_thread_ids: dict[str, str] = {}
+
+    async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+        return resolved_thread_ids.get(event_id)
+
+    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+        return event_infos.get(event_id)
+
+    async def thread_root_has_children(_room_id: str, thread_root_id: str) -> bool:
+        return any(
+            event_id != thread_root_id
+            and any(
+                candidate_thread_id == thread_root_id
+                for candidate_thread_id in (
+                    event_info.thread_id,
+                    event_info.thread_id_from_edit,
+                )
+            )
+            for event_id, event_info in event_infos.items()
+        )
+
+    access = ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        thread_root_has_children=thread_root_has_children,
+    )
+    ordered_event_ids = [
+        event_id
+        for event in sorted(
+            message_events,
+            key=lambda event: (
+                event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
+                event.event_id if isinstance(event.event_id, str) else "",
+            ),
+        )
+        if isinstance((event_id := event.event_id), str)
+    ]
+    progress_made = True
+    while progress_made:
+        progress_made = False
+        for event_id in ordered_event_ids:
+            if event_id in resolved_thread_ids:
+                continue
+            thread_id = await resolve_event_thread_id("", event_infos[event_id], access=access)
+            if thread_id is None:
+                continue
+            resolved_thread_ids[event_id] = thread_id
+            progress_made = True
+
     message_data_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     for event in message_events:
         event_id = event.event_id
@@ -646,7 +763,7 @@ def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText])
             content=raw_content,
             body=event.body,
             timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-            thread_id=event_info.thread_id,
+            thread_id=resolved_thread_ids.get(event_id) or event_info.thread_id,
         )
     return message_data_by_event_id
 

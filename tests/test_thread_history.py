@@ -1409,6 +1409,50 @@ class TestThreadHistory:
         assert event_ids == ["$root", "$explicit", "$zzz_parent", "$aaa_child"]
 
     @pytest.mark.asyncio
+    async def test_resolve_thread_history_keeps_same_timestamp_reference_descendant_after_parent(self) -> None:
+        """Same-timestamp reference descendants should sort after their related parent."""
+        client = AsyncMock()
+
+        history, _sidecar_ms = await _resolve_thread_history_from_event_sources_timed(
+            client,
+            thread_id="$root",
+            event_sources=[
+                {
+                    "event_id": "$root",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "sender": "@user:localhost",
+                    "content": {"msgtype": "m.text", "body": "root"},
+                },
+                {
+                    "event_id": "$aaa_child",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "sender": "@bridge:localhost",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "reference child",
+                        "m.relates_to": {"rel_type": "m.reference", "event_id": "$zzz_parent"},
+                    },
+                },
+                {
+                    "event_id": "$zzz_parent",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "sender": "@bridge:localhost",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "parent",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+                    },
+                },
+            ],
+            hydrate_sidecars=True,
+        )
+
+        assert [message.event_id for message in history] == ["$root", "$zzz_parent", "$aaa_child"]
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:
         """When multiple edits exist, keep the latest one deterministically."""
         client = AsyncMock()
@@ -2206,6 +2250,77 @@ class TestThreadHistoryCache:
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         assert cached_events is not None
         assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_cache_miss_persists_reference_descendant_in_causal_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Fresh room-scan snapshots should store same-timestamp reference descendants after their parent."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root", "msgtype": "m.text"},
+        )
+        explicit_reply = self._make_text_event(
+            event_id="$explicit",
+            sender="@agent:localhost",
+            body="explicit reply",
+            server_timestamp=1500,
+            source_content={
+                "body": "explicit reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+            },
+        )
+        reference_parent = self._make_text_event(
+            event_id="$zzz_parent",
+            sender="@bridge:localhost",
+            body="reference parent",
+            server_timestamp=2000,
+            source_content={
+                "body": "reference parent",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+            },
+        )
+        reference_child = self._make_text_event(
+            event_id="$aaa_child",
+            sender="@bridge:localhost",
+            body="reference child",
+            server_timestamp=2000,
+            source_content={
+                "body": "reference child",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.reference", "event_id": "$zzz_parent"},
+            },
+        )
+
+        client = MagicMock()
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [reference_child, reference_parent, explicit_reply, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$root",
+                event_cache=cache,
+            )
+            cached_events = await cache.get_thread_events("!room:localhost", "$root")
+        finally:
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$root", "$explicit", "$zzz_parent", "$aaa_child"]
+        assert cached_events is not None
+        assert [event["event_id"] for event in cached_events] == ["$root", "$explicit", "$zzz_parent", "$aaa_child"]
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_refetches_after_durable_room_invalidation(self, tmp_path: Path) -> None:

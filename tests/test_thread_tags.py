@@ -1821,7 +1821,7 @@ async def test_normalize_thread_root_event_id_resolves_thread_reply_edit_via_ori
 
 @pytest.mark.asyncio
 async def test_normalize_thread_root_event_id_resolves_edit_of_promoted_plain_reply_via_original_reply_target() -> None:
-    """Edits of promoted plain replies should reuse the same one-hop explicit-thread inheritance."""
+    """Edits of promoted plain replies should reuse the same transitive thread inheritance."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
         side_effect=[

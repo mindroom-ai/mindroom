@@ -1215,7 +1215,7 @@ def _sort_thread_history_root_first(
     *,
     thread_id: str,
     input_order_by_event_id: dict[str, int] | None = None,
-    reply_to_by_event_id: dict[str, str] | None = None,
+    related_event_id_by_event_id: dict[str, str] | None = None,
 ) -> None:
     """Keep the thread root first, then order the remaining messages chronologically."""
     messages.sort(
@@ -1225,7 +1225,7 @@ def _sort_thread_history_root_first(
             message.event_id,
         ),
     )
-    if reply_to_by_event_id is not None:
+    if related_event_id_by_event_id is not None:
         grouped_messages: list[ResolvedVisibleMessage] = []
         index = 0
         while index < len(messages):
@@ -1235,7 +1235,7 @@ def _sort_thread_history_root_first(
             grouped_messages.extend(
                 _sort_same_timestamp_group(
                     messages[index:group_end],
-                    reply_to_by_event_id=reply_to_by_event_id,
+                    related_event_id_by_event_id=related_event_id_by_event_id,
                     input_order_by_event_id=input_order_by_event_id,
                 ),
             )
@@ -1256,40 +1256,39 @@ def _thread_history_input_order(
     return input_order_by_event_id.get(event_id, 0)
 
 
-def _build_same_timestamp_reply_graph(
-    messages: list[ResolvedVisibleMessage],
+def _build_same_timestamp_relation_graph(
+    event_ids: set[str],
     *,
-    reply_to_by_event_id: dict[str, str],
-) -> tuple[dict[str, ResolvedVisibleMessage], dict[str, int], dict[str, list[str]]]:
-    """Return parent/child relationships for one same-timestamp message group."""
-    messages_by_event_id = {message.event_id: message for message in messages}
-    in_degree = {message.event_id: 0 for message in messages}
+    related_event_id_by_event_id: dict[str, str],
+) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """Return parent/child relationships for one same-timestamp relation group."""
+    in_degree = dict.fromkeys(event_ids, 0)
     children_by_parent: dict[str, list[str]] = {}
     for event_id in in_degree:
-        parent_event_id = reply_to_by_event_id.get(event_id)
-        if parent_event_id not in messages_by_event_id or parent_event_id == event_id:
+        parent_event_id = related_event_id_by_event_id.get(event_id)
+        if parent_event_id not in event_ids or parent_event_id == event_id:
             continue
         in_degree[event_id] += 1
         children_by_parent.setdefault(parent_event_id, []).append(event_id)
-    return messages_by_event_id, in_degree, children_by_parent
+    return in_degree, children_by_parent
 
 
-def _sort_same_timestamp_group(
-    messages: list[ResolvedVisibleMessage],
+def _topologically_sort_same_timestamp_event_ids(
+    event_ids: set[str],
     *,
-    reply_to_by_event_id: dict[str, str],
+    related_event_id_by_event_id: dict[str, str],
     input_order_by_event_id: dict[str, int] | None,
-) -> list[ResolvedVisibleMessage]:
-    """Keep same-timestamp parents ahead of descendants when reply ancestry is known."""
-    if len(messages) < 2:
-        return messages
+) -> list[str] | None:
+    """Return one ancestry-aware order for equal-timestamp events when relations exist."""
+    if len(event_ids) < 2:
+        return None
 
-    messages_by_event_id, in_degree, children_by_parent = _build_same_timestamp_reply_graph(
-        messages,
-        reply_to_by_event_id=reply_to_by_event_id,
+    in_degree, children_by_parent = _build_same_timestamp_relation_graph(
+        event_ids,
+        related_event_id_by_event_id=related_event_id_by_event_id,
     )
     if not children_by_parent:
-        return messages
+        return None
 
     ready: list[tuple[int, str]] = []
     for event_id, degree in in_degree.items():
@@ -1317,8 +1316,8 @@ def _sort_same_timestamp_group(
                     ),
                 )
 
-    if len(ordered_event_ids) != len(messages):
-        remaining_event_ids = set(messages_by_event_id) - set(ordered_event_ids)
+    if len(ordered_event_ids) != len(event_ids):
+        remaining_event_ids = event_ids - set(ordered_event_ids)
         ordered_event_ids.extend(
             sorted(
                 remaining_event_ids,
@@ -1329,7 +1328,101 @@ def _sort_same_timestamp_group(
             ),
         )
 
+    return ordered_event_ids
+
+
+def _sort_same_timestamp_group(
+    messages: list[ResolvedVisibleMessage],
+    *,
+    related_event_id_by_event_id: dict[str, str],
+    input_order_by_event_id: dict[str, int] | None,
+) -> list[ResolvedVisibleMessage]:
+    """Keep same-timestamp parents ahead of descendants when relation ancestry is known."""
+    if len(messages) < 2:
+        return messages
+
+    messages_by_event_id = {message.event_id: message for message in messages}
+    ordered_event_ids = _topologically_sort_same_timestamp_event_ids(
+        set(messages_by_event_id),
+        related_event_id_by_event_id=related_event_id_by_event_id,
+        input_order_by_event_id=input_order_by_event_id,
+    )
+    if ordered_event_ids is None:
+        return messages
+
     return [messages_by_event_id[event_id] for event_id in ordered_event_ids]
+
+
+def _sort_thread_event_sources_root_first(
+    event_sources: Sequence[dict[str, Any]],
+    *,
+    thread_id: str,
+) -> list[dict[str, Any]]:
+    """Return one stable raw-source order with same-timestamp ancestors before descendants."""
+    input_order_by_event_id: dict[str, int] = {}
+    related_event_id_by_event_id: dict[str, str] = {}
+    for index, event_source in enumerate(event_sources):
+        event_id = _event_id_from_source(event_source)
+        if event_id is None:
+            continue
+        input_order_by_event_id[event_id] = index
+        related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
+        if related_event_id is not None:
+            related_event_id_by_event_id[event_id] = related_event_id
+
+    sorted_sources = sorted(
+        event_sources,
+        key=lambda event_source: (
+            int(event_source.get("origin_server_ts", 0)),
+            input_order_by_event_id.get(str(event_source.get("event_id", "")), 0),
+            str(event_source.get("event_id", "")),
+        ),
+    )
+
+    grouped_sources: list[dict[str, Any]] = []
+    index = 0
+    while index < len(sorted_sources):
+        group_end = index + 1
+        current_timestamp = int(sorted_sources[index].get("origin_server_ts", 0))
+        while (
+            group_end < len(sorted_sources)
+            and int(sorted_sources[group_end].get("origin_server_ts", 0)) == current_timestamp
+        ):
+            group_end += 1
+        group_sources = sorted_sources[index:group_end]
+        group_event_ids = {
+            event_id
+            for event_source in group_sources
+            if isinstance((event_id := _event_id_from_source(event_source)), str)
+        }
+        ordered_group_event_ids = _topologically_sort_same_timestamp_event_ids(
+            group_event_ids,
+            related_event_id_by_event_id=related_event_id_by_event_id,
+            input_order_by_event_id=input_order_by_event_id,
+        )
+        if ordered_group_event_ids is None:
+            grouped_sources.extend(group_sources)
+            index = group_end
+            continue
+        sources_by_event_id = {
+            event_id: event_source
+            for event_source in group_sources
+            if isinstance((event_id := _event_id_from_source(event_source)), str)
+        }
+        grouped_sources.extend([sources_by_event_id[event_id] for event_id in ordered_group_event_ids])
+        index = group_end
+
+    root_index = next(
+        (
+            index
+            for index, event_source in enumerate(grouped_sources)
+            if _event_id_from_source(event_source) == thread_id
+        ),
+        None,
+    )
+    if root_index not in (None, 0):
+        grouped_sources.insert(0, grouped_sources.pop(root_index))
+    return grouped_sources
 
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
@@ -1401,14 +1494,14 @@ async def _resolve_thread_history_from_event_sources_timed(
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Resolve visible thread history and return approximate sidecar hydration time."""
     input_order_by_event_id: dict[str, int] = {}
-    reply_to_by_event_id: dict[str, str] = {}
+    related_event_id_by_event_id: dict[str, str] = {}
     for index, event_source in enumerate(event_sources):
         event_id = event_source.get("event_id")
         if isinstance(event_id, str):
             input_order_by_event_id[event_id] = index
-            reply_to_event_id = EventInfo.from_event(event_source).reply_to_event_id
-            if isinstance(reply_to_event_id, str):
-                reply_to_by_event_id[event_id] = reply_to_event_id
+            related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
+            if isinstance(related_event_id, str):
+                related_event_id_by_event_id[event_id] = related_event_id
     parsed_events = [
         parsed_event
         for event_source in event_sources
@@ -1451,7 +1544,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         messages,
         thread_id=thread_id,
         input_order_by_event_id=input_order_by_event_id,
-        reply_to_by_event_id=reply_to_by_event_id,
+        related_event_id_by_event_id=related_event_id_by_event_id,
     )
     return messages, round((time.perf_counter() - sidecar_hydration_started) * 1000, 1)
 
@@ -2041,6 +2134,7 @@ async def _resolve_scanned_thread_message_sources(
         fetch_event_info=fetch_event_info,
         thread_root_has_children=thread_root_has_children,
     )
+    input_order_by_event_id = {event_id: index for index, event_id in enumerate(scanned_message_sources)}
     relevant_message_sources = {
         thread_id: scanned_message_sources[thread_id],
     }
@@ -2048,6 +2142,7 @@ async def _resolve_scanned_thread_message_sources(
         scanned_message_sources.values(),
         key=lambda event_source: (
             int(event_source.get("origin_server_ts", 0)),
+            input_order_by_event_id.get(str(event_source.get("event_id", "")), 0),
             str(event_source.get("event_id", "")),
         ),
     )
@@ -2071,7 +2166,15 @@ async def _resolve_scanned_thread_message_sources(
             relevant_message_sources[event_id] = event_source
             progress_made = True
 
-    return relevant_message_sources
+    ordered_relevant_sources = _sort_thread_event_sources_root_first(
+        list(relevant_message_sources.values()),
+        thread_id=thread_id,
+    )
+    return {
+        event_id: event_source
+        for event_source in ordered_relevant_sources
+        if isinstance((event_id := _event_id_from_source(event_source)), str)
+    }
 
 
 async def _fetch_thread_event_sources_via_room_messages(
@@ -2139,7 +2242,7 @@ async def _fetch_thread_event_sources_via_room_messages(
         for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items()
         if original_event_id in relevant_event_ids or edit_thread_id == thread_id
     )
-    return event_sources, root_message_found
+    return _sort_thread_event_sources_root_first(event_sources, thread_id=thread_id), root_message_found
 
 
 async def get_room_threads_page(

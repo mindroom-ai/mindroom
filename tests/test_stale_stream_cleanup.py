@@ -474,6 +474,48 @@ async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(t
 
 
 @pytest.mark.asyncio
+async def test_cleanup_returns_interrupted_thread_for_transitive_plain_reply(tmp_path: Path) -> None:
+    """Cleanup should keep interrupted-thread metadata for plain replies inside a transitive thread chain."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Start here",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$thread-reply",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        ),
+        _make_message_event(
+            event_id="$plain-reply",
+            body="Working ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"m.in_reply_to": {"event_id": "$thread-reply"}},
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert len(interrupted) == 1
+    assert interrupted[0].thread_id == "$thread-root"
+    assert interrupted[0].target_event_id == "$plain-reply"
+    assert interrupted[0].agent_name == "test_agent"
+
+
+@pytest.mark.asyncio
 async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> None:
     """Auto-resume should send the requested system message into each interrupted thread."""
     config = _make_config(tmp_path)
@@ -880,6 +922,60 @@ async def test_cleanup_uses_latest_thread_event_for_threaded_edit_fallback(tmp_p
     assert cleaned == 1
     assert len(interrupted) == 1
     assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$later-user-message"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_same_timestamp_descendant_for_threaded_edit_fallback(tmp_path: Path) -> None:
+    """Cleanup should treat a same-timestamp descendant as later than its parent."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    same_timestamp = NOW_MS - (STALE_AGE_MS - 1_000)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Start here",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$original",
+            body="Needs cleanup",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+        _make_message_event(
+            event_id="$zzz_parent",
+            body="Parent thread message",
+            sender=USER_ID,
+            timestamp_ms=same_timestamp,
+            relates_to=_thread_reply_relation("$thread-root", "$original"),
+        ),
+        _make_message_event(
+            event_id="$aaa_child",
+            body="Child plain reply",
+            sender=USER_ID,
+            timestamp_ms=same_timestamp,
+            relates_to={"m.in_reply_to": {"event_id": "$zzz_parent"}},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.format_message_with_mentions",
+            return_value={"body": "cleanup", "msgtype": "m.text"},
+        ) as mock_format,
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert len(interrupted) == 1
+    assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$aaa_child"
 
 
 @pytest.mark.asyncio

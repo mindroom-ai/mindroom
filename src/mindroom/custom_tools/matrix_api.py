@@ -15,7 +15,11 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_id,
+    resolve_related_event_thread_id,
+)
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -444,25 +448,7 @@ class MatrixApiTools(Toolkit):
             return False
         event_info = EventInfo.from_event({"type": event_type, "content": content})
         try:
-            access = ThreadMembershipAccess(
-                lookup_thread_id=lambda lookup_room_id, lookup_event_id: MatrixApiTools._get_thread_id_for_event(
-                    context,
-                    room_id=lookup_room_id,
-                    event_id=lookup_event_id,
-                ),
-                fetch_event_info=lambda lookup_room_id, lookup_event_id: MatrixApiTools._event_info_for_event(
-                    context,
-                    room_id=lookup_room_id,
-                    event_id=lookup_event_id,
-                ),
-                thread_root_has_children=(
-                    lambda lookup_room_id, thread_root_id: MatrixApiTools._thread_root_has_children(
-                        context,
-                        room_id=lookup_room_id,
-                        thread_root_id=thread_root_id,
-                    )
-                ),
-            )
+            access = MatrixApiTools._thread_membership_access(context)
             return isinstance(
                 await resolve_event_thread_id(
                     room_id,
@@ -490,11 +476,19 @@ class MatrixApiTools(Toolkit):
     ) -> bool:
         """Return whether one redact payload must update threaded conversation cache state."""
         try:
+            target_event_info = await MatrixApiTools._event_info_for_event(
+                context,
+                room_id=room_id,
+                event_id=event_id,
+            )
+            if target_event_info is not None and target_event_info.is_reaction:
+                return False
+            access = MatrixApiTools._thread_membership_access(context)
             return isinstance(
-                await MatrixApiTools._get_thread_id_for_event(
-                    context,
-                    room_id=room_id,
-                    event_id=event_id,
+                await resolve_related_event_thread_id(
+                    room_id,
+                    event_id,
+                    access=access,
                 ),
                 str,
             )
@@ -506,6 +500,29 @@ class MatrixApiTools(Toolkit):
                 error=str(exc),
             )
             return False
+
+    @staticmethod
+    def _thread_membership_access(context: ToolRuntimeContext) -> ThreadMembershipAccess:
+        """Return the shared thread-membership accessors for Matrix API classification."""
+        return ThreadMembershipAccess(
+            lookup_thread_id=lambda lookup_room_id, lookup_event_id: MatrixApiTools._get_thread_id_for_event(
+                context,
+                room_id=lookup_room_id,
+                event_id=lookup_event_id,
+            ),
+            fetch_event_info=lambda lookup_room_id, lookup_event_id: MatrixApiTools._event_info_for_event(
+                context,
+                room_id=lookup_room_id,
+                event_id=lookup_event_id,
+            ),
+            thread_root_has_children=(
+                lambda lookup_room_id, thread_root_id: MatrixApiTools._thread_root_has_children(
+                    context,
+                    room_id=lookup_room_id,
+                    thread_root_id=thread_root_id,
+                )
+            ),
+        )
 
     @staticmethod
     async def _record_send_event_outbound_cache_write(

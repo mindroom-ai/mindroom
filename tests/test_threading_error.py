@@ -36,6 +36,7 @@ from mindroom.matrix.cache.thread_history_result import (
 from mindroom.matrix.cache.thread_history_result import (
     thread_history_result as _thread_history_result_impl,
 )
+from mindroom.matrix.cache.thread_writes import _collect_sync_timeline_cache_updates
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import (
     DeliveredMatrixEvent,
@@ -382,6 +383,220 @@ class TestMatrixConversationCacheThreadReads:
             reason="outbound_thread_mutation",
         )
         event_cache.append_event.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_notify_outbound_message_reference_to_threaded_target_updates_thread_cache(self) -> None:
+        """References to known threaded targets should still do outbound thread bookkeeping."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(
+            side_effect=lambda room_id, event_id: (
+                "$thread-root:localhost"
+                if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost")
+                else None
+            ),
+        )
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@agent:localhost"
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+
+        access.notify_outbound_message(
+            "!room:localhost",
+            "$reference:localhost",
+            {
+                "body": "reference",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.reference", "event_id": "$thread-reply:localhost"},
+            },
+        )
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread-root:localhost",
+            reason="outbound_thread_mutation",
+        )
+        event_cache.append_event.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_notify_outbound_redaction_transitive_target_updates_thread_cache(self) -> None:
+        """Transitive-threaded redactions should still stale-mark the owning thread."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(
+            side_effect=lambda room_id, event_id: (
+                "$thread-root:localhost"
+                if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost")
+                else None
+            ),
+        )
+        event_cache.redact_event = AsyncMock(return_value=True)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@agent:localhost"
+
+        def room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
+            if event_id == "$plain-two:localhost":
+                event = nio.RoomMessageText.from_dict(
+                    {
+                        "content": {
+                            "body": "plain two",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-one:localhost"}},
+                        },
+                        "event_id": event_id,
+                        "sender": "@bridge:localhost",
+                        "origin_server_ts": 3000,
+                        "room_id": "!room:localhost",
+                        "type": "m.room.message",
+                    },
+                )
+                return _make_room_get_event_response(event)
+            if event_id == "$plain-one:localhost":
+                event = nio.RoomMessageText.from_dict(
+                    {
+                        "content": {
+                            "body": "plain one",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
+                        },
+                        "event_id": event_id,
+                        "sender": "@bridge:localhost",
+                        "origin_server_ts": 2000,
+                        "room_id": "!room:localhost",
+                        "type": "m.room.message",
+                    },
+                )
+                return _make_room_get_event_response(event)
+            message = f"unexpected lookup for {event_id}"
+            raise AssertionError(message)
+
+        async def room_get_event(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            return room_get_event_response(event_id)
+
+        client.room_get_event = AsyncMock(side_effect=room_get_event)
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+
+        access.notify_outbound_redaction("!room:localhost", "$plain-two:localhost")
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread-root:localhost",
+            reason="outbound_redaction",
+        )
+        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$plain-two:localhost")
+
+    @pytest.mark.asyncio
+    async def test_notify_outbound_redaction_of_reaction_does_not_invalidate_thread_cache(self) -> None:
+        """Reaction redactions should not stale-mark thread message history."""
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread-root:localhost")
+        event_cache.redact_event = AsyncMock(return_value=True)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@agent:localhost"
+        client.room_get_event = AsyncMock(
+            return_value=_make_room_get_event_response(
+                nio.ReactionEvent.from_dict(
+                    {
+                        "content": {
+                            "m.relates_to": {
+                                "rel_type": "m.annotation",
+                                "event_id": "$thread-reply:localhost",
+                                "key": "👍",
+                            },
+                        },
+                        "event_id": "$reaction:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567890,
+                        "room_id": "!room:localhost",
+                        "type": "m.reaction",
+                    },
+                ),
+            ),
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+
+        access.notify_outbound_redaction("!room:localhost", "$reaction:localhost")
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.redact_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_turn_cache_hit_with_later_persist_request_still_persists_lookup_fill(self) -> None:
+        """A later ordinary lookup in the same turn should still persist an earlier non-persist fill."""
+        event_cache = _runtime_event_cache()
+        coordinator = _runtime_write_coordinator()
+        client = _make_client_mock()
+        client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {"body": "hello", "msgtype": "m.text"},
+                    "event_id": "$event:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=client,
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+
+        async with access.turn_scope():
+            await access.get_event("!test:localhost", "$event:localhost", persist_lookup_fill=False)
+            await access.get_event("!test:localhost", "$event:localhost")
+
+        await coordinator.wait_for_room_idle("!test:localhost")
+
+        client.room_get_event.assert_awaited_once_with("!test:localhost", "$event:localhost")
+        event_cache.store_event.assert_awaited_once()
+
+    def test_collect_sync_timeline_cache_updates_treats_reference_as_thread_candidate(self) -> None:
+        """Sync bookkeeping should classify references alongside other thread-affecting relations."""
+        room_threaded_events: dict[str, list[dict[str, object]]] = {}
+        room_plain_events: dict[str, list[dict[str, object]]] = {}
+        room_redactions: dict[str, list[str]] = {}
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "reference",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.reference", "event_id": "$target:localhost"},
+                },
+                "event_id": "$reference:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        _collect_sync_timeline_cache_updates(
+            "!test:localhost",
+            event,
+            room_threaded_events=room_threaded_events,
+            room_plain_events=room_plain_events,
+            room_redactions=room_redactions,
+        )
+
+        assert [cached["event_id"] for cached in room_threaded_events["!test:localhost"]] == ["$reference:localhost"]
+        assert room_plain_events == {}
+        assert room_redactions == {}
 
     @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:

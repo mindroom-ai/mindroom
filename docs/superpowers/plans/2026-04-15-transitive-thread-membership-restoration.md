@@ -19,6 +19,13 @@ Current single-hop docs, tests, and helper behavior are expected to be rewritten
 - **Removal commit:** `380214dba` (`refactor: drop reply-chain thread inference`)
 - **Current head at planning time:** `c23c28970`
 
+## Execution Status
+
+- This plan has been executed on branch `issue-139-matrix-message-event-cache`.
+- The main implementation landed across `727d5c1fe`, `087a45cda`, `631f2745e`, `0431969d7`, `897114603`, and `4cef34ad2`.
+- Focused verification passed for the affected thread history, cache, Matrix API, stale cleanup, and thread-tag suites.
+- CI passed on the pushed implementation heads during the execution pass, including smoke and backend test jobs.
+
 ## Invariant To Implement Everywhere
 
 Use one shared rule:
@@ -274,7 +281,7 @@ Any architecture or tool-doc contract change above must be mirrored here in the 
 - Inspect: commit `380214dba`
 - Modify: `docs/superpowers/plans/2026-04-15-transitive-thread-membership-restoration.md`
 
-- [ ] **Step 1: Extract the pre-removal reply-chain rules**
+- [x] **Step 1: Extract the pre-removal reply-chain rules**
 
 Run:
 
@@ -287,14 +294,14 @@ Expected:
 - Understand how the old implementation traversed plain replies, edits, and roots
 - Record any traversal guards that must survive in the new helper
 
-- [ ] **Step 2: Write down the final invariant and edge conditions**
+- [x] **Step 2: Write down the final invariant and edge conditions**
 
 Update this plan with:
 - the precise traversal rules
 - the stop conditions
 - which callers are allowed to use cached membership directly
 
-- [ ] **Step 3: Commit the plan update if it changed materially**
+- [x] **Step 3: Commit the plan update if it changed materially**
 
 ```bash
 git add docs/superpowers/plans/2026-04-15-transitive-thread-membership-restoration.md
@@ -308,7 +315,7 @@ git commit -m "docs: refine transitive thread membership plan"
 - Modify: `src/mindroom/matrix/event_info.py`
 - Test: `tests/test_threading_error.py`
 
-- [ ] **Step 1: Write failing invariant tests**
+- [x] **Step 1: Write failing invariant tests**
 
 Add tests for:
 - plain reply to threaded event => threaded
@@ -317,7 +324,7 @@ Add tests for:
 - reaction/redaction to promoted plain reply => threaded
 - cycles and hop limit => safe fail-closed
 
-- [ ] **Step 2: Run the targeted failures**
+- [x] **Step 2: Run the targeted failures**
 
 Run:
 
@@ -327,7 +334,7 @@ Run:
 
 Expected: FAIL against current single-hop behavior
 
-- [ ] **Step 3: Rebuild `resolve_event_thread_id()` as the only canonical membership rule**
+- [x] **Step 3: Rebuild `resolve_event_thread_id()` as the only canonical membership rule**
 
 Implementation notes:
 - follow direct parents transitively
@@ -335,7 +342,7 @@ Implementation notes:
 - preserve explicit thread metadata as the fastest path
 - keep visited-set and hop limit
 
-- [ ] **Step 4: Re-run the invariant tests**
+- [x] **Step 4: Re-run the invariant tests**
 
 Run:
 
@@ -345,7 +352,7 @@ Run:
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/mindroom/matrix/thread_membership.py src/mindroom/matrix/event_info.py tests/test_threading_error.py
@@ -363,14 +370,14 @@ git commit -m "refactor: restore transitive thread membership"
 - Test: `tests/test_live_message_coalescing.py`
 - Test: `tests/test_threading_error.py`
 
-- [ ] **Step 1: Write failing routing and coalescing tests**
+- [x] **Step 1: Write failing routing and coalescing tests**
 
 Cover:
 - room-level message + bridged reply to thread must not coalesce together incorrectly
 - active-thread bypass must trigger for transitive plain-reply chains
 - reactions should surface the same thread ID as resolver
 
-- [ ] **Step 2: Run the targeted failures**
+- [x] **Step 2: Run the targeted failures**
 
 Run:
 
@@ -378,18 +385,18 @@ Run:
 .venv/bin/pytest tests/test_thread_mode.py tests/test_live_message_coalescing.py tests/test_threading_error.py -k 'coalesc or active_thread or reaction' -x -n 0 --no-cov -q
 ```
 
-- [ ] **Step 3: Replace local membership logic with shared invariant calls**
+- [x] **Step 3: Replace local membership logic with shared invariant calls**
 
 Implementation notes:
 - `coalescing_thread_id()` must use the same `effective_thread_id`
 - pre-gate coalescing and active-thread bypass must see the same answer as later dispatch
 - reaction hook context must stay on the same rule
 
-- [ ] **Step 4: Re-run the targeted slice**
+- [x] **Step 4: Re-run the targeted slice**
 
 Run the same command and verify PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/mindroom/conversation_resolver.py src/mindroom/turn_controller.py src/mindroom/coalescing.py src/mindroom/bot.py tests/test_thread_mode.py tests/test_live_message_coalescing.py tests/test_threading_error.py
@@ -408,7 +415,7 @@ git commit -m "fix: align routing and batching with transitive thread membership
 - Test: `tests/test_event_cache.py`
 - Test: `tests/test_threading_error.py`
 
-- [ ] **Step 1: Write failing hot/cold parity tests**
+- [x] **Step 1: Write failing hot/cold parity tests**
 
 Cover:
 - room-scan fallback includes full transitive plain-reply chain
@@ -416,7 +423,7 @@ Cover:
 - outbound live/sync writes persist transitive membership
 - missing write coordinator fails open without spurious background error noise
 
-- [ ] **Step 2: Run the failures**
+- [x] **Step 2: Run the failures**
 
 Run:
 
@@ -424,7 +431,7 @@ Run:
 .venv/bin/pytest tests/test_thread_history.py tests/test_event_cache.py tests/test_threading_error.py -k 'room_scan or transitive or cache_hit or write_coordinator' -x -n 0 --no-cov -q
 ```
 
-- [ ] **Step 3: Update room-scan reconstruction and cache persistence**
+- [x] **Step 3: Update room-scan reconstruction and cache persistence**
 
 Implementation notes:
 - `_resolve_scanned_thread_message_sources()` should reach a fixpoint using the shared transitive invariant
@@ -432,11 +439,11 @@ Implementation notes:
 - thread reads should not assume a coordinator exists
 - thread writes should persist every transitive member of `T`
 
-- [ ] **Step 4: Re-run the slice**
+- [x] **Step 4: Re-run the slice**
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/mindroom/matrix/client.py src/mindroom/matrix/cache/event_cache.py src/mindroom/matrix/cache/thread_reads.py src/mindroom/matrix/cache/thread_writes.py src/mindroom/matrix/conversation_cache.py tests/test_thread_history.py tests/test_event_cache.py tests/test_threading_error.py
@@ -467,7 +474,7 @@ git commit -m "fix: align hot and cold thread history with transitive membership
 - Test: `tests/test_tool_hooks.py`
 - Test: `tests/test_skills.py`
 
-- [ ] **Step 1: Write failing tool-path regressions**
+- [x] **Step 1: Write failing tool-path regressions**
 
 Cover:
 - tag/summary/attachment helpers accept transitive inherited context
@@ -476,7 +483,7 @@ Cover:
 - `matrix_message` and `subagents` default to the same resolved thread context and outbound cache bookkeeping contract as the main runtime
 - tool runtime preserves source vs resolved thread correctly
 
-- [ ] **Step 2: Run the failures**
+- [x] **Step 2: Run the failures**
 
 Run:
 
@@ -484,7 +491,7 @@ Run:
 .venv/bin/pytest tests/test_thread_tags.py tests/test_thread_tags_tool.py tests/test_thread_summary_tool.py tests/test_attachments_tool.py tests/test_matrix_api_tool.py tests/test_matrix_message_tool.py tests/test_subagents.py tests/test_tool_hooks.py tests/test_skills.py -k 'thread or attachment or dry_run' -x -n 0 --no-cov -q
 ```
 
-- [ ] **Step 3: Remove local thread logic from tools**
+- [x] **Step 3: Remove local thread logic from tools**
 
 Implementation notes:
 - normalize by canonical `effective_thread_id`, then root
@@ -492,11 +499,11 @@ Implementation notes:
 - thread-affecting outbound bookkeeping must use canonical membership
 - `matrix_message` and `subagents` must not preserve their own narrower room/thread defaulting rules
 
-- [ ] **Step 4: Re-run the slice**
+- [x] **Step 4: Re-run the slice**
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/mindroom/thread_tags.py src/mindroom/custom_tools/matrix_message.py src/mindroom/custom_tools/subagents.py src/mindroom/custom_tools/thread_tags.py src/mindroom/custom_tools/thread_summary.py src/mindroom/custom_tools/attachments.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/custom_tools/matrix_api.py src/mindroom/tool_system/runtime_context.py src/mindroom/tool_system/tool_hooks.py src/mindroom/commands/handler.py tests/test_thread_tags.py tests/test_thread_tags_tool.py tests/test_thread_summary_tool.py tests/test_attachments_tool.py tests/test_matrix_api_tool.py tests/test_matrix_message_tool.py tests/test_subagents.py tests/test_tool_hooks.py tests/test_skills.py
@@ -520,7 +527,7 @@ git commit -m "fix: align tools and hooks with transitive thread membership"
 - Test: `tests/test_bot_scheduling.py`
 - Test: `tests/test_multi_agent_bot.py`
 
-- [ ] **Step 1: Write failing follow-up tests**
+- [x] **Step 1: Write failing follow-up tests**
 
 Cover:
 - thread summaries on transitive reply chains
@@ -528,7 +535,7 @@ Cover:
 - regeneration sees the same thread/session identity as live dispatch
 - startup welcome / scheduling restoration still work after any routing changes
 
-- [ ] **Step 2: Run the failures**
+- [x] **Step 2: Run the failures**
 
 Run:
 
@@ -536,17 +543,17 @@ Run:
 .venv/bin/pytest tests/test_streaming_behavior.py tests/test_streaming_edits.py tests/test_edit_response_regeneration.py tests/test_bot_scheduling.py tests/test_multi_agent_bot.py -k 'thread_summary or compaction or regeneration or welcome or restore' -x -n 0 --no-cov -q
 ```
 
-- [ ] **Step 3: Update follow-up surfaces to consume the canonical resolved thread**
+- [x] **Step 3: Update follow-up surfaces to consume the canonical resolved thread**
 
 Implementation notes:
 - no post-response path should recompute thread membership ad hoc
 - summary fallback and delivery targeting should stay consistent with routing
 
-- [ ] **Step 4: Re-run the slice**
+- [x] **Step 4: Re-run the slice**
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/mindroom/post_response_effects.py src/mindroom/response_runner.py src/mindroom/thread_summary.py src/mindroom/message_target.py src/mindroom/delivery_gateway.py src/mindroom/streaming.py src/mindroom/edit_regenerator.py src/mindroom/handled_turns.py tests/test_streaming_behavior.py tests/test_streaming_edits.py tests/test_edit_response_regeneration.py tests/test_bot_scheduling.py tests/test_multi_agent_bot.py
@@ -565,7 +572,7 @@ git commit -m "fix: align follow-up effects with transitive thread membership"
 - Modify: `docs/dev/general-agent-guides/agents/testing-specialist.md`
 - Modify mirrored references if needed
 
-- [ ] **Step 1: Update the public contract**
+- [x] **Step 1: Update the public contract**
 
 Document:
 - transitive plain-reply inheritance
@@ -573,14 +580,14 @@ Document:
 - explicit `m.thread` still primary, but inherited membership is transitive
 - what thread tools default to
 
-- [ ] **Step 2: Update generated mirrors**
+- [x] **Step 2: Update generated mirrors**
 
 Regenerate or hand-update:
 - `skills/mindroom-docs/references/llms-full.txt`
 - `skills/mindroom-docs/references/page__tools__matrix-and-attachments__index.md`
 - `skills/mindroom-docs/references/page__architecture__matrix__index.md`
 
-- [ ] **Step 3: Update the PR body**
+- [x] **Step 3: Update the PR body**
 
 Run:
 
@@ -591,7 +598,7 @@ gh pr edit 575 --body-file /tmp/pr575-body.md
 Expected:
 - Summary says transitive thread membership, not explicit-only or single-hop
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md docs/architecture/matrix.md docs/architecture/bot-runtime.md docs/tools/index.md docs/tools/matrix-and-attachments.md docs/dev/exhaustive-live-test-checklist.md docs/dev/general-agent-guides/agents/testing-specialist.md skills/mindroom-docs/references/llms-full.txt skills/mindroom-docs/references/page__tools__matrix-and-attachments__index.md skills/mindroom-docs/references/page__architecture__matrix__index.md
@@ -604,26 +611,26 @@ git commit -m "docs: describe transitive thread membership"
 - Modify only if verification finds a real issue
 - Test: full affected thread/matrix suite
 
-- [ ] **Step 1: Run the broad focused suite**
+- [x] **Step 1: Run the broad focused suite**
 
 ```bash
 .venv/bin/pytest tests/test_thread_history.py tests/test_threading_error.py tests/test_thread_mode.py tests/test_live_message_coalescing.py tests/test_matrix_api_tool.py tests/test_thread_tags.py tests/test_thread_tags_tool.py tests/test_thread_summary_tool.py tests/test_attachments_tool.py tests/test_multi_agent_bot.py tests/test_streaming_behavior.py tests/test_streaming_edits.py tests/test_edit_response_regeneration.py tests/test_bot_scheduling.py -x -n 0 --no-cov -q
 ```
 
-- [ ] **Step 2: Run touched-file pre-commit**
+- [x] **Step 2: Run touched-file pre-commit**
 
 ```bash
 .venv/bin/pre-commit run --files <touched files>
 ```
 
-- [ ] **Step 3: Push and watch CI**
+- [x] **Step 3: Push and watch CI**
 
 ```bash
 git push
 gh pr checks 575 --watch
 ```
 
-- [ ] **Step 4: Commit only if verification uncovered a final real bug**
+- [x] **Step 4: Commit only if verification uncovered a final real bug**
 
 ```bash
 git add <touched files>
