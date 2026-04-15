@@ -1223,6 +1223,10 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 f"authored_override_validator '{raw_validator}'."
             )
             raise TypeError(msg) from exc
+        raw_runtime_loadable = raw_info.get("runtime_loadable", True)
+        if not isinstance(raw_runtime_loadable, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
+            raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1234,7 +1238,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
-            runtime_loadable=bool(raw_info.get("runtime_loadable", True)),
+            runtime_loadable=raw_runtime_loadable,
         )
     return snapshot
 

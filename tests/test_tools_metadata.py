@@ -469,6 +469,21 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
     assert restored_snapshot["mcp_demo"].agent_override_fields is not None
 
 
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadable() -> None:
+    """Validation snapshot payloads should type-check runtime_loadable strictly."""
+    with pytest.raises(TypeError, match="runtime_loadable to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "shell": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "runtime_loadable": "yes",
+                },
+            },
+        )
+
+
 def test_secret_like_config_fields_are_marked_password() -> None:
     """Secret-like tool config fields should be declared as password inputs."""
     suspicious_suffixes = ("_api_key", "_password", "_secret", "_token")
