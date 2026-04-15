@@ -75,6 +75,7 @@ class _EventCacheWriteCoordinator:
         update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
         *,
         name: str,
+        log_exceptions: bool = True,
     ) -> asyncio.Task[object]:
         """Schedule one room-scoped cache update behind any active predecessor."""
         previous_task = self._room_update_tasks.get(room_id)
@@ -87,6 +88,7 @@ class _EventCacheWriteCoordinator:
             run_after_previous(),
             name=name,
             owner=self.background_task_owner,
+            log_exceptions=log_exceptions,
         )
         self._room_update_predecessors[task] = previous_task
         self._room_update_tasks[room_id] = task
@@ -105,6 +107,7 @@ class _EventCacheWriteCoordinator:
             room_id,
             update_coro_factory,
             name=name,
+            log_exceptions=False,
         )
 
     async def wait_for_room_idle(self, room_id: str) -> None:

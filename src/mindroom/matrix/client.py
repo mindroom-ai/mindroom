@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import io
 import json
 import mimetypes
@@ -1214,6 +1215,7 @@ def _sort_thread_history_root_first(
     *,
     thread_id: str,
     input_order_by_event_id: dict[str, int] | None = None,
+    reply_to_by_event_id: dict[str, str] | None = None,
 ) -> None:
     """Keep the thread root first, then order the remaining messages chronologically."""
     messages.sort(
@@ -1223,9 +1225,111 @@ def _sort_thread_history_root_first(
             message.event_id,
         ),
     )
+    if reply_to_by_event_id is not None:
+        grouped_messages: list[ResolvedVisibleMessage] = []
+        index = 0
+        while index < len(messages):
+            group_end = index + 1
+            while group_end < len(messages) and messages[group_end].timestamp == messages[index].timestamp:
+                group_end += 1
+            grouped_messages.extend(
+                _sort_same_timestamp_group(
+                    messages[index:group_end],
+                    reply_to_by_event_id=reply_to_by_event_id,
+                    input_order_by_event_id=input_order_by_event_id,
+                ),
+            )
+            index = group_end
+        messages[:] = grouped_messages
     root_index = next((index for index, message in enumerate(messages) if message.event_id == thread_id), None)
     if root_index not in (None, 0):
         messages.insert(0, messages.pop(root_index))
+
+
+def _thread_history_input_order(
+    event_id: str,
+    input_order_by_event_id: dict[str, int] | None,
+) -> int:
+    """Return the stable secondary ordering index for one event."""
+    if input_order_by_event_id is None:
+        return 0
+    return input_order_by_event_id.get(event_id, 0)
+
+
+def _build_same_timestamp_reply_graph(
+    messages: list[ResolvedVisibleMessage],
+    *,
+    reply_to_by_event_id: dict[str, str],
+) -> tuple[dict[str, ResolvedVisibleMessage], dict[str, int], dict[str, list[str]]]:
+    """Return parent/child relationships for one same-timestamp message group."""
+    messages_by_event_id = {message.event_id: message for message in messages}
+    in_degree = {message.event_id: 0 for message in messages}
+    children_by_parent: dict[str, list[str]] = {}
+    for event_id in in_degree:
+        parent_event_id = reply_to_by_event_id.get(event_id)
+        if parent_event_id not in messages_by_event_id or parent_event_id == event_id:
+            continue
+        in_degree[event_id] += 1
+        children_by_parent.setdefault(parent_event_id, []).append(event_id)
+    return messages_by_event_id, in_degree, children_by_parent
+
+
+def _sort_same_timestamp_group(
+    messages: list[ResolvedVisibleMessage],
+    *,
+    reply_to_by_event_id: dict[str, str],
+    input_order_by_event_id: dict[str, int] | None,
+) -> list[ResolvedVisibleMessage]:
+    """Keep same-timestamp parents ahead of descendants when reply ancestry is known."""
+    if len(messages) < 2:
+        return messages
+
+    messages_by_event_id, in_degree, children_by_parent = _build_same_timestamp_reply_graph(
+        messages,
+        reply_to_by_event_id=reply_to_by_event_id,
+    )
+    if not children_by_parent:
+        return messages
+
+    ready: list[tuple[int, str]] = []
+    for event_id, degree in in_degree.items():
+        if degree == 0:
+            heapq.heappush(
+                ready,
+                (
+                    _thread_history_input_order(event_id, input_order_by_event_id),
+                    event_id,
+                ),
+            )
+
+    ordered_event_ids: list[str] = []
+    while ready:
+        _input_order, event_id = heapq.heappop(ready)
+        ordered_event_ids.append(event_id)
+        for child_event_id in children_by_parent.get(event_id, ()):
+            in_degree[child_event_id] -= 1
+            if in_degree[child_event_id] == 0:
+                heapq.heappush(
+                    ready,
+                    (
+                        _thread_history_input_order(child_event_id, input_order_by_event_id),
+                        child_event_id,
+                    ),
+                )
+
+    if len(ordered_event_ids) != len(messages):
+        remaining_event_ids = set(messages_by_event_id) - set(ordered_event_ids)
+        ordered_event_ids.extend(
+            sorted(
+                remaining_event_ids,
+                key=lambda event_id: (
+                    _thread_history_input_order(event_id, input_order_by_event_id),
+                    event_id,
+                ),
+            ),
+        )
+
+    return [messages_by_event_id[event_id] for event_id in ordered_event_ids]
 
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
@@ -1297,10 +1401,14 @@ async def _resolve_thread_history_from_event_sources_timed(
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Resolve visible thread history and return approximate sidecar hydration time."""
     input_order_by_event_id: dict[str, int] = {}
+    reply_to_by_event_id: dict[str, str] = {}
     for index, event_source in enumerate(event_sources):
         event_id = event_source.get("event_id")
         if isinstance(event_id, str):
             input_order_by_event_id[event_id] = index
+            reply_to_event_id = EventInfo.from_event(event_source).reply_to_event_id
+            if isinstance(reply_to_event_id, str):
+                reply_to_by_event_id[event_id] = reply_to_event_id
     parsed_events = [
         parsed_event
         for event_source in event_sources
@@ -1343,6 +1451,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         messages,
         thread_id=thread_id,
         input_order_by_event_id=input_order_by_event_id,
+        reply_to_by_event_id=reply_to_by_event_id,
     )
     return messages, round((time.perf_counter() - sidecar_hydration_started) * 1000, 1)
 

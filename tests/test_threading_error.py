@@ -2172,6 +2172,86 @@ class TestThreadingBehavior:
         assert resolved_thread_id == thread_root_id
 
     @pytest.mark.asyncio
+    async def test_resolve_event_thread_id_follows_reaction_target_transitively(
+        self,
+    ) -> None:
+        """The shared entrypoint should inherit thread membership across reaction targets too."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        thread_reply_id = "$thread_reply:localhost"
+        plain_reply_id = "$plain_reply:localhost"
+        reaction_event = EventInfo.from_event(
+            {
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.annotation",
+                        "event_id": plain_reply_id,
+                        "key": "👍",
+                    },
+                },
+                "event_id": "$reaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 4,
+                "room_id": room_id,
+                "type": "m.reaction",
+            },
+        )
+        event_infos: dict[str, EventInfo] = {
+            thread_reply_id: EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": thread_root_id,
+                        },
+                    },
+                    "event_id": thread_reply_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            ),
+            plain_reply_id: EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "plain reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
+                    },
+                    "event_id": plain_reply_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            ),
+        }
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return event_infos.get(event_id)
+
+        async def thread_root_has_children(_room_id: str, _thread_root_id: str) -> bool:
+            return False
+
+        resolved_thread_id = await resolve_event_thread_id(
+            room_id,
+            reaction_event,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                thread_root_has_children=thread_root_has_children,
+            ),
+        )
+
+        assert resolved_thread_id == thread_root_id
+
+    @pytest.mark.asyncio
     async def test_live_edit_of_promoted_plain_reply_persists_event_thread_membership(
         self,
         bot: AgentBot,
@@ -3003,6 +3083,30 @@ class TestThreadingBehavior:
         await wait_for_background_tasks(timeout=1.0, owner=owner)
 
         assert third_update_started.is_set()
+
+    @pytest.mark.asyncio
+    async def test_run_room_update_does_not_log_handled_exception_as_background_failure(self) -> None:
+        """Awaited room updates should not be logged as unhandled background task failures."""
+        owner = object()
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+
+        async def failing_update() -> None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        with patch("mindroom.background_tasks.logger.exception") as background_logger_exception:
+            with pytest.raises(RuntimeError, match="boom"):
+                await coordinator.run_room_update(
+                    "!test:localhost",
+                    lambda: failing_update(),
+                    name="matrix_cache_test_failure",
+                )
+            await asyncio.sleep(0)
+
+        background_logger_exception.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:

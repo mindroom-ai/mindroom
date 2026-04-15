@@ -41,16 +41,11 @@ async def resolve_event_thread_id(
     explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
     if explicit_thread_id is not None:
         return explicit_thread_id
-    if event_info.is_edit and event_info.original_event_id is not None:
+    related_event_id = event_info.next_related_event_id("")
+    if related_event_id is not None:
         return await resolve_related_event_thread_id(
             room_id,
-            event_info.original_event_id,
-            access=access,
-        )
-    if event_info.reply_to_event_id is not None:
-        return await resolve_related_event_thread_id(
-            room_id,
-            event_info.reply_to_event_id,
+            related_event_id,
             access=access,
         )
     return None

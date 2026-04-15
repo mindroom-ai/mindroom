@@ -299,7 +299,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         finally:
             self._turn_event_cache.reset(event_token)
 
-    async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
+    async def get_event(
+        self,
+        room_id: str,
+        event_id: str,
+        *,
+        persist_lookup_fill: bool = True,
+    ) -> EventLookupResult:
         """Resolve one event through per-turn memoization and the advisory cache."""
         cache_key = (room_id, event_id)
         turn_cache = self._turn_event_cache.get()
@@ -313,7 +319,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             event_id,
         )
-        if fetched_event_source is not None:
+        if fetched_event_source is not None and persist_lookup_fill:
 
             async def persist_lookup_event() -> None:
                 await self.runtime.event_cache.store_event(normalized_event_id, room_id, fetched_event_source)
@@ -341,7 +347,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_id: str,
     ) -> EventInfo | None:
         """Resolve one related event through the shared conversation-cache lookup path."""
-        response = await self.get_event(room_id, event_id)
+        response = await self.get_event(room_id, event_id, persist_lookup_fill=False)
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
         return EventInfo.from_event(response.event.source)
