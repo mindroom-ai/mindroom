@@ -1119,6 +1119,78 @@ async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_co
 
 
 @pytest.mark.asyncio
+async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_identity() -> None:
+    """An explicit bridge identity should not backfill missing fields from ambient execution state."""
+    seen: list[tuple[str | None, str | None, str | None, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="child-agent",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="child-agent",
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> str:
+        return str(kwargs["path"])
+
+    with tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == "notes.txt"
+    assert seen == [(None, None, None, None)]
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_runtime_context(
+    tmp_path: Path,
+) -> None:
+    """An explicit bridge identity should not backfill missing fields from ambient runtime context."""
+    seen: list[tuple[str | None, str | None, str | None, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="child-agent",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="child-agent",
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> str:
+        return str(kwargs["path"])
+
+    with tool_runtime_context(_tool_runtime_context(tmp_path, agent_name="parent-agent")):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == "notes.txt"
+    assert seen == [(None, None, None, None)]
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> None:
     """A declined before-call hook should return a synthetic result and not call the real tool."""
     after_seen: list[tuple[bool, object | None, BaseException | None]] = []

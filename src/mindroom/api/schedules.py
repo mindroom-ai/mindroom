@@ -300,12 +300,7 @@ async def update_schedule(
                 room_id=resolved_room_id,
                 task_id=task_id,
                 workflow=updated_workflow,
-                config=runtime_config,
-                runtime_paths=runtime_paths,
-                event_cache=None,
-                conversation_cache=None,
                 existing_task=existing_task,
-                restart_task=False,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e

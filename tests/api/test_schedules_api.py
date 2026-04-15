@@ -187,7 +187,6 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["task_id"] == "abc12345"
     assert save_mock.await_args.kwargs["room_id"] == "test_room"
-    assert save_mock.await_args.kwargs["restart_task"] is False
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
 
 
@@ -250,8 +249,6 @@ async def test_update_schedule_does_not_resolve_cache_path_when_not_restarting()
         )
 
     runtime_config.cache.resolve_db_path.assert_not_called()
-    assert save_mock.await_args.kwargs["event_cache"] is None
-    assert save_mock.await_args.kwargs["restart_task"] is False
     assert response.task_id == "abc12345"
 
 

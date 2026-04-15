@@ -330,6 +330,17 @@ class _ToolCallArguments:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class _SkillToolDispatchTarget:
+    """One valid runtime shape for tool-dispatched skill execution."""
+
+    requester_user_id: str | None
+    room_id: str | None
+    resolved_thread_id: str | None
+    session_id: str | None
+    runtime_context: ToolRuntimeContext | None
+
+
 def _prepare_tool_call_arguments(  # noqa: PLR0911
     entrypoint: Callable[..., object] | None,
     base_args: Mapping[str, object],
@@ -392,6 +403,49 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+def _resolve_skill_tool_dispatch_target(
+    *,
+    requester_user_id: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+    runtime_context: ToolRuntimeContext | None,
+) -> _SkillToolDispatchTarget:
+    if runtime_context is not None:
+        if requester_user_id is not None or room_id is not None or thread_id is not None:
+            msg = "Skill tool dispatch accepts either runtime_context or raw Matrix coordinates."
+            raise ValueError(msg)
+
+        target = MessageTarget.from_runtime_context(runtime_context)
+        return _SkillToolDispatchTarget(
+            requester_user_id=runtime_context.requester_id,
+            room_id=target.room_id,
+            resolved_thread_id=target.resolved_thread_id,
+            session_id=target.session_id,
+            runtime_context=runtime_context,
+        )
+
+    if thread_id is not None and room_id is None:
+        msg = "Skill tool dispatch thread_id requires room_id."
+        raise ValueError(msg)
+
+    target = (
+        MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        )
+        if room_id is not None
+        else None
+    )
+    return _SkillToolDispatchTarget(
+        requester_user_id=requester_user_id,
+        room_id=target.room_id if target is not None else None,
+        resolved_thread_id=target.resolved_thread_id if target is not None else None,
+        session_id=target.session_id if target is not None else None,
+        runtime_context=None,
+    )
+
+
 async def _run_skill_command_tool(
     *,
     config: Config,
@@ -407,30 +461,21 @@ async def _run_skill_command_tool(
     thread_id: str | None = None,
     runtime_context: ToolRuntimeContext | None = None,
 ) -> str:
-    target = (
-        MessageTarget.from_runtime_context(runtime_context)
-        if runtime_context is not None
-        else MessageTarget.resolve(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=None,
-        )
-        if room_id is not None
-        else None
+    dispatch_target = _resolve_skill_tool_dispatch_target(
+        requester_user_id=requester_user_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        runtime_context=runtime_context,
     )
-    resolved_requester_user_id = runtime_context.requester_id if runtime_context is not None else requester_user_id
-    resolved_room_id = target.room_id if target is not None else room_id
-    resolved_thread_id = target.resolved_thread_id if target is not None else thread_id
-    session_id = target.session_id if target is not None else None
     execution_identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent_name,
         runtime_paths=runtime_paths,
-        requester_id=resolved_requester_user_id,
-        room_id=resolved_room_id,
-        thread_id=resolved_thread_id,
-        resolved_thread_id=resolved_thread_id,
-        session_id=session_id,
+        requester_id=dispatch_target.requester_user_id,
+        room_id=dispatch_target.room_id,
+        thread_id=dispatch_target.resolved_thread_id,
+        resolved_thread_id=dispatch_target.resolved_thread_id,
+        session_id=dispatch_target.session_id,
     )
     effective_runtime_paths = (
         runtime_paths
@@ -439,7 +484,7 @@ async def _run_skill_command_tool(
     )
 
     try:
-        with tool_runtime_context(runtime_context), tool_execution_identity(execution_identity):
+        with tool_runtime_context(dispatch_target.runtime_context), tool_execution_identity(execution_identity):
             toolkits = _collect_agent_toolkits(
                 config,
                 agent_name,

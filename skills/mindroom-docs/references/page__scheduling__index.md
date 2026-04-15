@@ -73,4 +73,4 @@ timezone: America/Los_Angeles
 
 ## Persistence
 
-Schedules are stored in Matrix room state and persist across restarts. Past one-time tasks are automatically skipped during restoration. Only the router restores persisted schedules after startup — individual agents do not restore their own. On shutdown, the router cancels its in-memory scheduled tasks before exiting.
+Schedules are stored in Matrix room state and persist across restarts. New schedules use the live runtime to start their in-memory runners immediately. Edits are state-only Matrix writes. Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks. Past one-time tasks are automatically skipped during restoration. Only the router restores persisted schedules after startup — individual agents do not restore their own. On shutdown, the router cancels its in-memory scheduled tasks before exiting.
