@@ -1529,7 +1529,9 @@ class TestExtractedModuleLoggerRebinding:
         )
         thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,
+            event.event_id,
             EventInfo.from_event(event.source),
+            full_history=False,
             dispatch_safe=True,
         )
 

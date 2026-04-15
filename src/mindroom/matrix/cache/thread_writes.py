@@ -311,10 +311,14 @@ class ThreadWritePolicy:
         event_id: str | None,
         context: str,
     ) -> str | None:
+        explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        if explicit_thread_id is not None:
+            return explicit_thread_id
         try:
             thread_id = await resolve_event_thread_id(
                 room_id,
                 event_info,
+                event_id=event_id,
                 access=self._thread_membership_access(),
             )
         except Exception as exc:
@@ -327,11 +331,7 @@ class ThreadWritePolicy:
                 error=str(exc),
             )
             return None
-        if thread_id is not None:
-            return thread_id
-        if _has_explicit_thread_relation(event_info):
-            return event_info.thread_id or event_info.thread_id_from_edit
-        return None
+        return thread_id
 
     async def _event_info_for_thread_resolution(
         self,

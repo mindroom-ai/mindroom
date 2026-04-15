@@ -650,7 +650,10 @@ class AgentBot:
                 thread_id = await resolve_related_event_thread_id(
                     room_id,
                     normalized_target_event_id,
-                    access=self._conversation_resolver.thread_membership_access(dispatch_safe=True),
+                    access=self._conversation_resolver.thread_membership_access(
+                        full_history=False,
+                        dispatch_safe=True,
+                    ),
                 )
             except Exception as exc:
                 self.logger.debug(

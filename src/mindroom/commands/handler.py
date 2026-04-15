@@ -59,6 +59,19 @@ class CommandEvent(Protocol):
     source: dict[str, Any]
 
 
+class DeriveConversationContext(Protocol):
+    """Callable signature for deriving conversation thread context."""
+
+    async def __call__(
+        self,
+        room_id: str,
+        event_info: EventInfo,
+        *,
+        event_id: str | None = None,
+    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
+        """Return whether one event is threaded plus its thread id and history."""
+
+
 @dataclass(frozen=True)
 class CommandHandlerContext:
     """Dependencies required by command handling."""
@@ -68,10 +81,7 @@ class CommandHandlerContext:
     runtime_paths: RuntimePaths
     storage_path: Path
     logger: structlog.stdlib.BoundLogger
-    derive_conversation_context: Callable[
-        [str, EventInfo],
-        Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
-    ]
+    derive_conversation_context: DeriveConversationContext
     conversation_cache: ConversationCacheProtocol
     event_cache: ConversationEventCache
     requester_user_id_for_event: Callable[[CommandEvent], str]
@@ -486,7 +496,11 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     context.logger.info("Handling command", command_type=command.type.value)
 
     event_info = EventInfo.from_event(event.source)
-    _, thread_id, thread_history = await context.derive_conversation_context(room.room_id, event_info)
+    _, thread_id, thread_history = await context.derive_conversation_context(
+        room.room_id,
+        event_info,
+        event_id=event.event_id,
+    )
 
     # Commands/tools that persist conversation context should use the same
     # thread-root policy as outgoing replies.

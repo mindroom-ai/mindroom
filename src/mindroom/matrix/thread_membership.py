@@ -24,6 +24,7 @@ class SupportsEventId(Protocol):
     event_id: str
 
 
+type ThreadMessagesLookup = Callable[[str, str], Awaitable[Sequence[SupportsEventId]]]
 type ThreadSnapshotLookup = Callable[[str, str], Awaitable[Sequence[SupportsEventId]]]
 
 
@@ -50,6 +51,8 @@ async def resolve_event_thread_id(
     event_info: EventInfo,
     *,
     access: ThreadMembershipAccess,
+    event_id: str | None = None,
+    allow_current_root: bool = False,
 ) -> str | None:
     """Return the explicit or inherited thread membership for one event."""
     explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
@@ -62,6 +65,13 @@ async def resolve_event_thread_id(
             related_event_id,
             access=access,
         )
+    if (
+        allow_current_root
+        and event_id is not None
+        and event_info.can_be_thread_root
+        and await access.thread_root_has_children(room_id, event_id)
+    ):
+        return event_id
     return None
 
 
@@ -147,6 +157,17 @@ def map_backed_thread_membership_access(
     )
 
 
+async def thread_messages_root_has_children(
+    room_id: str,
+    thread_root_id: str,
+    *,
+    fetch_thread_messages: ThreadMessagesLookup,
+) -> bool:
+    """Return whether one thread-message fetch proves child replies exist."""
+    thread_messages = await fetch_thread_messages(room_id, thread_root_id)
+    return any(message.event_id != thread_root_id for message in thread_messages)
+
+
 async def snapshot_thread_root_has_children(
     room_id: str,
     thread_root_id: str,
@@ -154,11 +175,11 @@ async def snapshot_thread_root_has_children(
     fetch_thread_snapshot: ThreadSnapshotLookup,
 ) -> bool:
     """Return whether one snapshot-backed lookup proves child replies exist."""
-    try:
-        snapshot = await fetch_thread_snapshot(room_id, thread_root_id)
-    except Exception:
-        return False
-    return any(message.event_id != thread_root_id for message in snapshot)
+    return await thread_messages_root_has_children(
+        room_id,
+        thread_root_id,
+        fetch_thread_messages=fetch_thread_snapshot,
+    )
 
 
 async def room_scan_thread_root_has_children(
@@ -168,11 +189,30 @@ async def room_scan_thread_root_has_children(
     fetch_thread_event_sources: ThreadEventSourcesLookup,
 ) -> bool:
     """Return whether one room-scan-backed lookup proves child replies exist."""
-    try:
-        event_sources, _root_found = await fetch_thread_event_sources(room_id, thread_root_id)
-    except Exception:
-        return False
+    event_sources, _root_found = await fetch_thread_event_sources(room_id, thread_root_id)
     return any(event_source.get("event_id") != thread_root_id for event_source in event_sources)
+
+
+def thread_messages_thread_membership_access(
+    *,
+    lookup_thread_id: ThreadIdLookup,
+    fetch_event_info: EventInfoLookup,
+    fetch_thread_messages: ThreadMessagesLookup,
+) -> ThreadMembershipAccess:
+    """Build shared membership access backed by authoritative thread messages."""
+
+    async def thread_root_has_children(room_id: str, thread_root_id: str) -> bool:
+        return await thread_messages_root_has_children(
+            room_id,
+            thread_root_id,
+            fetch_thread_messages=fetch_thread_messages,
+        )
+
+    return ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        thread_root_has_children=thread_root_has_children,
+    )
 
 
 def snapshot_thread_membership_access(
@@ -182,18 +222,10 @@ def snapshot_thread_membership_access(
     fetch_thread_snapshot: ThreadSnapshotLookup,
 ) -> ThreadMembershipAccess:
     """Build shared membership access backed by authoritative thread snapshots."""
-
-    async def thread_root_has_children(room_id: str, thread_root_id: str) -> bool:
-        return await snapshot_thread_root_has_children(
-            room_id,
-            thread_root_id,
-            fetch_thread_snapshot=fetch_thread_snapshot,
-        )
-
-    return ThreadMembershipAccess(
+    return thread_messages_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
-        thread_root_has_children=thread_root_has_children,
+        fetch_thread_messages=fetch_thread_snapshot,
     )
 
 

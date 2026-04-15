@@ -19,7 +19,7 @@ from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
-    snapshot_thread_membership_access,
+    thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import check_agent_mentioned
@@ -288,39 +288,52 @@ class ConversationResolver:
             return None
         return await self._explicit_thread_id_for_event(
             room.room_id,
+            event.event_id,
             EventInfo.from_event(event.source),
+            full_history=False,
             dispatch_safe=True,
         )
 
     async def _explicit_thread_id_for_event(
         self,
         room_id: str,
+        event_id: str | None,
         event_info: EventInfo,
         *,
+        full_history: bool,
         dispatch_safe: bool,
     ) -> str | None:
         """Resolve canonical thread membership for one event."""
         return await resolve_event_thread_id(
             room_id,
             event_info,
-            access=self.thread_membership_access(dispatch_safe=dispatch_safe),
+            event_id=event_id,
+            access=self.thread_membership_access(
+                full_history=full_history,
+                dispatch_safe=dispatch_safe,
+            ),
         )
 
     def thread_membership_access(
         self,
         *,
+        full_history: bool,
         dispatch_safe: bool,
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver."""
-        fetch_snapshot = (
-            self.deps.conversation_cache.get_dispatch_thread_snapshot
+        fetch_thread_messages = (
+            self.deps.conversation_cache.get_dispatch_thread_history
+            if full_history and dispatch_safe
+            else self.deps.conversation_cache.get_thread_history
+            if full_history
+            else self.deps.conversation_cache.get_dispatch_thread_snapshot
             if dispatch_safe
             else self.deps.conversation_cache.get_thread_snapshot
         )
-        return snapshot_thread_membership_access(
+        return thread_messages_thread_membership_access(
             lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
             fetch_event_info=self._event_info_for_event_id,
-            fetch_thread_snapshot=fetch_snapshot,
+            fetch_thread_messages=fetch_thread_messages,
         )
 
     async def _event_info_for_event_id(
@@ -337,10 +350,13 @@ class ConversationResolver:
         self,
         room_id: str,
         event_info: EventInfo,
+        *,
+        event_id: str | None = None,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
         """Derive conversation context from canonical Matrix thread membership."""
         is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
             room_id,
+            event_id,
             event_info,
             full_history=True,
             dispatch_safe=False,
@@ -350,6 +366,7 @@ class ConversationResolver:
     async def _resolve_thread_context(
         self,
         room_id: str,
+        event_id: str | None,
         event_info: EventInfo,
         *,
         full_history: bool,
@@ -358,7 +375,9 @@ class ConversationResolver:
         """Resolve one thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(
             room_id,
+            event_id,
             event_info,
+            full_history=full_history,
             dispatch_safe=dispatch_safe,
         )
         if thread_id is None:
@@ -457,6 +476,7 @@ class ConversationResolver:
                 requires_full_thread_history,
             ) = await self._resolve_thread_context(
                 room.room_id,
+                event.event_id,
                 event_info,
                 full_history=full_history,
                 dispatch_safe=dispatch_safe,

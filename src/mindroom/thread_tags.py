@@ -141,17 +141,6 @@ def _normalize_non_empty_string(value: object) -> str | None:
     return normalized_value
 
 
-def _canonical_thread_id(event_info: EventInfo, *, fallback_root: str | None = None) -> str | None:
-    """Return the explicit or canonical root thread ID represented by one event."""
-    if event_info.thread_id is not None:
-        return event_info.thread_id
-    if event_info.thread_id_from_edit is not None:
-        return event_info.thread_id_from_edit
-    if fallback_root is not None and event_info.can_be_thread_root:
-        return fallback_root
-    return None
-
-
 async def _event_info_for_event_id(
     client: nio.AsyncClient,
     room_id: str,
@@ -792,22 +781,11 @@ async def normalize_thread_root_event_id(
     if event_info is None:
         return await _lookup_thread_id_from_cache(conversation_cache, room_id, normalized_event_id)
 
-    normalized_thread_id = _canonical_thread_id(event_info, fallback_root=normalized_event_id)
-    if normalized_thread_id is not None:
-        return normalized_thread_id
-    if event_info.is_edit and event_info.original_event_id is not None:
-        original_info = await _event_info_for_event_id(client, room_id, event_info.original_event_id)
-        if original_info is not None:
-            normalized_original_thread_id = _canonical_thread_id(
-                original_info,
-                fallback_root=event_info.original_event_id,
-            )
-            if normalized_original_thread_id is not None:
-                return normalized_original_thread_id
-
     return await resolve_event_thread_id(
         room_id,
         event_info,
+        event_id=normalized_event_id,
+        allow_current_root=True,
         access=_thread_membership_access(
             client,
             conversation_cache=conversation_cache,

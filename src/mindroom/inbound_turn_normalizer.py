@@ -160,6 +160,7 @@ class InboundTurnNormalizer:
         _, thread_id, _ = await self.deps.conversation_resolver.derive_conversation_context(
             request.room.room_id,
             event_info,
+            event_id=request.event.event_id,
         )
         effective_thread_id = self.deps.conversation_resolver.build_message_target(
             room_id=request.room.room_id,
