@@ -5109,6 +5109,49 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
+    async def test_router_welcome_waits_for_joined_room_cache_before_send(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Welcome sends should wait until the joined room is cached locally."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.client.rooms = {}
+        bot.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id="!welcome:localhost",
+                chunk=[],
+                start="",
+                end=None,
+            ),
+        )
+
+        async def fake_send_response(*, room_id: str, **_: object) -> str:
+            assert room_id in bot.client.rooms
+            return "$welcome"
+
+        async def populate_room_cache(_delay: float) -> None:
+            bot.client.rooms["!welcome:localhost"] = MagicMock()
+
+        bot._send_response = AsyncMock(side_effect=fake_send_response)
+        with (
+            patch("mindroom.bot._generate_welcome_message", return_value="Welcome"),
+            patch("mindroom.bot.asyncio.sleep", new=AsyncMock(side_effect=populate_room_cache)) as mock_sleep,
+        ):
+            await bot._send_welcome_message_if_empty("!welcome:localhost")
+
+        mock_sleep.assert_awaited()
+        bot._send_response.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_router_routes_file_messages_with_sender_metadata(
         self,
         tmp_path: Path,
