@@ -985,6 +985,36 @@ async def test_redaction_removes_event_thread_rows_and_blocks_late_edit_resurrec
 
 
 @pytest.mark.asyncio
+async def test_store_events_batch_records_thread_root_self_mapping_from_explicit_thread_child(
+    tmp_path: Path,
+) -> None:
+    """Explicit threaded children should also make the root resolve to its own thread id."""
+    cache = _EventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+
+    reply_event = _make_text_event(
+        event_id="$reply",
+        sender="@user:localhost",
+        body="Reply",
+        server_timestamp=2000,
+        source_content={
+            "body": "Reply",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+        },
+    )
+
+    try:
+        await cache.store_events_batch([("$reply", "!room:localhost", _cache_source(reply_event))])
+        reply_thread_id = await cache.get_thread_id_for_event("!room:localhost", "$reply")
+        root_thread_id = await cache.get_thread_id_for_event("!room:localhost", "$thread_root")
+    finally:
+        await cache.close()
+
+    assert reply_thread_id == "$thread_root"
+    assert root_thread_id == "$thread_root"
+
+
+@pytest.mark.asyncio
 async def test_store_events_batch_rolls_back_on_index_derivation_failure(tmp_path: Path) -> None:
     """Failed batch writes must not leak partial point-lookup rows into later commits."""
     cache = _EventCache(tmp_path / "event_cache.db")

@@ -799,16 +799,12 @@ class _EventCache:
                 thread_id=thread_id,
             )
         else:
-            await db.execute(
+            await db.executemany(
                 """
                 INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
                 VALUES (?, ?, ?)
                 """,
-                (
-                    room_id,
-                    event_id,
-                    thread_id,
-                ),
+                _with_thread_root_self_rows([(room_id, event_id, thread_id)]),
             )
         await db.commit()
         return True
@@ -979,6 +975,22 @@ def _event_thread_row(room_id: str, event: dict[str, Any]) -> tuple[str, str, st
     return room_id, event_id, thread_id
 
 
+def _with_thread_root_self_rows(
+    thread_rows: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """Ensure any learned thread membership also records the root's own lookup row."""
+    if not thread_rows:
+        return thread_rows
+    return list(
+        dict.fromkeys(
+            [
+                *thread_rows,
+                *((room_id, thread_id, thread_id) for room_id, _event_id, thread_id in thread_rows),
+            ],
+        ),
+    )
+
+
 def _event_timestamp(event: dict[str, Any]) -> int:
     timestamp = event.get("origin_server_ts")
     if isinstance(timestamp, int) and not isinstance(timestamp, bool):
@@ -1083,6 +1095,7 @@ async def _write_lookup_index_rows(
         ]
     )
     if thread_rows:
+        thread_rows = _with_thread_root_self_rows(thread_rows)
         await db.executemany(
             """
             INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
