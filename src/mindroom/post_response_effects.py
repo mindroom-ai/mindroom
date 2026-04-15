@@ -331,7 +331,9 @@ async def apply_post_response_effects(  # noqa: C901
                 "Failed to queue memory persistence after response",
                 session_id=outcome.session_id,
                 room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
-                thread_id=outcome.interactive_target.thread_id if outcome.interactive_target is not None else None,
+                thread_id=(
+                    outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
+                ),
             )
 
     if (

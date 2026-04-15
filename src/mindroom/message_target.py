@@ -15,7 +15,7 @@ class MessageTarget:
     """Single source of truth for where one message should be delivered."""
 
     room_id: str
-    thread_id: str | None
+    source_thread_id: str | None
     resolved_thread_id: str | None
     reply_to_event_id: str | None
     session_id: str
@@ -57,7 +57,7 @@ class MessageTarget:
         """Build the canonical target represented by one tool runtime context."""
         return cls(
             room_id=context.room_id,
-            thread_id=context.thread_id,
+            source_thread_id=context.thread_id,
             resolved_thread_id=context.resolved_thread_id,
             reply_to_event_id=context.reply_to_event_id,
             session_id=context.session_id or cls._build_session_id(context.room_id, context.resolved_thread_id),
@@ -69,7 +69,7 @@ class MessageTarget:
             return self
         return MessageTarget(
             room_id=self.room_id,
-            thread_id=self.thread_id,
+            source_thread_id=self.source_thread_id,
             resolved_thread_id=resolved_thread_id,
             reply_to_event_id=self.reply_to_event_id,
             session_id=self._build_session_id(self.room_id, resolved_thread_id),
@@ -91,7 +91,7 @@ class MessageTarget:
 
         return cls(
             room_id=room_id,
-            thread_id=effective_thread_id,
+            source_thread_id=effective_thread_id,
             resolved_thread_id=resolved_thread_id,
             reply_to_event_id=reply_to_event_id,
             session_id=cls._build_session_id(room_id, resolved_thread_id),

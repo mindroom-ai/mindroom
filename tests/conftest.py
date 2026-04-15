@@ -594,7 +594,7 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
             request.target.room_id,
             request.target.reply_to_event_id,
             request.response_text,
-            request.target.thread_id,
+            request.target.resolved_thread_id,
             reply_to_event=None,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
@@ -652,7 +652,7 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
             request.target.room_id,
             request.event_id,
             request.new_text,
-            request.target.thread_id,
+            request.target.resolved_thread_id,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
         )

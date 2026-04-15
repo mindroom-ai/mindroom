@@ -931,7 +931,7 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
     request = bot._delivery_gateway.send_text.call_args.args[0]
     assert request.target.reply_to_event_id == "$voice_event"
     assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
-    assert request.target.thread_id == "$voice_event"
+    assert request.target.resolved_thread_id == "$voice_event"
     assert request.skip_mentions is True
 
 
@@ -1170,7 +1170,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
     assert request.target.reply_to_event_id == "$voice_event"
-    assert request.target.thread_id == "$voice_event"
+    assert request.target.resolved_thread_id == "$voice_event"
     assert request.target.resolved_thread_id == "$voice_event"
     assert request.response_text == "@home could you help with this?"
     assert request.extra_content == {

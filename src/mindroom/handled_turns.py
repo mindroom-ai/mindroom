@@ -651,7 +651,7 @@ def _normalized_conversation_target(conversation_target: MessageTarget | None) -
     )
     return MessageTarget(
         room_id=conversation_target.room_id,
-        thread_id=_normalized_event_id(conversation_target.thread_id),
+        source_thread_id=_normalized_event_id(conversation_target.source_thread_id),
         resolved_thread_id=_normalized_event_id(conversation_target.resolved_thread_id),
         reply_to_event_id=_normalized_event_id(conversation_target.reply_to_event_id),
         session_id=session_id,
@@ -709,7 +709,7 @@ def _serialized_record(
     if conversation_target is not None:
         record["conversation_target"] = {
             "room_id": conversation_target.room_id,
-            "thread_id": conversation_target.thread_id,
+            "source_thread_id": conversation_target.source_thread_id,
             "resolved_thread_id": conversation_target.resolved_thread_id,
             "reply_to_event_id": conversation_target.reply_to_event_id,
             "session_id": conversation_target.session_id,
@@ -830,7 +830,7 @@ def _normalize_serialized_record(
     if conversation_target is not None:
         normalized_record["conversation_target"] = {
             "room_id": conversation_target.room_id,
-            "thread_id": conversation_target.thread_id,
+            "source_thread_id": conversation_target.source_thread_id,
             "resolved_thread_id": conversation_target.resolved_thread_id,
             "reply_to_event_id": conversation_target.reply_to_event_id,
             "session_id": conversation_target.session_id,
@@ -915,7 +915,7 @@ def _conversation_target_for_record(record: _SerializedHandledTurnRecordLike | N
     resolved_thread_id = _normalized_event_id(raw_target.get("resolved_thread_id"))
     normalized_target = MessageTarget(
         room_id=room_id,
-        thread_id=_normalized_event_id(raw_target.get("thread_id")),
+        source_thread_id=_normalized_event_id(raw_target.get("source_thread_id") or raw_target.get("thread_id")),
         resolved_thread_id=resolved_thread_id,
         reply_to_event_id=_normalized_event_id(raw_target.get("reply_to_event_id")),
         session_id=(

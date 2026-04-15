@@ -199,7 +199,7 @@ class StreamingResponse:
                 room_mode=self.room_mode,
             )
         self.room_id = self.target.room_id
-        self.thread_id = self.target.thread_id
+        self.thread_id = self.target.resolved_thread_id
         self.reply_to_event_id = self.target.reply_to_event_id
         self.room_mode = self.target.is_room_mode
 

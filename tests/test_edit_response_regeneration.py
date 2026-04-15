@@ -707,7 +707,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     mock_remove_stale_runs.assert_called_once()
     call_kwargs = mock_generate_response.call_args.kwargs
     assert call_kwargs["reply_to_event_id"] == "$original:example.com"
-    assert call_kwargs["thread_id"] == stored_target.thread_id
+    assert call_kwargs["thread_id"] == stored_target.resolved_thread_id
     assert call_kwargs["target"] == stored_target
 
 

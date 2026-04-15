@@ -29,6 +29,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.thread_utils import create_session_id
+from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -523,7 +524,7 @@ class TestCreateSessionIdWithNoneThread:
             reply_to_event_id="$event456",
             room_mode=True,
         )
-        assert target.thread_id is None
+        assert target.source_thread_id is None
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
@@ -538,6 +539,37 @@ class TestCreateSessionIdWithNoneThread:
         assert target.reply_to_event_id == "$event456"
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
+
+    def test_message_target_from_runtime_context_keeps_room_mode_thread_provenance(self) -> None:
+        """Room-mode runtime targets should retain raw provenance only under the source-thread field."""
+        config = _runtime_bound_config(
+            Config(
+                agents={},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+        )
+        runtime_context = ToolRuntimeContext(
+            agent_name="assistant",
+            room_id="!room:localhost",
+            thread_id="$raw-thread",
+            resolved_thread_id=None,
+            requester_id="@user:localhost",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            event_cache=make_event_cache_mock(),
+            reply_to_event_id="$event456",
+            session_id=create_session_id("!room:localhost", None),
+        )
+
+        target = MessageTarget.from_runtime_context(runtime_context)
+
+        assert target.source_thread_id == "$raw-thread"
+        assert target.resolved_thread_id is None
+        assert target.is_room_mode is True
 
 
 class TestExtractMessageContextRoomMode:
@@ -804,7 +836,7 @@ class TestExtractMessageContextRoomMode:
         )
 
         assert threaded_target.resolved_thread_id == "$thread123"
-        assert room_mode_target.thread_id is None
+        assert room_mode_target.source_thread_id is None
         assert room_mode_target.resolved_thread_id is None
 
     def test_build_message_target_plain_reply_does_not_infer_thread_identity(
