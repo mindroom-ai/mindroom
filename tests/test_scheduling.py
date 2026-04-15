@@ -771,6 +771,36 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_once_task_tolerates_initial_missing_pending_state() -> None:
+    """One-time tasks should not self-cancel on an immediate post-save read miss."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Run once",
+        description="One-time reminder",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    pending_record = _record("task_once_missing_initial_state", workflow, status="pending")
+
+    with (
+        patch(
+            "mindroom.scheduling.get_scheduled_task",
+            new=AsyncMock(side_effect=[None, pending_record]),
+        ),
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock(return_value=True)) as execute_mock,
+    ):
+        await _run_once_task(client, "task_once_missing_initial_state", workflow, config, _runtime_paths())
+
+    execute_mock.assert_awaited_once()
+    client.room_put_state.assert_awaited_once()
+    assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_run_once_task_marks_completed_after_success() -> None:
     """One-time tasks should overwrite pending state with completed after firing."""
     client = AsyncMock()

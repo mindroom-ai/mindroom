@@ -1003,13 +1003,32 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
 
     current_target = MessageTarget.for_scheduled_task(workflow)
     latest_pending_task: ScheduledTaskRecord | None = None
+    has_confirmed_pending_state = False
     try:
         while True:
             latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
             if not latest_task:
-                with bound_log_context(**current_target.log_context):
-                    logger.info("One-time task is no longer pending, stopping", task_id=task_id)
-                return
+                if not has_confirmed_pending_state:
+                    with bound_log_context(**current_target.log_context):
+                        logger.warning(
+                            "One-time task missing pending state immediately after start; using in-memory workflow",
+                            task_id=task_id,
+                        )
+                    latest_task = ScheduledTaskRecord(
+                        task_id=task_id,
+                        room_id=workflow.room_id,
+                        status="pending",
+                        created_at=None,
+                        workflow=workflow,
+                    )
+                else:
+                    with bound_log_context(**current_target.log_context):
+                        logger.info("One-time task is no longer pending, stopping", task_id=task_id)
+                    return
+
+            has_confirmed_pending_state = has_confirmed_pending_state or latest_task.created_at is not None
+            if latest_pending_task is None:
+                latest_pending_task = latest_task
 
             latest_workflow = latest_task.workflow
             workflow = latest_workflow
