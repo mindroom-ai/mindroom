@@ -22,6 +22,7 @@ from mindroom.matrix.reply_chain import (
     derive_conversation_target,
 )
 from mindroom.matrix.room_cache import cached_room
+from mindroom.matrix.rooms import is_dm_room
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import check_agent_mentioned
 
@@ -100,6 +101,18 @@ class ConversationResolver:
 
     def _matrix_id(self) -> MatrixID:
         return self.deps.matrix_id
+
+    async def _should_use_room_mode(self, room_id: str) -> bool:
+        """Return whether inbound events in this room should ignore thread metadata."""
+        config_prefers_room_mode = (
+            self.deps.runtime.config.get_entity_thread_mode(
+                self.deps.agent_name,
+                self.deps.runtime_paths,
+                room_id=room_id,
+            )
+            == "room"
+        )
+        return config_prefers_room_mode or await is_dm_room(self._client(), room_id)
 
     def _envelope_ingress_metadata(
         self,
@@ -274,15 +287,7 @@ class ConversationResolver:
         event: DispatchEvent,
     ) -> str | None:
         """Return the coalescing thread scope for one inbound event."""
-        config = self.deps.runtime.config
-        if (
-            config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room.room_id,
-            )
-            == "room"
-        ):
+        if await self._should_use_room_mode(room.room_id):
             return None
         event_info = EventInfo.from_event(event.source)
         if event_info.thread_id:
@@ -378,14 +383,7 @@ class ConversationResolver:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
 
         event_info = EventInfo.from_event(resolved_event_source)
-        if (
-            config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room.room_id,
-            )
-            == "room"
-        ):
+        if await self._should_use_room_mode(room.room_id):
             is_thread = False
             thread_id = None
             thread_history: list[ResolvedVisibleMessage] = []

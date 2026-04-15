@@ -19,6 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.conversation_resolver import MessageContext
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -176,6 +177,69 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
         # Router should NOT have been called
         assert mock_suggest_agent.call_count == 0
+
+    @pytest.mark.asyncio
+    @patch("mindroom.conversation_resolver.is_dm_room", new_callable=AsyncMock, return_value=True)
+    async def test_dm_fallback_thread_message_is_routed_in_room_mode(
+        self,
+        mock_is_dm_room: AsyncMock,
+        mock_research_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """DM follow-ups with fallback thread metadata should stay in room mode."""
+        test_room_id = "!dm:localhost"
+        thread_root = "$thread_root"
+
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
+
+        mock_room = MagicMock()
+        mock_room.room_id = test_room_id
+        mock_room.users = {
+            "@user:localhost": MagicMock(),
+            mock_research_agent.user_id: MagicMock(),
+        }
+
+        message_event = MagicMock(spec=nio.RoomMessageText)
+        message_event.sender = "@user:localhost"
+        message_event.body = "followup"
+        message_event.event_id = "$user_msg_456"
+        message_event.server_timestamp = 1000
+        message_event.source = {
+            "content": {
+                "body": "followup",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "event_id": thread_root,
+                    "rel_type": "m.thread",
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": thread_root},
+                },
+            },
+        }
+
+        coalescing_thread_id = await research_bot._conversation_resolver.coalescing_thread_id(
+            mock_room,
+            message_event,
+        )
+        context = await research_bot._conversation_resolver.extract_dispatch_context(
+            mock_room,
+            message_event,
+        )
+        dispatch = await research_bot._turn_controller._prepare_dispatch(
+            mock_room,
+            message_event,
+            message_event.sender,
+            event_label="message",
+            handled_turn=HandledTurnState.from_source_event_id(message_event.event_id),
+        )
+
+        assert coalescing_thread_id is None
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert dispatch is not None
+        assert dispatch.target.thread_id is None
+        assert dispatch.target.reply_to_event_id == message_event.event_id
+        assert mock_is_dm_room.await_count >= 1
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.ai_response")
