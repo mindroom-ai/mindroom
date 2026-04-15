@@ -378,10 +378,11 @@ class TestBotTaskRestoration:
                 mock_client.add_response_callback = MagicMock()
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
+                mock_client.rooms = {}
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
-                mock_join_response = MagicMock(spec=nio.JoinResponse)
+                mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
                 mock_client.join.return_value = mock_join_response
 
                 mock_restore.return_value = 2  # 2 tasks restored
@@ -428,10 +429,11 @@ class TestBotTaskRestoration:
                 mock_client.add_response_callback = MagicMock()
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
+                mock_client.rooms = {}
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
-                mock_join_response = MagicMock(spec=nio.JoinResponse)
+                mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
                 mock_client.join.return_value = mock_join_response
 
                 mock_restore.return_value = 0  # No tasks restored

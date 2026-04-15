@@ -217,8 +217,8 @@ You: @mindroom_research @mindroom_analyst What are the latest AI breakthroughs?
 
 ### Agent Response Rules
 Agents respond using Matrix thread relations to keep conversations organized.
-If your client or bridge only sends plain replies, MindRoom keeps them in an existing explicit thread when the direct reply target already belongs to that thread.
-Plain replies to ordinary room messages still stay plain replies.
+If your client or bridge only sends plain replies, MindRoom keeps them in an existing thread when the reply chain eventually reaches a threaded ancestor or proven thread root.
+Plain replies that never reach threaded context still stay plain replies.
 
 1. **Mentioned agents always respond** - Tag them to get their attention
 2. **Single agent continues** - One agent in thread? It keeps responding

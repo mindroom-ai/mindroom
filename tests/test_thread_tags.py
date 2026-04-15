@@ -1500,8 +1500,8 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_does_not_walk_past_direct_plain_reply_target() -> None:
-    """Plain replies should not inherit a thread by walking past an unclassified direct target."""
+async def test_normalize_thread_root_event_id_walks_transitively_to_threaded_ancestor() -> None:
+    """Plain replies should normalize transitively when the reply chain eventually reaches a threaded ancestor."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
         side_effect=[
@@ -1521,6 +1521,14 @@ async def test_normalize_thread_root_event_id_does_not_walk_past_direct_plain_re
                     "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
                 },
             ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root:localhost"},
+                },
+            ),
         ],
     )
 
@@ -1530,9 +1538,10 @@ async def test_normalize_thread_root_event_id_does_not_walk_past_direct_plain_re
         "$plain-reply-2:localhost",
     )
 
-    assert normalized is None
+    assert normalized == "$thread-root:localhost"
     assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply-2:localhost")
     assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-reply-1:localhost")
+    assert client.room_get_event.await_args_list[2].args == ("!room:localhost", "$thread-reply:localhost")
     client.room_messages.assert_not_awaited()
 
 

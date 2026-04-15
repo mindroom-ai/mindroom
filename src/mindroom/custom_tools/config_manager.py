@@ -433,7 +433,7 @@ class ConfigManagerTools(Toolkit):
 - **Teams**: Groups of agents that collaborate
 - **Tools**: Integrations that give agents capabilities (80+ available)
 - **Memory**: Persistent conversation memory across sessions
-- **Threading**: Agents respond with explicit thread relations, and plain replies inherit an existing explicit thread only from their direct reply target
+- **Threading**: Agents respond with explicit thread relations, and plain replies inherit thread membership transitively when their reply chain reaches a threaded ancestor
 - **Routing**: Smart agent selection based on message content
 - **Commands**: Special !commands for configuration and control
 """

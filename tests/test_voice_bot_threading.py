@@ -183,8 +183,10 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
 
 
 @pytest.mark.asyncio
-async def test_voice_plain_reply_to_thread_message_stays_plain_reply(mock_home_bot: AgentBot) -> None:
-    """Plain-reply audio should not inherit thread context from the replied-to event."""
+async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Plain-reply audio should inherit thread context transitively from the replied-to event."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -200,12 +202,12 @@ async def test_voice_plain_reply_to_thread_message_stays_plain_reply(mock_home_b
     )
 
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(False, None, []),
+        return_value=(True, "$thread_root", []),
     )
     mock_context = MagicMock()
     mock_context.am_i_mentioned = False
-    mock_context.is_thread = False
-    mock_context.thread_id = None
+    mock_context.is_thread = True
+    mock_context.thread_id = "$thread_root"
     mock_context.thread_history = []
     mock_context.mentioned_agents = []
     mock_context.has_non_agent_mentions = False
@@ -224,8 +226,8 @@ async def test_voice_plain_reply_to_thread_message_stays_plain_reply(mock_home_b
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
     assert call_kwargs["reply_to_event_id"] == "$voice789"
-    assert call_kwargs["thread_id"] is None
+    assert call_kwargs["thread_id"] == "$thread_root"
     assert call_kwargs["prompt"].startswith("🎤 continue the same thread")
     attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice789"))
     assert attachment is not None
-    assert attachment.thread_id is None
+    assert attachment.thread_id == "$thread_root"

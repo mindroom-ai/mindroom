@@ -294,7 +294,7 @@ class ConversationResolver:
         *,
         dispatch_safe: bool,
     ) -> str | None:
-        """Resolve explicit thread identity with direct-target inheritance only."""
+        """Resolve canonical thread membership for one event."""
         access = ThreadMembershipAccess(
             lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
             fetch_event_info=self._event_info_for_event_id,
@@ -346,7 +346,7 @@ class ConversationResolver:
         room_id: str,
         event_info: EventInfo,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
-        """Derive conversation context from explicit Matrix threads only."""
+        """Derive conversation context from canonical Matrix thread membership."""
         is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
             room_id,
             event_info,
@@ -363,7 +363,7 @@ class ConversationResolver:
         full_history: bool,
         dispatch_safe: bool,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
-        """Resolve one explicit-thread context using either snapshot or full history."""
+        """Resolve one thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(
             room_id,
             event_info,

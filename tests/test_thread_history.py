@@ -1298,8 +1298,8 @@ class TestThreadHistory:
         assert set(resolved) == {"$root", "$z-parent", "$a-child"}
 
     @pytest.mark.asyncio
-    async def test_room_scan_does_not_promote_second_plain_reply_hop(self) -> None:
-        """Cold room scans must not treat a promoted plain reply as a new inheritance source."""
+    async def test_room_scan_promotes_transitive_plain_reply_chain(self) -> None:
+        """Cold room scans should keep a plain-reply chain inside the same thread transitively."""
         resolved = await _resolve_scanned_thread_message_sources(
             room_id="!room:localhost",
             thread_id="$root",
@@ -1343,7 +1343,7 @@ class TestThreadHistory:
             },
         )
 
-        assert list(resolved) == ["$root", "$thread_reply", "$plain1"]
+        assert list(resolved) == ["$root", "$thread_reply", "$plain1", "$plain2"]
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_keeps_same_timestamp_promoted_descendant(self) -> None:

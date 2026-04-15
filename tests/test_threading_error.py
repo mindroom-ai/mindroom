@@ -12,7 +12,7 @@ import asyncio
 import json
 import time
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import nio
 import pytest
@@ -1934,11 +1934,11 @@ class TestThreadingBehavior:
             await real_event_cache.close()
 
     @pytest.mark.asyncio
-    async def test_live_plain_reply_to_unclassified_plain_reply_does_not_persist_thread_membership(
+    async def test_live_plain_reply_chain_persists_thread_membership_transitively(
         self,
         bot: AgentBot,
     ) -> None:
-        """A second plain reply should not inherit thread membership past its direct unclassified target."""
+        """A plain-reply chain should persist thread membership transitively once it reaches a thread."""
         room_id = "!test:localhost"
         thread_root_id = "$thread_root:localhost"
         thread_reply_id = "$thread_reply:localhost"
@@ -2011,7 +2011,7 @@ class TestThreadingBehavior:
             )
             await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
 
-            assert await real_event_cache.get_thread_id_for_event(room_id, second_plain_reply_id) is None
+            assert await real_event_cache.get_thread_id_for_event(room_id, second_plain_reply_id) == thread_root_id
         finally:
             await real_event_cache.close()
 
@@ -3274,11 +3274,11 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_to_unclassified_plain_reply_stays_room_level(
+    async def test_extract_context_plain_reply_chain_stays_threaded_transitively(
         self,
         bot: AgentBot,
     ) -> None:
-        """A plain reply should not inherit a thread by walking past its direct plain-reply target."""
+        """A plain reply chain should stay threaded when it eventually reaches a threaded ancestor."""
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"
@@ -3299,20 +3299,39 @@ class TestThreadingBehavior:
         )
 
         bot.client.room_get_event = AsyncMock(
-            return_value=nio.RoomGetEventResponse.from_dict(
-                {
-                    "content": {
-                        "body": "first bridge reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "first bridge reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                        },
+                        "event_id": "$plain_reply_1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567896,
+                        "room_id": room.room_id,
+                        "type": "m.room.message",
                     },
-                    "event_id": "$plain_reply_1:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567896,
-                    "room_id": room.room_id,
-                    "type": "m.room.message",
-                },
-            ),
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "thread reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {
+                                "rel_type": "m.thread",
+                                "event_id": "$thread_root:localhost",
+                            },
+                        },
+                        "event_id": "$thread_msg:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567895,
+                        "room_id": room.room_id,
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
         )
 
         with (
@@ -3324,24 +3343,40 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(),
+                AsyncMock(
+                    return_value=[
+                        _message(event_id="$thread_root:localhost", body="Root message"),
+                        _message(event_id="$thread_msg:localhost", body="Thread reply"),
+                        _message(event_id="$plain_reply_1:localhost", body="first bridge reply"),
+                    ],
+                ),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        mock_lookup.assert_not_awaited()
-        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
-        mock_fetch.assert_not_called()
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert [message.event_id for message in context.thread_history] == [
+            "$thread_root:localhost",
+            "$thread_msg:localhost",
+            "$plain_reply_1:localhost",
+        ]
+        assert mock_lookup.await_args_list == [
+            call(room.room_id, "$plain_reply_1:localhost"),
+            call(room.room_id, "$thread_msg:localhost"),
+        ]
+        assert bot.client.room_get_event.await_args_list == [
+            call(room.room_id, "$plain_reply_1:localhost"),
+            call(room.room_id, "$thread_msg:localhost"),
+        ]
+        mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_to_promoted_plain_reply_stays_room_level(
+    async def test_extract_context_plain_reply_to_promoted_plain_reply_stays_threaded(
         self,
         bot: AgentBot,
     ) -> None:
-        """A plain reply should not inherit from a cached promoted plain-reply target."""
+        """A plain reply should inherit thread membership transitively through a promoted plain reply."""
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"
@@ -3387,17 +3422,17 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(),
+                AsyncMock(return_value=[_message(event_id="$thread_root:localhost", body="root")]),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        mock_lookup.assert_not_awaited()
-        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
-        mock_fetch.assert_not_called()
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == [_message(event_id="$thread_root:localhost", body="root")]
+        mock_lookup.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
+        mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+        bot.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_thread_root_uses_cached_root_mapping(self, bot: AgentBot) -> None:
@@ -3771,8 +3806,11 @@ class TestThreadingBehavior:
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_to_threaded_message_stays_plain_reply(self, bot: AgentBot) -> None:
-        """Plain replies should not inherit thread context from earlier threaded messages."""
+    async def test_extract_context_plain_reply_to_threaded_message_stays_threaded_transitively(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Plain replies should inherit thread context transitively from earlier threaded messages."""
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"
@@ -3839,17 +3877,23 @@ class TestThreadingBehavior:
             ],
         )
 
+        expected_history = [
+            _message(event_id="$thread_root:localhost", body="Thread root"),
+            _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
+            _message(event_id="$plain1:localhost", body="First plain reply"),
+            _message(event_id="$plain2:localhost", body="Second plain reply"),
+        ]
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(),
+            AsyncMock(return_value=expected_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        mock_fetch.assert_not_called()
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == expected_history
+        mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
     async def test_explicit_thread_id_returns_none_for_cyclic_edit_chain(self, bot: AgentBot) -> None:
@@ -4226,8 +4270,11 @@ class TestThreadingBehavior:
             assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_thread:localhost"
 
     @pytest.mark.asyncio
-    async def test_command_reply_to_thread_message_stays_plain_reply(self, tmp_path: Path) -> None:
-        """Plain replies to threaded messages should not get upgraded into threads."""
+    async def test_command_reply_to_thread_message_stays_in_thread_transitively(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plain command replies to threaded messages should stay in the inherited thread."""
         agent_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
             password=TEST_PASSWORD,
@@ -4297,12 +4344,25 @@ class TestThreadingBehavior:
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
                 AsyncMock(return_value=thread_history_result([], is_full_history=False)),
             ),
+            patch(
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
+                AsyncMock(return_value=[]),
+            ),
+            patch(
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
+                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+            ),
+            patch(
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_id_for_event",
+                AsyncMock(return_value="$thread_root:localhost"),
+            ),
         ):
             await bot._on_message(room, event)
 
         bot.client.room_send.assert_called_once()
         content = bot.client.room_send.call_args.kwargs["content"]
-        assert "rel_type" not in content["m.relates_to"]
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply_plain:localhost"
 
     @pytest.mark.asyncio

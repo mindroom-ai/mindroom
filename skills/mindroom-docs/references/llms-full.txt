@@ -10325,15 +10325,15 @@ Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_roo
 
 MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
 
-Explicit `m.thread` metadata remains the primary source of thread conversation context. For clients or bridges that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom applies a single-hop compatibility rule. If the direct reply target already belongs to explicit thread `T`, MindRoom treats the new reply as part of `T`. Otherwise the reply stays room-level.
+Explicit `m.thread` metadata remains the primary source of thread conversation context. For clients or bridges that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom applies a transitive compatibility rule. If a reply chain eventually reaches explicit thread `T` or a proven thread root, MindRoom treats the new reply as part of `T`. Replies that never reach threaded context stay room-level.
 
 ### Resolution Rules
 
 When deriving context for an incoming event, MindRoom:
 
 1. Uses explicit `m.thread` relations as the primary inbound thread identity.
-1. Lets a plain reply inherit an existing explicit thread only from its direct reply target.
-1. Does not walk arbitrary plain reply chains to derive thread or session identity.
+1. Lets plain replies inherit thread membership transitively when their reply chain reaches a threaded ancestor or proven thread root.
+1. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
 1. May start a new thread under a room-root event when agent thread mode requires it.
 
 ```

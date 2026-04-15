@@ -12,7 +12,7 @@ Condensed from `.claude/agents/mindroom-tester.md`.
 ## CRITICAL Interaction Rules
 
 - Agents respond with thread relations.
-- In non-thread clients or bridges, send plain replies and verify they inherit an existing explicit thread only from their direct reply target, otherwise they stay room-level.
+- In non-thread clients or bridges, send plain replies and verify the reply chain stays in the same thread whenever it eventually reaches a threaded ancestor, otherwise it stays room-level.
 - Use explicit @mentions to invite the right agents.
 - Wait: singles ~30s, teams 45–60s+. Watch for streaming ellipses, then recheck.
 

@@ -520,8 +520,8 @@ async def test_matrix_api_send_event_rejects_threaded_edit_without_conversation_
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_thread_lookup_uses_conversation_cache_facade() -> None:
-    """Threaded edit detection should prefer conversation_cache over direct event_cache access."""
+async def test_matrix_api_send_event_dry_run_stays_local_without_thread_lookup() -> None:
+    """Dry-run send_event should not perform thread lookup work before returning."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
@@ -545,7 +545,7 @@ async def test_matrix_api_send_event_thread_lookup_uses_conversation_cache_facad
 
     assert payload["status"] == "ok"
     assert payload["dry_run"] is True
-    ctx.conversation_cache.get_thread_id_for_event.assert_awaited_once_with(ctx.room_id, "$reply:localhost")
+    ctx.conversation_cache.get_thread_id_for_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
