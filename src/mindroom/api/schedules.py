@@ -302,6 +302,8 @@ async def update_schedule(
                 workflow=updated_workflow,
                 config=runtime_config,
                 runtime_paths=runtime_paths,
+                event_cache=None,
+                conversation_cache=None,
                 existing_task=existing_task,
                 restart_task=False,
             )

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 import nio
 
 from mindroom.logging_config import bound_log_context, get_logger
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
@@ -467,6 +466,8 @@ async def handle_text_response(
     room: nio.MatrixRoom,
     event: TextResponseEvent,
     agent_name: str,
+    *,
+    resolved_thread_id: str | None,
 ) -> InteractiveSelection | None:
     """Handle text responses to interactive questions (e.g., "1", "2", "3").
 
@@ -475,6 +476,7 @@ async def handle_text_response(
         room: The room the message occurred in
         event: The message event
         agent_name: The name of the agent handling this
+        resolved_thread_id: Canonical resolved thread scope for the inbound message
 
     Returns:
         Interactive selection details if this was a valid response, None otherwise
@@ -486,15 +488,12 @@ async def handle_text_response(
     if not message_text.isdigit() or len(message_text) > 1:
         return None
 
-    thread_info = EventInfo.from_event(event.source)
-    thread_id = thread_info.thread_id
-
     # Find matching active questions in this room/thread
     with _thread_lock:
         _refresh_active_questions_locked()
         return _handle_text_response_locked(
             room_id=room.room_id,
-            thread_id=thread_id,
+            thread_id=resolved_thread_id,
             message_text=message_text,
             sender=event.sender,
             client_user_id=client.user_id,

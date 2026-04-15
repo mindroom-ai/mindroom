@@ -1,11 +1,13 @@
 """Tests for centralized message content extraction with large message support."""
 
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
+import mindroom.matrix.message_content as message_content_module
 from mindroom.matrix.message_content import (
     _clear_mxc_cache,
     _download_mxc_text,
@@ -335,6 +337,25 @@ class TestDownloadMxcText:
 
         result = await _download_mxc_text(client, "mxc://server/media123")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_mxc_cache_uses_lru_eviction(self) -> None:
+        """A cache hit should refresh recency so the oldest untouched entry is evicted first."""
+        client = AsyncMock()
+        now = time.time()
+        for index in range(message_content_module._mxc_cache_max_entries):
+            message_content_module._mxc_cache[f"mxc://server/{index}"] = (str(index), now)
+
+        assert await _download_mxc_text(client, "mxc://server/0") == "0"
+        client.download.assert_not_called()
+
+        overflow_response = MagicMock(spec=nio.DownloadResponse)
+        overflow_response.body = b"overflow"
+        client.download.return_value = overflow_response
+
+        assert await _download_mxc_text(client, "mxc://server/overflow") == "overflow"
+        assert "mxc://server/0" in message_content_module._mxc_cache
+        assert "mxc://server/1" not in message_content_module._mxc_cache
 
 
 class TestCanonicalContentResolution:

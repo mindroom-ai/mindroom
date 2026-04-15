@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import OrderedDict
 from typing import Any
 
 import nio
@@ -13,10 +14,10 @@ from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# MXC download cache - stores (content, timestamp) tuples
-# Key: mxc_url, Value: (content, timestamp)
-_mxc_cache: dict[str, tuple[str, float]] = {}
+# MXC download cache - stores (content, timestamp) tuples keyed by MXC URL.
+_mxc_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _cache_ttl = 3600.0  # 1 hour TTL
+_mxc_cache_max_entries = 500
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -110,6 +111,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
     if mxc_url in _mxc_cache:
         content, timestamp = _mxc_cache[mxc_url]
         if current_time - timestamp < _cache_ttl:
+            _mxc_cache.move_to_end(mxc_url)
             logger.debug("mxc_cache_hit", mxc_url=mxc_url)
             return content
         # Expired, remove from cache
@@ -158,10 +160,10 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
             return None
         # Cache the result
         _mxc_cache[mxc_url] = (decoded_text, time.time())
+        _mxc_cache.move_to_end(mxc_url)
         logger.debug("mxc_content_cached", mxc_url=mxc_url)
 
-        # Clean old entries if cache is getting large
-        if len(_mxc_cache) > 100:
+        if len(_mxc_cache) > _mxc_cache_max_entries:
             _clean_expired_cache()
 
     except Exception:
@@ -268,13 +270,21 @@ async def _resolve_canonical_content(
 
 
 def _clean_expired_cache() -> None:
-    """Remove expired entries from the MXC cache."""
+    """Remove expired entries, then evict oldest live entries until within the LRU bound."""
     current_time = time.time()
     expired_keys = [key for key, (_, timestamp) in _mxc_cache.items() if current_time - timestamp >= _cache_ttl]
     for key in expired_keys:
         del _mxc_cache[key]
-    if expired_keys:
-        logger.debug("mxc_cache_cleaned", expired_entries=len(expired_keys))
+    evicted_entries = 0
+    while len(_mxc_cache) > _mxc_cache_max_entries:
+        _mxc_cache.popitem(last=False)
+        evicted_entries += 1
+    if expired_keys or evicted_entries:
+        logger.debug(
+            "mxc_cache_cleaned",
+            expired_entries=len(expired_keys),
+            evicted_entries=evicted_entries,
+        )
 
 
 def _clear_mxc_cache() -> None:

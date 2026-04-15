@@ -11,8 +11,8 @@ Condensed from `.claude/agents/mindroom-tester.md`.
 
 ## CRITICAL Interaction Rules
 
-- Agents respond with thread relations. In non-thread clients, send plain
-  replies and verify responses stay in the same conversation thread.
+- Agents respond with thread relations.
+- In non-thread clients or bridges, send plain replies and verify the reply chain stays in the same thread whenever it eventually reaches a threaded ancestor, otherwise it stays room-level.
 - Use explicit @mentions to invite the right agents.
 - Wait: singles ~30s, teams 45–60s+. Watch for streaming ellipses, then recheck.
 
@@ -24,8 +24,7 @@ Condensed from `.claude/agents/mindroom-tester.md`.
 4. Each scenario = initial prompt + 3–5 follow-ups that reference prior turns.
 5. Challenge answers (clarify, ask for risks, request deeper detail).
 6. Exercise commands (`!help`, `!schedule`, `!list_schedules`, `!cancel_schedule`).
-7. Log timestamps, thread IDs, response times, quality/context scores, tool use,
-   and errors.
+7. Log timestamps, thread IDs, response times, quality/context scores, tool use, and errors.
 
 ## Conversation Patterns
 

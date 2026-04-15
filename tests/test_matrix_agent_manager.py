@@ -804,7 +804,7 @@ class TestAgentUserCreation:
 
         assert agent_user.password == "existing_pass"  # noqa: S105
         assert agent_user.device_id is None
-        assert agent_user.access_token is None  # noqa: S105
+        assert agent_user.access_token is None
         mock_save_creds.assert_not_called()  # Should not save again
         mock_matrix_client.assert_not_called()
 

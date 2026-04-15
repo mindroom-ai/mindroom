@@ -13,8 +13,16 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import HandledTurnState
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,9 +65,16 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     mock_orchestrator.current_config = config
     bot.orchestrator = mock_orchestrator
 
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    bot.client.user_id = "@mindroom_test:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
+    install_runtime_cache_support(bot)
+    bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
 
     # Mock room send to return a response event ID
     mock_send_response = MagicMock()

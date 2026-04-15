@@ -18,6 +18,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_generate_response_mock,
+    install_runtime_cache_support,
     install_send_response_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -64,6 +65,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
     general_bot.client.rooms = {}
+    install_runtime_cache_support(general_bot)
     sync_bot_runtime_state(general_bot)
 
     # Create a test room
@@ -152,6 +154,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
     general_bot.client.rooms = {}
+    install_runtime_cache_support(general_bot)
     sync_bot_runtime_state(general_bot)
 
     # Mock response tracker

@@ -35,8 +35,12 @@ from mindroom.matrix.client import (
     get_room_members,
     invite_to_room,
 )
-from mindroom.matrix.event_cache import EventCache
-from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.conversation_cache import (
+    EventCache as _EventCache,
+)
+from mindroom.matrix.conversation_cache import (
+    EventCacheWriteCoordinator as _EventCacheWriteCoordinator,
+)
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import (
@@ -213,8 +217,8 @@ class MultiAgentOrchestrator:
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _event_cache: EventCache | None = field(default=None, init=False)
-    _event_cache_write_coordinator: EventCacheWriteCoordinator | None = field(default=None, init=False)
+    _event_cache: _EventCache = field(init=False)
+    _event_cache_write_coordinator: _EventCacheWriteCoordinator = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
@@ -222,6 +226,11 @@ class MultiAgentOrchestrator:
         """Store canonical derived paths from the explicit runtime context."""
         self.storage_path = self.runtime_paths.storage_root
         self.config_path = self.runtime_paths.config_path
+        self._event_cache = _EventCache(self.storage_path / "event_cache.db")
+        self._event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=logger,
+            background_task_owner=self._event_cache_write_task_owner,
+        )
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
@@ -269,83 +278,37 @@ class MultiAgentOrchestrator:
             self._bind_runtime_support_services(bot)
 
     async def _sync_event_cache_service(self, config: Config) -> None:
-        """Ensure the runtime has one shared event-cache service.
-
-        The cache is intentionally always attempted, but it remains advisory.
-        Startup should therefore degrade to no cache service if SQLite init fails.
-        Hot reload may rebind bots to the existing shared service, but it must not
-        swap the live SQLite file underneath running bots.
-        Future changes to ``cache.db_path`` should therefore apply on restart, not
-        by mutating the active service during ``update_config()``.
-        """
+        """Ensure the runtime has one initialized shared event-cache service."""
         desired_db_path = config.cache.resolve_db_path(self.runtime_paths)
         cache = self._event_cache
-        coordinator = self._event_cache_write_coordinator
-        if cache is None:
-            if coordinator is not None:
-                await self._close_event_cache_write_coordinator()
-            cache = EventCache(desired_db_path)
-            try:
-                await cache.initialize()
-            except Exception as exc:
-                logger.warning(
-                    "Failed to initialize event cache",
-                    db_path=str(desired_db_path),
-                    error=str(exc),
-                )
-                try:
-                    await cache.close()
-                except Exception as close_exc:
-                    logger.warning(
-                        "Failed to close partially initialized event cache",
-                        db_path=str(desired_db_path),
-                        error=str(close_exc),
-                    )
-                self._event_cache = None
-                self._event_cache_write_coordinator = None
-                self._rebind_runtime_support_services()
-                return
-
-            coordinator = EventCacheWriteCoordinator(
-                logger=logger,
-                background_task_owner=self._event_cache_write_task_owner,
-            )
+        if not cache.is_initialized and cache.db_path != desired_db_path:
+            cache = _EventCache(desired_db_path)
             self._event_cache = cache
-            self._event_cache_write_coordinator = coordinator
-            self._rebind_runtime_support_services()
-            return
-
-        if cache.db_path != desired_db_path:
+        elif cache.db_path != desired_db_path:
             logger.info(
                 "Event cache db_path change will apply after restart",
                 active_db_path=str(cache.db_path),
                 configured_db_path=str(desired_db_path),
             )
-
-        if cache is not None:
-            if coordinator is None:
-                coordinator = EventCacheWriteCoordinator(
-                    logger=logger,
-                    background_task_owner=self._event_cache_write_task_owner,
+        if not cache.is_initialized:
+            try:
+                await cache.initialize()
+            except Exception as exc:
+                cache.disable(f"shared_runtime_init_failed:{exc}")
+                logger.warning(
+                    "Shared event cache init failed; continuing without advisory cache",
+                    db_path=str(cache.db_path),
+                    error=str(exc),
                 )
-                self._event_cache_write_coordinator = coordinator
-            self._rebind_runtime_support_services()
+        self._rebind_runtime_support_services()
 
     async def _close_event_cache_write_coordinator(self) -> None:
         """Drain the shared event-cache write coordinator."""
-        coordinator = self._event_cache_write_coordinator
-        self._event_cache_write_coordinator = None
-        if coordinator is None:
-            return
-        await coordinator.close()
+        await self._event_cache_write_coordinator.close()
 
     async def _close_event_cache(self) -> None:
         """Close the shared event cache."""
-        cache = self._event_cache
-        self._event_cache = None
-        if cache is None:
-            return
-        await cache.close()
+        await self._event_cache.close()
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -943,6 +906,7 @@ class MultiAgentOrchestrator:
                     bot_user_ids=bot_user_ids,
                     config=config,
                     runtime_paths=self.runtime_paths,
+                    conversation_cache=bot._conversation_cache,
                 )
                 cleaned_count += bot_cleaned_count
                 interrupted_threads.extend(bot_interrupted_threads)
@@ -976,6 +940,7 @@ class MultiAgentOrchestrator:
                 interrupted_threads,
                 config=config,
                 runtime_paths=self.runtime_paths,
+                conversation_cache=router_bot._conversation_cache,
             )
             if resumed_count > 0:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)

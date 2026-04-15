@@ -48,17 +48,19 @@ Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_roo
 
 MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
 
-For clients that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom resolves the reply chain to the existing thread root and continues the same conversation.
+Explicit `m.thread` metadata remains the primary source of thread conversation context.
+For clients or bridges that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom applies a transitive compatibility rule.
+If a reply chain eventually reaches explicit thread `T` or a proven thread root, MindRoom treats the new reply as part of `T`.
+Replies that never reach threaded context stay room-level.
 
 ### Resolution Rules
 
-When deriving context for a non-thread client reply, MindRoom:
+When deriving context for an incoming event, MindRoom:
 
-1. Traverses `m.in_reply_to` backwards until it finds a root, a known thread root, a cycle, or the traversal limit.
-2. Uses cycle detection and a bounded traversal limit (`ReplyChainCaches.traversal_limit`) to avoid runaway chains.
-3. If the chain points to a real thread root, fetches thread history and merges chain history so plain replies are preserved in order.
-4. If no thread relation exists, treats the reply chain itself as the conversation context root.
-5. Falls back to the oldest successfully resolved event when traversal is interrupted by fetch failures or limits.
+1. Uses explicit `m.thread` relations as the primary inbound thread identity.
+2. Lets plain replies inherit thread membership transitively when their reply chain reaches a threaded ancestor or proven thread root.
+3. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
+4. May start a new thread under a room-root event when agent thread mode requires it.
 
 ```
 ├── User: @assistant help with this code

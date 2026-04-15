@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -77,6 +77,13 @@ def _make_summary_notice_message(
         },
         thread_id=thread_id,
     )
+
+
+def _mock_client() -> AsyncMock:
+    """Return a typed AsyncClient mock with an initialized room cache."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    return client
 
 
 # -- model validation --
@@ -201,7 +208,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_recovers_count_from_notice_summary_event(self) -> None:
         """Finds a new m.notice summary event and returns its message_count."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [
             _make_text_event(),
@@ -215,7 +222,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_recovers_count_from_legacy_summary_event(self) -> None:
         """Older m.thread.summary events remain valid for recovery."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [
             _make_summary_event("$thread1", 15, msgtype="m.thread.summary"),
@@ -227,7 +234,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_returns_highest_count(self) -> None:
         """When multiple summary events exist, returns the highest count."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [
             _make_summary_event("$thread1", 25, msgtype="m.notice"),
@@ -240,7 +247,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_ignores_other_threads(self) -> None:
         """Summary events for a different thread are ignored."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [
             _make_summary_event("$other_thread", 20, msgtype="m.notice"),
@@ -252,7 +259,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_returns_zero_on_api_error(self) -> None:
         """Returns 0 when room_messages fails."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_messages = AsyncMock(return_value=nio.RoomMessagesError(message="forbidden"))
 
         result = await _recover_last_summary_count(client, "!room:x", "$thread1")
@@ -260,7 +267,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_returns_zero_when_no_summaries(self) -> None:
         """Returns 0 when no summary events exist."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [_make_text_event(), _make_notice_event()]
         client.room_messages = AsyncMock(return_value=response)
@@ -270,7 +277,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_ignores_legacy_msgtype_without_metadata(self) -> None:
         """Old custom msgtype alone is not enough without thread summary metadata."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [
             _make_summary_event("$thread1", 15, msgtype="m.thread.summary", include_metadata=False),
@@ -282,7 +289,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_skips_non_dict_relates_to_and_continues_scanning(self) -> None:
         """Malformed m.relates_to values are ignored without aborting recovery."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [
             _make_summary_event("$thread1", 15, relates_to="bad-relates-to"),
@@ -295,7 +302,7 @@ class TestRecoverLastSummaryCount:
 
     async def test_skips_non_int_message_count_and_continues_scanning(self) -> None:
         """Malformed message_count values are ignored without aborting recovery."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [
             _make_summary_event("$thread1", "15"),
@@ -399,9 +406,11 @@ class TestMaybeGenerateThreadSummary:
     """Integration tests for the threshold-gated summary pipeline."""
 
     @pytest.fixture(autouse=True)
-    def _conversation_access(self) -> None:
-        """Provide one explicit conversation-access mock per test."""
-        self.conversation_access = MagicMock()
+    def _conversation_cache(self) -> None:
+        """Provide one explicit conversation-cache mock per test."""
+        self.conversation_cache = MagicMock()
+        self.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
+        self.conversation_cache.notify_outbound_message = Mock()
 
     async def _maybe_generate(
         self,
@@ -418,13 +427,13 @@ class TestMaybeGenerateThreadSummary:
             "$thread1",
             config,
             rp,
-            conversation_access=self.conversation_access,
+            conversation_cache=self.conversation_cache,
             message_count_hint=message_count_hint,
         )
 
     async def test_below_threshold_skips(self) -> None:
         """No LLM call when message count is below the first threshold."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -448,7 +457,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_below_threshold_skips_timed_generation_helper(self) -> None:
         """Timing should only wrap actual generation attempts, not early threshold skips."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -472,7 +481,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_at_threshold_generates(self) -> None:
         """LLM is called and event sent when count reaches threshold."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -507,7 +516,7 @@ class TestMaybeGenerateThreadSummary:
     )
     async def test_first_threshold_boundaries(self, message_count: int, should_generate: bool) -> None:
         """The first-threshold boundary should trigger only at count 5 or above."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -542,7 +551,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_second_threshold_boundaries(self, message_count: int, should_generate: bool) -> None:
         """The second-threshold boundary should trigger only at count 15 or above."""
         update_last_summary_count("!room:x", "$thread1", 5)
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -564,7 +573,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_concurrent_calls_generate_and_send_once_per_thread(self) -> None:
         """Concurrent calls for one thread should share a single generation/send path."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
         generation_started = asyncio.Event()
@@ -610,12 +619,13 @@ class TestMaybeGenerateThreadSummary:
             "Users discussed testing strategies",
             5,
             "default",
+            self.conversation_cache,
         )
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_auto_generated_summary_strips_markdown_before_send(self) -> None:
         """Auto summaries should be converted to plain text before the Matrix event is sent."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -646,12 +656,13 @@ class TestMaybeGenerateThreadSummary:
             "Fix ISSUE-116",
             5,
             "default",
+            self.conversation_cache,
         )
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_stale_below_threshold_hint_still_fetches_live_thread_history(self) -> None:
         """A stale low hint must not suppress a fetch when concurrent posts crossed the threshold."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -664,13 +675,13 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp, message_count_hint=4)
 
-        mock_fetch.assert_awaited_once_with(self.conversation_access, "!room:x", "$thread1")
+        mock_fetch.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
         mock_gen.assert_awaited_once_with(thread_history, config, rp)
         client.room_send.assert_awaited_once()
 
     async def test_threshold_hint_fetches_on_boundary(self) -> None:
         """A hint at the threshold should still fetch and generate the summary."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -683,14 +694,14 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp, message_count_hint=5)
 
-        mock_fetch.assert_awaited_once_with(self.conversation_access, "!room:x", "$thread1")
+        mock_fetch.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
         mock_gen.assert_awaited_once_with(thread_history, config, rp)
         client.room_send.assert_awaited_once()
 
     async def test_already_summarized_skips(self) -> None:
         """No LLM call when count hasn't crossed the next threshold."""
         update_last_summary_count("!room:x", "$thread1", 5)
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -710,7 +721,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_crosses_second_threshold(self) -> None:
         """Summary is generated when crossing the second threshold (15)."""
         update_last_summary_count("!room:x", "$thread1", 5)
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -732,7 +743,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_first_threshold_one_triggers_on_first_message(self) -> None:
         """A configured first threshold of 1 should summarize the first thread message."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-first", room_id="!room:x"))
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -760,7 +771,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_custom_subsequent_interval_controls_next_threshold(self) -> None:
         """A custom interval should defer the next summary until the configured count is reached."""
         update_last_summary_count("!room:x", "$thread1", 3)
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-custom", room_id="!room:x"))
         config = _mock_config(first_threshold=3, subsequent_interval=4)
         rp = _mock_runtime_paths()
@@ -797,7 +808,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_manual_summary_below_first_threshold_delays_next_auto_summary(self) -> None:
         """A manual summary below the first threshold should suppress auto-summary until the interval is reached."""
         update_last_summary_count("!room:x", "$thread1", 3)
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-manual", room_id="!room:x"))
         config = _mock_config(first_threshold=5, subsequent_interval=10)
         rp = _mock_runtime_paths()
@@ -847,7 +858,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_existing_summary_notice_does_not_advance_threshold(self) -> None:
         """Existing thread summary notices must not count toward the next automatic threshold."""
         update_last_summary_count("!room:x", "$thread1", 5)
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
         thread_history = [
@@ -871,7 +882,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_generation_failure_no_event(self) -> None:
         """No Matrix event sent when LLM returns None; count is recorded to prevent retries."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -897,7 +908,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_generation_exception_records_count(self) -> None:
         """Exception in _generate_summary records count to prevent retry storms."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -923,7 +934,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_send_failure_still_records_count(self) -> None:
         """When _send_summary_event fails (returns None), count is still recorded to prevent cost amplification."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -951,7 +962,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_recovery_seeds_cache_on_restart(self) -> None:
         """On cache miss, recovery from existing events seeds _last_summary_counts."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -976,7 +987,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_concurrent_calls_generate_one_summary_per_thread(self) -> None:
         """Concurrent summary checks should serialize on the per-thread critical section."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1011,7 +1022,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_concurrent_calls_serialize_history_fetch_inside_lock(self) -> None:
         """Only one concurrent task should fetch history before the per-thread lock is released."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
         fetch_started = asyncio.Event()
@@ -1064,8 +1075,11 @@ class TestSendSummaryEvent:
 
     async def test_event_content_structure(self) -> None:
         """Verify the public summary-send API writes the expected event payload."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
+        conversation_cache.notify_outbound_message = Mock()
 
         result = await send_thread_summary_event(
             client,
@@ -1074,6 +1088,7 @@ class TestSendSummaryEvent:
             summary="Discussed deployment plan",
             message_count=15,
             model_name="haiku",
+            conversation_cache=conversation_cache,
         )
 
         assert result == "$s1"
@@ -1088,6 +1103,7 @@ class TestSendSummaryEvent:
         relates_to = content["m.relates_to"]
         assert relates_to["rel_type"] == "m.thread"
         assert relates_to["event_id"] == "$root1"
+        assert relates_to["m.in_reply_to"] == {"event_id": "$reply1"}
 
         meta = content["io.mindroom.thread_summary"]
         assert meta["version"] == 1
@@ -1095,11 +1111,16 @@ class TestSendSummaryEvent:
         assert meta["message_count"] == 15
         assert meta["model"] == "haiku"
         assert "generated_at" in meta
+        conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with("!room:x", "$root1")
+        conversation_cache.notify_outbound_message.assert_called_once_with("!room:x", "$s1", content)
 
     async def test_event_content_truncates_overlong_summary(self) -> None:
         """Overlong summaries should be truncated before sending to Matrix."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
+        conversation_cache.notify_outbound_message = Mock()
         summary = "x" * (THREAD_SUMMARY_MAX_LENGTH + 1)
 
         result = await send_thread_summary_event(
@@ -1109,6 +1130,7 @@ class TestSendSummaryEvent:
             summary=summary,
             message_count=15,
             model_name="haiku",
+            conversation_cache=conversation_cache,
         )
 
         assert result == "$s1"
@@ -1120,8 +1142,11 @@ class TestSendSummaryEvent:
 
     async def test_send_failure_returns_none(self) -> None:
         """Return None when room_send fails."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
+        conversation_cache.notify_outbound_message = Mock()
 
         result = await send_thread_summary_event(
             client,
@@ -1130,9 +1155,35 @@ class TestSendSummaryEvent:
             summary="test",
             message_count=5,
             model_name="default",
+            conversation_cache=conversation_cache,
         )
 
         assert result is None
+        conversation_cache.notify_outbound_message.assert_not_called()
+
+    async def test_latest_thread_lookup_failure_falls_back_to_thread_root(self) -> None:
+        """Summary sending should remain threaded when latest-event lookup fails."""
+        client = _mock_client()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(side_effect=RuntimeError("lookup boom"))
+        conversation_cache.notify_outbound_message = Mock()
+
+        result = await send_thread_summary_event(
+            client,
+            room_id="!room:x",
+            thread_id="$root1",
+            summary="test",
+            message_count=5,
+            model_name="default",
+            conversation_cache=conversation_cache,
+        )
+
+        assert result == "$s1"
+        relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
+        assert relates_to["event_id"] == "$root1"
+        assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
+        conversation_cache.notify_outbound_message.assert_called_once()
 
 
 class TestBuildConversationText:

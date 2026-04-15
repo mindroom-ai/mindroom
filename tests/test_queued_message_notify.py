@@ -27,8 +27,8 @@ from mindroom.ai import (
     queued_message_signal_context,
     stream_agent_response,
 )
-from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -38,22 +38,25 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
     ResponseOutcome,
     apply_post_response_effects,
 )
-from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
+    make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -63,8 +66,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
-
-    from agno.session.team import TeamSession
 
 
 def _config(tmp_path: Path) -> Config:
@@ -89,6 +90,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -286,16 +288,16 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         config=config,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
+        event_cache=make_event_cache_mock(),
+        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_access = MagicMock()
+    conversation_cache = MagicMock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_access=conversation_access,
+        conversation_cache=conversation_cache,
     )
     deps = support.build_deps(
         room_id="!room:localhost",
@@ -351,7 +353,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_fetch.assert_awaited_once_with(conversation_access, "!room:localhost", "$thread")
+    mock_fetch.assert_awaited_once_with(conversation_cache, "!room:localhost", "$thread")
     mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths)
     mock_send.assert_awaited_once_with(
         client,
@@ -360,6 +362,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         "Summary",
         5,
         "default",
+        conversation_cache,
     )
 
 
@@ -588,6 +591,36 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
 
     mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
     assert request.thread_history == fresh_history
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path) -> None:
+    """Post-lock refresh failures should route through the normalized preparation error boundary."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+
+    with (
+        patch.object(
+            resolver,
+            "fetch_thread_history",
+            new=AsyncMock(side_effect=RuntimeError("repair required")),
+        ),
+        pytest.raises(PostLockRequestPreparationError) as excinfo,
+    ):
+        await coordinator._prepare_request_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                requires_full_thread_history=True,
+            ),
+        )
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
 
 
 @pytest.mark.asyncio

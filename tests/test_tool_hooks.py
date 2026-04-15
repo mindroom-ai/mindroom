@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -48,7 +49,13 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -172,6 +179,8 @@ def _tool_runtime_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         correlation_id="corr-runtime",
         hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,
@@ -924,6 +933,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     bot = _agent_bot(tmp_path, config=config)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
+    bot.event_cache = MagicMock()
     bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
     bot.client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
     router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
@@ -1277,6 +1287,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     plugins = [_plugin("tool-policy", [before, on_custom_event])]
     config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
     bot = _agent_bot(tmp_path, config=config)
+    bot.event_cache = MagicMock()
     bot.hook_registry = HookRegistry.from_plugins(plugins)
 
     try:
@@ -1390,6 +1401,29 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
             HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_emit_custom_event_ignores_raw_room_mode_thread_id(tmp_path: Path) -> None:
+    """Custom tool events should not re-scope room-mode contexts from raw thread provenance."""
+    custom_event_name = "demo:room_mode_thread_guard"
+    seen_thread_ids: list[str | None] = []
+
+    @hook(custom_event_name)
+    async def on_custom_event(ctx: CustomEventContext) -> None:
+        seen_thread_ids.append(ctx.thread_id)
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
+    runtime_context = replace(
+        _tool_runtime_context(tmp_path, hook_registry=registry),
+        thread_id="$raw-thread",
+        resolved_thread_id=None,
+    )
+
+    with tool_runtime_context(runtime_context):
+        await emit_custom_event("tool-policy", custom_event_name, {"item_id": "123"})
+
+    assert seen_thread_ids == [None]
 
 
 @pytest.mark.asyncio

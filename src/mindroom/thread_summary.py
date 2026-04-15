@@ -7,7 +7,7 @@ import hashlib
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import nio
 from agno.agent import Agent
@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import send_message_result
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)
 THREAD_SUMMARY_MAX_LENGTH = 300
@@ -146,12 +148,12 @@ def should_queue_thread_summary(
 
 
 async def _load_thread_history(
-    conversation_access: ConversationReadAccess,
+    conversation_cache: ConversationCacheProtocol,
     room_id: str,
     thread_id: str,
 ) -> list[ResolvedVisibleMessage]:
-    """Load thread history through the explicit conversation-access seam."""
-    return list(await conversation_access.get_thread_history(room_id, thread_id))
+    """Load thread history through the explicit conversation-cache seam."""
+    return list(await conversation_cache.get_thread_history(room_id, thread_id))
 
 
 async def _recover_last_summary_count(
@@ -306,6 +308,7 @@ async def send_thread_summary_event(
     summary: str,
     message_count: int,
     model_name: str,
+    conversation_cache: ConversationCacheProtocol,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event."""
     normalized_summary = normalize_thread_summary_text(summary)
@@ -323,37 +326,49 @@ async def send_thread_summary_event(
         if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
         else normalized_summary
     )
-    content: dict[str, Any] = {
-        "msgtype": "m.notice",
-        "body": truncated_summary,
-        "m.relates_to": {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": thread_id},
+    try:
+        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
+            room_id,
+            thread_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Falling back to thread root for summary send after latest-event lookup failure",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        latest_thread_event_id = None
+    content = build_message_content(
+        truncated_summary,
+        thread_event_id=thread_id,
+        latest_thread_event_id=latest_thread_event_id or thread_id,
+        extra_content={
+            "msgtype": "m.notice",
+            "io.mindroom.thread_summary": {
+                "version": 1,
+                "summary": truncated_summary,
+                "message_count": message_count,
+                "generated_at": datetime.now(UTC).isoformat(),
+                "model": model_name,
+            },
         },
-        "io.mindroom.thread_summary": {
-            "version": 1,
-            "summary": truncated_summary,
-            "message_count": message_count,
-            "generated_at": datetime.now(UTC).isoformat(),
-            "model": model_name,
-        },
-    }
-    response = await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=content,
     )
-    if isinstance(response, nio.RoomSendResponse):
+    delivered = await send_message_result(client, room_id, content)
+    if delivered is not None:
+        conversation_cache.notify_outbound_message(
+            room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
         logger.info(
             "Sent thread summary",
             room_id=room_id,
             thread_id=thread_id,
             message_count=message_count,
         )
-        return str(response.event_id)
-    logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id, response=str(response))
+        return delivered.event_id
+    logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id)
     return None
 
 
@@ -364,7 +379,7 @@ async def maybe_generate_thread_summary(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    conversation_access: ConversationReadAccess,
+    conversation_cache: ConversationCacheProtocol,
     message_count_hint: int | None = None,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
@@ -381,7 +396,7 @@ async def maybe_generate_thread_summary(
         # message_count_hint comes from a pre-send snapshot and is only a
         # lower bound. Other agents or humans can post before this background
         # task runs, so a stale hint must never suppress the live re-fetch.
-        thread_history = await _load_thread_history(conversation_access, room_id, thread_id)
+        thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
         message_count = _count_non_summary_messages(thread_history)
         if message_count_hint is not None:
             message_count = max(message_count, message_count_hint)
@@ -415,4 +430,12 @@ async def maybe_generate_thread_summary(
         # Record count before sending — the LLM cost is already incurred, so don't
         # retry on Matrix send failure (avoids cost amplification loop).
         update_last_summary_count(room_id, thread_id, message_count)
-        await send_thread_summary_event(client, room_id, thread_id, normalized_summary, message_count, model_name)
+        await send_thread_summary_event(
+            client,
+            room_id,
+            thread_id,
+            normalized_summary,
+            message_count,
+            model_name,
+            conversation_cache,
+        )

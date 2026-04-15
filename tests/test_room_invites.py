@@ -97,6 +97,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
     ) -> int:
         return 0
 
@@ -289,6 +290,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
     ) -> int:
         return 0
 

@@ -3,7 +3,7 @@
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -12,7 +12,7 @@ from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, resolve_runtime_paths
-from mindroom.matrix.client import edit_message, send_message
+from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_message
 from mindroom.streaming import (
     ReplacementStreamingResponse,
@@ -84,7 +84,7 @@ async def test_regular_message_under_limit() -> None:
     content = {"body": "Hello world", "msgtype": "m.text"}
 
     # Should pass through unchanged
-    await send_message(client, "!room:server", content)
+    await send_message_result(client, "!room:server", content)
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -101,7 +101,7 @@ async def test_regular_message_over_limit() -> None:
     large_text = "x" * 100000
     content = {"body": large_text, "msgtype": "m.text"}
 
-    await send_message(client, "!room:server", content)
+    await send_message_result(client, "!room:server", content)
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -133,7 +133,7 @@ async def test_edit_message_with_lower_threshold() -> None:
     text = "y" * 30000
     content = {"body": text, "msgtype": "m.text", "formatted_body": f"<p>{text}</p>"}
 
-    await edit_message(client, "!room:server", "$original", content, text)
+    await edit_message_result(client, "!room:server", "$original", content, text)
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -157,7 +157,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
     }
     content = {"body": text, "msgtype": "m.text", "formatted_body": f"<p>{text}</p>"}
 
-    await edit_message(
+    await edit_message_result(
         client,
         "!room:server",
         "$original",
@@ -240,6 +240,37 @@ async def test_streaming_initial_message_over_limit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_large_initial_message_records_transformed_content_to_cache() -> None:
+    """Streaming write-through should cache the exact oversized event content Matrix stored."""
+    client = MockClient()
+    config = MockConfig()
+    conversation_cache = AsyncMock()
+    conversation_cache.notify_outbound_message = Mock()
+
+    streaming = StreamingResponse(
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        runtime_paths=_runtime_paths(),
+        conversation_cache=conversation_cache,
+    )
+
+    streaming.accumulated_text = "a" * 60000
+    streaming.last_update = float("-inf")
+
+    await streaming._send_or_edit_message(client, is_final=True)
+
+    sent_content = client.messages_sent[0][2]
+    conversation_cache.notify_outbound_message.assert_called_once_with(
+        "!test:room",
+        "$event_1",
+        sent_content,
+    )
+
+
+@pytest.mark.asyncio
 async def test_streaming_edit_grows_over_limit() -> None:
     """Test streaming where edit grows beyond limit."""
     client = MockClient()
@@ -279,6 +310,42 @@ async def test_streaming_edit_grows_over_limit() -> None:
     assert edit_content["m.new_content"]["msgtype"] == "m.file"
     assert "io.mindroom.long_text" in edit_content["m.new_content"]
     assert len(edit_content["m.new_content"]["body"]) < 35000
+
+
+@pytest.mark.asyncio
+async def test_streaming_large_edit_records_transformed_content_to_cache() -> None:
+    """Streaming edit write-through should cache the exact transformed edit event."""
+    client = MockClient()
+    config = MockConfig()
+    conversation_cache = AsyncMock()
+    conversation_cache.notify_outbound_message = Mock()
+
+    streaming = StreamingResponse(
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        runtime_paths=_runtime_paths(),
+        conversation_cache=conversation_cache,
+    )
+
+    streaming.accumulated_text = "Small start"
+    streaming.last_update = float("-inf")
+    await streaming._send_or_edit_message(client, is_final=False)
+    conversation_cache.notify_outbound_message.reset_mock()
+
+    streaming.accumulated_text = "b" * 35000
+    streaming.last_update = float("-inf")
+
+    await streaming._send_or_edit_message(client, is_final=True)
+
+    edit_content = client.messages_sent[1][2]
+    conversation_cache.notify_outbound_message.assert_called_once_with(
+        "!test:room",
+        "$event_2",
+        edit_content,
+    )
 
 
 @pytest.mark.asyncio

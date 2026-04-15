@@ -25,8 +25,7 @@ from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.sender import send_hook_message
 from mindroom.hooks.types import EVENT_AGENT_STARTED, EVENT_AGENT_STOPPED, EVENT_BOT_READY, EVENT_REACTION_RECEIVED
-from mindroom.matrix.conversation_access import MatrixConversationAccess
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.health import (
     clear_matrix_sync_state,
     mark_matrix_sync_loop_started,
@@ -42,6 +41,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
+from mindroom.matrix.thread_membership import resolve_related_event_thread_id_best_effort
 from mindroom.matrix.users import (
     AgentMatrixUser,
     create_agent_user,
@@ -124,6 +124,7 @@ from .runtime_support import (
     StandaloneRuntimeSupport,
     close_standalone_runtime_support,
     create_standalone_runtime_support,
+    initialize_standalone_runtime_support,
 )
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -150,8 +151,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.event_cache import ConversationEventCache
-    from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
+    from mindroom.matrix.conversation_cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -163,8 +163,6 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 # Constants
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
-_JOINED_ROOM_CACHE_WAIT_ATTEMPTS = 20
-_JOINED_ROOM_CACHE_WAIT_SECONDS = 0.1
 
 
 def _create_task_wrapper(
@@ -312,7 +310,7 @@ class AgentBot:
     _turn_policy: TurnPolicy
     _conversation_resolver: ConversationResolver
     _conversation_state_writer: ConversationStateWriter
-    _conversation_access: MatrixConversationAccess
+    _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
     _turn_store: TurnStore
@@ -349,6 +347,7 @@ class AgentBot:
         self._first_sync_done = False
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
+        self._standalone_runtime_support = None
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -357,7 +356,6 @@ class AgentBot:
             event_cache=None,
             event_cache_write_coordinator=None,
         )
-        self._standalone_runtime_support = None
         self._deferred_overdue_task_drain_task = None
         self._init_runtime_components()
 
@@ -388,7 +386,7 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
         )
-        self._conversation_access = MatrixConversationAccess(
+        self._conversation_cache = MatrixConversationCache(
             logger=self.logger,
             runtime=self._runtime_view,
         )
@@ -407,7 +405,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_access=self._conversation_access,
+                conversation_cache=self._conversation_cache,
             ),
         )
         self._inbound_turn_normalizer = InboundTurnNormalizer(
@@ -458,7 +456,7 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
             delivery_gateway=self._delivery_gateway,
-            conversation_access=self._conversation_access,
+            conversation_cache=self._conversation_cache,
         )
         self._response_runner = ResponseRunner(
             ResponseRunnerDeps(
@@ -509,7 +507,7 @@ class AgentBot:
                 storage_path=self.storage_path,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_access=self._conversation_access,
+                conversation_cache=self._conversation_cache,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 turn_policy=self._turn_policy,
@@ -564,23 +562,31 @@ class AgentBot:
         self._runtime_view.orchestrator = value
 
     @property
-    def event_cache(self) -> ConversationEventCache | None:
-        """Return the advisory event cache."""
-        return self._runtime_view.event_cache
+    def event_cache(self) -> ConversationEventCache:
+        """Return the configured Matrix event cache."""
+        event_cache = self._runtime_view.event_cache
+        if event_cache is None:
+            msg = "Matrix event cache is not initialized for this bot runtime"
+            raise RuntimeError(msg)
+        return event_cache
 
     @event_cache.setter
     def event_cache(self, value: ConversationEventCache | None) -> None:
-        """Update the advisory event cache."""
+        """Update the configured Matrix event cache."""
         self._runtime_view.event_cache = value
 
     @property
-    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator | None:
-        """Return the advisory event-cache write coordinator."""
-        return self._runtime_view.event_cache_write_coordinator
+    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator:
+        """Return the configured Matrix event-cache write coordinator."""
+        coordinator = self._runtime_view.event_cache_write_coordinator
+        if coordinator is None:
+            msg = "Matrix event-cache write coordinator is not initialized for this bot runtime"
+            raise RuntimeError(msg)
+        return coordinator
 
     @event_cache_write_coordinator.setter
     def event_cache_write_coordinator(self, value: EventCacheWriteCoordinator | None) -> None:
-        """Update the advisory event-cache write coordinator."""
+        """Update the configured Matrix event-cache write coordinator."""
         self._runtime_view.event_cache_write_coordinator = value
 
     @property
@@ -640,27 +646,21 @@ class AgentBot:
         normalized_target_event_id = event.reacts_to.strip()
         thread_id: str | None = None
         if normalized_target_event_id:
-            response = await self._conversation_access.get_event(room_id, normalized_target_event_id)
-            if isinstance(response, nio.RoomGetEventResponse):
-                target_info = EventInfo.from_event(response.event.source)
-                if target_info.thread_id:
-                    thread_id = target_info.thread_id
-                elif target_info.thread_id_from_edit:
-                    thread_id = target_info.thread_id_from_edit
-                elif not target_info.has_relations:
-                    thread_history = await self._conversation_resolver.fetch_thread_history(
-                        self.client,
-                        room_id,
-                        normalized_target_event_id,
-                    )
-                    if len(thread_history) > 1:
-                        thread_id = normalized_target_event_id
-            else:
+            try:
+                thread_id = await resolve_related_event_thread_id_best_effort(
+                    room_id,
+                    normalized_target_event_id,
+                    access=self._conversation_resolver.thread_membership_access(
+                        full_history=False,
+                        dispatch_safe=True,
+                    ),
+                )
+            except Exception as exc:
                 self.logger.debug(
-                    "Failed to fetch reaction target event for hook context",
+                    "Failed to resolve reaction target thread for hook context",
                     room_id=room_id,
                     target_event_id=normalized_target_event_id,
-                    error=str(response),
+                    error=str(exc),
                 )
 
         context = ReactionReceivedContext(
@@ -767,7 +767,14 @@ class AgentBot:
 
         assert self.client is not None
 
-        restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config, self.runtime_paths)
+        restored_tasks = await restore_scheduled_tasks(
+            self.client,
+            room_id,
+            self.config,
+            self.runtime_paths,
+            self.event_cache,
+            self._conversation_cache,
+        )
         if restored_tasks > 0:
             self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
 
@@ -892,7 +899,7 @@ class AgentBot:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
 
     def seconds_since_last_sync_activity(self) -> float | None:
-        """Return elapsed seconds since the last successful sync or loop start."""
+        """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
         if self._last_sync_monotonic is None:
             return None
         return time.monotonic() - self._last_sync_monotonic
@@ -909,7 +916,7 @@ class AgentBot:
         if isinstance(_response, nio.SyncResponse):
             # Cache before persisting so a crash prefers replaying one batch over
             # skipping events whose timeline metadata never reached local state.
-            self._conversation_access.cache_sync_timeline(_response)
+            self._conversation_cache.cache_sync_timeline(_response)
 
         # Event callbacks run fire-and-forget in background tasks. A crash after
         # persisting `next_batch` but before all callback tasks finish can still
@@ -925,7 +932,7 @@ class AgentBot:
             self._maybe_start_deferred_overdue_task_drain()
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
-        """Update the watchdog clock on sync errors so it knows the loop is alive."""
+        """Update the watchdog clock on sync errors without marking cache state fresh."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
 
@@ -940,45 +947,66 @@ class AgentBot:
         await self.leave_unconfigured_rooms()
 
     async def _initialize_runtime_support_services(self) -> None:
-        """Initialize standalone runtime support services with an all-or-nothing injection contract."""
-        if self._standalone_runtime_support is not None:
+        """Initialize standalone runtime support services or accept a full injected pair."""
+        binding_state = self._runtime_support_binding_state()
+        if binding_state == "injected":
+            self._runtime_view.mark_runtime_started()
             return
-        injected_service_count = self._runtime_support_injection_count()
-        if injected_service_count == 2:
-            return
-        if injected_service_count != 0:
+        if binding_state == "mixed":
             msg = self._partial_runtime_support_injection_error()
             raise RuntimeError(msg)
-
-        support = await create_standalone_runtime_support(
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            logger=self.logger,
-            background_task_owner=self._runtime_view,
-        )
-        self._standalone_runtime_support = support
-        self.event_cache = support.event_cache
-        self.event_cache_write_coordinator = support.event_cache_write_coordinator
+        self._runtime_view.mark_runtime_started()
+        if binding_state == "uninitialized":
+            support = await create_standalone_runtime_support(
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                logger=self.logger,
+                background_task_owner=self._runtime_view,
+            )
+            self._standalone_runtime_support = support
+            self.event_cache = support.event_cache
+            self.event_cache_write_coordinator = support.event_cache_write_coordinator
+            return
+        support = self._standalone_runtime_support
+        assert support is not None
+        support.event_cache_write_coordinator.background_task_owner = self._runtime_view
+        await initialize_standalone_runtime_support(support, logger=self.logger)
 
     async def _close_runtime_support_services(self) -> None:
-        """Clear runtime support bindings and close standalone-owned services when present."""
+        """Close standalone-owned services and detach any injected shared support."""
+        binding_state = self._runtime_support_binding_state()
+        if binding_state == "mixed":
+            msg = self._partial_runtime_support_injection_error()
+            raise RuntimeError(msg)
+        if binding_state == "injected":
+            return
+        if binding_state == "uninitialized":
+            return
         support = self._standalone_runtime_support
-        self._standalone_runtime_support = None
+        assert support is not None
+        await close_standalone_runtime_support(support, logger=self.logger)
         self.event_cache = None
         self.event_cache_write_coordinator = None
-        if support is None:
-            return
-        await close_standalone_runtime_support(support, logger=self.logger)
+        self._standalone_runtime_support = None
 
-    def _runtime_support_injection_count(self) -> int:
-        """Return how many runtime support services are currently injected."""
-        return sum(
-            service is not None
-            for service in (
-                self.event_cache,
-                self.event_cache_write_coordinator,
-            )
-        )
+    def _runtime_support_binding_state(self) -> Literal["uninitialized", "standalone", "injected", "mixed"]:
+        """Classify whether runtime support is local, injected, or inconsistently mixed."""
+        runtime_event_cache = self._runtime_view.event_cache
+        runtime_coordinator = self._runtime_view.event_cache_write_coordinator
+        support = self._standalone_runtime_support
+        if support is None:
+            if runtime_event_cache is None and runtime_coordinator is None:
+                return "uninitialized"
+            if runtime_event_cache is not None and runtime_coordinator is not None:
+                return "injected"
+            return "mixed"
+        uses_standalone_event_cache = runtime_event_cache is support.event_cache
+        uses_standalone_coordinator = runtime_coordinator is support.event_cache_write_coordinator
+        if uses_standalone_event_cache and uses_standalone_coordinator:
+            return "standalone"
+        if not uses_standalone_event_cache and not uses_standalone_coordinator:
+            return "injected"
+        return "mixed"
 
     @staticmethod
     def _partial_runtime_support_injection_error() -> str:
@@ -987,8 +1015,7 @@ class AgentBot:
 
     def _validate_runtime_support_injection_contract_for_startup(self) -> None:
         """Reject mixed runtime support injection before startup side effects begin."""
-        injected_service_count = self._runtime_support_injection_count()
-        if injected_service_count in {0, 2}:
+        if self._runtime_support_binding_state() != "mixed":
             return
         raise PermanentMatrixStartupError(self._partial_runtime_support_injection_error())
 
@@ -1001,75 +1028,76 @@ class AgentBot:
             self.agent_user,
             runtime_paths=self.runtime_paths,
         )
-        self._restore_saved_sync_token()
-        await self._initialize_runtime_support_services()
-        await self._set_avatar_if_available()
-        await self._set_presence_with_model_info()
-        interactive.init_persistence(self.runtime_paths.storage_root)
-        client = self.client
-        assert client is not None
+        try:
+            self._restore_saved_sync_token()
+            await self._initialize_runtime_support_services()
+            await self._set_avatar_if_available()
+            await self._set_presence_with_model_info()
+            interactive.init_persistence(self.runtime_paths.storage_root)
+            client = self.client
+            assert client is not None
 
-        # Register event callbacks - wrap them to run as background tasks
-        # This ensures the sync loop is never blocked, allowing stop reactions to work
-        client.add_event_callback(
-            _create_task_wrapper(self._on_invite, owner=self._runtime_view),
-            nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
-        )
-        client.add_event_callback(_create_task_wrapper(self._on_message, owner=self._runtime_view), nio.RoomMessageText)
-        client.add_event_callback(
-            _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
-            nio.RedactionEvent,
-        )
-        client.add_event_callback(_create_task_wrapper(self._on_reaction, owner=self._runtime_view), nio.ReactionEvent)
+            # Register event callbacks - wrap them to run as background tasks
+            # This ensures the sync loop is never blocked, allowing stop reactions to work
+            client.add_event_callback(
+                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+                nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_message, owner=self._runtime_view),
+                nio.RoomMessageText,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
+                nio.RedactionEvent,
+            )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
+                nio.ReactionEvent,
+            )
 
-        # Register media callbacks on all agents (each agent handles its own routing)
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageImage,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedImage,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageFile,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedFile,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageVideo,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedVideo,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomMessageAudio,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(self._on_media_message, owner=self._runtime_view),
-            nio.RoomEncryptedAudio,
-        )
-        client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
-        client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
+            # Register media callbacks on all agents (each agent handles its own routing)
+            media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
+            for event_type in (
+                nio.RoomMessageImage,
+                nio.RoomEncryptedImage,
+                nio.RoomMessageFile,
+                nio.RoomEncryptedFile,
+                nio.RoomMessageVideo,
+                nio.RoomEncryptedVideo,
+                nio.RoomMessageAudio,
+                nio.RoomEncryptedAudio,
+            ):
+                client.add_event_callback(media_callback, event_type)
+            client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+            client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
-        self.running = True
+            self.running = True
 
-        # Router bot has additional responsibilities
-        if self.agent_name == ROUTER_AGENT_NAME:
+            # Router bot has additional responsibilities
+            if self.agent_name == ROUTER_AGENT_NAME:
+                try:
+                    await cleanup_all_orphaned_bots(client, self.config, self.runtime_paths)
+                except Exception as e:
+                    self.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
+
+            # Note: Room joining is deferred until after invitations are handled
+            self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
+            await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+        except Exception:
+            client = self.client
+            self.running = False
             try:
-                await cleanup_all_orphaned_bots(client, self.config, self.runtime_paths)
-            except Exception as e:
-                self.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
-
-        # Note: Room joining is deferred until after invitations are handled
-        self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
-        await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+                await self._close_runtime_support_services()
+            except Exception:
+                self.logger.warning("Failed to clean up runtime support after startup failure", exc_info=True)
+            self.client = None
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
+            raise
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.
@@ -1172,12 +1200,6 @@ class AgentBot:
         if not response.chunk:
             # Room is completely empty
             self.logger.info("Room is empty, sending welcome message", room_id=room_id)
-            if not await self._wait_for_joined_room_cache(room_id):
-                self.logger.warning(
-                    "Skipping welcome message because the joined room is not cached yet",
-                    room_id=room_id,
-                )
-                return
 
             # Generate and send the welcome message
             welcome_msg = _generate_welcome_message(room_id, self.config, self.runtime_paths)
@@ -1202,18 +1224,6 @@ class AgentBot:
             # Otherwise, room has a different message, don't send welcome
         # Room has other messages, don't send welcome
 
-    async def _wait_for_joined_room_cache(self, room_id: str) -> bool:
-        """Wait briefly for a newly joined room to appear in nio's local room cache."""
-        assert self.client is not None
-        if room_id in self.client.rooms:
-            return True
-
-        for _ in range(_JOINED_ROOM_CACHE_WAIT_ATTEMPTS):
-            await asyncio.sleep(_JOINED_ROOM_CACHE_WAIT_SECONDS)
-            if room_id in self.client.rooms:
-                return True
-        return False
-
     def _maybe_start_deferred_overdue_task_drain(self) -> None:
         """Start draining queued overdue tasks once Matrix sync is ready."""
         if self.agent_name != ROUTER_AGENT_NAME or self.client is None or self._sync_shutting_down:
@@ -1233,7 +1243,13 @@ class AgentBot:
         assert self.client is not None
 
         try:
-            drained_count = await drain_deferred_overdue_tasks(self.client, self.config, self.runtime_paths)
+            drained_count = await drain_deferred_overdue_tasks(
+                self.client,
+                self.config,
+                self.runtime_paths,
+                self.event_cache,
+                self._conversation_cache,
+            )
             if drained_count > 0:
                 self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
         except asyncio.CancelledError:
@@ -1289,7 +1305,7 @@ class AgentBot:
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
-        await self._conversation_access.apply_redaction(room.room_id, event)
+        await self._conversation_cache.apply_redaction(room.room_id, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -1570,6 +1586,7 @@ class AgentBot:
             extra_content,
             trigger_dispatch=trigger_dispatch,
             sender_domain=self.matrix_id.domain,
+            conversation_cache=self._conversation_cache,
         )
         if event_id:
             self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
@@ -1620,6 +1637,7 @@ class AgentBot:
         if isinstance(response, nio.RoomRedactError):
             self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
             return False
+        self._conversation_cache.notify_outbound_redaction(room_id, event_id)
         return True
 
 

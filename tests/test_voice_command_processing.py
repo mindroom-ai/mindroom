@@ -24,12 +24,14 @@ from mindroom.constants import (
 )
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history.types import HistoryScope
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
 from mindroom.voice_handler import prepare_voice_message
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
+    install_runtime_cache_support,
     install_send_response_mock,
     install_send_skill_command_response_mock,
     orchestrator_runtime_paths,
@@ -49,12 +51,14 @@ def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
 
 def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    bot = AgentBot(
-        agent_user=agent_user,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=rooms,
+    bot = install_runtime_cache_support(
+        AgentBot(
+            agent_user=agent_user,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=rooms,
+        ),
     )
     wrap_extracted_collaborators(bot)
     return bot
@@ -108,6 +112,16 @@ def _make_room(*user_ids: str) -> nio.MatrixRoom:
     return room
 
 
+def _install_voice_thread_dispatch_mocks(
+    bot: AgentBot,
+) -> None:
+    """Provide minimal explicit-thread cache reads for normalized voice dispatch."""
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+
+
 def _make_visible_router_echo_scenario(
     tmp_path: Path,
     *,
@@ -142,6 +156,7 @@ def _make_visible_router_echo_scenario(
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
+    _install_voice_thread_dispatch_mocks(bot)
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
         return_value=(False, None, []),
     )
@@ -744,6 +759,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     bot.client.user_id = "@mindroom_home:localhost"
     bot._generate_response = AsyncMock(return_value="$response")
     install_generate_response_mock(bot, bot._generate_response)
+    _install_voice_thread_dispatch_mocks(bot)
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
         return_value=(True, "$voice_event", []),
     )
@@ -814,6 +830,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     bot.client.user_id = "@mindroom_home:localhost"
     bot._generate_response = AsyncMock(return_value="$response")
     install_generate_response_mock(bot, bot._generate_response)
+    _install_voice_thread_dispatch_mocks(bot)
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
         return_value=(True, "$voice_event", []),
     )
@@ -870,6 +887,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
         install_send_response_mock(bot, bot._send_response)
         install_generate_response_mock(bot, bot._generate_response)
+        _install_voice_thread_dispatch_mocks(bot)
         unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
             return_value=(True, "$voice_event", []),
         )
@@ -913,7 +931,7 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
     request = bot._delivery_gateway.send_text.call_args.args[0]
     assert request.target.reply_to_event_id == "$voice_event"
     assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
-    assert request.target.thread_id == "$voice_event"
+    assert request.target.resolved_thread_id == "$voice_event"
     assert request.skip_mentions is True
 
 
@@ -1126,6 +1144,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot.client = AsyncMock()
     bot._send_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
+    _install_voice_thread_dispatch_mocks(bot)
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
         return_value=(False, None, []),
     )
@@ -1151,6 +1170,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
     assert request.target.reply_to_event_id == "$voice_event"
+    assert request.target.resolved_thread_id == "$voice_event"
+    assert request.target.resolved_thread_id == "$voice_event"
     assert request.response_text == "@home could you help with this?"
     assert request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
@@ -1211,6 +1232,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
         install_generate_response_mock(bot, bot._generate_response)
+        _install_voice_thread_dispatch_mocks(bot)
         unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
             return_value=(True, "$voice_event", []),
         )
@@ -1286,6 +1308,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
         install_generate_response_mock(bot, bot._generate_response)
+        _install_voice_thread_dispatch_mocks(bot)
         unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
             return_value=(True, "$voice_event", []),
         )

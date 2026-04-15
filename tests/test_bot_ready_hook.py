@@ -28,6 +28,8 @@ from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    delivered_matrix_event,
+    install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -50,17 +52,19 @@ def _config(tmp_path: Path) -> Config:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    return AgentBot(
-        agent_user=AgentMatrixUser(
-            agent_name=agent_name,
-            password=TEST_PASSWORD,
-            display_name=agent_name.title(),
-            user_id=f"@mindroom_{agent_name}:localhost",
+    return install_runtime_cache_support(
+        AgentBot(
+            agent_user=AgentMatrixUser(
+                agent_name=agent_name,
+                password=TEST_PASSWORD,
+                display_name=agent_name.title(),
+                user_id=f"@mindroom_{agent_name}:localhost",
+            ),
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!room:localhost"],
         ),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!room:localhost"],
     )
 
 
@@ -111,6 +115,40 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
         await bot._on_sync_response(MagicMock())
 
     assert fired_events == ["bot:ready"]
+
+
+@pytest.mark.asyncio
+async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_writes(tmp_path: Path) -> None:
+    """The shared test runtime helper must preserve the coordinator's synchronous queue contract."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+
+    message_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "Thread reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+            },
+            "event_id": "$thread_msg:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+    sync_response = MagicMock()
+    sync_response.__class__ = nio.SyncResponse
+    sync_response.rooms = MagicMock(
+        join={
+            "!room:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+        },
+    )
+
+    bot._conversation_cache.cache_sync_timeline(sync_response)
+    await bot.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+    bot.event_cache.store_events_batch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -175,20 +213,20 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
 
     captured_content: dict[str, object] = {}
 
-    async def mock_send(_client: object, _room_id: str, content: dict[str, object]) -> str:
+    async def mock_send(_client: object, _room_id: str, content: dict[str, object]) -> object:
         captured_content.update(content)
-        return "$hook-event"
+        return delivered_matrix_event("$hook-event", content)
 
     @hook(EVENT_BOT_READY)
     async def on_ready(ctx: AgentLifecycleContext) -> None:
         await ctx.send_message("!room:localhost", "I'm ready!")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
-        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
+        patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send),
     ):
         await bot._on_sync_response(MagicMock())
 
@@ -438,16 +476,16 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
 
     sent_clients: list[object] = []
 
-    async def mock_send(client: object, _room_id: str, _content: dict[str, object]) -> str:
+    async def mock_send(client: object, _room_id: str, content: dict[str, object]) -> object:
         sent_clients.append(client)
-        return "$hook-event"
+        return delivered_matrix_event("$hook-event", content)
 
     sender = bot._hook_context_support.message_sender()
     assert sender is not None
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
-        patch("mindroom.hooks.sender.get_latest_thread_event_id_if_needed", new=AsyncMock(return_value=None)),
-        patch("mindroom.hooks.sender.send_message", side_effect=mock_send),
+        patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send),
     ):
         event_id = await sender("!room:localhost", "hello", None, "test-plugin:bot:ready", None)
 

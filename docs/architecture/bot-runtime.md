@@ -14,7 +14,7 @@ It should own lifecycle, callback registration, sync, room membership, presence,
 It should turn text, voice, sidecars, and media into canonical turn inputs before policy or execution runs.
 
 `ConversationResolver` owns conversation identity.
-It should resolve thread roots, reply chains, history, mentions, and normalized ingress envelopes.
+It should resolve explicit thread identity, history, mentions, and normalized ingress envelopes.
 
 `DeliveryGateway` owns Matrix transport.
 It should send, edit, redact, and finalize already-generated responses.

@@ -12,8 +12,17 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    delivered_matrix_event,
+    install_runtime_cache_support,
+    make_matrix_client_mock,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+)
 
 
 @pytest.mark.asyncio
@@ -53,8 +62,8 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     )
 
     # Mock client and initialize required components
-    bot.client = AsyncMock()
-    bot.client.user_id = "@mindroom_router:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+    install_runtime_cache_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -82,7 +91,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
-    ) -> str:
+    ) -> object:
         # Extract thread_id from content if present
         thread_id = None
         if "m.relates_to" in content:
@@ -97,13 +106,13 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
                 "thread_id": thread_id,
             },
         )
-        return "$response_event"
+        return delivered_matrix_event("$response_event", content)
 
     # Add orchestrator mock
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
         await bot._on_message(room, event)
 
     # Verify error message was sent
@@ -153,8 +162,8 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     )
 
     # Mock client and initialize required components
-    bot.client = AsyncMock()
-    bot.client.user_id = "@mindroom_router:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+    install_runtime_cache_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -192,7 +201,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
-    ) -> str:
+    ) -> object:
         # Extract thread_id from content if present
         thread_id = None
         if "m.relates_to" in content:
@@ -214,33 +223,44 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
                 "thread_id": thread_id,
             },
         )
-        return "$response_event"
+        return delivered_matrix_event("$response_event", content)
 
     # Add orchestrator mock
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
+    with (
+        patch("mindroom.delivery_gateway.send_message_result", mock_send_message),
+        patch(
+            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
+            AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+        ),
+        patch(
+            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
+            AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+        ),
+        patch(
+            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
+            AsyncMock(return_value=[]),
+        ),
+    ):
         await bot._on_message(room, event)
 
-    # The current bug: it tries to use the event as thread root and fails
-    # After fix: it should use the existing thread_id from the event
-    if error_messages:
-        # This is the current buggy behavior
-        assert "Cannot start threads from an event with a relation" in error_messages[0]
-        assert len(sent_messages) == 0  # Message failed to send
-    else:
-        # This is the expected behavior after fix
-        assert len(sent_messages) == 1
-        msg = sent_messages[0]
-        assert msg["room_id"] == "!test:localhost"
-        assert "Unknown command" in msg["content"]["body"]
-        assert msg["thread_id"] == "$thread_root"  # Should use existing thread
+    assert not error_messages
+    assert len(sent_messages) == 1
+    msg = sent_messages[0]
+    assert msg["room_id"] == "!test:localhost"
+    assert "Unknown command" in msg["content"]["body"]
+    assert msg["thread_id"] == "$thread_root"
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_with_reply(tmp_path: Path) -> None:
-    """Test that unknown commands work when replying to another message."""
+async def test_unknown_command_with_reply_stays_plain_reply(tmp_path: Path) -> None:
+    """Plain-reply unknown commands should not invent a thread root."""
     # Create config
     config = bind_runtime_paths(
         Config(
@@ -275,8 +295,8 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     )
 
     # Mock client and initialize required components
-    bot.client = AsyncMock()
-    bot.client.user_id = "@mindroom_router:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+    install_runtime_cache_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -307,7 +327,7 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
-    ) -> str:
+    ) -> object:
         # Extract thread_id from content if present
         thread_id = None
         if "m.relates_to" in content:
@@ -322,19 +342,18 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
                 "thread_id": thread_id,
             },
         )
-        return "$response_event"
+        return delivered_matrix_event("$response_event", content)
 
     # Add orchestrator mock
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
         await bot._on_message(room, event)
 
-    # Should use the original message as thread root, not the reply
     assert len(sent_messages) == 1
     msg = sent_messages[0]
     assert msg["room_id"] == "!test:localhost"
     assert "Unknown command" in msg["content"]["body"]
-    # Should use the message we're replying to as thread root
-    assert msg["thread_id"] == "$original_message"
+    assert msg["thread_id"] is None
+    assert msg["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$test_event"}}

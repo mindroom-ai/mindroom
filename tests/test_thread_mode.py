@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,13 +21,15 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
-from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.thread_utils import create_session_id
+from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -34,7 +37,11 @@ if TYPE_CHECKING:
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    delivered_matrix_event,
+    install_runtime_cache_support,
     install_send_response_mock,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
     runtime_paths_for,
     sync_bot_runtime_state,
     unwrap_extracted_collaborator,
@@ -77,13 +84,14 @@ def _agent_bot(
         runtime_paths=runtime_paths_for(config),
         rooms=[] if rooms is None else rooms,
     )
+    install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
 
 def _install_static_logger_deps(bot: AgentBot, logger: MagicMock) -> None:
     """Rebuild extracted collaborators with one fixed logger dependency."""
-    bot._conversation_access.logger = logger
+    bot._conversation_cache.logger = logger
     resolver = replace(
         unwrap_extracted_collaborator(bot._conversation_resolver),
         deps=replace(unwrap_extracted_collaborator(bot._conversation_resolver).deps, logger=logger),
@@ -425,10 +433,10 @@ class TestRouterHandoffThreadMode:
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured_content.clear()
             captured_content.update(content)
-            return "$reply"
+            return delivered_matrix_event("$reply", content)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -438,9 +446,9 @@ class TestRouterHandoffThreadMode:
 
         with (
             patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="assistant")),
-            patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
+            patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
-                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
@@ -452,7 +460,7 @@ class TestRouterHandoffThreadMode:
                 requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_not_called()
-        assert "m.relates_to" not in captured_content
+        assert captured_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$user_event"}}
 
     @pytest.mark.asyncio
     async def test_router_handoff_uses_suggested_thread_mode(
@@ -466,19 +474,19 @@ class TestRouterHandoffThreadMode:
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured_content.clear()
             captured_content.update(content)
-            return "$reply"
+            return delivered_matrix_event("$reply", content)
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
 
         with (
             patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="coder")),
-            patch("mindroom.delivery_gateway.send_message", side_effect=mock_send),
+            patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
-                "mindroom.delivery_gateway.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new_callable=AsyncMock,
                 return_value="$latest",
             ) as mock_get_latest,
@@ -517,8 +525,53 @@ class TestCreateSessionIdWithNoneThread:
             reply_to_event_id="$event456",
             room_mode=True,
         )
+        assert target.source_thread_id is None
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
+
+    def test_message_target_plain_reply_keeps_room_level_session(self) -> None:
+        """Plain reply targets should not derive thread or session identity."""
+        target = MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$event456",
+            room_mode=False,
+        )
+        assert target.reply_to_event_id == "$event456"
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
+
+    def test_message_target_from_runtime_context_keeps_room_mode_thread_provenance(self) -> None:
+        """Room-mode runtime targets should retain raw provenance only under the source-thread field."""
+        config = _runtime_bound_config(
+            Config(
+                agents={},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+        )
+        runtime_context = ToolRuntimeContext(
+            agent_name="assistant",
+            room_id="!room:localhost",
+            thread_id="$raw-thread",
+            resolved_thread_id=None,
+            requester_id="@user:localhost",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            reply_to_event_id="$event456",
+            session_id=create_session_id("!room:localhost", None),
+        )
+
+        target = MessageTarget.from_runtime_context(runtime_context)
+
+        assert target.source_thread_id == "$raw-thread"
+        assert target.resolved_thread_id is None
+        assert target.is_room_mode is True
 
 
 class TestExtractMessageContextRoomMode:
@@ -582,8 +635,8 @@ class TestExtractMessageContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
-        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-            return_value=(True, "$thread123", [{"event_id": "$thread123"}]),
+        unwrap_extracted_collaborator(bot._conversation_resolver)._resolve_thread_context = AsyncMock(
+            return_value=(True, "$thread123", [{"event_id": "$thread123"}], False),
         )
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -668,7 +721,7 @@ class TestExtractMessageContextRoomMode:
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Context extraction and hydration should go through the extracted resolver."""
+        """Context extraction helpers should go through the extracted resolver."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -698,12 +751,18 @@ class TestExtractMessageContextRoomMode:
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
         bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
         bot._conversation_resolver.extract_message_context_impl = AsyncMock(return_value=context)
-        bot._conversation_resolver.hydrate_dispatch_context = AsyncMock()
 
         assert await bot._conversation_resolver.extract_dispatch_context(room, event) is context
         assert await bot._conversation_resolver.extract_message_context(room, event, full_history=False) is context
-        assert await bot._conversation_resolver.extract_message_context_impl(room, event, full_history=True) is context
-        await bot._conversation_resolver.hydrate_dispatch_context(room, event, context)
+        assert (
+            await bot._conversation_resolver.extract_message_context_impl(
+                room,
+                event,
+                full_history=True,
+                dispatch_safe=False,
+            )
+            is context
+        )
 
         bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
         bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
@@ -715,8 +774,8 @@ class TestExtractMessageContextRoomMode:
             room,
             event,
             full_history=True,
+            dispatch_safe=False,
         )
-        bot._conversation_resolver.hydrate_dispatch_context.assert_awaited_once_with(room, event, context)
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
         self,
@@ -769,10 +828,103 @@ class TestExtractMessageContextRoomMode:
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
+            event_source={
+                "event_id": "$event123",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "type": "m.room.message",
+                "content": {"body": "Hello", "msgtype": "m.text"},
+            },
         )
 
         assert threaded_target.resolved_thread_id == "$thread123"
+        assert room_mode_target.source_thread_id is None
         assert room_mode_target.resolved_thread_id is None
+
+    def test_build_message_target_plain_reply_does_not_infer_thread_identity(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Resolver target building should keep plain replies out of thread/session routing."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$reply-event:localhost",
+            event_source={
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$target:localhost"}},
+                },
+                "event_id": "$reply-event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.reply_to_event_id == "$reply-event:localhost"
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
+
+    @pytest.mark.parametrize("relation_type", ["m.replace", "m.annotation", "m.reference"])
+    def test_build_message_target_plain_reply_relation_does_not_infer_thread_identity(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+        relation_type: str,
+    ) -> None:
+        """Edits, reactions, and references to plain replies must stay room-scoped."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$relation-event:localhost",
+            event_source={
+                "content": {
+                    "body": "relation on plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": relation_type,
+                        "event_id": "$plain-reply:localhost",
+                    },
+                },
+                "event_id": "$relation-event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.reply_to_event_id == "$relation-event:localhost"
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
 
 
 class TestSendResponseRoomMode:
@@ -791,11 +943,11 @@ class TestSendResponseRoomMode:
 
         captured_content: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured_content.update(content)
-            return "$response_event"
+            return delivered_matrix_event("$response_event", content)
 
-        with patch("mindroom.delivery_gateway.send_message", side_effect=mock_send):
+        with patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send):
             event_id = await bot._send_response(
                 room_id="!room:localhost",
                 reply_to_event_id="$event123",
@@ -811,7 +963,7 @@ class TestSendResponseRoomMode:
 
 
 class TestStreamingResponseRoomMode:
-    """Test StreamingResponse skips thread and reply relations when room_mode=True."""
+    """Test StreamingResponse keeps plain reply relations while suppressing thread relations in room mode."""
 
     @pytest.fixture
     def streaming_config(self) -> Config:
@@ -838,8 +990,8 @@ class TestStreamingResponseRoomMode:
         assert sr.room_mode is False
 
     @pytest.mark.asyncio
-    async def test_room_mode_no_relations(self, streaming_config: Config) -> None:
-        """In room mode, _send_or_edit_message should emit no m.relates_to."""
+    async def test_room_mode_keeps_plain_reply_relation(self, streaming_config: Config) -> None:
+        """In room mode, _send_or_edit_message should emit a plain reply relation only."""
         sr = _streaming_response(
             streaming_config,
             room_id="!room:localhost",
@@ -853,15 +1005,15 @@ class TestStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured.update(content)
-            return "$sent"
+            return delivered_matrix_event("$sent", content)
 
         client = AsyncMock()
-        with patch("mindroom.streaming.send_message", side_effect=mock_send):
+        with patch("mindroom.streaming.send_message_result", side_effect=mock_send):
             await sr._send_or_edit_message(client, is_final=True)
 
-        assert "m.relates_to" not in captured
+        assert captured["m.relates_to"] == {"m.in_reply_to": {"event_id": "$event123"}}
 
     @pytest.mark.asyncio
     async def test_thread_mode_has_relations(self, streaming_config: Config) -> None:
@@ -879,12 +1031,12 @@ class TestStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured.update(content)
-            return "$sent"
+            return delivered_matrix_event("$sent", content)
 
         client = AsyncMock()
-        with patch("mindroom.streaming.send_message", side_effect=mock_send):
+        with patch("mindroom.streaming.send_message_result", side_effect=mock_send):
             await sr._send_or_edit_message(client, is_final=True)
 
         assert "m.relates_to" in captured
@@ -892,7 +1044,7 @@ class TestStreamingResponseRoomMode:
 
 
 class TestSendStreamingResponseRoomMode:
-    """Test send_streaming_response skips thread lookup and relations in room mode."""
+    """Test send_streaming_response skips thread lookup in room mode."""
 
     @pytest.mark.asyncio
     async def test_room_mode_skips_latest_thread_lookup(self) -> None:
@@ -914,13 +1066,12 @@ class TestSendStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
             captured.update(content)
-            return "$sent"
+            return delivered_matrix_event("$sent", content)
 
         with (
-            patch("mindroom.streaming.send_message", side_effect=mock_send),
-            patch("mindroom.streaming.get_latest_thread_event_id_if_needed") as mock_get_latest,
+            patch("mindroom.streaming.send_message_result", side_effect=mock_send),
         ):
             await send_streaming_response(
                 client,
@@ -934,8 +1085,11 @@ class TestSendStreamingResponseRoomMode:
                 room_mode=True,
             )
 
-        mock_get_latest.assert_not_called()
-        assert "m.relates_to" not in captured
+        assert captured["m.relates_to"] == {
+            "m.in_reply_to": {
+                "event_id": "$event123",
+            },
+        }
 
 
 class TestCommandThreadContextRoomMode:
@@ -1132,7 +1286,7 @@ class TestExtractedModuleLoggerRebinding:
         event_cache = AsyncMock()
         event_cache.append_event.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -1154,27 +1308,28 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        await bot._conversation_access.append_live_event(
+        await bot._conversation_cache.append_live_event(
             "!room:localhost",
             event,
             event_info=EventInfo.from_event(event.source),
         )
 
         original_logger.warning.assert_called_once_with(
-            "Failed to append live thread event to cache",
+            "Failed to append thread event to cache",
             room_id="!room:localhost",
             thread_id="$threadroot",
             event_id="$event123",
+            context="live",
             error="cache write failed",
         )
         rebound_logger.warning.assert_not_called()
 
-    def test_conversation_resolver_fetch_path_uses_conversation_access_api(
+    def test_conversation_resolver_fetch_path_uses_conversation_cache_api(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Resolver full-history fetches should go through the explicit access layer."""
+        """Resolver full-history fetches should go through the explicit conversation-cache layer."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1188,7 +1343,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        bot._conversation_access.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
@@ -1198,13 +1353,10 @@ class TestExtractedModuleLoggerRebinding:
             ),
         )
 
-        bot._conversation_access.get_thread_history.assert_awaited_once_with(
-            "!room:localhost",
-            "$threadroot",
-        )
+        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with("!room:localhost", "$threadroot")
 
     @pytest.mark.asyncio
-    async def test_conversation_access_fetch_path_passes_explicit_event_cache(
+    async def test_conversation_cache_fetch_path_passes_explicit_event_cache(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1221,34 +1373,59 @@ class TestExtractedModuleLoggerRebinding:
             tmp_path,
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = MagicMock()
+        bot.event_cache = make_event_cache_mock()
+        bot.event_cache.get_thread_events = AsyncMock(
+            return_value=[
+                {
+                    "event_id": "$threadroot",
+                    "sender": "@user:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 1000,
+                    "content": {"body": "Root", "msgtype": "m.text"},
+                },
+                {
+                    "event_id": "$reply",
+                    "sender": "@agent:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 2000,
+                    "content": {
+                        "body": "Reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
+                    },
+                },
+            ],
+        )
         sync_bot_runtime_state(bot)
 
-        client = MagicMock()
+        client = AsyncMock()
         with patch(
-            "mindroom.matrix.conversation_access.fetch_thread_history",
+            "mindroom.matrix.conversation_cache.fetch_thread_history",
             new=AsyncMock(return_value=[]),
         ) as fetch_thread_history_mock:
             bot.client = client
-            await bot._conversation_access.get_thread_history(
+            await bot._conversation_cache.get_thread_history(
                 "!room:localhost",
                 "$threadroot",
             )
 
-        fetch_thread_history_mock.assert_awaited_once_with(
+        fetch_thread_history_mock.assert_awaited_once()
+        call_args = fetch_thread_history_mock.await_args
+        assert call_args.args == (
             client,
             "!room:localhost",
             "$threadroot",
-            event_cache=bot.event_cache,
         )
+        assert call_args.kwargs["event_cache"] is bot.event_cache
+        assert call_args.kwargs["runtime_started_at"] == bot._runtime_view.runtime_started_at
 
     @pytest.mark.asyncio
-    async def test_conversation_access_promotes_full_snapshot_to_history_cache(
+    async def test_conversation_cache_reuses_fresh_durable_snapshot_before_full_history_hydration(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Full snapshots should satisfy later full-history reads inside the same turn."""
+        """Fresh durable thread rows should serve snapshots before full-history hydration."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1260,92 +1437,63 @@ class TestExtractedModuleLoggerRebinding:
             tmp_path,
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = MagicMock()
+        bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
-
-        snapshot = ThreadHistoryResult([], is_full_history=True)
-        with (
-            patch(
-                "mindroom.matrix.conversation_access.fetch_thread_snapshot",
-                new=AsyncMock(return_value=snapshot),
-            ) as fetch_thread_snapshot_mock,
-            patch(
-                "mindroom.matrix.conversation_access.fetch_thread_history",
-                new=AsyncMock(),
-            ) as fetch_thread_history_mock,
-        ):
-            bot.client = MagicMock()
-            async with bot._conversation_access.turn_scope():
-                snapshot_history = await bot._conversation_access.get_thread_snapshot(
-                    "!room:localhost",
-                    "$threadroot",
-                )
-                full_history = await bot._conversation_access.get_thread_history(
-                    "!room:localhost",
-                    "$threadroot",
-                )
-
-        assert snapshot_history is snapshot
-        assert full_history is snapshot
-        fetch_thread_snapshot_mock.assert_awaited_once()
-        fetch_thread_history_mock.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_conversation_access_reloads_non_full_snapshot_for_history(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Preview snapshots should not suppress a later hydrated history read."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
+        bot.event_cache.get_thread_cache_state = AsyncMock(
+            return_value=ThreadCacheState(
+                validated_at=time.time(),
+                invalidated_at=None,
+                invalidation_reason=None,
+                room_invalidated_at=None,
+                room_invalidation_reason=None,
             ),
-            tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = MagicMock()
-        sync_bot_runtime_state(bot)
+        bot.event_cache.get_thread_events = AsyncMock(
+            return_value=[
+                {
+                    "event_id": "$threadroot",
+                    "sender": "@user:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 1000,
+                    "content": {"body": "Root", "msgtype": "m.text"},
+                },
+                {
+                    "event_id": "$reply",
+                    "sender": "@agent:localhost",
+                    "type": "m.room.message",
+                    "origin_server_ts": 2000,
+                    "content": {
+                        "body": "Reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
+                    },
+                },
+            ],
+        )
 
-        preview_snapshot = ThreadHistoryResult([], is_full_history=False)
-        hydrated_history = ThreadHistoryResult([], is_full_history=True)
-        with (
-            patch(
-                "mindroom.matrix.conversation_access.fetch_thread_snapshot",
-                new=AsyncMock(return_value=preview_snapshot),
-            ) as fetch_thread_snapshot_mock,
-            patch(
-                "mindroom.matrix.conversation_access.fetch_thread_history",
-                new=AsyncMock(return_value=hydrated_history),
-            ) as fetch_thread_history_mock,
-        ):
-            bot.client = MagicMock()
-            async with bot._conversation_access.turn_scope():
-                snapshot_history = await bot._conversation_access.get_thread_snapshot(
-                    "!room:localhost",
-                    "$threadroot",
-                )
-                full_history = await bot._conversation_access.get_thread_history(
-                    "!room:localhost",
-                    "$threadroot",
-                )
+        bot.client = AsyncMock()
+        async with bot._conversation_cache.turn_scope():
+            snapshot_history = await bot._conversation_cache.get_thread_snapshot(
+                "!room:localhost",
+                "$threadroot",
+            )
+            full_history = await bot._conversation_cache.get_thread_history(
+                "!room:localhost",
+                "$threadroot",
+            )
 
-        assert snapshot_history is preview_snapshot
-        assert full_history is hydrated_history
-        fetch_thread_snapshot_mock.assert_awaited_once()
-        fetch_thread_history_mock.assert_awaited_once()
+        assert snapshot_history.is_full_history is False
+        assert [message.event_id for message in snapshot_history] == ["$threadroot", "$reply"]
+        assert full_history.is_full_history is True
+        assert [message.event_id for message in full_history] == ["$threadroot", "$reply"]
 
     @pytest.mark.asyncio
-    async def test_coalescing_thread_id_uses_canonical_relation_walk(
+    async def test_explicit_thread_id_inherits_known_thread_for_plain_reply_target(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Pre-gate coalescing should avoid full dispatch-target derivation for reply chains."""
+        """Direct plain replies should inherit a known thread from the resolver boundary."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1378,34 +1526,103 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        with (
-            patch(
-                "mindroom.conversation_resolver.canonicalize_related_event_id",
-                new=AsyncMock(return_value="$thread-root:localhost"),
-            ) as canonicalize_mock,
-            patch.object(
-                bot._conversation_resolver,
-                "derive_conversation_target",
-                new=AsyncMock(side_effect=AssertionError("coalescing should not derive full dispatch target")),
-            ),
-        ):
-            thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
-
-        assert thread_id == "$thread-root:localhost"
-        canonicalize_mock.assert_awaited_once_with(
-            bot.client,
+        bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
+            side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
+        )
+        thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,
-            "$reply-seed:localhost",
-            access=bot._conversation_access,
-            caches=bot._conversation_resolver.reply_chain,
+            event.event_id,
+            EventInfo.from_event(event.source),
+            full_history=False,
+            dispatch_safe=True,
+        )
+
+        assert thread_id == "$threadroot"
+
+    @pytest.mark.asyncio
+    async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Only explicit thread events should defer full history after snapshot preview."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        sync_bot_runtime_state(bot)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.name = "Direct Thread Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "follow-up",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                        "m.in_reply_to": {"event_id": "$thread-msg:localhost"},
+                    },
+                },
+            },
+        )
+        preview_snapshot = ThreadHistoryResult(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="Root",
+                    event_id="$thread-root:localhost",
+                ),
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="Earlier reply",
+                    event_id="$thread-msg:localhost",
+                ),
+            ],
+            is_full_history=False,
+        )
+
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=preview_snapshot)
+
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_snapshot",
+            AsyncMock(side_effect=AssertionError("dispatch preview should use strict dispatch snapshot reads")),
+        ):
+            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread-root:localhost"
+        assert [message.event_id for message in context.thread_history] == [
+            "$thread-root:localhost",
+            "$thread-msg:localhost",
+        ]
+        assert context.requires_full_thread_history is True
+        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+            room.room_id,
+            "$thread-root:localhost",
         )
 
 
-class TestConversationAccessArchitecture:
-    """Architecture guards for the explicit conversation-access seam."""
+class TestConversationCacheArchitecture:
+    """Architecture guards for the explicit conversation-cache seam."""
 
     def test_hot_path_modules_do_not_call_raw_matrix_history_apis(self) -> None:
-        """Hot-path conversation modules should use the explicit access layer."""
+        """Hot-path conversation modules should use the explicit conversation-cache layer."""
         repo_root = Path(__file__).resolve().parents[1]
         banned_calls = (
             "room_get_event(",
@@ -1416,7 +1633,6 @@ class TestConversationAccessArchitecture:
         for relative_path in (
             "src/mindroom/conversation_resolver.py",
             "src/mindroom/turn_policy.py",
-            "src/mindroom/matrix/reply_chain.py",
             "src/mindroom/response_runner.py",
         ):
             file_text = (repo_root / relative_path).read_text()
@@ -1424,16 +1640,15 @@ class TestConversationAccessArchitecture:
                 assert banned_call not in file_text, f"{relative_path} should not call {banned_call}"
 
     def test_hot_path_modules_do_not_reference_event_cache_directly(self) -> None:
-        """Hot-path conversation modules should not bypass the access layer for cache state."""
+        """Hot-path conversation modules should not bypass the conversation-cache layer for cache state."""
         repo_root = Path(__file__).resolve().parents[1]
         banned_tokens = (
-            "EventCache(",
+            "_EventCache(",
             "event_cache.",
         )
         for relative_path in (
             "src/mindroom/conversation_resolver.py",
             "src/mindroom/turn_policy.py",
-            "src/mindroom/matrix/reply_chain.py",
             "src/mindroom/response_runner.py",
         ):
             file_text = (repo_root / relative_path).read_text()

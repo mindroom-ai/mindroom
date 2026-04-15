@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from pydantic import ValidationError
-
 from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.document.base import Document
+from pydantic import ValidationError
+
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config

@@ -273,7 +273,7 @@ class EditRegenerator:
             room_id=room.room_id,
             prompt=regeneration_prompt,
             reply_to_event_id=regeneration_turn_record.anchor_event_id,
-            thread_id=regeneration_target.thread_id,
+            thread_id=regeneration_target.resolved_thread_id,
             target=regeneration_target,
             thread_history=context.thread_history,
             existing_event_id=response_event_id,

@@ -14,6 +14,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -23,6 +24,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     make_matrix_client_mock,
     patch_response_runner_module,
     runtime_paths_for,
@@ -91,33 +93,39 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
-@patch("mindroom.matrix.conversation_access.fetch_thread_snapshot")
 @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
 async def test_agent_processes_direct_mention(
-    mock_fetch_snapshot: AsyncMock,
     mock_fetch_history: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
 ) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
-    mock_fetch_snapshot.return_value = []
     mock_fetch_history.return_value = []
     test_room_id = "!test:localhost"
     test_user_id = "@alice:localhost"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
-        # Mock the client
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
-        mock_client.add_response_callback = MagicMock()
+        mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.access_token = mock_calculator_agent.access_token
+        mock_client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse("$placeholder:localhost", test_room_id),
+        )
         mock_login.return_value = mock_client
 
         config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         bot.client = mock_client
+        install_runtime_cache_support(bot)
+        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
         bot.running = True
 
         # Create a message mentioning the calculator agent
@@ -148,7 +156,7 @@ async def test_agent_processes_direct_mention(
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "15% of 200 is 30"
 
-        mock_ai = AsyncMock(return_value=mock_streaming_response())
+        mock_ai = MagicMock(return_value=mock_streaming_response())
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
@@ -206,6 +214,7 @@ async def test_agent_ignores_other_agents(
         config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
+        install_runtime_cache_support(bot)
         await bot.start()
 
         # Create a message from another agent
@@ -284,6 +293,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             rooms=[test_room_id],
             enable_streaming=False,
         )
+        install_runtime_cache_support(bot)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -327,8 +337,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         }
 
         with (
-            patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
-            patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
+            patch.object(bot._conversation_cache, "get_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
+            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
@@ -343,7 +355,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_dispatch_history.return_value = thread_history
+            mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(
@@ -384,8 +398,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_2.sender = test_user_id
 
         with (
-            patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
-            patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
+            patch.object(bot._conversation_cache, "get_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
+            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
@@ -406,7 +422,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_dispatch_history.return_value = thread_history
+            mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
             bot.client.room_send.side_effect = [
                 nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
                 nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
@@ -462,8 +480,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_with_mention.sender = test_user_id
 
         with (
-            patch.object(bot._conversation_access, "get_thread_snapshot") as mock_fetch_snapshot,
-            patch.object(bot._conversation_access, "get_thread_history") as mock_fetch,
+            patch.object(bot._conversation_cache, "get_thread_snapshot") as mock_fetch_snapshot,
+            patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
+            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
@@ -483,7 +503,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history
-            mock_fetch_snapshot.return_value = thread_history
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_dispatch_history.return_value = thread_history
+            mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(
@@ -605,6 +627,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[initial_room])
+        install_runtime_cache_support(bot)
         await bot.start()
 
         # Create invite event for a different room

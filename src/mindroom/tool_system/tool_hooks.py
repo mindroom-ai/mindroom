@@ -67,16 +67,14 @@ def _resolved_thread_id(
     request_execution_identity: ToolExecutionIdentity | None,
     runtime_context: ToolRuntimeContext | None,
 ) -> str | None:
-    if runtime_context is not None:
-        return runtime_context.resolved_thread_id or runtime_context.thread_id
+    if runtime_context is not None and runtime_context.resolved_thread_id is not None:
+        return runtime_context.resolved_thread_id
 
-    if execution_identity is not None and (
-        execution_identity.resolved_thread_id is not None or execution_identity.thread_id is not None
-    ):
-        return execution_identity.resolved_thread_id or execution_identity.thread_id
+    if execution_identity is not None and execution_identity.resolved_thread_id is not None:
+        return execution_identity.resolved_thread_id
 
-    if request_execution_identity is not None:
-        return request_execution_identity.resolved_thread_id or request_execution_identity.thread_id
+    if request_execution_identity is not None and request_execution_identity.resolved_thread_id is not None:
+        return request_execution_identity.resolved_thread_id
 
     return default_thread_id
 

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.tools import Toolkit
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.matrix.client import get_latest_thread_event_id_if_needed, send_message
+from mindroom.matrix.client import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import (
@@ -257,8 +257,7 @@ async def _send_matrix_text(
     """Send a formatted text message to a Matrix room, optionally in a thread."""
     latest_thread_event_id = None
     if thread_id is not None:
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            context.client,
+        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
         )
@@ -272,7 +271,12 @@ async def _send_matrix_text(
     )
     if original_sender:
         content[ORIGINAL_SENDER_KEY] = original_sender
-    return await send_message(context.client, room_id, content)
+    delivered = await send_message_result(context.client, room_id, content)
+    if delivered is not None:
+        context.conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
+    if delivered is not None:
+        return delivered.event_id
+    return None
 
 
 def _spawn_room_mode_error(context: ToolRuntimeContext, *, target_agent: str) -> str | None:
@@ -305,6 +309,7 @@ async def _spawn_followup_warnings(
             summary,
             summary_message_count,
             "manual",
+            context.conversation_cache,
         )
     except Exception as exc:
         warnings.append(f"Failed to set thread summary: {exc}")
@@ -611,12 +616,10 @@ class SubAgentsTools(Toolkit):
             tag=normalized_tag,
             target_agent=target_agent,
         )
-        if reused_payload is not None:
-            return reused_payload
-
         room_mode_error = _spawn_room_mode_error(context, target_agent=target_agent)
-        if room_mode_error is not None:
-            return room_mode_error
+        early_payload = reused_payload or room_mode_error
+        if early_payload is not None:
+            return early_payload
 
         return await _spawn_session_payload(
             context,

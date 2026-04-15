@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks.sender import HookMessageSender
     from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
-    from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -72,7 +72,8 @@ class ToolRuntimeContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
-    conversation_access: ConversationReadAccess | None = None
+    event_cache: ConversationEventCache
+    conversation_cache: ConversationCacheProtocol
     active_model_name: str | None = None
     session_id: str | None = None
     room: nio.MatrixRoom | None = None
@@ -127,8 +128,11 @@ class ToolRuntimeSupport:
         client = self.runtime.client
         if client is None:
             return None
+        event_cache = self.runtime.event_cache
+        if event_cache is None:
+            return None
         target_room_id = target.room_id
-        target_thread_id = target.thread_id
+        target_thread_id = target.source_thread_id
         target_resolved_thread_id = target.resolved_thread_id
         target_reply_to_event_id = target.reply_to_event_id
         return ToolRuntimeContext(
@@ -140,7 +144,8 @@ class ToolRuntimeSupport:
             client=client,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
-            conversation_access=self.resolver.deps.conversation_access,
+            conversation_cache=self.resolver.deps.conversation_cache,
+            event_cache=event_cache,
             active_model_name=active_model_name,
             session_id=session_id,
             room=self.resolver.cached_room(target_room_id),
@@ -170,7 +175,7 @@ class ToolRuntimeSupport:
             runtime_paths=self.runtime_paths,
             requester_id=user_id or self.matrix_id.full_id,
             room_id=target.room_id,
-            thread_id=target.thread_id,
+            thread_id=target.resolved_thread_id,
             resolved_thread_id=target.resolved_thread_id,
             session_id=session_id,
         )
@@ -337,7 +342,7 @@ async def emit_custom_event(
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,
-        thread_id=context.resolved_thread_id or context.thread_id,
+        thread_id=context.resolved_thread_id,
         sender_id=context.requester_id,
         message_received_depth=bindings.message_received_depth,
     )

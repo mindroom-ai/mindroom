@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
@@ -26,6 +27,7 @@ from mindroom.streaming import build_restart_interrupted_body
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     resolve_response_thread_root_for_test,
@@ -69,7 +71,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.hook_registry = HookRegistry.empty()
     bot.enable_streaming = True
     bot.orchestrator = None
-    bot._conversation_resolver = MagicMock()
+    install_runtime_cache_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
     )
@@ -139,15 +141,18 @@ class TestAIErrorDisplay:
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
             event_id: str,
-            content: dict[str, object],  # noqa: ARG001
+            content: dict[str, object],
             text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, text))
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
-            patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(side_effect=mock_gateway_edit_message)),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=mock_gateway_edit_message),
+            ),
         ):
             _build_response_runner(bot)
             error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
@@ -191,19 +196,19 @@ class TestAIErrorDisplay:
 
             mock_stream.return_value = error_stream()
 
-            # Mock send_streaming_response to return the accumulated text
-            with patch("mindroom.delivery_gateway.send_streaming_response") as mock_send_streaming:
-                _build_response_runner(bot)
-                error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
-                mock_send_streaming.return_value = ("$msg_id", error_text)
-
+            _build_response_runner(bot)
+            error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
+            with patch(
+                "mindroom.delivery_gateway.DeliveryGateway.deliver_stream",
+                new=AsyncMock(return_value=("$msg_id", error_text)),
+            ) as mock_deliver_stream:
                 # Call the method with an existing_event_id
                 await bot._response_runner.process_and_respond_streaming(
                     _response_request(existing_event_id="$thinking_msg"),
                 )
 
-                # Verify send_streaming_response was called with the error stream
-                mock_send_streaming.assert_called_once()
+                # Verify the delivery gateway was asked to stream the response.
+                mock_deliver_stream.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:
@@ -215,16 +220,19 @@ class TestAIErrorDisplay:
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
             event_id: str,
-            content: dict[str, object],  # noqa: ARG001
+            content: dict[str, object],
             text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, text))
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         # Mock ai_response to raise CancelledError
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
-            patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(side_effect=mock_gateway_edit_message)),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=mock_gateway_edit_message),
+            ),
         ):
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError()
@@ -252,11 +260,11 @@ class TestAIErrorDisplay:
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
             event_id: str,  # noqa: ARG001
-            content: dict[str, object],  # noqa: ARG001
+            content: dict[str, object],
             text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_messages.append(text)
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         error_messages = [
             "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
@@ -271,7 +279,10 @@ class TestAIErrorDisplay:
 
             with (
                 patch("mindroom.response_runner.ai_response") as mock_ai,
-                patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(side_effect=mock_gateway_edit_message)),
+                patch(
+                    "mindroom.delivery_gateway.edit_message_result",
+                    new=AsyncMock(side_effect=mock_gateway_edit_message),
+                ),
             ):
                 _build_response_runner(bot)
                 mock_ai.return_value = error_msg
@@ -313,13 +324,16 @@ class TestAIErrorDisplay:
             event_id: str,
             content: dict[str, object],
             text: str,
-        ) -> str:
+        ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, content, text))
-            return "$edit"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
-            patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(side_effect=mock_gateway_edit_message)),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=mock_gateway_edit_message),
+            ),
         ):
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
@@ -348,7 +362,15 @@ class TestAIErrorDisplay:
                 side_effect=RuntimeError("knowledge init failed"),
             ),
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$response_id")),
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(
+                    return_value=DeliveredMatrixEvent(
+                        event_id="$response_id",
+                        content_sent={"body": "Response without knowledge", "msgtype": "m.text"},
+                    ),
+                ),
+            ),
         ):
             _build_response_runner(bot)
             mock_ai.return_value = "Response without knowledge"

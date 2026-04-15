@@ -2,7 +2,7 @@
 
 import os
 import re
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
@@ -20,8 +20,16 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
-from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.client import (
+    DeliveredMatrixEvent,
+    ResolvedVisibleMessage,
+    build_edit_event_content,
+)
+from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.turn_controller import TurnController
 from mindroom.turn_policy import TurnPolicy
 from mindroom.turn_store import TurnStore
@@ -35,10 +43,16 @@ __all__ = [
     "build_private_template_dir",
     "bypass_authorization",
     "create_mock_room",
+    "delivered_matrix_event",
+    "delivered_matrix_side_effect",
     "install_edit_message_mock",
     "install_generate_response_mock",
+    "install_runtime_cache_support",
     "install_send_response_mock",
     "install_send_skill_command_response_mock",
+    "make_conversation_cache_mock",
+    "make_event_cache_mock",
+    "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
     "normalize_console_output",
@@ -107,6 +121,110 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     return client
+
+
+def delivered_matrix_event(
+    event_id: str,
+    content: Mapping[str, object] | None = None,
+) -> DeliveredMatrixEvent:
+    """Return one delivered Matrix event using the exact content payload seen by the helper."""
+    return DeliveredMatrixEvent(
+        event_id=event_id,
+        content_sent={} if content is None else dict(content),
+    )
+
+
+def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[DeliveredMatrixEvent]]:
+    """Build one async mock side effect that mirrors send/edit helpers returning delivered events."""
+
+    async def _deliver(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+        if "content" in kwargs:
+            content = kwargs["content"]
+            content_mapping = content if isinstance(content, Mapping) else None
+            return delivered_matrix_event(event_id, content_mapping)
+        if "new_content" in kwargs:
+            new_content = kwargs["new_content"]
+            new_text = kwargs.get("new_text")
+            if isinstance(new_content, Mapping) and isinstance(new_text, str):
+                return delivered_matrix_event(
+                    event_id,
+                    build_edit_event_content(
+                        event_id=str(args[2]) if len(args) > 2 else "",
+                        new_content=dict(new_content),
+                        new_text=new_text,
+                    ),
+                )
+            content = new_content
+            content_mapping = content if isinstance(content, Mapping) else None
+            return delivered_matrix_event(event_id, content_mapping)
+        if len(args) > 4 and isinstance(args[3], Mapping) and isinstance(args[4], str):
+            return delivered_matrix_event(
+                event_id,
+                build_edit_event_content(
+                    event_id=str(args[2]),
+                    new_content=dict(args[3]),
+                    new_text=args[4],
+                ),
+            )
+        content_index = 2 if len(args) <= 3 else 3
+        content = args[content_index] if len(args) > content_index else None
+        content_mapping = content if isinstance(content, Mapping) else None
+        return delivered_matrix_event(event_id, content_mapping)
+
+    return _deliver
+
+
+def make_event_cache_mock() -> AsyncMock:
+    """Return an async mock shaped like the event cache protocol."""
+    event_cache = AsyncMock(spec=_EventCache)
+    event_cache.get_event.return_value = None
+    event_cache.get_latest_edit.return_value = None
+    event_cache.get_thread_events.return_value = None
+    event_cache.get_thread_cache_state.return_value = None
+    event_cache.get_thread_id_for_event.return_value = None
+    event_cache.append_event.return_value = True
+    event_cache.redact_event.return_value = False
+    return event_cache
+
+
+def make_conversation_cache_mock() -> AsyncMock:
+    """Return an async mock shaped like the conversation cache protocol."""
+    conversation_cache = AsyncMock(spec=ConversationCacheProtocol)
+    conversation_cache.get_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id),
+    )
+    conversation_cache.get_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+    conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    conversation_cache.append_live_event = AsyncMock()
+    conversation_cache.notify_outbound_message = MagicMock()
+    conversation_cache.notify_outbound_redaction = MagicMock()
+    return conversation_cache
+
+
+def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> _EventCacheWriteCoordinator:
+    """Return a coordinator-shaped runtime helper with the real synchronous queue contract."""
+    return _EventCacheWriteCoordinator(
+        logger=MagicMock(),
+        background_task_owner=object() if owner is None else owner,
+    )
+
+
+def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
+    """Attach required cache runtime support to one test bot."""
+    if bot._runtime_view.event_cache is None:
+        bot.event_cache = make_event_cache_mock()
+    if bot._runtime_view.event_cache_write_coordinator is None:
+        bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
+    sync_bot_runtime_state(bot)
+    return bot
 
 
 def normalize_console_output(text: str) -> str:
@@ -418,7 +536,7 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
 
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
-    sync_bot_runtime_state(bot)
+    install_runtime_cache_support(bot)
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
     rebuilt_changes = {
@@ -446,7 +564,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     controller_field_names = set(controller.deps.__dataclass_fields__)
     rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
     default_collaborators = {
-        "conversation_access": "_conversation_access",
+        "conversation_cache": "_conversation_cache",
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
         "turn_policy": "_turn_policy",
@@ -485,12 +603,10 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
     """Patch module-level response coordinator seams on the real current owner."""
     with ExitStack() as stack:
         for name, replacement in changes.items():
-            target = (
-                f"mindroom.response_lifecycle.{name}"
-                if name == "apply_post_response_effects"
-                else f"mindroom.response_runner.{name}"
+            module_name = (
+                "mindroom.response_lifecycle" if name == "apply_post_response_effects" else "mindroom.response_runner"
             )
-            stack.enter_context(patch(target, new=replacement))
+            stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
 
 
@@ -503,7 +619,7 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
             request.target.room_id,
             request.target.reply_to_event_id,
             request.response_text,
-            request.target.thread_id,
+            request.target.resolved_thread_id,
             reply_to_event=None,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
@@ -522,6 +638,11 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
     wrap_extracted_collaborators(bot, "_response_runner")
 
     async def _generate(request: ResponseRequest) -> str | None:
+        if request.prepare_after_lock is not None:
+            try:
+                request = await request.prepare_after_lock(request)
+            except Exception as exc:
+                raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         return await generate_response(
             room_id=request.room_id,
@@ -556,7 +677,7 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
             request.target.room_id,
             request.event_id,
             request.new_text,
-            request.target.thread_id,
+            request.target.resolved_thread_id,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
         )

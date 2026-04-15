@@ -44,7 +44,7 @@ class ThreadSummaryTools(Toolkit):
             message="Thread summary tool context is unavailable in this runtime path.",
         )
 
-    async def set_thread_summary(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def set_thread_summary(  # noqa: C901, PLR0911, PLR0912
         self,
         summary: str,
         thread_id: str | None = None,
@@ -57,9 +57,7 @@ class ThreadSummaryTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_access = context.conversation_access
-        if conversation_access is None:
-            return self._context_error()
+        conversation_cache = context.conversation_cache
 
         if room_id is None:
             resolved_room_id = context.room_id
@@ -110,7 +108,6 @@ class ThreadSummaryTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            room_timeline_fallback_event_id=context.reply_to_event_id,
         )
         if effective_thread_id is None:
             error_message = "thread_id is required when no active thread context is available for the target room."
@@ -120,7 +117,7 @@ class ThreadSummaryTools(Toolkit):
                     context.client,
                     resolved_room_id,
                     effective_thread_id,
-                    access=conversation_access,
+                    context.conversation_cache,
                 )
             except Exception:
                 error_thread_id = effective_thread_id
@@ -132,7 +129,7 @@ class ThreadSummaryTools(Toolkit):
                 else:
                     async with thread_summary_lock(resolved_room_id, normalized_thread_id):
                         try:
-                            thread_history = await conversation_access.get_thread_history(
+                            thread_history = await conversation_cache.get_thread_history(
                                 resolved_room_id,
                                 normalized_thread_id,
                             )
@@ -149,6 +146,7 @@ class ThreadSummaryTools(Toolkit):
                                     normalized_summary,
                                     message_count,
                                     "manual",
+                                    conversation_cache,
                                 )
                             except Exception:
                                 error_thread_id = normalized_thread_id

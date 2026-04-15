@@ -23,9 +23,6 @@ class EventInfo:
     can_be_thread_root: bool
     """Whether this event can be used as a thread root per MSC3440."""
 
-    safe_thread_root: str | None
-    """Safe event ID to use as thread root (None means use this event)."""
-
     # Edit information
     is_edit: bool
     """Whether this event is an edit (m.replace)."""
@@ -71,7 +68,9 @@ class EventInfo:
     def next_related_event_id(self, current_event_id: str) -> str | None:
         """Return the next relation target to inspect outside native thread hops."""
         for related_event_id in (
-            self.safe_thread_root,
+            self.original_event_id if self.is_edit else None,
+            self.reaction_target_event_id if self.is_reaction else None,
+            self.relates_to_event_id if self.relation_type == "m.reference" else None,
             self.reply_to_event_id,
         ):
             if not isinstance(related_event_id, str):
@@ -108,7 +107,6 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
             is_thread=False,
             thread_id=None,
             can_be_thread_root=True,
-            safe_thread_root=None,
             is_edit=False,
             original_event_id=None,
             is_reply=False,
@@ -155,26 +153,11 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # An event can only be a thread root if it has NO relations
     can_be_thread_root = not has_relations
 
-    # Determine safe thread root for creating new threads
-    safe_thread_root = None
-    if not can_be_thread_root:
-        # This event has relations, so it cannot be a thread root
-        # Try to use the target of the relation as the thread root
-
-        if relation_type in ("m.replace", "m.annotation", "m.reference"):
-            # For edits, reactions, and references, use the target event
-            if relates_to_event_id:
-                safe_thread_root = str(relates_to_event_id)
-        elif is_reply and reply_to_event_id:
-            # For rich replies, use the event being replied to
-            safe_thread_root = str(reply_to_event_id)
-
     return EventInfo(
         # Thread info
         is_thread=is_thread,
         thread_id=thread_id,
         can_be_thread_root=can_be_thread_root,
-        safe_thread_root=safe_thread_root,
         # Edit info
         is_edit=is_edit,
         original_event_id=original_event_id,

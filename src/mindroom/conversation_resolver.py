@@ -8,20 +8,21 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import nio
+from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.matrix.client import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.reply_chain import (
-    ReplyChainCaches,
-    canonicalize_related_event_id,
-    derive_conversation_context,
-    derive_conversation_target,
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_id,
+    resolve_event_thread_id_best_effort,
+    thread_messages_thread_membership_access,
 )
-from mindroom.matrix.room_cache import cached_room
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import check_agent_mentioned
 
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import MatrixConversationAccess
+    from mindroom.matrix.conversation_cache import MatrixConversationCache
 
 type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type MediaDispatchEvent = (
@@ -81,15 +82,14 @@ class ConversationResolverDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
-    conversation_access: MatrixConversationAccess
+    conversation_cache: MatrixConversationCache
 
 
 @dataclass
 class ConversationResolver:
-    """Resolve thread roots, reply-chain context, history, mentions, and ingress envelopes."""
+    """Resolve explicit thread context, history, mentions, and ingress envelopes."""
 
     deps: ConversationResolverDeps
-    reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches)
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -157,12 +157,16 @@ class ConversationResolver:
             self.deps.runtime_paths,
             room_id=room_id,
         )
-        safe_thread_root = EventInfo.from_event(event_source).safe_thread_root if event_source is not None else None
+        thread_start_root_event_id = None
+        if event_source is not None:
+            event_info = EventInfo.from_event(event_source)
+            if event_info.can_be_thread_root and reply_to_event_id is not None:
+                thread_start_root_event_id = reply_to_event_id
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
-            safe_thread_root=safe_thread_root,
+            thread_start_root_event_id=thread_start_root_event_id,
             room_mode=effective_thread_mode == "room",
         )
 
@@ -284,54 +288,138 @@ class ConversationResolver:
             == "room"
         ):
             return None
-        event_info = EventInfo.from_event(event.source)
-        if event_info.thread_id:
-            return event_info.thread_id
-        if event_info.thread_id_from_edit:
-            return event_info.thread_id_from_edit
-        if not event_info.has_relations:
+        try:
+            return await resolve_event_thread_id_best_effort(
+                room.room_id,
+                EventInfo.from_event(event.source),
+                event_id=event.event_id,
+                access=self.thread_membership_access(
+                    full_history=False,
+                    dispatch_safe=True,
+                ),
+            )
+        except Exception as exc:
+            self.deps.logger.debug(
+                "Failed to resolve coalescing thread id; continuing room-level",
+                room_id=room.room_id,
+                event_id=event.event_id,
+                error=str(exc),
+            )
             return None
-        relation_seed = event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
-        if relation_seed is None:
-            return None
-        return await canonicalize_related_event_id(
-            self._client(),
-            room.room_id,
-            relation_seed,
-            access=self.deps.conversation_access,
-            caches=self.reply_chain,
+
+    async def _explicit_thread_id_for_event(
+        self,
+        room_id: str,
+        event_id: str | None,
+        event_info: EventInfo,
+        *,
+        full_history: bool,
+        dispatch_safe: bool,
+    ) -> str | None:
+        """Resolve canonical thread membership for one event."""
+        return await resolve_event_thread_id(
+            room_id,
+            event_info,
+            event_id=event_id,
+            access=self.thread_membership_access(
+                full_history=full_history,
+                dispatch_safe=dispatch_safe,
+            ),
         )
+
+    def thread_membership_access(
+        self,
+        *,
+        full_history: bool,
+        dispatch_safe: bool,
+    ) -> ThreadMembershipAccess:
+        """Return the shared thread-membership accessors for this resolver."""
+        fetch_thread_messages = (
+            self.deps.conversation_cache.get_dispatch_thread_history
+            if full_history and dispatch_safe
+            else self.deps.conversation_cache.get_thread_history
+            if full_history
+            else self.deps.conversation_cache.get_dispatch_thread_snapshot
+            if dispatch_safe
+            else self.deps.conversation_cache.get_thread_snapshot
+        )
+        return thread_messages_thread_membership_access(
+            lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
+            fetch_event_info=self._event_info_for_event_id,
+            fetch_thread_messages=fetch_thread_messages,
+        )
+
+    async def _event_info_for_event_id(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> EventInfo | None:
+        target_event = await self.deps.conversation_cache.get_event(room_id, event_id)
+        if not isinstance(target_event, nio.RoomGetEventResponse):
+            if isinstance(target_event, RoomGetEventError) and target_event.status_code == "M_NOT_FOUND":
+                return None
+            detail = (
+                target_event.message
+                if isinstance(target_event, RoomGetEventError) and isinstance(target_event.message, str)
+                else "unknown error"
+            )
+            msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
+            raise RuntimeError(msg)
+        return EventInfo.from_event(target_event.event.source)
 
     async def derive_conversation_context(
         self,
         room_id: str,
         event_info: EventInfo,
+        *,
+        event_id: str | None = None,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
-        """Derive conversation context from threads or reply chains."""
-        is_thread, thread_id, thread_history = await derive_conversation_context(
-            self._client(),
+        """Derive conversation context from canonical Matrix thread membership."""
+        is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
             room_id,
+            event_id,
             event_info,
-            self.reply_chain,
-            self.deps.logger,
-            self.deps.conversation_access,
+            full_history=True,
+            dispatch_safe=False,
         )
         return is_thread, thread_id, thread_history
 
-    async def derive_conversation_target(
+    async def _resolve_thread_context(
         self,
         room_id: str,
+        event_id: str | None,
         event_info: EventInfo,
+        *,
+        full_history: bool,
+        dispatch_safe: bool,
     ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
-        """Derive dispatch target using lightweight thread snapshots."""
-        return await derive_conversation_target(
-            self._client(),
+        """Resolve one thread context using either snapshot or full history."""
+        thread_id = await self._explicit_thread_id_for_event(
             room_id,
+            event_id,
             event_info,
-            self.reply_chain,
-            self.deps.logger,
-            self.deps.conversation_access,
+            full_history=full_history,
+            dispatch_safe=dispatch_safe,
         )
+        if thread_id is None:
+            return False, None, [], False
+
+        if full_history:
+            fetch_history = (
+                self.deps.conversation_cache.get_dispatch_thread_history
+                if dispatch_safe
+                else self.deps.conversation_cache.get_thread_history
+            )
+            thread_history = await fetch_history(room_id, thread_id)
+            return True, thread_id, list(thread_history), False
+
+        fetch_snapshot = (
+            self.deps.conversation_cache.get_dispatch_thread_snapshot
+            if dispatch_safe
+            else self.deps.conversation_cache.get_thread_snapshot
+        )
+        snapshot = await fetch_snapshot(room_id, thread_id)
+        return True, thread_id, list(snapshot), not snapshot.is_full_history
 
     async def extract_dispatch_context(
         self,
@@ -339,7 +427,12 @@ class ConversationResolver:
         event: DispatchEvent,
     ) -> MessageContext:
         """Extract lightweight routing context without hydrating full thread history."""
-        return await self.extract_message_context(room, event, full_history=False)
+        return await self.extract_message_context_impl(
+            room,
+            event,
+            full_history=False,
+            dispatch_safe=True,
+        )
 
     async def extract_message_context(
         self,
@@ -349,7 +442,12 @@ class ConversationResolver:
         full_history: bool = True,
     ) -> MessageContext:
         """Extract message context, optionally using a lightweight thread snapshot."""
-        return await self.extract_message_context_impl(room, event, full_history=full_history)
+        return await self.extract_message_context_impl(
+            room,
+            event,
+            full_history=full_history,
+            dispatch_safe=False,
+        )
 
     async def extract_message_context_impl(
         self,
@@ -357,6 +455,7 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         full_history: bool,
+        dispatch_safe: bool,
     ) -> MessageContext:
         """Resolve event metadata, mentions, and thread history for one inbound turn."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
@@ -390,19 +489,19 @@ class ConversationResolver:
             thread_id = None
             thread_history: list[ResolvedVisibleMessage] = []
             requires_full_thread_history = False
-        elif full_history:
-            is_thread, thread_id, thread_history = await self.derive_conversation_context(
-                room.room_id,
-                event_info,
-            )
-            requires_full_thread_history = False
         else:
             (
                 is_thread,
                 thread_id,
                 thread_history,
                 requires_full_thread_history,
-            ) = await self.derive_conversation_target(room.room_id, event_info)
+            ) = await self._resolve_thread_context(
+                room.room_id,
+                event.event_id,
+                event_info,
+                full_history=full_history,
+                dispatch_safe=dispatch_safe,
+            )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
@@ -425,7 +524,12 @@ class ConversationResolver:
         if not context.requires_full_thread_history or context.thread_id is None:
             context.requires_full_thread_history = False
             return
-        full_context = await self.extract_message_context(room, event)
+        full_context = await self.extract_message_context_impl(
+            room,
+            event,
+            full_history=True,
+            dispatch_safe=True,
+        )
         context.thread_history = full_context.thread_history
         context.is_thread = full_context.is_thread
         context.thread_id = full_context.thread_id
@@ -436,12 +540,12 @@ class ConversationResolver:
         client = self.deps.runtime.client
         if client is None:
             return None
-        return cached_room(client, room_id)
+        return matrix_cached_room(client, room_id)
 
     @asynccontextmanager
     async def turn_thread_cache_scope(self) -> AsyncIterator[None]:
-        """Cache thread history for the lifetime of one message-handling turn."""
-        async with self.deps.conversation_access.turn_scope():
+        """Initialize per-turn conversation lookup memoization."""
+        async with self.deps.conversation_cache.turn_scope():
             yield
 
     async def fetch_thread_history(
@@ -450,5 +554,5 @@ class ConversationResolver:
         room_id: str,
         thread_id: str,
     ) -> list[ResolvedVisibleMessage]:
-        """Fetch thread history once per turn for the same room/thread pair."""
-        return list(await self.deps.conversation_access.get_thread_history(room_id, thread_id))
+        """Fetch strict post-lock thread history through the shared conversation-cache policy."""
+        return await self.deps.conversation_cache.get_dispatch_thread_history(room_id, thread_id)

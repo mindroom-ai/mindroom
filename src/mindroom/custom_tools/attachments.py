@@ -137,7 +137,7 @@ def _register_attachment_file_path(
         resolved_path,
         kind="file",
         room_id=context.room_id,
-        thread_id=context.thread_id,
+        thread_id=context.resolved_thread_id,
         sender=context.requester_id,
     )
     if attachment_record is None:
@@ -204,16 +204,24 @@ async def _send_attachment_paths(
 ) -> tuple[list[str], str | None]:
     """Upload local attachment paths to Matrix, preserving order."""
     attachment_event_ids: list[str] = []
+    assert context.conversation_cache is not None
+    latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
+        room_id,
+        thread_id,
+    )
     for attachment_path in attachment_paths:
         attachment_event_id = await send_file_message(
             context.client,
             room_id,
             attachment_path,
             thread_id=thread_id,
+            latest_thread_event_id=latest_thread_event_id,
+            conversation_cache=context.conversation_cache,
         )
         if attachment_event_id is None:
             return attachment_event_ids, f"Failed to send attachment: {attachment_path}"
         attachment_event_ids.append(attachment_event_id)
+        latest_thread_event_id = attachment_event_id
     return attachment_event_ids, None
 
 
@@ -292,7 +300,7 @@ def _resolve_send_target(
     if thread_id is not None:
         return effective_room_id, thread_id, None
     if inherit_context_thread and effective_room_id == context.room_id:
-        return effective_room_id, context.thread_id, None
+        return effective_room_id, context.resolved_thread_id, None
     return effective_room_id, None, None
 
 

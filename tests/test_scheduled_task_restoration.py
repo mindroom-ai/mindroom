@@ -13,7 +13,13 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import bind_runtime_paths, make_matrix_client_mock, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    make_matrix_client_mock,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,6 +34,10 @@ class TestScheduledTaskRestoration:
             config,
             orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
         )
+
+    @staticmethod
+    def _install_runtime_support(bot: AgentBot) -> AgentBot:
+        return install_runtime_cache_support(bot)
 
     @pytest.mark.asyncio
     async def test_only_router_restores_tasks(self, tmp_path: Path) -> None:
@@ -72,6 +82,7 @@ class TestScheduledTaskRestoration:
         # Mock the client and join_room
         router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
         router_bot.client.rooms = {}
+        self._install_runtime_support(router_bot)
 
         with (
             patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
@@ -93,6 +104,8 @@ class TestScheduledTaskRestoration:
                 "lobby",
                 config,
                 runtime_paths_for(config),
+                router_bot.event_cache,
+                router_bot._conversation_cache,
             )
 
     @pytest.mark.asyncio
@@ -131,6 +144,7 @@ class TestScheduledTaskRestoration:
         # Mock the client and join_room
         regular_bot.client = make_matrix_client_mock(user_id=regular_user.user_id)
         regular_bot.client.rooms = {}
+        self._install_runtime_support(regular_bot)
 
         with (
             patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
@@ -163,6 +177,7 @@ class TestScheduledTaskRestoration:
         )
         router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
         router_bot.client.rooms = {"lobby": object()}
+        self._install_runtime_support(router_bot)
 
         with (
             patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
@@ -186,6 +201,8 @@ class TestScheduledTaskRestoration:
             "lobby",
             config,
             runtime_paths_for(config),
+            router_bot.event_cache,
+            router_bot._conversation_cache,
         )
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
         mock_welcome.assert_awaited_once_with("lobby")
@@ -209,6 +226,7 @@ class TestScheduledTaskRestoration:
             rooms=["lobby"],
         )
         router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        self._install_runtime_support(router_bot)
 
         with (
             patch(
@@ -227,6 +245,8 @@ class TestScheduledTaskRestoration:
                 router_bot.client,
                 config,
                 runtime_paths_for(config),
+                router_bot.event_cache,
+                router_bot._conversation_cache,
             )
 
             await router_bot._on_sync_response(MagicMock())
@@ -254,6 +274,7 @@ class TestScheduledTaskRestoration:
             rooms=["lobby"],
         )
         router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        self._install_runtime_support(router_bot)
 
         with (
             patch(
@@ -296,6 +317,7 @@ class TestScheduledTaskRestoration:
             rooms=["lobby"],
         )
         router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        self._install_runtime_support(router_bot)
 
         with (
             patch(
@@ -339,6 +361,7 @@ class TestScheduledTaskRestoration:
         )
         router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
         router_bot.client.rooms = {}
+        self._install_runtime_support(router_bot)
         drain_task = asyncio.create_task(asyncio.sleep(60))
         router_bot._deferred_overdue_task_drain_task = drain_task
 
@@ -414,6 +437,7 @@ class TestScheduledTaskRestoration:
             )
             bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
             bot.client.rooms = {}
+            self._install_runtime_support(bot)
 
             with (
                 patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),

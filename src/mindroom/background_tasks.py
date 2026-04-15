@@ -24,6 +24,7 @@ def create_background_task(
     error_handler: Callable[[Exception], None] | None = None,
     *,
     owner: object | None = None,
+    log_exceptions: bool = True,
 ) -> asyncio.Task[Any]:
     """Create a background task that won't block the main execution.
 
@@ -32,6 +33,7 @@ def create_background_task(
         name: Optional name for the task (for logging)
         error_handler: Optional error handler function
         owner: Optional logical owner used for scoped shutdown waits
+        log_exceptions: Whether unhandled task exceptions should be logged automatically
 
     Returns:
         The created task
@@ -58,7 +60,8 @@ def create_background_task(
             pass
         except Exception as e:
             task_name = task.get_name()
-            logger.exception("Background task failed", task_name=task_name, error=str(e))
+            if log_exceptions:
+                logger.exception("Background task failed", task_name=task_name, error=str(e))
             if error_handler:
                 try:
                     error_handler(e)

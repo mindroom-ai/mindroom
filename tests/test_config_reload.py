@@ -22,6 +22,8 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_send_response_mock,
+    make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -37,6 +39,8 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
+    bot.event_cache = make_event_cache_mock()
+    bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
 
 
 def test_config_reload_drain_state_tracks_wait_warning_force_and_reset() -> None:
@@ -579,6 +583,8 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
+        _conversation_cache: object,
     ) -> int:
         return 0
 
@@ -661,6 +667,8 @@ async def test_router_updates_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
+        _conversation_cache: object,
     ) -> int:
         return 0
 
@@ -745,6 +753,8 @@ async def test_new_agent_joins_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
+        _conversation_cache: object,
     ) -> int:
         return 0
 
@@ -818,6 +828,8 @@ async def test_team_room_changes_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
+        _conversation_cache: object,
     ) -> int:
         return 0
 
@@ -1026,6 +1038,8 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
+        _conversation_cache: object,
     ) -> int:
         return 0
 

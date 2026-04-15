@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class EventCacheWriteCoordinator:
+class _EventCacheWriteCoordinator:
     """Serialize same-room advisory cache writes across the whole runtime."""
 
     logger: structlog.stdlib.BoundLogger
@@ -75,6 +75,7 @@ class EventCacheWriteCoordinator:
         update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
         *,
         name: str,
+        log_exceptions: bool = True,
     ) -> asyncio.Task[object]:
         """Schedule one room-scoped cache update behind any active predecessor."""
         previous_task = self._room_update_tasks.get(room_id)
@@ -87,11 +88,49 @@ class EventCacheWriteCoordinator:
             run_after_previous(),
             name=name,
             owner=self.background_task_owner,
+            log_exceptions=log_exceptions,
         )
         self._room_update_predecessors[task] = previous_task
         self._room_update_tasks[room_id] = task
         task.add_done_callback(lambda done_task: self._clear_room_tail(room_id, done_task))
         return task
+
+    async def run_room_update(
+        self,
+        room_id: str,
+        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
+        *,
+        name: str,
+    ) -> object:
+        """Run one room-scoped operation through the same ordered barrier and await its result."""
+        return await self.queue_room_update(
+            room_id,
+            update_coro_factory,
+            name=name,
+            log_exceptions=False,
+        )
+
+    async def wait_for_room_idle(self, room_id: str) -> None:
+        """Wait for the currently queued same-room update chain to drain."""
+        while True:
+            tail_task = self._room_update_tasks.get(room_id)
+            if tail_task is None:
+                return
+            try:
+                await tail_task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+            except Exception as exc:
+                self.logger.debug(
+                    "Room cache update failed before room became idle",
+                    room_id=room_id,
+                    error=str(exc),
+                )
+            finally:
+                if self._room_update_tasks.get(room_id) is tail_task and tail_task.done():
+                    self._clear_room_tail(room_id, tail_task)
 
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator."""

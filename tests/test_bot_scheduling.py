@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
@@ -25,8 +26,10 @@ from tests.conftest import (
     bind_runtime_paths,
     create_mock_room,
     install_generate_response_mock,
+    install_runtime_cache_support,
     install_send_response_mock,
     install_send_skill_command_response_mock,
+    make_matrix_client_mock,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
@@ -66,7 +69,7 @@ def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> None:
 
 def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     """Rebind planner deps after tests replace the bot logger or ledger."""
-    sync_bot_runtime_state(bot)
+    install_runtime_cache_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
     turn_store.visible_echo_for_sources = MagicMock(return_value=None)
@@ -108,11 +111,20 @@ def mock_agent_bot() -> AgentBot:
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
     bot.client.user_id = bot.agent_user.user_id
+    install_runtime_cache_support(bot)
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
     bot._send_response = AsyncMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, bot._send_response)
+    bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
     return bot
 
 
@@ -367,10 +379,11 @@ class TestBotTaskRestoration:
                 mock_client.add_response_callback = MagicMock()
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
+                mock_client.rooms = {}
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
-                mock_join_response = MagicMock(spec=nio.JoinResponse)
+                mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
                 mock_client.join.return_value = mock_join_response
 
                 mock_restore.return_value = 2  # 2 tasks restored
@@ -417,10 +430,11 @@ class TestBotTaskRestoration:
                 mock_client.add_response_callback = MagicMock()
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
+                mock_client.rooms = {}
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
-                mock_join_response = MagicMock(spec=nio.JoinResponse)
+                mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
                 mock_client.join.return_value = mock_join_response
 
                 mock_restore.return_value = 0  # No tasks restored
@@ -523,12 +537,19 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            bot.client = AsyncMock()
-            bot.client.user_id = bot.agent_user.user_id
+            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
             bot.logger = MagicMock()
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
             bot._turn_controller._execute_command = AsyncMock()
+            bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+            bot._conversation_cache.get_thread_snapshot = AsyncMock(
+                return_value=thread_history_result([], is_full_history=False),
+            )
+            bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+                return_value=thread_history_result([], is_full_history=False),
+            )
 
             # Create a room and event with thread info
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -579,8 +600,7 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            bot.client = AsyncMock()
-            bot.client.user_id = bot.agent_user.user_id
+            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
             bot.logger = MagicMock()
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)

@@ -25,6 +25,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.conftest import (
     bind_runtime_paths,
+    install_runtime_cache_support,
+    make_matrix_client_mock,
     make_visible_message,
     patch_response_runner_module,
     runtime_paths_for,
@@ -51,10 +53,7 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGene
 
 
 def _make_matrix_client_mock() -> AsyncMock:
-    client = AsyncMock()
-    client.rooms = {}
-    client.add_event_callback = MagicMock()
-    client.add_response_callback = MagicMock()
+    client = make_matrix_client_mock()
     client.room_get_event_relations = MagicMock(return_value=_empty_event_iterator())
     return client
 
@@ -118,6 +117,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     )
     router = AgentBot(router_user, tmp_path, config_with_team, runtime_paths)
     router.client = _make_matrix_client_mock()
+    install_runtime_cache_support(router)
 
     # Room has router + team + two agents and the human user
     team_user_id = ids["t1"].full_id
@@ -165,6 +165,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
@@ -232,6 +233,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -315,6 +317,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
     bot._edit_message = AsyncMock(return_value=True)
@@ -341,8 +344,11 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
 
 
 @pytest.mark.asyncio
-async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_team: Config, tmp_path: Path) -> None:
-    """TeamBot should continue the resolved thread when mention comes as a plain reply."""
+async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root(
+    config_with_team: Config,
+    tmp_path: Path,
+) -> None:
+    """TeamBot should treat a plain reply as a plain reply even if it points at a threaded event."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = config_with_team.get_ids(runtime_paths)
@@ -368,6 +374,7 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
 
     team_user_id = ids["t1"].full_id
@@ -384,23 +391,6 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         },
     }
 
-    bot.client.room_get_event = AsyncMock(
-        return_value=nio.RoomGetEventResponse.from_dict(
-            {
-                "content": {
-                    "body": "Earlier team message",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-                },
-                "event_id": "$thread_msg",
-                "sender": "@mindroom_t1:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": "!room:localhost",
-                "type": "m.room.message",
-            },
-        ),
-    )
-
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
@@ -416,9 +406,9 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
 
     assert bot.client.room_send.call_count >= 1
     first_content = bot.client.room_send.call_args_list[0].kwargs["content"]
-    assert first_content["m.relates_to"]["rel_type"] == "m.thread"
-    assert first_content["m.relates_to"]["event_id"] == "$thread_root"
     assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$evt_plain_reply"
+    assert first_content["m.relates_to"].get("rel_type") is None
+    assert first_content["m.relates_to"].get("event_id") is None
 
 
 @pytest.mark.asyncio
@@ -453,6 +443,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
+    install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401

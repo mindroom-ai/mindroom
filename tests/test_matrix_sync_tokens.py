@@ -125,6 +125,7 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     bot.client.next_batch = "s_latest"
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_latest"
+    response.rooms = MagicMock(join={})
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await bot._on_sync_response(response)

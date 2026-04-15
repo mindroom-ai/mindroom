@@ -60,12 +60,12 @@ from mindroom.inbound_turn_normalizer import (
     VoiceNormalizationRequest,
 )
 from mindroom.logging_config import bound_log_context
+from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import get_configured_agents_for_room
 from mindroom.timing import (
@@ -89,8 +89,9 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import MatrixConversationAccess
+    from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
@@ -145,7 +146,7 @@ class TurnControllerDeps:
     storage_path: Path
     agent_name: str
     matrix_id: MatrixID
-    conversation_access: MatrixConversationAccess
+    conversation_cache: MatrixConversationCache
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
     turn_policy: TurnPolicy
@@ -554,7 +555,12 @@ class TurnController:
             runtime_context = None
             if room_id is not None:
                 runtime_context = self.deps.tool_runtime.build_context(
-                    MessageTarget.resolve(room_id, thread_id, event.event_id),
+                    self.deps.resolver.build_message_target(
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        reply_to_event_id=event.event_id,
+                        event_source=event.source,
+                    ),
                     user_id=requester_user_id,
                     agent_name=agent_name,
                     source_envelope=source_envelope,
@@ -580,7 +586,8 @@ class TurnController:
             storage_path=self.deps.storage_path,
             logger=self.deps.logger,
             derive_conversation_context=self.deps.resolver.derive_conversation_context,
-            conversation_access=self.deps.resolver.deps.conversation_access,
+            conversation_cache=self.deps.resolver.deps.conversation_cache,
+            event_cache=self.deps.runtime.event_cache,
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
             record_handled_turn=self.deps.turn_store.record_turn,
@@ -857,15 +864,21 @@ class TurnController:
         dispatch_started_at: float,
         context_ready_monotonic: float,
         payload_ready_monotonic: float,
+        thread_history: Sequence[ResolvedVisibleMessage],
     ) -> None:
         """Emit startup latency metrics for dispatch decisions that will respond."""
+        latency_event_data: dict[str, str | float | int | bool] = {
+            "event_id": event_id,
+            "action_kind": action_kind,
+            "context_hydration_ms": round((context_ready_monotonic - dispatch_started_at) * 1000, 1),
+            "payload_hydration_ms": round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
+            "startup_total_ms": round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
+        }
+        if isinstance(thread_history, ThreadHistoryResult):
+            latency_event_data.update(thread_history.diagnostics)
         self.deps.logger.info(
             "Response startup latency",
-            event_id=event_id,
-            action_kind=action_kind,
-            context_hydration_ms=round((context_ready_monotonic - dispatch_started_at) * 1000, 1),
-            payload_hydration_ms=round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
-            startup_total_ms=round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
+            **latency_event_data,
         )
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
@@ -916,34 +929,8 @@ class TurnController:
             )
 
         try:
-            if dispatch_timing is not None:
-                dispatch_timing.mark("response_payload_start")
-            if dispatch.context.requires_full_thread_history:
-                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             context_ready_monotonic = time.monotonic()
-            payload = await payload_builder(dispatch.context)
-            prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
-                dispatch,
-                payload,
-                target_entity_name=self.deps.agent_name,
-                target_member_names=target_member_names,
-            )
-            system_enrichment_items = await self.deps.ingress_hook_runner.apply_system_enrichment(
-                dispatch,
-                prepared_payload.envelope,
-                target_entity_name=self.deps.agent_name,
-                target_member_names=target_member_names,
-            )
-            if system_enrichment_items:
-                prepared_payload = type(prepared_payload)(
-                    payload=prepared_payload.payload,
-                    envelope=prepared_payload.envelope,
-                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
-                    system_enrichment_items=tuple(system_enrichment_items),
-                )
-            payload_ready_monotonic = time.monotonic()
-            if dispatch_timing is not None:
-                dispatch_timing.mark("response_payload_ready")
+            payload_ready_monotonic = context_ready_monotonic
         except Exception as error:
             response_event_id = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
@@ -960,17 +947,75 @@ class TurnController:
             return
 
         with bound_log_context(**dispatch.target.log_context):
-            self._log_dispatch_latency(
-                event_id=event.event_id,
-                action_kind=action.kind,
-                dispatch_started_at=dispatch_started_at,
-                context_ready_monotonic=context_ready_monotonic,
-                payload_ready_monotonic=payload_ready_monotonic,
-            )
+            if dispatch_timing is not None and isinstance(dispatch.context.thread_history, ThreadHistoryResult):
+                dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
 
         with bound_log_context(**dispatch.target.log_context):
             self.deps.logger.info(processing_log, event_id=event.event_id)
         try:
+
+            async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
+                nonlocal payload_ready_monotonic
+                if dispatch_timing is not None:
+                    dispatch_timing.mark("response_payload_start")
+                dispatch.context.thread_history = request.thread_history
+                dispatch.context.thread_id = request.thread_id
+                dispatch.context.requires_full_thread_history = False
+                payload = await payload_builder(dispatch.context)
+                prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
+                    dispatch,
+                    payload,
+                    target_entity_name=self.deps.agent_name,
+                    target_member_names=target_member_names,
+                )
+                system_enrichment_items = await self.deps.ingress_hook_runner.apply_system_enrichment(
+                    dispatch,
+                    prepared_payload.envelope,
+                    target_entity_name=self.deps.agent_name,
+                    target_member_names=target_member_names,
+                )
+                if system_enrichment_items:
+                    prepared_payload = type(prepared_payload)(
+                        payload=prepared_payload.payload,
+                        envelope=prepared_payload.envelope,
+                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        system_enrichment_items=tuple(system_enrichment_items),
+                    )
+                payload_ready_monotonic = time.monotonic()
+                if dispatch_timing is not None:
+                    dispatch_timing.mark("response_payload_ready")
+                with bound_log_context(**dispatch.target.log_context):
+                    self._log_dispatch_latency(
+                        event_id=event.event_id,
+                        action_kind=action.kind,
+                        dispatch_started_at=dispatch_started_at,
+                        context_ready_monotonic=context_ready_monotonic,
+                        payload_ready_monotonic=payload_ready_monotonic,
+                        thread_history=request.thread_history,
+                    )
+                return ResponseRequest(
+                    room_id=request.room_id,
+                    reply_to_event_id=request.reply_to_event_id,
+                    thread_id=request.thread_id,
+                    thread_history=request.thread_history,
+                    prompt=prepared_payload.payload.prompt,
+                    model_prompt=prepared_payload.payload.model_prompt,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    user_id=request.user_id,
+                    media=prepared_payload.payload.media,
+                    attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
+                    response_envelope=prepared_payload.envelope,
+                    correlation_id=request.correlation_id,
+                    target=request.target,
+                    matrix_run_metadata=request.matrix_run_metadata,
+                    system_enrichment_items=prepared_payload.system_enrichment_items,
+                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    requires_full_thread_history=False,
+                    on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
+                    pipeline_timing=request.pipeline_timing,
+                )
+
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
@@ -980,17 +1025,14 @@ class TurnController:
                         reply_to_event_id=event.event_id,
                         thread_id=dispatch.context.thread_id,
                         thread_history=dispatch.context.thread_history,
-                        prompt=prepared_payload.payload.prompt,
-                        model_prompt=prepared_payload.payload.model_prompt,
+                        prompt=event.body,
                         user_id=dispatch.requester_user_id,
-                        media=prepared_payload.payload.media,
-                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
-                        response_envelope=prepared_payload.envelope,
+                        response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
                         matrix_run_metadata=matrix_run_metadata,
-                        system_enrichment_items=prepared_payload.system_enrichment_items,
-                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        requires_full_thread_history=dispatch.context.requires_full_thread_history,
+                        prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
                     ),
                     team_agents=action.form_team.eligible_members,
@@ -1003,20 +1045,28 @@ class TurnController:
                         reply_to_event_id=event.event_id,
                         thread_id=dispatch.context.thread_id,
                         thread_history=dispatch.context.thread_history,
-                        prompt=prepared_payload.payload.prompt,
-                        model_prompt=prepared_payload.payload.model_prompt,
+                        prompt=event.body,
                         user_id=dispatch.requester_user_id,
-                        media=prepared_payload.payload.media,
-                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
-                        response_envelope=prepared_payload.envelope,
+                        response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
                         matrix_run_metadata=matrix_run_metadata,
-                        system_enrichment_items=prepared_payload.system_enrichment_items,
-                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                        requires_full_thread_history=dispatch.context.requires_full_thread_history,
+                        prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
                     ),
                 )
+        except PostLockRequestPreparationError as error:
+            failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
+            response_event_id = await self._finalize_dispatch_failure(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                thread_id=dispatch.context.thread_id,
+                error=failure,
+            )
+            if response_event_id is not None:
+                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+            return
         except SuppressedPlaceholderCleanupError:
             with bound_log_context(**dispatch.target.log_context):
                 self.deps.logger.warning(
@@ -1068,7 +1118,7 @@ class TurnController:
             await self._handle_message_inner(room, event)
 
     async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        """Handle one text message inside the per-turn thread-history cache scope."""
+        """Handle one text message inside the per-turn conversation lookup scope."""
         ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         self.deps.logger.info(
             "Received message",
@@ -1083,7 +1133,7 @@ class TurnController:
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         event_info = EventInfo.from_event(event.source)
-        await self.deps.conversation_access.append_live_event(room.room_id, event, event_info=event_info)
+        await self.deps.conversation_cache.append_live_event(room.room_id, event, event_info=event_info)
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1120,12 +1170,14 @@ class TurnController:
             envelope=envelope,
         ):
             return
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
         if should_handle_interactive_text_response(envelope):
             selection = await interactive.handle_text_response(
                 self._client(),
                 room,
                 prepared_event,
                 self.deps.agent_name,
+                resolved_thread_id=coalescing_thread_id,
             )
             if selection is not None:
                 await self.handle_interactive_selection(
@@ -1135,7 +1187,6 @@ class TurnController:
                     source_event_id=prepared_event.event_id,
                 )
                 return
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -1234,8 +1285,6 @@ class TurnController:
             ):
                 self._mark_source_events_responded(handled_turn)
                 return
-            if dispatch.context.requires_full_thread_history:
-                await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             if self._should_skip_deep_synthetic_full_dispatch(
                 event_id=event.event_id,
                 envelope=dispatch.envelope,
@@ -1256,6 +1305,7 @@ class TurnController:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+            await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_plan_start")
             plan = await self.deps.turn_policy.plan_turn(
@@ -1394,10 +1444,18 @@ class TurnController:
         room: nio.MatrixRoom,
         event: _MediaDispatchEvent,
     ) -> None:
-        """Handle one media event inside the per-turn thread-history cache scope."""
+        """Handle one media event inside the per-turn conversation lookup scope."""
         prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return
+        # Prime transitive ancestor lookups before writing advisory cache membership.
+        await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+        event_info = EventInfo.from_event(prechecked_event.event.source)
+        await self.deps.conversation_cache.append_live_event(
+            room.room_id,
+            prechecked_event.event,
+            event_info=event_info,
+        )
 
         if await self._dispatch_special_media_as_text(room, prechecked_event):
             return
@@ -1498,12 +1556,14 @@ class TurnController:
             envelope=envelope,
         ):
             return True
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_text_event)
         if should_handle_interactive_text_response(envelope):
             selection = await interactive.handle_text_response(
                 self._client(),
                 room,
                 prepared_text_event,
                 self.deps.agent_name,
+                resolved_thread_id=coalescing_thread_id,
             )
             if selection is not None:
                 await self.handle_interactive_selection(

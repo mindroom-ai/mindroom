@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom import interactive
@@ -15,6 +16,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_side_effect,
     install_generate_response_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -109,7 +111,10 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         async def response_stream() -> AsyncIterator[str]:
             yield "Processed selection"
 
-        with patch("mindroom.streaming.edit_message", new=AsyncMock(return_value="$edit:localhost")) as mock_edit:
+        with patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit:localhost")),
+        ) as mock_edit:
             event_id, accumulated = await send_streaming_response(
                 client=bot.client,
                 room_id=room_id,
@@ -144,3 +149,88 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     generate_response_mock.assert_awaited_once()
     assert captured_target is not None
     assert captured_target.resolved_thread_id == selection.thread_id
+
+
+@pytest.mark.asyncio
+async def test_on_message_passes_resolved_thread_id_to_interactive_text_response(
+    tmp_path: Path,
+) -> None:
+    """Plain numeric replies should use the canonical coalescing thread id for interactive matching."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    message_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "1",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-reply:localhost"}},
+            },
+            "event_id": "$selection:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:localhost",
+        },
+    )
+    message_event.source = {
+        "content": {
+            "body": "1",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-reply:localhost"}},
+        },
+        "event_id": "$selection:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000000,
+        "type": "m.room.message",
+        "room_id": "!test:localhost",
+    }
+
+    wrap_extracted_collaborators(bot, "_delivery_gateway", "_turn_policy")
+    replace_turn_controller_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+        turn_policy=bot._turn_policy,
+    )
+
+    with (
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch.object(bot._turn_policy, "can_reply_to_sender", return_value=True),
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new_callable=AsyncMock,
+            return_value="$thread-root:localhost",
+        ),
+        patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_handle_text_response,
+        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
+    ):
+        await bot._on_message(room, message_event)
+
+    mock_handle_text_response.assert_awaited_once()
+    assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
+    mock_dispatch_text.assert_awaited_once()

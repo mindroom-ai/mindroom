@@ -15,7 +15,13 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+)
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -164,6 +170,8 @@ async def test_router_joins_rooms_on_start(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
+        _event_cache: object,
+        _conversation_cache: object,
     ) -> int:
         return 0
 
@@ -200,6 +208,7 @@ async def test_router_joins_rooms_on_start(
     mock_client = AsyncMock()
     assert router_bot is not None
     router_bot.client = mock_client
+    install_runtime_cache_support(router_bot)
 
     # Test that the router joins all configured rooms
     await router_bot.join_configured_rooms()

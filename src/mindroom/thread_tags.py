@@ -12,16 +12,20 @@ from typing import TYPE_CHECKING, Any, cast
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from mindroom.matrix.reply_chain import canonicalize_related_event_id
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_id,
+    room_scan_thread_membership_access_for_client,
+)
 
 if TYPE_CHECKING:
-    from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 DEFAULT_USER_POWER_LEVEL = 0
-MAX_THREAD_ROOT_NORMALIZATION_DEPTH = 500
 MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
@@ -135,6 +139,18 @@ def _normalize_non_empty_string(value: object) -> str | None:
     if not normalized_value:
         return None
     return normalized_value
+
+
+async def _event_info_for_event_id(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+) -> EventInfo | None:
+    """Fetch one event and return parsed relation metadata when available."""
+    response = await client.room_get_event(room_id, event_id)
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+    return EventInfo.from_event(response.event.source)
 
 
 def _require_non_empty_string(value: object, *, field_name: str) -> str:
@@ -754,21 +770,65 @@ async def normalize_thread_root_event_id(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
-    *,
-    access: ConversationReadAccess,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
-    """Resolve a room event or related reply into the canonical thread root ID."""
+    """Resolve one event ID to an explicit thread root when possible."""
     normalized_event_id = _normalize_non_empty_string(event_id)
     if not normalized_event_id:
         return None
 
-    return await canonicalize_related_event_id(
-        client,
+    event_info = await _event_info_for_event_id(client, room_id, normalized_event_id)
+    if event_info is None:
+        return await _lookup_thread_id_from_cache(conversation_cache, room_id, normalized_event_id)
+
+    return await resolve_event_thread_id(
         room_id,
-        normalized_event_id,
-        access=access,
-        traversal_limit=MAX_THREAD_ROOT_NORMALIZATION_DEPTH,
+        event_info,
+        event_id=normalized_event_id,
+        allow_current_root=True,
+        access=_thread_membership_access(
+            client,
+            conversation_cache=conversation_cache,
+        ),
     )
+
+
+def _thread_membership_access(
+    client: nio.AsyncClient,
+    *,
+    conversation_cache: ConversationCacheProtocol | None,
+) -> ThreadMembershipAccess:
+    """Return the shared thread-membership accessors for thread-tag normalization."""
+
+    async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
+        return await _lookup_thread_id_from_cache(
+            conversation_cache,
+            lookup_room_id,
+            lookup_event_id,
+        )
+
+    async def fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
+        return await _event_info_for_event_id(
+            client,
+            lookup_room_id,
+            lookup_event_id,
+        )
+
+    return room_scan_thread_membership_access_for_client(
+        client,
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+    )
+
+
+async def _lookup_thread_id_from_cache(
+    conversation_cache: ConversationCacheProtocol | None,
+    room_id: str,
+    event_id: str,
+) -> str | None:
+    if conversation_cache is None:
+        return None
+    return await conversation_cache.get_thread_id_for_event(room_id, event_id)
 
 
 async def get_thread_tags(

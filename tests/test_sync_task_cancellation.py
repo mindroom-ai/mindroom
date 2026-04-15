@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
@@ -23,7 +24,11 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import orchestrator_runtime_paths
+from tests.conftest import (
+    make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
+    orchestrator_runtime_paths,
+)
 
 
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
@@ -378,6 +383,14 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._first_sync_done = False
     bot._sync_shutting_down = False
     bot.client = FakeClient()
+    bot._runtime_view = BotRuntimeState(
+        client=bot.client,
+        config=MagicMock(spec=Config),
+        enable_streaming=True,
+        orchestrator=None,
+        event_cache=make_event_cache_mock(),
+        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
+    )
 
     # Call the real sync_forever method
     await AgentBot.sync_forever(bot)

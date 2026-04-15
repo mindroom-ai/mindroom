@@ -21,7 +21,14 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    delivered_matrix_side_effect,
+    install_runtime_cache_support,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -101,6 +108,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$agent_message_id")
         bot.client = client
+        install_runtime_cache_support(bot)
 
         room_id = "!test:localhost"
         user_message_id = "$user_original_message"
@@ -151,7 +159,10 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
     with (
         patch("mindroom.response_runner.ai_response") as mock_ai_response,
         patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-        patch("mindroom.delivery_gateway.edit_message", new=AsyncMock(return_value=_room_send_response("$edit"))),
+        patch(
+            "mindroom.delivery_gateway.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
@@ -195,6 +206,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$agent_response_id")
         bot.client = client
+        install_runtime_cache_support(bot)
 
         room_id = "!test:localhost"
         user_message_id = "$user_thread_start"
@@ -276,6 +288,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$standalone_message")
         bot.client = client
+        install_runtime_cache_support(bot)
 
         room_id = "!test:localhost"
         event_id = await bot._generate_response(
@@ -293,7 +306,4 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         registered_event_id = call_args[0]
         registered_thread_id = call_args[2]
         assert registered_event_id == "$standalone_message"
-        assert registered_thread_id is not None, (
-            "When not in a thread, thread_id should not be None. "
-            "It should be the agent's message ID for proper thread creation."
-        )
+        assert registered_thread_id is None

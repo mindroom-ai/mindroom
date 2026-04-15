@@ -35,11 +35,10 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
-    edit_message,
-    get_latest_thread_event_id_if_needed,
+    edit_message_result,
     get_room_threads_page,
     send_file_message,
-    send_message,
+    send_message_result,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
@@ -169,8 +168,7 @@ class MatrixMessageTools(Toolkit):
         ignore_mentions: bool,
     ) -> str | None:
         formatted_text = parse_and_format_interactive(text, extract_mapping=False).formatted_text
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            context.client,
+        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
         )
@@ -188,7 +186,16 @@ class MatrixMessageTools(Toolkit):
             latest_thread_event_id=latest_thread_event_id,
             extra_content=extra_content or None,
         )
-        return await send_message(context.client, room_id, content)
+        delivered = await send_message_result(context.client, room_id, content)
+        if delivered is not None:
+            context.conversation_cache.notify_outbound_message(
+                room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+        if delivered is not None:
+            return delivered.event_id
+        return None
 
     async def _maybe_add_interactive_question(
         self,
@@ -304,11 +311,17 @@ class MatrixMessageTools(Toolkit):
 
                 first_attachment_path = attachment_paths[0]
                 remaining_attachment_paths = attachment_paths[1:]
+                latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
+                    room_id,
+                    effective_thread_id,
+                )
                 first_attachment_event_id = await send_file_message(
                     context.client,
                     room_id,
                     first_attachment_path,
                     thread_id=effective_thread_id,
+                    latest_thread_event_id=latest_thread_event_id,
+                    conversation_cache=context.conversation_cache,
                 )
                 if first_attachment_event_id is None:
                     return self._payload(
@@ -688,10 +701,7 @@ class MatrixMessageTools(Toolkit):
         thread_id: str,
         read_limit: int,
     ) -> str:
-        conversation_access = context.conversation_access
-        if conversation_access is None:
-            return self._context_error()
-        thread_messages = await conversation_access.get_thread_history(room_id, thread_id)
+        thread_messages = await context.conversation_cache.get_thread_history(room_id, thread_id)
         recent_messages = thread_messages[-read_limit:]
         return self._payload(
             "ok",
@@ -743,12 +753,10 @@ class MatrixMessageTools(Toolkit):
 
         latest_thread_event_id: str | None = None
         if thread_id is not None:
-            conversation_access = context.conversation_access
-            if conversation_access is None:
-                return self._context_error()
-            thread_messages = await conversation_access.get_thread_history(room_id, thread_id)
-            if thread_messages:
-                latest_thread_event_id = thread_messages[-1].visible_event_id
+            latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
+                room_id,
+                thread_id,
+            )
             if latest_thread_event_id is None:
                 latest_thread_event_id = target
 
@@ -763,8 +771,8 @@ class MatrixMessageTools(Toolkit):
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
-        edit_event_id = await edit_message(context.client, room_id, target, content, formatted_text)
-        if edit_event_id is None:
+        delivered = await edit_message_result(context.client, room_id, target, content, formatted_text)
+        if delivered is None:
             return self._payload(
                 "error",
                 action="edit",
@@ -773,6 +781,11 @@ class MatrixMessageTools(Toolkit):
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
+        context.conversation_cache.notify_outbound_message(
+            room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
 
         if interactive_response.option_map and interactive_response.options_list:
             register_interactive_question(
@@ -795,7 +808,7 @@ class MatrixMessageTools(Toolkit):
             room_id=room_id,
             thread_id=thread_id,
             target=target,
-            event_id=edit_event_id,
+            event_id=delivered.event_id,
         )
 
     def _message_context(

@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -23,13 +23,23 @@ from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    delivered_matrix_side_effect,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+    make_matrix_client_mock,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
 _DEFAULT_RESOLVED_THREAD_ID = object()
+_DEFAULT_EVENT_CACHE = object()
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +70,16 @@ def _make_context(
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
     agent_thread_mode: str = "thread",
+    event_cache: object = _DEFAULT_EVENT_CACHE,
 ) -> ToolRuntimeContext:
+    async def _latest_thread_event_id(
+        _room_id: str,
+        thread_id: str | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> str | None:
+        return thread_id
+
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
         Config(
@@ -73,12 +92,16 @@ def _make_context(
         ),
         test_runtime_paths(runtime_root),
     )
-    client = AsyncMock()
+    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     client.room_send = AsyncMock()
     client.room_messages = AsyncMock()
     client.room_get_event_relations = MagicMock(
         side_effect=lambda *_args, **_kwargs: _empty_async_iterator(),
     )
+    conversation_cache = make_conversation_cache_mock()
+    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
+    conversation_cache.notify_outbound_message = Mock()
+    conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -88,7 +111,8 @@ def _make_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_access=AsyncMock(),
+        conversation_cache=conversation_cache,
+        event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
         reply_to_event_id=reply_to_event_id,
         storage_path=storage_path,
@@ -194,7 +218,10 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="send", message="hello"))
@@ -212,14 +239,15 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
 async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     """thread_id='room' should disable thread metadata for sends."""
     tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
+    event_cache = MagicMock()
+    ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_latest_thread_event_id_if_needed",
-            new=AsyncMock(return_value=None),
-        ) as mock_latest_thread,
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -231,7 +259,10 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     assert payload["room_id"] == ctx.room_id
     assert payload["thread_id"] is None
     assert payload["event_id"] == "$evt"
-    mock_latest_thread.assert_awaited_once_with(ctx.client, ctx.room_id, None)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        ctx.room_id,
+        None,
+    )
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
@@ -256,7 +287,10 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
         patch(
             "mindroom.custom_tools.matrix_message.add_reaction_buttons",
@@ -300,7 +334,10 @@ async def test_matrix_message_send_plain_text_skips_interactive_registration_and
     ctx = _make_context()
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
         patch(
             "mindroom.custom_tools.matrix_message.parse_and_format_interactive",
             wraps=parse_and_format_interactive,
@@ -339,9 +376,13 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     )
     assert attachment is not None
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_upload",))
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.return_value = "$evt"
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -368,6 +409,8 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         ctx.room_id,
         attachment.local_path,
         thread_id="$evt",
+        latest_thread_event_id="$evt",
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -393,7 +436,10 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
     )
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -419,6 +465,8 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         ctx.room_id,
         attachment.local_path,
         thread_id=None,
+        latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -439,8 +487,8 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message",
-            new=AsyncMock(return_value="$reply_evt"),
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$reply_evt")),
         ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
@@ -467,6 +515,8 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         ctx.room_id,
         attachment.local_path,
         thread_id=ctx.thread_id,
+        latest_thread_event_id=ctx.thread_id,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -490,8 +540,8 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message",
-            new=AsyncMock(return_value="$send_evt"),
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$send_evt")),
         ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
@@ -523,6 +573,8 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         ctx.room_id,
         attachment.local_path,
         thread_id=explicit_thread_id,
+        latest_thread_event_id=explicit_thread_id,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -542,7 +594,10 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_only",))
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -568,6 +623,8 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         ctx.room_id,
         attachment.local_path,
         thread_id=None,
+        latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -626,6 +683,8 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         ctx.room_id,
         first_attachment.local_path,
         thread_id=None,
+        latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
     mock_send_attachment_paths.assert_awaited_once()
     assert mock_send_attachment_paths.await_args.args == (ctx,)
@@ -697,9 +756,17 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     first_call = mock_send_file.await_args_list[0]
     second_call = mock_send_file.await_args_list[1]
     assert first_call.args == (ctx.client, ctx.room_id, first_attachment.local_path)
-    assert first_call.kwargs == {"thread_id": None}
+    assert first_call.kwargs == {
+        "thread_id": None,
+        "latest_thread_event_id": None,
+        "conversation_cache": ctx.conversation_cache,
+    }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
-    assert second_call.kwargs == {"thread_id": None}
+    assert second_call.kwargs == {
+        "thread_id": None,
+        "latest_thread_event_id": "$file_one",
+        "conversation_cache": ctx.conversation_cache,
+    }
 
 
 @pytest.mark.asyncio
@@ -711,7 +778,10 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
     ctx = _make_context(storage_path=tmp_path)
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -739,6 +809,8 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         ctx.room_id,
         generated_file,
         thread_id="$evt",
+        latest_thread_event_id="$evt",
+        conversation_cache=ctx.conversation_cache,
     )
 
 
@@ -758,7 +830,10 @@ async def test_matrix_message_send_text_failure_does_not_attempt_attachments(tmp
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_text_fail",))
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value=None)) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(return_value=None),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.matrix_message.send_context_attachments",
             new=AsyncMock(),
@@ -841,6 +916,8 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
         ctx.room_id,
         first_attachment.local_path,
         thread_id=None,
+        latest_thread_event_id=None,
+        conversation_cache=ctx.conversation_cache,
     )
     mock_send_attachment_paths.assert_not_awaited()
 
@@ -853,13 +930,13 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _make_context(storage_path=tmp_path)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=ctx.thread_id)
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_latest_thread_event_id_if_needed",
-            new=AsyncMock(return_value=ctx.thread_id),
-        ),
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
@@ -896,7 +973,10 @@ async def test_matrix_message_reply_defaults_to_context_thread() -> None:
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="reply", message="hello"))
@@ -915,7 +995,10 @@ async def test_matrix_message_thread_reply_defaults_to_context_thread() -> None:
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="thread-reply", message="hello"))
@@ -1003,12 +1086,12 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
 }
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
         patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
         patch(
@@ -1054,7 +1137,7 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
     thread_messages = [
         make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     interactive.register_interactive_question(
         "$target",
         ctx.room_id,
@@ -1065,8 +1148,8 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ),
         tool_runtime_context(ctx),
     ):
@@ -1096,12 +1179,12 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
 }
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
         patch("mindroom.custom_tools.matrix_message.clear_interactive_question") as mock_clear,
         patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
@@ -1158,7 +1241,7 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     thread_messages = [
         make_visible_message(event_id=f"${index}", timestamp=index, body=f"m{index}") for index in range(100)
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read", limit=999))
@@ -1167,7 +1250,7 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     assert payload["limit"] == MatrixMessageTools._MAX_READ_LIMIT
     assert len(payload["messages"]) == MatrixMessageTools._MAX_READ_LIMIT
     assert "edit_options" in payload
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, ctx.thread_id)
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, ctx.thread_id)
 
 
 @pytest.mark.asyncio
@@ -1185,7 +1268,7 @@ async def test_matrix_message_read_thread_includes_edit_options() -> None:
             body="latest message",
         ),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read"))
@@ -1225,7 +1308,7 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
         make_visible_message(event_id="$one", timestamp=1, sender="@mindroom_general:localhost", body="first"),
         make_visible_message(event_id="$two", timestamp=2, sender="@alice:localhost", body="second"),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1241,7 +1324,7 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
     assert payload["edit_options"][0]["event_id"] == "$two"
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
 
 
 @pytest.mark.asyncio
@@ -1259,7 +1342,7 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
             content={"body": "Compacted 12 messages", "msgtype": "m.notice"},
         ),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1273,7 +1356,7 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
     assert payload["status"] == "ok"
     assert payload["messages"] == [message.to_dict() for message in thread_messages]
     assert payload["messages"][1]["msgtype"] == "m.notice"
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
 
 
 @pytest.mark.asyncio
@@ -1945,7 +2028,7 @@ async def test_matrix_message_read_room_sentinel_uses_room_timeline() -> None:
         message_filter={"types": ["m.room.message"]},
     )
     mock_extract.assert_awaited_once()
-    ctx.conversation_access.get_thread_history.assert_not_awaited()
+    ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1957,7 +2040,7 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
         make_visible_message(event_id="$one", timestamp=1, body="first"),
         make_visible_message(event_id="$two", timestamp=2, body="second"),
     ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    ctx.conversation_cache.get_thread_history.return_value = thread_messages
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1968,7 +2051,7 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
     assert payload["action"] == "read"
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
     ctx.client.room_messages.assert_not_awaited()
 
 
@@ -1976,17 +2059,14 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
 async def test_matrix_message_edit_happy_path() -> None:
     """Edit should update an existing message by target event ID."""
     tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
-    thread_messages = [
-        make_visible_message(event_id="$one", timestamp=1, sender="@alice:localhost", body="first"),
-        make_visible_message(event_id="$latest", timestamp=2, sender="@alice:localhost", body="latest"),
-    ]
-    ctx.conversation_access.get_thread_history.return_value = thread_messages
+    event_cache = MagicMock()
+    ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message",
-            new=AsyncMock(return_value="$edit_evt"),
+            "mindroom.custom_tools.matrix_message.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
         tool_runtime_context(ctx),
     ):
@@ -2006,7 +2086,11 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert args[3]["m.relates_to"]["event_id"] == "$ctx-thread:localhost"
     assert args[3]["m.relates_to"]["is_falling_back"] is True
     assert args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-    ctx.conversation_access.get_thread_history.assert_awaited_once_with(ctx.room_id, "$ctx-thread:localhost")
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        ctx.room_id,
+        "$ctx-thread:localhost",
+    )
+    ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2123,7 +2207,7 @@ async def test_matrix_message_reply_room_sentinel_disables_context_thread_fallba
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock()) as mock_send,
+        patch("mindroom.custom_tools.matrix_message.send_message_result", new=AsyncMock()) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="reply", thread_id="room", message="hello"))
@@ -2182,7 +2266,10 @@ async def test_matrix_message_rate_limit_guardrail() -> None:
     ctx = _make_context()
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_MAX_ACTIONS", 1),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_WINDOW_SECONDS", 60.0),
         tool_runtime_context(ctx),
@@ -2211,7 +2298,10 @@ async def test_matrix_message_rate_limit_counts_attachments_weight(tmp_path: Pat
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_weighted",))
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
+        patch(
+            "mindroom.custom_tools.matrix_message.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
         patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),

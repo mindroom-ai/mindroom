@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
-import nio
-
 from mindroom import constants, interactive
 from mindroom.hooks import (
     AfterResponseContext,
@@ -26,12 +24,7 @@ from mindroom.hooks.types import (
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
 )
-from mindroom.matrix.client import (
-    build_threaded_edit_content,
-    edit_message,
-    get_latest_thread_event_id_if_needed,
-    send_message,
-)
+from mindroom.matrix.client import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.streaming import StreamingResponse, send_streaming_response
@@ -39,6 +32,7 @@ from mindroom.streaming import StreamingResponse, send_streaming_response
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    import nio
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -310,17 +304,18 @@ class DeliveryGateway:
                 request.response_text,
                 sender_domain=self.deps.sender_domain,
                 thread_event_id=None,
-                reply_to_event_id=None,
+                reply_to_event_id=resolved_target.reply_to_event_id,
                 latest_thread_event_id=None,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )
         else:
-            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-                client,
-                resolved_target.room_id,
-                effective_thread_id,
-                resolved_target.reply_to_event_id,
+            latest_thread_event_id = (
+                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+                    resolved_target.room_id,
+                    effective_thread_id,
+                    resolved_target.reply_to_event_id,
+                )
             )
             content = format_message_with_mentions(
                 config,
@@ -337,10 +332,15 @@ class DeliveryGateway:
         if request.skip_mentions:
             content["com.mindroom.skip_mentions"] = True
 
-        event_id = await send_message(client, resolved_target.room_id, content)
-        if event_id:
-            self.deps.logger.info("Sent response", event_id=event_id, **resolved_target.log_context)
-            return event_id
+        delivered = await send_message_result(client, resolved_target.room_id, content)
+        if delivered is not None:
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
+                resolved_target.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+            self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
+            return delivered.event_id
         self.deps.logger.error("Failed to send response to room", **resolved_target.log_context)
         return None
 
@@ -362,13 +362,18 @@ class DeliveryGateway:
                 self.deps.runtime_paths,
                 request.new_text,
                 sender_domain=self.deps.sender_domain,
+                reply_to_event_id=target.reply_to_event_id,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )
         else:
-            content = await build_threaded_edit_content(
-                client,
-                room_id=target.room_id,
+            latest_thread_event_id = (
+                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+                    target.room_id,
+                    target.resolved_thread_id,
+                )
+            )
+            content = build_threaded_edit_content(
                 new_text=request.new_text,
                 thread_id=target.resolved_thread_id,
                 config=config,
@@ -376,22 +381,28 @@ class DeliveryGateway:
                 sender_domain=self.deps.sender_domain,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
+                latest_thread_event_id=latest_thread_event_id,
             )
 
-        response = await edit_message(
+        delivered = await edit_message_result(
             client,
             target.room_id,
             request.event_id,
             content,
             request.new_text,
         )
-        if isinstance(response, nio.RoomSendResponse):
+        if delivered is not None:
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
+                target.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
-            error=str(response),
+            error="edit_message_result returned None",
             **target.log_context,
         )
         return False
@@ -573,15 +584,20 @@ class DeliveryGateway:
                 "com.mindroom.skip_mentions": True,
             },
         )
-        event_id = await send_message(client, target.room_id, content)
-        if event_id:
+        delivered = await send_message_result(client, target.room_id, content)
+        if delivered is not None:
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
+                target.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
             self.deps.logger.info(
                 "Sent compaction notice",
-                event_id=event_id,
+                event_id=delivered.event_id,
                 **target.log_context,
                 summary_model=request.outcome.summary_model,
             )
-            return event_id
+            return delivered.event_id
         self.deps.logger.error("Failed to send compaction notice", **target.log_context)
         return None
 
@@ -592,6 +608,12 @@ class DeliveryGateway:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config
+        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+            request.target.room_id,
+            request.target.resolved_thread_id,
+            request.target.reply_to_event_id,
+            request.existing_event_id,
+        )
         return await send_streaming_response(
             client,
             request.target.room_id,
@@ -611,6 +633,8 @@ class DeliveryGateway:
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
+            latest_thread_event_id=latest_thread_event_id,
+            conversation_cache=self.deps.resolver.deps.conversation_cache,
         )
 
     async def finalize_streamed_response(

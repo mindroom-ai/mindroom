@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
 
-from mindroom.matrix.client import _msgtype_for_mimetype, _upload_file_as_mxc, send_file_message, send_message
+from mindroom.matrix.client import (
+    DeliveredMatrixEvent,
+    _msgtype_for_mimetype,
+    _upload_file_as_mxc,
+    join_room,
+    send_file_message,
+    send_message_result,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -146,16 +153,20 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "report.pdf"
         file.write_bytes(b"%PDF")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
-            event_id = await send_file_message(client, "!room:localhost", file)
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None
@@ -174,10 +185,10 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "secret.bin"
         file.write_bytes(b"\x00" * 8)
@@ -195,9 +206,13 @@ class TestSendFileMessage:
                     },
                 ),
             ),
-            patch("mindroom.matrix.client.send_message", side_effect=capture_send),
+            patch("mindroom.matrix.client.send_message_result", side_effect=capture_send),
         ):
-            event_id = await send_file_message(client, "!room:localhost", file)
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None
@@ -213,27 +228,21 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with (
-            patch("mindroom.matrix.client.send_message", side_effect=capture_send),
-            patch(
-                "mindroom.matrix.client._latest_thread_event_id",
-                new_callable=AsyncMock,
-                return_value="$latest:localhost",
-            ),
-        ):
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
                 file,
                 thread_id="$root:localhost",
+                latest_thread_event_id="$latest:localhost",
             )
 
         assert event_id == "$evt:localhost"
@@ -245,10 +254,107 @@ class TestSendFileMessage:
         assert relates_to["m.in_reply_to"]["event_id"] == "$latest:localhost"
 
     @pytest.mark.asyncio
+    async def test_uses_precomputed_latest_thread_event_id_when_provided(self, tmp_path: Path) -> None:
+        """Threaded sends should skip lookup when the caller already resolved the latest event."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
+
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c", encoding="utf-8")
+
+        with (
+            patch("mindroom.matrix.client.send_message_result", side_effect=capture_send),
+        ):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                thread_id="$root:localhost",
+                latest_thread_event_id="$precomputed:localhost",
+            )
+
+        assert event_id == "$evt:localhost"
+        assert sent_content is not None
+        assert sent_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
+
+    @pytest.mark.asyncio
+    async def test_threaded_send_requires_precomputed_latest_thread_event_id(self, tmp_path: Path) -> None:
+        """Threaded file sends should require fallback resolution from the conversation-cache seam."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="latest_thread_event_id is required for thread fallback"):
+            await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                thread_id="$root:localhost",
+            )
+
+    @pytest.mark.asyncio
+    async def test_threaded_send_records_outbound_message_when_cache_available(self, tmp_path: Path) -> None:
+        """Threaded file sends should write through to the conversation cache immediately."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
+        conversation_cache = AsyncMock()
+        conversation_cache.notify_outbound_message = Mock()
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c", encoding="utf-8")
+
+        with patch(
+            "mindroom.matrix.client.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$evt:localhost",
+                    content_sent={
+                        "msgtype": "m.file",
+                        "body": "data.csv",
+                        "url": "mxc://localhost/t1",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$root:localhost",
+                            "is_falling_back": True,
+                            "m.in_reply_to": {"event_id": "$precomputed:localhost"},
+                        },
+                    },
+                ),
+            ),
+        ):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                thread_id="$root:localhost",
+                latest_thread_event_id="$precomputed:localhost",
+                conversation_cache=conversation_cache,
+            )
+
+        assert event_id == "$evt:localhost"
+        conversation_cache.notify_outbound_message.assert_called_once()
+        record_args = conversation_cache.notify_outbound_message.call_args.args
+        assert record_args[0] == "!room:localhost"
+        assert record_args[1] == "$evt:localhost"
+        assert record_args[2]["m.relates_to"]["event_id"] == "$root:localhost"
+        assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
+
+    @pytest.mark.asyncio
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
         """Should return None when the file doesn't exist."""
         client = _mock_client()
-        result = await send_file_message(client, "!room:localhost", tmp_path / "gone.txt")
+        result = await send_file_message(
+            client,
+            "!room:localhost",
+            tmp_path / "gone.txt",
+        )
         assert result is None
 
     @pytest.mark.asyncio
@@ -263,7 +369,11 @@ class TestSendFileMessage:
             patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
             patch("mindroom.matrix.client._upload_file_as_mxc", new_callable=AsyncMock) as mock_upload,
         ):
-            result = await send_file_message(client, "!room:localhost", file)
+            result = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+            )
 
         assert result is None
         mock_upload.assert_not_awaited()
@@ -276,15 +386,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "report.pdf"
         file.write_bytes(b"%PDF")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
             await send_file_message(
                 client,
                 "!room:localhost",
@@ -316,8 +426,8 @@ class TestMsgtypeForMimetype:
         assert _msgtype_for_mimetype(mimetype) == expected
 
 
-class TestSendMessage:
-    """Tests for send_message."""
+class TestSendMessageResult:
+    """Tests for send_message_result."""
 
     @pytest.mark.asyncio
     async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self) -> None:
@@ -328,11 +438,45 @@ class TestSendMessage:
             patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
             patch("mindroom.matrix.client.prepare_large_message", new_callable=AsyncMock) as mock_prepare,
         ):
-            result = await send_message(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
         assert result is None
         mock_prepare.assert_not_awaited()
         client.room_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_treats_non_dict_room_cache_as_unknown_room(self) -> None:
+        """Non-dict room caches should be treated as empty for plain sends."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = AsyncMock()
+        client.room_send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+
+        with patch(
+            "mindroom.matrix.client.prepare_large_message",
+            new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
+        ):
+            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+        assert result is not None
+        assert result.event_id == "$evt:localhost"
+        client.room_send.assert_awaited_once()
+
+
+class TestJoinRoom:
+    """Tests for join_room."""
+
+    @pytest.mark.asyncio
+    async def test_treats_non_dict_room_cache_as_uninitialized(self) -> None:
+        """Join should succeed without mutating when the room cache is not a real dict."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = AsyncMock()
+        client.user_id = "@mindroom_test:localhost"
+        client.join.return_value = nio.JoinResponse("!room:localhost")
+
+        joined = await join_room(client, "!room:localhost")
+
+        assert joined is True
+        client.join.assert_awaited_once_with("!room:localhost")
 
 
 class TestSendFileMessageMsgtype:
@@ -346,16 +490,20 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "photo.png"
         file.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
-            event_id = await send_file_message(client, "!room:localhost", file)
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None
@@ -372,16 +520,20 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> str:
+        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
-            return "$evt:localhost"
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
         file = tmp_path / "clip.mp4"
         file.write_bytes(b"\x00\x00\x00\x1cftyp")
 
-        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
-            event_id = await send_file_message(client, "!room:localhost", file)
+        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+            )
 
         assert event_id == "$evt:localhost"
         assert sent_content is not None

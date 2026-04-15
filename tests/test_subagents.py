@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -19,6 +19,7 @@ from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.conftest import delivered_matrix_side_effect, make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -54,7 +55,19 @@ def _make_context(
     thread_id: str | None = "$ctx-thread:localhost",
     requester_id: str = "@alice:localhost",
 ) -> ToolRuntimeContext:
+    async def _latest_thread_event_id(
+        _room_id: str,
+        thread_id: str | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> str | None:
+        return thread_id
+
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    conversation_cache = AsyncMock()
+    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
+    conversation_cache.notify_outbound_message = Mock()
+    conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="openclaw",
         room_id=room_id,
@@ -64,6 +77,8 @@ def _make_context(
         client=MagicMock(),
         config=config or _make_config(),
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=conversation_cache,
         room=None,
         reply_to_event_id=None,
         storage_path=tmp_path,
@@ -217,11 +232,11 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Threaded subagent sends should include the latest thread event for fallback replies."""
-    send_mock = AsyncMock(return_value="$evt")
-    latest_mock = AsyncMock(return_value="$latest:localhost")
-    monkeypatch.setattr(subagents_module, "send_message", send_mock)
-    monkeypatch.setattr(subagents_module, "get_latest_thread_event_id_if_needed", latest_mock)
-    ctx = _make_context(tmp_path, requester_id="@user:localhost")
+    send_mock = AsyncMock(side_effect=delivered_matrix_side_effect("$evt"))
+    monkeypatch.setattr(subagents_module, "send_message_result", send_mock)
+    event_cache = MagicMock()
+    ctx = replace(_make_context(tmp_path, requester_id="@user:localhost"), event_cache=event_cache)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest:localhost")
 
     await subagents_module._send_matrix_text(
         ctx,
@@ -231,7 +246,10 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
         original_sender=ctx.requester_id,
     )
 
-    latest_mock.assert_awaited_once_with(ctx.client, ctx.room_id, ctx.thread_id)
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        ctx.room_id,
+        ctx.thread_id,
+    )
     content = send_mock.await_args.args[2]
     assert content["m.relates_to"]["event_id"] == ctx.thread_id
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest:localhost"
@@ -544,7 +562,15 @@ async def test_sessions_spawn_sets_summary_after_spawn(
         )
 
     assert payload["status"] == "ok"
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
 
 
@@ -778,7 +804,15 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
     assert first["status"] == "ok"
     assert "reused" not in first
     send_mock.assert_awaited_once()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,
@@ -811,7 +845,15 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
     assert second["summary"] == TEST_SUMMARY
     assert second["tag"] == TEST_TAG
     send_mock.assert_not_awaited()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 0, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        0,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,
@@ -854,7 +896,15 @@ async def test_sessions_spawn_skips_reuse_when_registry_entry_lacks_thread_id(
     assert payload["event_id"] == "$new-event"
     assert payload["session_key"] == create_session_id(ctx.room_id, "$new-event")
     send_mock.assert_awaited_once()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$new-event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$new-event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,
@@ -904,6 +954,7 @@ async def test_sessions_spawn_reuse_derives_thread_id_from_session_key(
         TEST_SUMMARY,
         0,
         "manual",
+        ctx.conversation_cache,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -941,7 +992,15 @@ async def test_sessions_spawn_skips_room_level_reuse_candidates(
     assert "reused" not in payload
     assert payload["event_id"] == "$event"
     send_mock.assert_awaited_once()
-    summary_mock.assert_awaited_once_with(ctx.client, ctx.room_id, "$event", TEST_SUMMARY, 1, "manual")
+    summary_mock.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        "$event",
+        TEST_SUMMARY,
+        1,
+        "manual",
+        ctx.conversation_cache,
+    )
     tag_mock.assert_awaited_once_with(
         ctx.client,
         ctx.room_id,

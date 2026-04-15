@@ -1,27 +1,42 @@
 """Matrix client operations and utilities."""
 
+from __future__ import annotations
+
 import asyncio
+import heapq
 import io
 import json
 import mimetypes
 import ssl as ssl_module
-from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
+import time
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nio
 from aiohttp import ClientError
 from nio import crypto
-from nio.api import RelationshipType
 from nio.responses import RoomThreadsResponse
 
-from mindroom.config.main import Config
-from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_cache import ConversationEventCache, normalize_event_source_for_cache
+from mindroom.matrix.cache.event_cache import (
+    ConversationEventCache,
+    normalize_nio_event_for_cache,
+)
+from mindroom.matrix.cache.thread_cache_helpers import thread_cache_state_is_usable
+from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+    ThreadHistoryResult,
+    thread_history_result,
+)
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -31,9 +46,15 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     visible_body_from_event_source,
 )
-from mindroom.matrix.room_cache import cached_room
-from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.thread_membership import (
+    resolve_thread_ids_for_event_infos,
+)
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
+    from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
@@ -49,10 +70,6 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _THREAD_TAGS_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
-
-
-class _ThreadHistoryFastPathUnavailableError(RuntimeError):
-    """Raised when the lightweight relations snapshot cannot be used."""
 
 
 @dataclass(slots=True)
@@ -75,7 +92,7 @@ class ResolvedVisibleMessage:
         *,
         thread_id: str | None,
         latest_event_id: str,
-    ) -> "ResolvedVisibleMessage":
+    ) -> ResolvedVisibleMessage:
         """Build a resolved visible message from extracted message data."""
         message = cls(
             sender=message_data["sender"],
@@ -99,7 +116,7 @@ class ResolvedVisibleMessage:
         timestamp: int = 0,
         content: dict[str, Any] | None = None,
         thread_id: str | None = None,
-    ) -> "ResolvedVisibleMessage":
+    ) -> ResolvedVisibleMessage:
         """Build a synthetic visible message for non-Matrix history inputs."""
         message = cls(
             sender=sender,
@@ -165,6 +182,24 @@ class ResolvedVisibleMessage:
         return message_data
 
 
+@dataclass(slots=True)
+class _ThreadHistoryFetchResult:
+    """Resolved thread history plus the raw sources and timing diagnostics used to build it."""
+
+    history: list[ResolvedVisibleMessage]
+    event_sources: list[dict[str, Any]]
+    resolution_ms: float
+    sidecar_hydration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveredMatrixEvent:
+    """One successfully delivered Matrix event plus the exact sent content payload."""
+
+    event_id: str
+    content_sent: dict[str, Any]
+
+
 def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
     """Return the explicit reply target encoded on one visible content payload."""
     if content is None:
@@ -183,9 +218,10 @@ def _thread_history_result(
     history: list[ResolvedVisibleMessage],
     *,
     is_full_history: bool,
+    diagnostics: Mapping[str, str | int | float | bool] | None = None,
 ) -> ThreadHistoryResult:
     """Wrap history with hydration metadata used by dispatch fast paths."""
-    return thread_history_result(history, is_full_history=is_full_history)
+    return thread_history_result(history, is_full_history=is_full_history, diagnostics=diagnostics)
 
 
 def replace_visible_message(
@@ -818,40 +854,6 @@ async def add_room_to_space(
     return False
 
 
-async def _create_dm_room(
-    client: nio.AsyncClient,
-    invite_user_ids: list[str],
-    name: str | None = None,
-) -> str | None:
-    """Create a Direct Message room with specific users.
-
-    Args:
-        client: Authenticated Matrix client
-        invite_user_ids: List of user IDs to invite to the DM
-        name: Optional room name (defaults to "Direct Message")
-
-    Returns:
-        Room ID if successful, None otherwise
-
-    """
-    room_config: dict[str, Any] = {
-        "preset": "trusted_private_chat",  # DM preset - no need to invite, they can join
-        "is_direct": True,  # Mark as DM
-        "invite": invite_user_ids,
-    }
-
-    if name:
-        room_config["name"] = name
-
-    response = await client.room_create(**room_config)
-    if isinstance(response, nio.RoomCreateResponse):
-        logger.info("matrix_dm_room_created", room_id=str(response.room_id))
-        return str(response.room_id)
-
-    logger.error("matrix_dm_room_creation_failed", error=str(response))
-    return None
-
-
 async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Join a Matrix room.
 
@@ -865,6 +867,12 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     """
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
+        rooms = client.rooms
+        if isinstance(rooms, dict) and response.room_id not in rooms:
+            rooms[response.room_id] = nio.MatrixRoom(
+                room_id=response.room_id,
+                own_user_id=client.user_id or "",
+            )
         logger.info("matrix_room_joined", room_id=room_id)
         return True
     logger.warning("matrix_room_join_failed", room_id=room_id, error=str(response))
@@ -965,6 +973,17 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
     return False
 
 
+def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
+    """Return one room from nio's in-memory room cache if present."""
+    return cached_rooms(client).get(room_id)
+
+
+def cached_rooms(client: nio.AsyncClient) -> dict[str, nio.MatrixRoom]:
+    """Return the client room cache when nio has initialized it."""
+    rooms = client.rooms
+    return rooms if isinstance(rooms, dict) else {}
+
+
 def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
     """Return whether one outbound room operation can proceed with current nio E2EE support."""
     room = cached_room(client, room_id)
@@ -979,8 +998,12 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
     return False
 
 
-async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
-    """Send a message to a Matrix room.
+async def send_message_result(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+) -> DeliveredMatrixEvent | None:
+    """Send a message to a Matrix room and return the exact delivered payload.
 
     Automatically handles large messages that exceed the Matrix event size limit
     by uploading the full content as MXC and sending a maximum-size preview.
@@ -991,23 +1014,22 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         content: The message content dictionary
 
     Returns:
-        The event ID of the sent message, or None if sending failed
+        The delivered event id plus the exact sent content, or None if sending failed
 
     """
     if not _can_send_to_encrypted_room(client, room_id, operation="send_message"):
         return None
 
-    # Handle large messages if needed
-    content = await prepare_large_message(client, room_id, content)
+    content_sent = await prepare_large_message(client, room_id, content)
 
     response = await client.room_send(
         room_id=room_id,
         message_type="m.room.message",
-        content=content,
+        content=content_sent,
     )
     if isinstance(response, nio.RoomSendResponse):
         logger.debug("matrix_message_sent", room_id=room_id, event_id=str(response.event_id))
-        return str(response.event_id)
+        return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
     logger.error("matrix_message_send_failed", room_id=room_id, error=str(response))
     return None
 
@@ -1032,7 +1054,8 @@ async def _upload_file_as_mxc(
         return None, None
 
     info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
-    room = cached_room(client, room_id)
+    rooms = client.rooms
+    room = rooms.get(room_id) if isinstance(rooms, dict) else None
     if room is None:
         logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
         return None, None
@@ -1110,6 +1133,8 @@ async def send_file_message(
     *,
     thread_id: str | None = None,
     caption: str | None = None,
+    latest_thread_event_id: str | None = None,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
     resolved_path = Path(file_path).expanduser().resolve()
@@ -1143,7 +1168,9 @@ async def send_file_message(
         content["url"] = mxc_uri
 
     if thread_id:
-        latest_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
+        if latest_thread_event_id is None:
+            msg = "latest_thread_event_id is required for thread fallback"
+            raise ValueError(msg)
         content["m.relates_to"] = {
             "rel_type": "m.thread",
             "event_id": thread_id,
@@ -1151,12 +1178,14 @@ async def send_file_message(
             "m.in_reply_to": {"event_id": latest_thread_event_id},
         }
 
-    return await send_message(client, room_id, content)
-
-
-def _history_message_sort_key(message: ResolvedVisibleMessage) -> tuple[int, str]:
-    """Sort thread history messages by timestamp and event ID."""
-    return (message.timestamp, message.event_id)
+    delivered = await send_message_result(client, room_id, content)
+    if delivered is not None and conversation_cache is not None:
+        conversation_cache.notify_outbound_message(
+            room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
+    return delivered.event_id if delivered is not None else None
 
 
 def _is_room_message_event(event: nio.Event) -> bool:
@@ -1196,36 +1225,243 @@ def _snapshot_message_dict(event: nio.Event) -> ResolvedVisibleMessage:
     return message
 
 
-async def _fetch_thread_context_via_relations(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch a lightweight thread snapshot from relations when supported."""
-    event_sources = await _fetch_thread_event_sources_via_relations(
-        client,
-        room_id,
-        thread_id,
-        include_latest_edits=False,
-    )
-    return await _resolve_thread_history_from_event_sources(
-        client,
-        thread_id=thread_id,
-        event_sources=event_sources,
-        hydrate_sidecars=False,
-    )
-
-
 def _sort_thread_history_root_first(
     messages: list[ResolvedVisibleMessage],
     *,
     thread_id: str,
+    input_order_by_event_id: dict[str, int] | None = None,
+    related_event_id_by_event_id: dict[str, str] | None = None,
 ) -> None:
     """Keep the thread root first, then order the remaining messages chronologically."""
-    messages.sort(key=lambda message: (message.timestamp, message.event_id))
+    messages.sort(
+        key=lambda message: (
+            message.timestamp,
+            input_order_by_event_id.get(message.event_id, 0) if input_order_by_event_id is not None else 0,
+            message.event_id,
+        ),
+    )
+    if related_event_id_by_event_id is not None:
+        grouped_messages: list[ResolvedVisibleMessage] = []
+        index = 0
+        while index < len(messages):
+            group_end = index + 1
+            while group_end < len(messages) and messages[group_end].timestamp == messages[index].timestamp:
+                group_end += 1
+            grouped_messages.extend(
+                _sort_same_timestamp_group(
+                    messages[index:group_end],
+                    related_event_id_by_event_id=related_event_id_by_event_id,
+                    input_order_by_event_id=input_order_by_event_id,
+                ),
+            )
+            index = group_end
+        messages[:] = grouped_messages
     root_index = next((index for index, message in enumerate(messages) if message.event_id == thread_id), None)
     if root_index not in (None, 0):
         messages.insert(0, messages.pop(root_index))
+
+
+def _thread_history_input_order(
+    event_id: str,
+    input_order_by_event_id: dict[str, int] | None,
+) -> int:
+    """Return the stable secondary ordering index for one event."""
+    if input_order_by_event_id is None:
+        return 0
+    return input_order_by_event_id.get(event_id, 0)
+
+
+def _build_same_timestamp_relation_graph(
+    event_ids: set[str],
+    *,
+    related_event_id_by_event_id: dict[str, str],
+) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """Return parent/child relationships for one same-timestamp relation group."""
+    in_degree = dict.fromkeys(event_ids, 0)
+    children_by_parent: dict[str, list[str]] = {}
+    for event_id in in_degree:
+        parent_event_id = related_event_id_by_event_id.get(event_id)
+        if parent_event_id not in event_ids or parent_event_id == event_id:
+            continue
+        in_degree[event_id] += 1
+        children_by_parent.setdefault(parent_event_id, []).append(event_id)
+    return in_degree, children_by_parent
+
+
+def _topologically_sort_same_timestamp_event_ids(
+    event_ids: set[str],
+    *,
+    related_event_id_by_event_id: dict[str, str],
+    input_order_by_event_id: dict[str, int] | None,
+) -> list[str] | None:
+    """Return one ancestry-aware order for equal-timestamp events when relations exist."""
+    if len(event_ids) < 2:
+        return None
+
+    in_degree, children_by_parent = _build_same_timestamp_relation_graph(
+        event_ids,
+        related_event_id_by_event_id=related_event_id_by_event_id,
+    )
+    if not children_by_parent:
+        return None
+
+    ready: list[tuple[int, str]] = []
+    for event_id, degree in in_degree.items():
+        if degree == 0:
+            heapq.heappush(
+                ready,
+                (
+                    _thread_history_input_order(event_id, input_order_by_event_id),
+                    event_id,
+                ),
+            )
+
+    ordered_event_ids: list[str] = []
+    while ready:
+        _input_order, event_id = heapq.heappop(ready)
+        ordered_event_ids.append(event_id)
+        for child_event_id in children_by_parent.get(event_id, ()):
+            in_degree[child_event_id] -= 1
+            if in_degree[child_event_id] == 0:
+                heapq.heappush(
+                    ready,
+                    (
+                        _thread_history_input_order(child_event_id, input_order_by_event_id),
+                        child_event_id,
+                    ),
+                )
+
+    if len(ordered_event_ids) != len(event_ids):
+        remaining_event_ids = event_ids - set(ordered_event_ids)
+        ordered_event_ids.extend(
+            sorted(
+                remaining_event_ids,
+                key=lambda event_id: (
+                    _thread_history_input_order(event_id, input_order_by_event_id),
+                    event_id,
+                ),
+            ),
+        )
+
+    return ordered_event_ids
+
+
+def _sort_same_timestamp_group(
+    messages: list[ResolvedVisibleMessage],
+    *,
+    related_event_id_by_event_id: dict[str, str],
+    input_order_by_event_id: dict[str, int] | None,
+) -> list[ResolvedVisibleMessage]:
+    """Keep same-timestamp parents ahead of descendants when relation ancestry is known."""
+    if len(messages) < 2:
+        return messages
+
+    messages_by_event_id = {message.event_id: message for message in messages}
+    ordered_event_ids = _topologically_sort_same_timestamp_event_ids(
+        set(messages_by_event_id),
+        related_event_id_by_event_id=related_event_id_by_event_id,
+        input_order_by_event_id=input_order_by_event_id,
+    )
+    if ordered_event_ids is None:
+        return messages
+
+    return [messages_by_event_id[event_id] for event_id in ordered_event_ids]
+
+
+def _sort_thread_event_sources_root_first(
+    event_sources: Sequence[dict[str, Any]],
+    *,
+    thread_id: str,
+) -> list[dict[str, Any]]:
+    """Return one stable raw-source order with same-timestamp ancestors before descendants."""
+    input_order_by_event_id: dict[str, int] = {}
+    related_event_id_by_event_id: dict[str, str] = {}
+    for index, event_source in enumerate(event_sources):
+        event_id = _event_id_from_source(event_source)
+        if event_id is None:
+            continue
+        input_order_by_event_id[event_id] = index
+        related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
+        if related_event_id is not None:
+            related_event_id_by_event_id[event_id] = related_event_id
+
+    sorted_sources = sorted(
+        event_sources,
+        key=lambda event_source: (
+            int(event_source.get("origin_server_ts", 0)),
+            input_order_by_event_id.get(str(event_source.get("event_id", "")), 0),
+            str(event_source.get("event_id", "")),
+        ),
+    )
+
+    grouped_sources: list[dict[str, Any]] = []
+    index = 0
+    while index < len(sorted_sources):
+        group_end = index + 1
+        current_timestamp = int(sorted_sources[index].get("origin_server_ts", 0))
+        while (
+            group_end < len(sorted_sources)
+            and int(sorted_sources[group_end].get("origin_server_ts", 0)) == current_timestamp
+        ):
+            group_end += 1
+        group_sources = sorted_sources[index:group_end]
+        group_event_ids = {
+            event_id
+            for event_source in group_sources
+            if isinstance((event_id := _event_id_from_source(event_source)), str)
+        }
+        ordered_group_event_ids = _topologically_sort_same_timestamp_event_ids(
+            group_event_ids,
+            related_event_id_by_event_id=related_event_id_by_event_id,
+            input_order_by_event_id=input_order_by_event_id,
+        )
+        if ordered_group_event_ids is None:
+            grouped_sources.extend(group_sources)
+            index = group_end
+            continue
+        sources_by_event_id = {
+            event_id: event_source
+            for event_source in group_sources
+            if isinstance((event_id := _event_id_from_source(event_source)), str)
+        }
+        grouped_sources.extend([sources_by_event_id[event_id] for event_id in ordered_group_event_ids])
+        index = group_end
+
+    root_index = next(
+        (
+            index
+            for index, event_source in enumerate(grouped_sources)
+            if _event_id_from_source(event_source) == thread_id
+        ),
+        None,
+    )
+    if root_index not in (None, 0):
+        grouped_sources.insert(0, grouped_sources.pop(root_index))
+    return grouped_sources
+
+
+def _ordered_event_ids_from_scanned_event_sources(
+    event_sources: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Return scanned event IDs in stable chronological discovery order."""
+    event_source_list = list(event_sources)
+    input_order_by_event_id = {
+        event_id: index
+        for index, event_source in enumerate(event_source_list)
+        if isinstance((event_id := event_source.get("event_id")), str)
+    }
+    return [
+        event_id
+        for event_source in sorted(
+            event_source_list,
+            key=lambda source: (
+                int(source.get("origin_server_ts", 0)),
+                input_order_by_event_id.get(str(source.get("event_id", "")), 0),
+                str(source.get("event_id", "")),
+            ),
+        )
+        if isinstance((event_id := event_source.get("event_id")), str)
+    ]
 
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
@@ -1247,15 +1483,7 @@ def _parse_visible_text_message_event(
 
 def _event_source_for_cache(event: nio.Event) -> dict[str, Any]:
     """Normalize one nio event source for persistent cache storage."""
-    server_timestamp = event.server_timestamp
-    return normalize_event_source_for_cache(
-        event.source,
-        event_id=event.event_id if isinstance(event.event_id, str) else None,
-        sender=event.sender if isinstance(event.sender, str) else None,
-        origin_server_ts=server_timestamp
-        if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool)
-        else None,
-    )
+    return normalize_nio_event_for_cache(event)
 
 
 def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
@@ -1264,23 +1492,55 @@ def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
     return event_id if isinstance(event_id, str) else None
 
 
-def _event_server_timestamp(event: nio.Event) -> int:
-    """Return one event timestamp suitable for incremental timeline scans."""
-    server_timestamp = event.server_timestamp
-    if isinstance(server_timestamp, int) and not isinstance(server_timestamp, bool):
-        return server_timestamp
-    origin_server_ts = event.source.get("origin_server_ts")
-    return origin_server_ts if isinstance(origin_server_ts, int) and not isinstance(origin_server_ts, bool) else 0
+def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return one bundled replacement event source when Matrix already included it."""
+    unsigned = event_source.get("unsigned")
+    if not isinstance(unsigned, Mapping):
+        return None
+    relations = unsigned.get("m.relations")
+    if not isinstance(relations, Mapping):
+        return None
+    replacement = relations.get("m.replace")
+    if not isinstance(replacement, Mapping):
+        return None
+    candidates: tuple[object, ...] = (
+        replacement.get("event"),
+        replacement.get("latest_event"),
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
+        if _parse_visible_text_message_event(normalized_candidate) is not None:
+            return normalized_candidate
+    replacement_candidate = {key: value for key, value in replacement.items() if isinstance(key, str)}
+    if {
+        "event_id",
+        "sender",
+        "type",
+        "origin_server_ts",
+    }.issubset(replacement_candidate) and _parse_visible_text_message_event(replacement_candidate) is not None:
+        return replacement_candidate
+    return None
 
 
-async def _resolve_thread_history_from_event_sources(
+async def _resolve_thread_history_from_event_sources_timed(
     client: nio.AsyncClient,
     *,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
-) -> list[ResolvedVisibleMessage]:
-    """Resolve visible thread history from cached raw event sources."""
+) -> tuple[list[ResolvedVisibleMessage], float]:
+    """Resolve visible thread history and return approximate sidecar hydration time."""
+    input_order_by_event_id: dict[str, int] = {}
+    related_event_id_by_event_id: dict[str, str] = {}
+    for index, event_source in enumerate(event_sources):
+        event_id = event_source.get("event_id")
+        if isinstance(event_id, str):
+            input_order_by_event_id[event_id] = index
+            related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
+            if isinstance(related_event_id, str):
+                related_event_id_by_event_id[event_id] = related_event_id
     parsed_events = [
         parsed_event
         for event_source in event_sources
@@ -1288,8 +1548,18 @@ async def _resolve_thread_history_from_event_sources(
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    sidecar_hydration_started = time.perf_counter()
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
+        bundled_replacement_source = _bundled_replacement_source(event.source)
+        if bundled_replacement_source is not None:
+            bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
+            if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+                _record_latest_thread_edit(
+                    bundled_replacement,
+                    event_info=EventInfo.from_event(bundled_replacement.source),
+                    latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+                )
         if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and _record_latest_thread_edit(
             event,
             event_info=event_info,
@@ -1309,148 +1579,70 @@ async def _resolve_thread_history_from_event_sources(
         required_thread_id=thread_id,
     )
     messages = list(messages_by_event_id.values())
-    _sort_thread_history_root_first(messages, thread_id=thread_id)
-    return messages
+    _sort_thread_history_root_first(
+        messages,
+        thread_id=thread_id,
+        input_order_by_event_id=input_order_by_event_id,
+        related_event_id_by_event_id=related_event_id_by_event_id,
+    )
+    return messages, round((time.perf_counter() - sidecar_hydration_started) * 1000, 1)
 
 
-async def _fetch_thread_history_without_cache(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch thread history directly from the homeserver when no cache is active."""
-    try:
-        return await _fetch_thread_history_via_relations(client, room_id, thread_id)
-    except _ThreadHistoryFastPathUnavailableError as exc:
-        logger.info(
-            "Falling back to room scan for thread history",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=str(exc),
-        )
-        return await _fetch_thread_history_via_room_messages(client, room_id, thread_id)
-
-
-async def _load_cached_thread_history(
+async def _load_stale_cached_thread_history(
     client: nio.AsyncClient,
     *,
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
     hydrate_sidecars: bool = True,
-    refresh_cache: bool = True,
-) -> list[ResolvedVisibleMessage] | None:
-    """Return cached thread history when it can be refreshed and resolved safely."""
+    fetch_error: Exception,
+) -> ThreadHistoryResult | None:
+    """Return stale cached thread history when a refetch fails but durable rows still exist."""
+    cache_read_started = time.perf_counter()
     try:
         cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
     except Exception as exc:
         logger.warning(
-            "Event cache read failed; falling back to homeserver",
+            "Failed to read stale thread cache after refetch failure",
             room_id=room_id,
             thread_id=thread_id,
-            error=str(exc),
+            fetch_error=str(fetch_error),
+            cache_error=str(exc),
         )
         return None
-
     if cached_event_sources is None:
         return None
 
-    cached_event_ids = {
-        event_id
-        for event_source in cached_event_sources
-        if (event_id := _event_id_from_source(event_source)) is not None
-    }
-    if not cached_event_ids:
-        logger.warning(
-            "Cached thread payload was missing event IDs; refetching from homeserver",
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
-        return None
-
-    refreshed_event_sources = cached_event_sources
-    if refresh_cache:
-        refreshed_event_sources = await _refresh_cached_thread_event_sources(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            cached_event_ids=cached_event_ids,
-            event_cache=event_cache,
-            cached_event_sources=cached_event_sources,
-        )
-    return await _resolve_cached_thread_history(
+    resolution_started = time.perf_counter()
+    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
-        cached_event_sources=refreshed_event_sources,
+        cached_event_sources=cached_event_sources,
         hydrate_sidecars=hydrate_sidecars,
     )
+    if resolved_history is None:
+        return None
 
-
-async def _load_cached_thread_result(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    hydrate_sidecars: bool,
-    refresh_cache: bool,
-) -> ThreadHistoryResult | None:
-    """Resolve cached thread history into the shared thread-result wrapper."""
-    cached_history = await _load_cached_thread_history(
-        client,
+    logger.warning(
+        "Thread refetch failed; returning stale cached history",
         room_id=room_id,
         thread_id=thread_id,
-        event_cache=event_cache,
-        hydrate_sidecars=hydrate_sidecars,
-        refresh_cache=refresh_cache,
+        error=str(fetch_error),
     )
-    if cached_history is None:
-        return None
-    # Cached snapshots can reconstruct the same event set without sidecar hydration.
-    # Keep those reads marked as previews so a later full-history consumer still reloads.
-    return _thread_history_result(cached_history, is_full_history=hydrate_sidecars)
-
-
-async def _refresh_cached_thread_event_sources(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    cached_event_ids: Collection[str],
-    event_cache: ConversationEventCache,
-    cached_event_sources: Sequence[dict[str, Any]],
-) -> Sequence[dict[str, Any]]:
-    """Apply incremental refreshes to one cached thread payload when possible."""
-    try:
-        new_event_sources, redactions = await _fetch_incremental_thread_events(
-            client,
-            room_id,
-            thread_id,
-            cached_event_ids=cached_event_ids,
-        )
-        if new_event_sources:
-            await event_cache.store_thread_events(room_id, thread_id, new_event_sources)
-        for redacted_event_id, _ in redactions:
-            await event_cache.redact_event(room_id, redacted_event_id)
-        if not new_event_sources and not redactions:
-            return cached_event_sources
-
-        refreshed_event_sources = await event_cache.get_thread_events(room_id, thread_id)
-    except Exception as exc:
-        logger.warning(
-            "Incremental thread cache refresh failed; serving stale cache",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-        return cached_event_sources
-    else:
-        if refreshed_event_sources is not None:
-            return refreshed_event_sources
-        return []
+    return _thread_history_result(
+        resolved_history,
+        is_full_history=hydrate_sidecars,
+        diagnostics={
+            "cache_read_ms": round((time.perf_counter() - cache_read_started) * 1000, 1),
+            "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+            "sidecar_hydration_ms": sidecar_hydration_ms,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: str(fetch_error),
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+        },
+    )
 
 
 async def _resolve_cached_thread_history(
@@ -1461,10 +1653,10 @@ async def _resolve_cached_thread_history(
     event_cache: ConversationEventCache,
     cached_event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
-) -> list[ResolvedVisibleMessage] | None:
+) -> tuple[list[ResolvedVisibleMessage] | None, float]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
     try:
-        return await _resolve_thread_history_from_event_sources(
+        return await _resolve_thread_history_from_event_sources_timed(
             client,
             thread_id=thread_id,
             event_sources=cached_event_sources,
@@ -1478,7 +1670,53 @@ async def _resolve_cached_thread_history(
             error=str(exc),
         )
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+        return None, 0.0
+
+
+async def _load_cached_thread_history_if_usable(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    hydrate_sidecars: bool,
+    runtime_started_at: float | None,
+) -> ThreadHistoryResult | None:
+    """Return a fresh durable thread snapshot when the current runtime may safely trust it."""
+    cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
+    if not thread_cache_state_is_usable(
+        cache_state,
+        runtime_started_at=runtime_started_at,
+    ):
         return None
+
+    cache_read_started = time.perf_counter()
+    cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
+    if cached_event_sources is None:
+        return None
+
+    resolution_started = time.perf_counter()
+    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+        cached_event_sources=cached_event_sources,
+        hydrate_sidecars=hydrate_sidecars,
+    )
+    if resolved_history is None:
+        return None
+
+    return _thread_history_result(
+        resolved_history,
+        is_full_history=hydrate_sidecars,
+        diagnostics={
+            "cache_read_ms": round((time.perf_counter() - cache_read_started) * 1000, 1),
+            "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+            "sidecar_hydration_ms": sidecar_hydration_ms,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
+        },
+    )
 
 
 async def _invalidate_thread_cache_entry(
@@ -1502,65 +1740,65 @@ async def _fetch_thread_history_with_events(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> tuple[list[ResolvedVisibleMessage], list[dict[str, Any]]]:
-    """Fetch thread history and raw event sources from the homeserver."""
-    try:
-        return await _fetch_thread_history_via_relations_with_events(client, room_id, thread_id)
-    except _ThreadHistoryFastPathUnavailableError as exc:
-        logger.info(
-            "Falling back to room scan for thread history",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=str(exc),
-        )
-        return await _fetch_thread_history_via_room_messages_with_events(client, room_id, thread_id)
-
-
-async def _fetch_thread_event_sources_via_relations(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
     *,
-    include_latest_edits: bool,
-) -> list[dict[str, Any]]:
-    """Fetch thread event sources from relations plus explicit root lookup."""
-    try:
-        root_response = await client.room_get_event(room_id, thread_id)
-    except Exception as exc:
-        msg = f"root lookup failed for {thread_id}"
-        raise _ThreadHistoryFastPathUnavailableError(msg) from exc
-    if not isinstance(root_response, nio.RoomGetEventResponse):
-        msg = f"failed to fetch thread root {thread_id}"
-        raise _ThreadHistoryFastPathUnavailableError(msg)
-
-    root_message = root_response.event
-    if not _is_room_message_event(root_message):
-        msg = f"thread root {thread_id} is not a readable room message"
-        raise _ThreadHistoryFastPathUnavailableError(msg)
-
-    thread_events, latest_edits_by_original_event_id = await _collect_thread_relation_events(
+    hydrate_sidecars: bool,
+) -> _ThreadHistoryFetchResult:
+    """Fetch thread history and raw event sources from the homeserver."""
+    return await _fetch_thread_history_via_room_messages_with_events(
         client,
         room_id,
         thread_id,
+        hydrate_sidecars=hydrate_sidecars,
     )
-    if not thread_events:
-        msg = f"no direct thread children returned for {thread_id}"
-        raise _ThreadHistoryFastPathUnavailableError(msg)
 
-    if include_latest_edits:
-        for event in [root_message, *thread_events]:
-            if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                continue
-            replacement = await _fetch_latest_message_replacement(client, room_id, event)
-            if replacement is not None:
-                latest_edits_by_original_event_id[event.event_id] = replacement
 
-    event_sources = [_event_source_for_cache(root_message)]
-    event_sources.extend(_event_source_for_cache(event) for event in thread_events)
-    event_sources.extend(
-        _event_source_for_cache(edit_event) for edit_event, _ in latest_edits_by_original_event_id.values()
+async def refresh_thread_history_from_source(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    *,
+    hydrate_sidecars: bool = True,
+    allow_stale_fallback: bool = True,
+) -> ThreadHistoryResult:
+    """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
+    try:
+        fetch_result = await _fetch_thread_history_with_events(
+            client,
+            room_id,
+            thread_id,
+            hydrate_sidecars=hydrate_sidecars,
+        )
+    except Exception as exc:
+        if allow_stale_fallback:
+            stale_history = await _load_stale_cached_thread_history(
+                client,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_cache=event_cache,
+                hydrate_sidecars=hydrate_sidecars,
+                fetch_error=exc,
+            )
+            if stale_history is not None:
+                return stale_history
+        raise
+    if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
+        await _store_thread_history_cache(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_sources=fetch_result.event_sources,
+        )
+    return _thread_history_result(
+        fetch_result.history,
+        is_full_history=hydrate_sidecars,
+        diagnostics={
+            "cache_read_ms": 0.0,
+            "resolution_ms": fetch_result.resolution_ms,
+            "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+        },
     )
-    return event_sources
 
 
 async def _store_thread_history_cache(
@@ -1569,11 +1807,14 @@ async def _store_thread_history_cache(
     room_id: str,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
-) -> None:
+) -> bool:
     """Best-effort replacement of one cached thread snapshot."""
     try:
-        await event_cache.invalidate_thread(room_id, thread_id)
-        await event_cache.store_thread_events(room_id, thread_id, list(event_sources))
+        await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            list(event_sources),
+        )
     except Exception as exc:
         logger.warning(
             "Event cache write failed; continuing without cache",
@@ -1581,141 +1822,17 @@ async def _store_thread_history_cache(
             thread_id=thread_id,
             error=str(exc),
         )
+        return False
+    return True
 
 
-def _bundled_replacement_event(
-    event_source: dict[str, Any],
-) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
-    """Return bundled replacement data when the homeserver included it inline."""
-    for container in (
-        event_source.get("unsigned"),
-        event_source,
-    ):
-        if not isinstance(container, dict):
-            continue
-        relations = container.get("m.relations")
-        if not isinstance(relations, dict):
-            continue
-        replacement = relations.get("m.replace")
-        if not isinstance(replacement, dict):
-            continue
-        for candidate in (
-            replacement,
-            replacement.get("event"),
-            replacement.get("latest_event"),
-        ):
-            if not isinstance(candidate, dict):
-                continue
-            if (parsed_event := _parse_visible_text_message_event(candidate)) is not None:
-                return parsed_event
-    return None
-
-
-async def _collect_related_events(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
+def _thread_history_fetch_is_cacheable(
+    event_sources: Sequence[dict[str, Any]],
     *,
-    rel_type: RelationshipType,
-    event_type: str,
-    direction: nio.MessageDirection = nio.MessageDirection.back,
-    limit: int | None = None,
-    max_events: int | None = None,
-) -> list[nio.Event]:
-    """Collect a relations iterator into a concrete list."""
-    if max_events is not None and max_events <= 0:
-        return []
-
-    events: list[nio.Event] = []
-    try:
-        async for event in client.room_get_event_relations(
-            room_id,
-            event_id,
-            rel_type=rel_type,
-            event_type=event_type,
-            direction=direction,
-            limit=limit,
-        ):
-            events.append(event)
-            if max_events is not None and len(events) >= max_events:
-                return events
-    except Exception as exc:
-        msg = f"relations lookup failed for {event_id}"
-        raise _ThreadHistoryFastPathUnavailableError(msg) from exc
-    return events
-
-
-async def _fetch_latest_message_replacement(
-    client: nio.AsyncClient,
-    room_id: str,
-    event: nio.RoomMessageText | nio.RoomMessageNotice,
-) -> tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None] | None:
-    """Return the latest replacement event for one message when available."""
-    if (bundled_replacement := _bundled_replacement_event(event.source)) is not None:
-        bundled_info = EventInfo.from_event(bundled_replacement.source)
-        if bundled_info.original_event_id != event.event_id:
-            msg = f"bundled replacement did not target {event.event_id}"
-            raise _ThreadHistoryFastPathUnavailableError(msg)
-        return bundled_replacement, bundled_info.thread_id_from_edit
-
-    replacement_events = await _collect_related_events(
-        client,
-        room_id,
-        event.event_id,
-        rel_type=RelationshipType.replacement,
-        event_type="m.room.message",
-    )
-    latest_replacement: nio.RoomMessageText | nio.RoomMessageNotice | None = None
-    latest_replacement_thread_id: str | None = None
-    for replacement_event in replacement_events:
-        if not isinstance(replacement_event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-            continue
-        replacement_info = EventInfo.from_event(replacement_event.source)
-        if replacement_info.original_event_id != event.event_id:
-            msg = f"replacement relation did not target {event.event_id}"
-            raise _ThreadHistoryFastPathUnavailableError(msg)
-        if latest_replacement is None or (replacement_event.server_timestamp, replacement_event.event_id) > (
-            latest_replacement.server_timestamp,
-            latest_replacement.event_id,
-        ):
-            latest_replacement = replacement_event
-            latest_replacement_thread_id = replacement_info.thread_id_from_edit
-    if latest_replacement is None:
-        return None
-    return latest_replacement, latest_replacement_thread_id
-
-
-async def _collect_thread_relation_events(
-    client: nio.AsyncClient,
-    room_id: str,
     thread_id: str,
-) -> tuple[
-    list[nio.RoomMessageText | nio.RoomMessageNotice],
-    dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-]:
-    """Collect direct thread children and inline edit candidates from relations."""
-    relation_events = await _collect_related_events(
-        client,
-        room_id,
-        thread_id,
-        rel_type=RelationshipType.thread,
-        event_type="m.room.message",
-    )
-    thread_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
-    for event in relation_events:
-        if not isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-            continue
-        event_info = EventInfo.from_event(event.source)
-        if _record_latest_thread_edit(
-            event,
-            event_info=event_info,
-            latest_edits_by_original_event_id=latest_edits_by_original_event_id,
-        ):
-            continue
-        if event_info.thread_id == thread_id:
-            thread_events.append(event)
-    return thread_events, latest_edits_by_original_event_id
+) -> bool:
+    """Return whether one homeserver fetch contains the root event and is safe to cache."""
+    return any(_event_id_from_source(event_source) == thread_id for event_source in event_sources)
 
 
 async def _resolve_thread_history_message(
@@ -1866,91 +1983,147 @@ async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    event_cache: ConversationEventCache | None = None,
-) -> list[ResolvedVisibleMessage]:
+    event_cache: ConversationEventCache,
+    *,
+    runtime_started_at: float | None = None,
+) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
-    if event_cache is None:
-        return await _fetch_thread_history_without_cache(client, room_id, thread_id)
-
-    cached_history = await _load_cached_thread_history(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-    )
-    if cached_history is not None:
-        return cached_history
-
-    thread_messages, event_sources = await _fetch_thread_history_with_events(client, room_id, thread_id)
-    await _store_thread_history_cache(
-        event_cache,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_sources=event_sources,
-    )
-
-    return thread_messages
-
-
-async def _fetch_thread_history_via_relations_with_events(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> tuple[list[ResolvedVisibleMessage], list[dict[str, Any]]]:
-    """Fetch thread history through relations plus explicit root lookup."""
-    event_sources = await _fetch_thread_event_sources_via_relations(
+    try:
+        cached_history = await _load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=True,
+            runtime_started_at=runtime_started_at,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Durable thread cache read failed; refetching from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+    else:
+        if cached_history is not None:
+            return cached_history
+    return await refresh_thread_history_from_source(
         client,
         room_id,
         thread_id,
-        include_latest_edits=True,
-    )
-    return (
-        await _resolve_thread_history_from_event_sources(
-            client,
-            thread_id=thread_id,
-            event_sources=event_sources,
-            hydrate_sidecars=True,
-        ),
-        event_sources,
+        event_cache,
+        allow_stale_fallback=True,
     )
 
 
-async def _fetch_thread_history_via_relations(
+async def fetch_thread_snapshot(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch thread history through relations plus explicit root lookup."""
-    messages, _event_sources = await _fetch_thread_history_via_relations_with_events(client, room_id, thread_id)
-    return messages
+    event_cache: ConversationEventCache,
+    *,
+    runtime_started_at: float | None = None,
+) -> ThreadHistoryResult:
+    """Fetch lightweight thread context without hydrating sidecars when a fresh cache hit is unavailable."""
+    try:
+        cached_history = await _load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=False,
+            runtime_started_at=runtime_started_at,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Durable thread cache read failed; refetching snapshot from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+    else:
+        if cached_history is not None:
+            return cached_history
+    return await refresh_thread_history_from_source(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        hydrate_sidecars=False,
+        allow_stale_fallback=True,
+    )
+
+
+async def fetch_dispatch_thread_history(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+) -> ThreadHistoryResult:
+    """Fetch authoritative full thread history for dispatch without durable-cache reuse or stale fallback."""
+    return await refresh_thread_history_from_source(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        hydrate_sidecars=True,
+        allow_stale_fallback=False,
+    )
+
+
+async def fetch_dispatch_thread_snapshot(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+) -> ThreadHistoryResult:
+    """Fetch authoritative lightweight thread context for dispatch without durable-cache reuse or stale fallback."""
+    return await refresh_thread_history_from_source(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        hydrate_sidecars=False,
+        allow_stale_fallback=False,
+    )
 
 
 async def _fetch_thread_history_via_room_messages_with_events(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> tuple[list[ResolvedVisibleMessage], list[dict[str, Any]]]:
+    *,
+    hydrate_sidecars: bool,
+) -> _ThreadHistoryFetchResult:
     """Fetch all thread messages by scanning room history pages."""
-    event_sources = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
-    return (
-        await _resolve_thread_history_from_event_sources(
-            client,
-            thread_id=thread_id,
-            event_sources=event_sources,
-            hydrate_sidecars=True,
-        ),
-        event_sources,
+    event_sources, _root_message_found = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
+    resolution_started = time.perf_counter()
+    history, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        thread_id=thread_id,
+        event_sources=event_sources,
+        hydrate_sidecars=hydrate_sidecars,
+    )
+    return _ThreadHistoryFetchResult(
+        history=history,
+        event_sources=event_sources,
+        resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
+        sidecar_hydration_ms=sidecar_hydration_ms,
     )
 
 
-def _record_scanned_thread_event_source(
+class ThreadRoomScanRootNotFoundError(RuntimeError):
+    """Raised when a room scan finishes without ever seeing the requested root event."""
+
+
+def _record_scanned_room_message_source(
     event: nio.Event,
     *,
     thread_id: str,
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-    relevant_message_sources: dict[str, dict[str, Any]],
+    scanned_message_sources: dict[str, dict[str, Any]],
 ) -> bool:
-    """Record one scanned event source and return whether the thread root was found."""
+    """Record one scanned room-message source and return whether the thread root was found."""
     if not _is_room_message_event(event):
         return False
 
@@ -1964,19 +2137,56 @@ def _record_scanned_thread_event_source(
     if event_info.is_edit:
         return False
 
-    if event.event_id == thread_id or (event_info.is_thread and event_info.thread_id == thread_id):
-        relevant_message_sources[event.event_id] = _event_source_for_cache(event)
+    scanned_message_sources[event.event_id] = _event_source_for_cache(event)
     return event.event_id == thread_id
+
+
+async def _resolve_scanned_thread_message_sources(
+    *,
+    room_id: str,
+    thread_id: str,
+    scanned_message_sources: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Filter scanned room messages down to events that belong to one thread."""
+    event_infos = {
+        event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
+    }
+    relevant_message_sources = {
+        thread_id: scanned_message_sources[thread_id],
+    }
+    ordered_event_ids = _ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
+    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+        room_id,
+        event_infos=event_infos,
+        ordered_event_ids=ordered_event_ids,
+    )
+
+    for event_id in ordered_event_ids:
+        if event_id == thread_id or event_id in relevant_message_sources:
+            continue
+        if resolved_thread_ids.get(event_id) != thread_id:
+            continue
+        relevant_message_sources[event_id] = scanned_message_sources[event_id]
+
+    ordered_relevant_sources = _sort_thread_event_sources_root_first(
+        list(relevant_message_sources.values()),
+        thread_id=thread_id,
+    )
+    return {
+        event_id: event_source
+        for event_source in ordered_relevant_sources
+        if isinstance((event_id := _event_id_from_source(event_source)), str)
+    }
 
 
 async def _fetch_thread_event_sources_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Fetch thread event sources by scanning room history pages."""
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
-    relevant_message_sources: dict[str, dict[str, Any]] = {}
+    scanned_message_sources: dict[str, dict[str, Any]] = {}
     from_token = None
     root_message_found = False
 
@@ -1990,8 +2200,9 @@ async def _fetch_thread_event_sources_via_room_messages(
         )
 
         if not isinstance(response, nio.RoomMessagesResponse):
-            logger.error("Failed to fetch thread history", room_id=room_id, error=str(response))
-            break
+            msg = f"room scan failed for {thread_id}: {response}"
+            logger.error("Failed to fetch thread history", room_id=room_id, thread_id=thread_id, error=str(response))
+            raise RuntimeError(msg)  # noqa: TRY004
 
         if not response.chunk:
             break
@@ -1999,11 +2210,11 @@ async def _fetch_thread_event_sources_via_room_messages(
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
-            if _record_scanned_thread_event_source(
+            if _record_scanned_room_message_source(
                 event,
                 thread_id=thread_id,
                 latest_edits_by_original_event_id=latest_edits_by_original_event_id,
-                relevant_message_sources=relevant_message_sources,
+                scanned_message_sources=scanned_message_sources,
             ):
                 root_message_found = True
 
@@ -2011,6 +2222,21 @@ async def _fetch_thread_event_sources_via_room_messages(
             break
         from_token = response.end
 
+    if not root_message_found:
+        msg = f"thread root {thread_id} not found during room scan"
+        logger.warning(
+            "Thread room scan ended without finding root",
+            room_id=room_id,
+            thread_id=thread_id,
+            scanned_event_count=len(scanned_message_sources),
+        )
+        raise ThreadRoomScanRootNotFoundError(msg)
+
+    relevant_message_sources = await _resolve_scanned_thread_message_sources(
+        room_id=room_id,
+        thread_id=thread_id,
+        scanned_message_sources=scanned_message_sources,
+    )
     relevant_event_ids = set(relevant_message_sources)
     event_sources = list(relevant_message_sources.values())
     event_sources.extend(
@@ -2018,131 +2244,7 @@ async def _fetch_thread_event_sources_via_room_messages(
         for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items()
         if original_event_id in relevant_event_ids or edit_thread_id == thread_id
     )
-    return event_sources
-
-
-async def _fetch_thread_history_via_room_messages(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Fetch all thread messages by scanning room history pages."""
-    messages, _event_sources = await _fetch_thread_history_via_room_messages_with_events(client, room_id, thread_id)
-    return messages
-
-
-async def _fetch_incremental_thread_events(  # noqa: C901, PLR0912
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    *,
-    cached_event_ids: Collection[str],
-) -> tuple[list[dict[str, Any]], list[tuple[str, dict[str, Any]]]]:
-    """Fetch only recent timeline events that may affect one cached thread."""
-    from_token = None
-    relevant_message_sources: list[dict[str, Any]] = []
-    relevant_message_ids: set[str] = set()
-    candidate_edit_sources: list[tuple[str | None, str | None, dict[str, Any]]] = []
-    candidate_redactions: list[tuple[str, dict[str, Any]]] = []
-
-    while True:
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            direction=nio.MessageDirection.back,
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"failed to fetch incremental thread history for {thread_id}"
-            raise _ThreadHistoryFastPathUnavailableError(msg)
-        if not response.chunk:
-            break
-
-        reached_cached_history = False
-        for event in response.chunk:
-            if not isinstance(event, nio.Event):
-                continue
-            if event.event_id in cached_event_ids:
-                reached_cached_history = True
-                break
-
-            if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                event_info = EventInfo.from_event(event.source)
-                event_source = _event_source_for_cache(event)
-                if event_info.is_edit:
-                    candidate_edit_sources.append(
-                        (event_info.original_event_id, event_info.thread_id_from_edit, event_source),
-                    )
-                    continue
-                if event.event_id == thread_id or (event_info.is_thread and event_info.thread_id == thread_id):
-                    relevant_message_sources.append(event_source)
-                    relevant_message_ids.add(event.event_id)
-                    continue
-
-            if isinstance(event, nio.RedactionEvent):
-                candidate_redactions.append((event.redacts, _event_source_for_cache(event)))
-
-        if reached_cached_history or not response.end:
-            break
-        from_token = response.end
-
-    relevant_event_ids = set(cached_event_ids)
-    relevant_event_ids.update(relevant_message_ids)
-
-    relevant_edit_sources: list[dict[str, Any]] = []
-    for original_event_id, edit_thread_id, event_source in candidate_edit_sources:
-        touches_thread = edit_thread_id == thread_id
-        touches_root = original_event_id == thread_id
-        touches_known_event = original_event_id is not None and original_event_id in relevant_event_ids
-        if touches_thread or touches_root or touches_known_event:
-            relevant_edit_sources.append(event_source)
-            event_id = _event_id_from_source(event_source)
-            if event_id is not None:
-                relevant_event_ids.add(event_id)
-
-    relevant_redactions = [
-        (redacted_event_id, redaction_source)
-        for redacted_event_id, redaction_source in candidate_redactions
-        if redacted_event_id in relevant_event_ids
-    ]
-    redacted_event_ids = {redacted_event_id for redacted_event_id, _ in relevant_redactions}
-    event_sources = [
-        event_source
-        for event_source in [*relevant_message_sources, *relevant_edit_sources]
-        if (event_id := _event_id_from_source(event_source)) is None or event_id not in redacted_event_ids
-    ]
-    return event_sources, relevant_redactions
-
-
-async def fetch_thread_snapshot(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache | None = None,
-) -> ThreadHistoryResult:
-    """Fetch lightweight thread context for dispatch decisions."""
-    if event_cache is not None:
-        cached_snapshot = await _load_cached_thread_result(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=False,
-            refresh_cache=False,
-        )
-        if cached_snapshot is not None:
-            return cached_snapshot
-
-    try:
-        return _thread_history_result(
-            await _fetch_thread_context_via_relations(client, room_id, thread_id),
-            is_full_history=False,
-        )
-    except _ThreadHistoryFastPathUnavailableError:
-        return _thread_history_result(
-            await _fetch_thread_history_via_room_messages(client, room_id, thread_id),
-            is_full_history=True,
-        )
+    return _sort_thread_event_sources_root_first(event_sources, thread_id=thread_id), root_message_found
 
 
 async def get_room_threads_page(
@@ -2179,93 +2281,8 @@ async def get_room_threads_page(
     return response.thread_roots, response.next_batch
 
 
-async def _latest_thread_event_id(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> str:
-    """Get the latest visible event ID in a thread for MSC3440 fallback compliance."""
-    try:
-        thread_messages = await fetch_thread_history(client, room_id, thread_id)
-    except Exception:
-        return thread_id
-    if thread_messages:
-        last_event_id = thread_messages[-1].visible_event_id
-        if last_event_id:
-            return last_event_id
-
-    try:
-        relation_events = await _collect_related_events(
-            client,
-            room_id,
-            thread_id,
-            rel_type=RelationshipType.thread,
-            event_type="m.room.message",
-        )
-    except _ThreadHistoryFastPathUnavailableError:
-        return thread_id
-
-    latest_thread_edit: nio.RoomMessageText | nio.RoomMessageNotice | None = None
-    for event in relation_events:
-        if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-            continue
-        event_info = EventInfo.from_event(event.source)
-        if not event_info.is_edit or event_info.thread_id_from_edit != thread_id:
-            continue
-        candidate_key = (
-            event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
-            event.event_id,
-        )
-        latest_key = (
-            latest_thread_edit.server_timestamp
-            if latest_thread_edit and isinstance(latest_thread_edit.server_timestamp, int)
-            else 0,
-            latest_thread_edit.event_id if latest_thread_edit is not None else "",
-        )
-        if latest_thread_edit is None or candidate_key > latest_key:
-            latest_thread_edit = event
-    if latest_thread_edit is not None:
-        return latest_thread_edit.event_id
-    return thread_id
-
-
-async def get_latest_thread_event_id_if_needed(
-    client: nio.AsyncClient | None,
-    room_id: str,
-    thread_id: str | None,
-    reply_to_event_id: str | None = None,
-    existing_event_id: str | None = None,
-) -> str | None:
-    """Get the latest thread event ID only when needed for MSC3440 compliance.
-
-    This helper encapsulates the common pattern of conditionally fetching
-    the latest thread event ID based on various conditions.
-
-    Args:
-        client: Matrix client (can be None)
-        room_id: Room ID
-        thread_id: Thread root event ID (can be None)
-        reply_to_event_id: Event ID being replied to (if any)
-        existing_event_id: Existing event ID being edited (if any)
-
-    Returns:
-        The latest event ID in the thread if needed, None otherwise
-
-    """
-    # Only fetch latest thread event when:
-    # 1. We have a thread_id
-    # 2. We have a client
-    # 3. We're not editing an existing message
-    # 4. We're not making a genuine reply
-    if thread_id and client and not existing_event_id and not reply_to_event_id:
-        return await _latest_thread_event_id(client, room_id, thread_id)
-    return None
-
-
-async def build_threaded_edit_content(
-    client: nio.AsyncClient,
+def build_threaded_edit_content(
     *,
-    room_id: str,
     new_text: str,
     thread_id: str | None,
     config: Config,
@@ -2276,9 +2293,9 @@ async def build_threaded_edit_content(
     latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Build edit content that preserves thread fallback semantics when needed."""
-    latest_visible_thread_event_id = latest_thread_event_id
-    if thread_id is not None and latest_visible_thread_event_id is None:
-        latest_visible_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
+    if thread_id is not None and latest_thread_event_id is None:
+        msg = "latest_thread_event_id is required for thread fallback"
+        raise ValueError(msg)
 
     return format_message_with_mentions(
         config,
@@ -2286,21 +2303,44 @@ async def build_threaded_edit_content(
         new_text,
         sender_domain=sender_domain,
         thread_event_id=thread_id,
-        latest_thread_event_id=latest_visible_thread_event_id,
+        latest_thread_event_id=latest_thread_event_id,
         tool_trace=tool_trace,
         extra_content=extra_content,
     )
 
 
-async def edit_message(
+def build_edit_event_content(
+    *,
+    event_id: str,
+    new_content: dict[str, Any],
+    new_text: str,
+    extra_content: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Wrap replacement content in one Matrix m.replace edit envelope."""
+    replacement_content = dict(new_content)
+    edit_content = {
+        "msgtype": "m.text",
+        "body": f"* {new_text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": new_content.get("formatted_body", new_text),
+        "m.new_content": replacement_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+    }
+    if extra_content:
+        replacement_content.update(extra_content)
+        edit_content.update(extra_content)
+    return edit_content
+
+
+async def edit_message_result(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
     new_content: dict[str, Any],
     new_text: str,
     extra_content: dict[str, Any] | None = None,
-) -> str | None:
-    """Edit an existing Matrix message.
+) -> DeliveredMatrixEvent | None:
+    """Edit an existing Matrix message and return the exact delivered payload.
 
     Automatically handles large messages that exceed the Matrix event size limit
     by uploading the full content as MXC and sending a maximum-size preview.
@@ -2314,21 +2354,14 @@ async def edit_message(
         extra_content: Optional extra keys to merge into both edit payload layers
 
     Returns:
-        The event ID of the edit message, or None if editing failed
+        The delivered edit event plus exact sent content, or None if editing failed
 
     """
-    replacement_content = dict(new_content)
-    edit_content = {
-        "msgtype": "m.text",
-        "body": f"* {new_text}",
-        "format": "org.matrix.custom.html",
-        "formatted_body": new_content.get("formatted_body", new_text),
-        "m.new_content": replacement_content,
-        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
-    }
-    if extra_content:
-        replacement_content.update(extra_content)
-        edit_content.update(extra_content)
+    edit_content = build_edit_event_content(
+        event_id=event_id,
+        new_content=new_content,
+        new_text=new_text,
+        extra_content=extra_content,
+    )
 
-    # send_message will handle large messages, including the lower threshold for edits
-    return await send_message(client, room_id, edit_content)
+    return await send_message_result(client, room_id, edit_content)

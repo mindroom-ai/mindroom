@@ -23,9 +23,9 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     install_send_response_mock,
     runtime_paths_for,
-    sync_bot_runtime_state,
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
@@ -89,7 +89,7 @@ class TestResponseTrackingRegression:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        sync_bot_runtime_state(bot)
+        install_runtime_cache_support(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -173,7 +173,7 @@ class TestResponseTrackingRegression:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        sync_bot_runtime_state(bot)
+        install_runtime_cache_support(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -253,7 +253,7 @@ class TestResponseTrackingRegression:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        sync_bot_runtime_state(bot)
+        install_runtime_cache_support(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()

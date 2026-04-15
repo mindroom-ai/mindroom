@@ -195,6 +195,36 @@ def _text_event(
     )
 
 
+def _reply_event(
+    *,
+    event_id: str,
+    body: str,
+    reply_to_event_id: str,
+    sender: str = "@user:localhost",
+    server_timestamp: int = 1000,
+) -> nio.RoomMessageText:
+    """Build a synthetic inbound plain reply event for coalescing tests."""
+    return cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": body,
+                    "m.relates_to": {
+                        "m.in_reply_to": {"event_id": reply_to_event_id},
+                    },
+                },
+            },
+        ),
+    )
+
+
 def _image_event(
     *,
     event_id: str,
@@ -780,6 +810,52 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         await asyncio.sleep(0.03)
 
     assert sorted(calls) == [["$m1"], ["$m2"]]
+
+
+@pytest.mark.asyncio
+async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_together(tmp_path: Path) -> None:
+    """Inherited-thread plain replies must not batch with unrelated room-level messages."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    room_message = _text_event(event_id="$roommsg", body="room message", server_timestamp=1000)
+    threaded_plain_reply = _reply_event(
+        event_id="$reply",
+        body="bridged follow-up",
+        reply_to_event_id="$thread-seed",
+        server_timestamp=1001,
+    )
+    bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$thread-seed" else None,
+    )
+    calls: list[list[str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+    ) -> None:
+        _ = media_events, handled_turn
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+
+    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_controller._enqueue_for_dispatch(
+            room_message,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await bot._turn_controller._enqueue_for_dispatch(
+            threaded_plain_reply,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await asyncio.sleep(0.03)
+
+    assert sorted(calls) == [["$reply"], ["$roommsg"]]
 
 
 @pytest.mark.asyncio
@@ -1619,8 +1695,8 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_path: Path) -> None:
-    """Media-backed turns must use replay snapshot history even after hydration mutates planning history."""
+async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_history(tmp_path: Path) -> None:
+    """Media-backed turns must use replay snapshot history instead of mutable planning history."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
@@ -1632,7 +1708,6 @@ async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_p
         server_timestamp=1000,
     )
     dispatch = _prepared_dispatch(event_id="$img1", body="[Attached image]")
-    dispatch.context.requires_full_thread_history = True
     hydrated_msg = ResolvedVisibleMessage(
         sender="@user:localhost",
         body="hydrated newer message",
@@ -1644,20 +1719,13 @@ async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_p
     )
 
     action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-
-    async def hydrate_context(*_args: object) -> None:
-        dispatch.context.thread_history = [hydrated_msg]
-        dispatch.context.requires_full_thread_history = False
+    dispatch.context.thread_history = [hydrated_msg]
+    dispatch.context.replay_guard_history = []
 
     newer_mock = MagicMock(return_value=False)
     with (
         patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-        patch.object(
-            bot._conversation_resolver,
-            "hydrate_dispatch_context",
-            new=AsyncMock(side_effect=hydrate_context),
-        ) as hydrate_mock,
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=newer_mock),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
@@ -1668,7 +1736,6 @@ async def test_media_dispatch_uses_replay_snapshot_after_context_hydration(tmp_p
             media_events=[image_event],
         )
 
-    hydrate_mock.assert_awaited_once()
     newer_mock.assert_called_once()
     assert list(newer_mock.call_args.args[2]) == []
     action_mock.assert_awaited_once()

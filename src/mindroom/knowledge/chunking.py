@@ -23,6 +23,7 @@ class SafeFixedSizeChunking(FixedSizeChunking):
         self.min_chunk_fill_ratio = min_chunk_fill_ratio
 
     def chunk(self, document: Document) -> list[Document]:
+        """Split one document while avoiding tiny boundary fragments."""
         content = self.clean_text(document.content)
         content_length = len(content)
         chunked_documents: list[Document] = []
@@ -53,7 +54,7 @@ class SafeFixedSizeChunking(FixedSizeChunking):
                     name=document.name,
                     meta_data=meta_data,
                     content=chunk,
-                )
+                ),
             )
 
             if end >= content_length:

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_access import ConversationReadAccess
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -59,6 +59,19 @@ class CommandEvent(Protocol):
     source: dict[str, Any]
 
 
+class DeriveConversationContext(Protocol):
+    """Callable signature for deriving conversation thread context."""
+
+    async def __call__(
+        self,
+        room_id: str,
+        event_info: EventInfo,
+        *,
+        event_id: str | None = None,
+    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
+        """Return whether one event is threaded plus its thread id and history."""
+
+
 @dataclass(frozen=True)
 class CommandHandlerContext:
     """Dependencies required by command handling."""
@@ -68,11 +81,9 @@ class CommandHandlerContext:
     runtime_paths: RuntimePaths
     storage_path: Path
     logger: structlog.stdlib.BoundLogger
-    derive_conversation_context: Callable[
-        [str, EventInfo],
-        Awaitable[tuple[bool, str | None, list[ResolvedVisibleMessage]]],
-    ]
-    conversation_access: ConversationReadAccess
+    derive_conversation_context: DeriveConversationContext
+    conversation_cache: ConversationCacheProtocol
+    event_cache: ConversationEventCache
     requester_user_id_for_event: Callable[[CommandEvent], str]
     build_message_target: Callable[..., MessageTarget]
     record_handled_turn: Callable[[HandledTurnState], None]
@@ -148,7 +159,7 @@ def _generate_welcome_message(room_id: str, config: Config, runtime_paths: Runti
         "💬 **How to interact:**\n"
         "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
-        "• Agents respond in threads; plain replies still continue the same conversation\n"
+        "• Agents stay in existing Matrix threads, including compatible plain replies from bridges and non-thread clients\n"
         "• Multiple agents can collaborate when you mention them together\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
@@ -409,8 +420,7 @@ async def _run_skill_command_tool(
     )
     resolved_requester_user_id = runtime_context.requester_id if runtime_context is not None else requester_user_id
     resolved_room_id = target.room_id if target is not None else room_id
-    resolved_thread_id = target.thread_id if target is not None else thread_id
-    resolved_reply_thread_id = target.resolved_thread_id if target is not None else thread_id
+    resolved_thread_id = target.resolved_thread_id if target is not None else thread_id
     session_id = target.session_id if target is not None else None
     execution_identity = build_tool_execution_identity(
         channel="matrix",
@@ -419,7 +429,7 @@ async def _run_skill_command_tool(
         requester_id=resolved_requester_user_id,
         room_id=resolved_room_id,
         thread_id=resolved_thread_id,
-        resolved_thread_id=resolved_reply_thread_id,
+        resolved_thread_id=resolved_thread_id,
         session_id=session_id,
     )
     effective_runtime_paths = (
@@ -486,7 +496,11 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     context.logger.info("Handling command", command_type=command.type.value)
 
     event_info = EventInfo.from_event(event.source)
-    _, thread_id, thread_history = await context.derive_conversation_context(room.room_id, event_info)
+    _, thread_id, thread_history = await context.derive_conversation_context(
+        room.room_id,
+        event_info,
+        event_id=event.event_id,
+    )
 
     # Commands/tools that persist conversation context should use the same
     # thread-root policy as outgoing replies.
@@ -522,7 +536,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             config=context.config,
             runtime_paths=context.runtime_paths,
             room=room,
-            conversation_access=context.conversation_access,
+            conversation_cache=context.conversation_cache,
+            event_cache=context.event_cache,
             mentioned_agents=mentioned_agents,
         )
 
@@ -564,7 +579,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             config=context.config,
             runtime_paths=context.runtime_paths,
             room=room,
-            conversation_access=context.conversation_access,
+            conversation_cache=context.conversation_cache,
+            event_cache=context.event_cache,
             thread_id=effective_thread_id,
         )
 

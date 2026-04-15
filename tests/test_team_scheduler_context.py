@@ -28,6 +28,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_edit_message_mock,
+    install_runtime_cache_support,
     patch_response_runner_module,
     runtime_paths_for,
     test_runtime_paths,
@@ -90,7 +91,7 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     bot.orchestrator = MagicMock(config=config)
     bot._send_response = AsyncMock(return_value="$team_response")
     bot._handle_interactive_question = AsyncMock()
-    return bot
+    return install_runtime_cache_support(bot)
 
 
 @pytest.mark.asyncio

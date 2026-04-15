@@ -53,7 +53,13 @@ from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_too
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -210,6 +216,8 @@ def _tool_context(
         client=AsyncMock(),
         config=loaded.config,
         runtime_paths=loaded.runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         room=MagicMock(),
         reply_to_event_id=None,
         storage_path=None,
@@ -229,7 +237,7 @@ def _message_envelope(
         room_id=room_id,
         thread_id=thread_id,
         reply_to_event_id="$event",
-        safe_thread_root=resolved_thread_id if thread_id is None else None,
+        thread_start_root_event_id=resolved_thread_id if thread_id is None else None,
         room_mode=room_mode,
     )
     if thread_id is not None:

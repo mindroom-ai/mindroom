@@ -527,7 +527,13 @@ Based on your choice, I'll proceed accordingly."""
         event.body = "2"
         event.source = {"content": {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"}}}
 
-        await interactive.handle_text_response(mock_client, room, event, "test_agent")
+        await interactive.handle_text_response(
+            mock_client,
+            room,
+            event,
+            "test_agent",
+            resolved_thread_id="$thread123",
+        )
 
         # Should NOT send confirmation (user's message is the response)
         mock_client.room_send.assert_not_called()
@@ -555,7 +561,13 @@ Based on your choice, I'll proceed accordingly."""
         event.body = "1"
         event.source = {"content": {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"}}}
 
-        result = await interactive.handle_text_response(mock_client, room, event, "test_agent")
+        result = await interactive.handle_text_response(
+            mock_client,
+            room,
+            event,
+            "test_agent",
+            resolved_thread_id="$thread123",
+        )
 
         assert result == interactive.InteractiveSelection(
             question_event_id="$question123",
@@ -591,7 +603,13 @@ Based on your choice, I'll proceed accordingly."""
         event.body = "1"
         event.source = {"content": {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"}}}
 
-        result = await interactive.handle_text_response(mock_client, room, event, "test_agent")
+        result = await interactive.handle_text_response(
+            mock_client,
+            room,
+            event,
+            "test_agent",
+            resolved_thread_id="$thread123",
+        )
 
         assert result is None
         assert interactive._active_questions == {}
@@ -621,13 +639,63 @@ Based on your choice, I'll proceed accordingly."""
             event.body = body
             event.source = {"content": {}}
 
-            await interactive.handle_text_response(mock_client, room, event, "test_agent")
+            result = await interactive.handle_text_response(
+                mock_client,
+                room,
+                event,
+                "test_agent",
+                resolved_thread_id=None,
+            )
 
-            # Should never send anything
+            assert result is None
             mock_client.room_send.assert_not_called()
 
-        # Question should still be active
         assert "$question123" in interactive._active_questions
+
+    @pytest.mark.asyncio
+    async def test_handle_text_response_uses_resolved_thread_id_for_plain_reply(
+        self,
+        mock_client: AsyncMock,
+    ) -> None:
+        """Plain numeric replies should match threaded prompts via canonical resolved thread scope."""
+        interactive._active_questions.clear()
+        interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            options={"1": "first"},
+            creator_agent="test_agent",
+        )
+
+        room = MagicMock()
+        room.room_id = "!room:localhost"
+
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.sender = "@user:localhost"
+        event.body = "1"
+        event.source = {
+            "content": {
+                "body": "1",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-reply:localhost"}},
+            },
+        }
+
+        result = await interactive.handle_text_response(
+            mock_client,
+            room,
+            event,
+            "test_agent",
+            resolved_thread_id="$thread123",
+        )
+
+        assert result == interactive.InteractiveSelection(
+            question_event_id="$question123",
+            selection_key="1",
+            selected_value="first",
+            thread_id="$thread123",
+        )
+        mock_client.room_send.assert_not_called()
+        assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_newline_format(self, mock_client: AsyncMock) -> None:

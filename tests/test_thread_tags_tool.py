@@ -17,7 +17,7 @@ from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 
 def _make_context(
@@ -40,7 +40,8 @@ def _make_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_access=AsyncMock(),
+        conversation_cache=AsyncMock(),
+        event_cache=make_event_cache_mock(),
         room=None,
         reply_to_event_id=reply_to_event_id,
         storage_path=None,
@@ -139,7 +140,7 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -177,7 +178,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -215,7 +216,7 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -255,7 +256,7 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -291,7 +292,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -327,7 +328,7 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -365,7 +366,7 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -400,7 +401,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         context.client,
         context.room_id,
         "$explicit-event:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_get.assert_awaited_once_with(
         context.client,
@@ -427,6 +428,66 @@ async def test_thread_tags_explicit_room_target_requires_authorization(method_na
     assert payload["status"] == "error"
     assert payload["room_id"] == "!other:localhost"
     assert "Not authorized" in payload["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "args"),
+    [
+        ("tag_thread", ("resolved",)),
+        ("untag_thread", ("resolved",)),
+        ("list_thread_tags", ()),
+    ],
+)
+async def test_thread_tags_reject_blank_explicit_room_id(
+    method_name: str,
+    args: tuple[str, ...],
+) -> None:
+    """Explicit blank room IDs should not fall back to the current room."""
+    tool = ThreadTagsTools()
+    context = _make_context()
+
+    with tool_runtime_context(context):
+        if method_name == "tag_thread":
+            payload = json.loads(await tool.tag_thread(*args, room_id=""))
+        elif method_name == "untag_thread":
+            payload = json.loads(await tool.untag_thread(*args, room_id=""))
+        else:
+            payload = json.loads(await tool.list_thread_tags(room_id=""))
+
+    assert payload["status"] == "error"
+    assert payload["room_id"] == ""
+    assert "room_id" in payload["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "args"),
+    [
+        ("tag_thread", ("resolved",)),
+        ("untag_thread", ("resolved",)),
+        ("list_thread_tags", ()),
+    ],
+)
+async def test_thread_tags_reject_non_string_room_id(
+    method_name: str,
+    args: tuple[str, ...],
+) -> None:
+    """Explicit non-string room IDs should fail with a normal tool payload."""
+    tool = ThreadTagsTools()
+    context = _make_context()
+
+    with tool_runtime_context(context):
+        if method_name == "tag_thread":
+            payload = json.loads(await tool.tag_thread(*args, room_id=123))
+        elif method_name == "untag_thread":
+            payload = json.loads(await tool.untag_thread(*args, room_id=123))
+        else:
+            payload = json.loads(await tool.list_thread_tags(room_id=123))
+
+    assert payload["status"] == "error"
+    assert payload["room_id"] == 123
+    assert "room_id" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -482,7 +543,7 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
-        access=context.conversation_access,
+        context.conversation_cache,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -541,8 +602,8 @@ async def test_tag_thread_surfaces_write_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_thread_tags_falls_back_to_reply_to_event_id_for_room_timeline_root() -> None:
-    """Room-level messages with no thread context should use reply_to_event_id as the fallback root."""
+async def test_list_thread_tags_uses_room_wide_listing_without_thread_context() -> None:
+    """Room-level replies without thread context should not infer a synthetic thread root."""
     tool = ThreadTagsTools()
     context = _make_context(
         thread_id=None,
@@ -551,29 +612,22 @@ async def test_list_thread_tags_falls_back_to_reply_to_event_id_for_room_timelin
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.normalize_thread_root_event_id",
-            new=AsyncMock(return_value="$root-event:localhost"),
-        ) as mock_normalize,
-        patch(
-            "mindroom.custom_tools.thread_tags.get_thread_tags",
-            new=AsyncMock(return_value=_state("$root-event:localhost", resolved=_record())),
-        ) as mock_get,
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value={"$thread-one:localhost": _state("$thread-one:localhost", resolved=_record())}),
+        ) as mock_list,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.list_thread_tags())
 
     assert payload["status"] == "ok"
-    assert payload["thread_id"] == "$root-event:localhost"
-    mock_normalize.assert_awaited_once_with(
+    assert payload["room_wide"] is True
+    assert payload["threads"]["$thread-one:localhost"]["resolved"]["data"] == {}
+    assert payload["threads"]["$thread-one:localhost"]["resolved"]["set_by"] == "@user:localhost"
+    assert payload["threads"]["$thread-one:localhost"]["resolved"]["set_at"].startswith("2026-03-21T19:02:03")
+    mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
-        "$root-event:localhost",
-        access=context.conversation_access,
-    )
-    mock_get.assert_awaited_once_with(
-        context.client,
-        context.room_id,
-        "$root-event:localhost",
+        tag=None,
     )
 
 

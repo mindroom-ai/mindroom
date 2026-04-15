@@ -23,16 +23,19 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
-    build_threaded_edit_content,
-    edit_message,
+    _ordered_event_ids_from_scanned_event_sources,
+    _sort_thread_history_root_first,
+    edit_message_result,
     get_joined_rooms,
     resolve_latest_visible_messages,
-    send_message,
+    send_message_result,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.matrix.thread_membership import resolve_thread_ids_for_event_infos
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -43,6 +46,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)
 
@@ -125,6 +129,7 @@ async def cleanup_stale_streaming_messages(
     bot_user_ids: set[str] | None = None,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale in-progress bot messages across currently joined rooms."""
     joined_room_ids = await get_joined_rooms(client)
@@ -146,6 +151,7 @@ async def cleanup_stale_streaming_messages(
                 sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
+                conversation_cache=conversation_cache,
             )
             cleaned_count += room_cleaned_count
             interrupted_threads.extend(room_interrupted_threads)
@@ -165,6 +171,7 @@ async def auto_resume_interrupted_threads(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     max_resumes: int | None = None,
     delay: float = 2.0,
 ) -> int:
@@ -184,14 +191,20 @@ async def auto_resume_interrupted_threads(
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            response_event_id = await send_message(client, interrupted_thread.room_id, content)
-            if response_event_id:
+            delivered = await send_message_result(client, interrupted_thread.room_id, content)
+            if delivered is not None:
+                if conversation_cache is not None:
+                    conversation_cache.notify_outbound_message(
+                        interrupted_thread.room_id,
+                        delivered.event_id,
+                        delivered.content_sent,
+                    )
                 logger.info(
                     "Queued auto-resume after restart",
                     room_id=interrupted_thread.room_id,
                     thread_id=interrupted_thread.thread_id,
                     target_event_id=interrupted_thread.target_event_id,
-                    event_id=response_event_id,
+                    event_id=delivered.event_id,
                 )
                 resumed_count += 1
             else:
@@ -224,6 +237,7 @@ async def _cleanup_room_stale_streaming_messages(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     """Clean stale bot messages in one room."""
     current_time_ms = int(time.time() * 1000)
@@ -266,6 +280,7 @@ async def _cleanup_room_stale_streaming_messages(
                 sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
+                conversation_cache=conversation_cache,
                 agent_name=agent_name,
                 prior_edit_succeeded=prior_edit_succeeded,
             )
@@ -287,6 +302,7 @@ async def _cleanup_room_stale_streaming_messages(
                 sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
+                conversation_cache=conversation_cache,
                 prior_edit_succeeded=prior_edit_succeeded,
             )
             if repaired:
@@ -312,6 +328,7 @@ async def _repair_restart_marked_message_metadata(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
 ) -> bool:
     """Repair non-terminal stream metadata on already restart-marked messages."""
@@ -333,6 +350,7 @@ async def _repair_restart_marked_message_metadata(
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
         )
     except Exception as exc:
         logger.warning(
@@ -354,6 +372,7 @@ async def _cleanup_one_stale_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
 ) -> tuple[bool, InterruptedThread | None]:
     """Edit one stale message, redact stop reactions, return interrupted thread info."""
@@ -369,6 +388,7 @@ async def _cleanup_one_stale_message(
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
+        conversation_cache=conversation_cache,
     )
     if not edit_succeeded:
         return False, None
@@ -404,6 +424,7 @@ async def _cleanup_candidate_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, InterruptedThread | None]:
@@ -420,6 +441,7 @@ async def _cleanup_candidate_message(
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
             agent_name=agent_name,
         )
     except Exception as exc:
@@ -454,7 +476,7 @@ async def _scan_room_message_states(
     bot_resolved_messages = {
         event_id: message for event_id, message in resolved_messages.items() if message.sender == bot_user_id
     }
-    scanned_message_data_by_event_id = _scanned_message_data_by_event_id(message_events)
+    scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(message_events)
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
         client,
         resolved_messages=bot_resolved_messages,
@@ -469,6 +491,7 @@ async def _scan_room_message_states(
         bot_resolved_messages,
         bot_user_id=bot_user_id,
         requester_ids_by_event_id=requester_ids_by_event_id,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
     )
     _assign_latest_thread_event_ids(
         message_states,
@@ -486,31 +509,104 @@ def _assign_latest_thread_event_ids(
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> None:
     """Record the latest visible event ID seen for each explicit thread."""
-    all_messages = [
-        *resolved_messages.values(),
-        *scanned_message_data_by_event_id.values(),
-    ]
-    thread_root_ids = {message.thread_id for message in all_messages if message.thread_id is not None}
-    latest_event_id_by_thread: dict[str, tuple[int, str]] = {}
-
-    for message in all_messages:
-        thread_key = message.thread_id
-        if thread_key is None and message.event_id in thread_root_ids:
-            thread_key = message.event_id
-        if thread_key is None:
-            continue
-
-        candidate = (message.timestamp, message.visible_event_id)
-        current = latest_event_id_by_thread.get(thread_key)
-        if current is None or candidate > current:
-            latest_event_id_by_thread[thread_key] = candidate
+    all_messages = [*resolved_messages.values(), *scanned_message_data_by_event_id.values()]
+    latest_event_id_by_thread = _latest_thread_event_id_by_thread(all_messages)
 
     for state in message_states.values():
         if state.thread_id is None:
             continue
         latest_event = latest_event_id_by_thread.get(state.thread_id)
         if latest_event is not None:
-            state.latest_thread_event_id = latest_event[1]
+            state.latest_thread_event_id = latest_event
+
+
+def _latest_thread_event_id_by_thread(
+    messages: list[ResolvedVisibleMessage],
+) -> dict[str, str]:
+    """Return the latest visible event ID for each thread in one cleanup scan."""
+    return {
+        thread_key: _ordered_cleanup_thread_messages(thread_key, thread_messages)[-1].visible_event_id
+        for thread_key, thread_messages in _messages_by_thread_for_cleanup(messages).items()
+    }
+
+
+def _messages_by_thread_for_cleanup(
+    messages: list[ResolvedVisibleMessage],
+) -> dict[str, list[ResolvedVisibleMessage]]:
+    """Group visible messages by thread while preferring the strongest copy per visible event."""
+    thread_root_ids = {message.thread_id for message in messages if message.thread_id is not None}
+    messages_by_thread: dict[str, list[ResolvedVisibleMessage]] = {}
+    best_message_by_visible_event_id: dict[str, ResolvedVisibleMessage] = {}
+
+    for message in messages:
+        existing_message = best_message_by_visible_event_id.get(message.visible_event_id)
+        if existing_message is not None and not _cleanup_message_is_better_candidate(message, existing_message):
+            continue
+        best_message_by_visible_event_id[message.visible_event_id] = message
+
+    for message in best_message_by_visible_event_id.values():
+        thread_key = _cleanup_thread_key(message, thread_root_ids)
+        if thread_key is None:
+            continue
+        messages_by_thread.setdefault(thread_key, []).append(message)
+    return messages_by_thread
+
+
+def _cleanup_message_is_better_candidate(
+    candidate: ResolvedVisibleMessage,
+    current: ResolvedVisibleMessage,
+) -> bool:
+    """Return whether one cleanup message copy should replace the current visible-event winner."""
+    return (
+        candidate.thread_id is not None,
+        candidate.timestamp,
+        candidate.latest_event_id,
+    ) > (
+        current.thread_id is not None,
+        current.timestamp,
+        current.latest_event_id,
+    )
+
+
+def _cleanup_thread_key(
+    message: ResolvedVisibleMessage,
+    thread_root_ids: set[str],
+) -> str | None:
+    """Return the cleanup thread bucket for one visible message."""
+    if message.thread_id is not None:
+        return message.thread_id
+    if message.event_id in thread_root_ids:
+        return message.event_id
+    return None
+
+
+def _ordered_cleanup_thread_messages(
+    thread_id: str,
+    messages: list[ResolvedVisibleMessage],
+) -> list[ResolvedVisibleMessage]:
+    """Return one ancestry-aware thread order for cleanup fallback targeting."""
+    ordered_messages = list(messages)
+    _sort_thread_history_root_first(
+        ordered_messages,
+        thread_id=thread_id,
+        input_order_by_event_id={message.visible_event_id: index for index, message in enumerate(messages)},
+        related_event_id_by_event_id=_cleanup_related_event_id_by_event_id(messages),
+    )
+    return ordered_messages
+
+
+def _cleanup_related_event_id_by_event_id(
+    messages: list[ResolvedVisibleMessage],
+) -> dict[str, str]:
+    """Return same-thread relation edges used for cleanup ordering ties."""
+    related_event_id_by_event_id: dict[str, str] = {}
+    for message in messages:
+        related_event_id = EventInfo.from_event({"content": message.content}).next_related_event_id(
+            message.visible_event_id,
+        )
+        if isinstance(related_event_id, str):
+            related_event_id_by_event_id[message.visible_event_id] = related_event_id
+    return related_event_id_by_event_id
 
 
 async def _collect_room_history_events(
@@ -577,17 +673,20 @@ def _merge_bot_resolved_message_states(
     *,
     bot_user_id: str,
     requester_ids_by_event_id: dict[str, str],
+    scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> None:
     """Merge resolved bot-authored messages into cleanup state."""
     for target_event_id, message in resolved_messages.items():
         if message.sender != bot_user_id:
             continue
         requester_user_id = requester_ids_by_event_id.get(target_event_id)
+        scanned_message = scanned_message_data_by_event_id.get(target_event_id)
         _merge_resolved_message_state(
             message_states,
             target_event_id=target_event_id,
             message=message,
             requester_user_id=requester_user_id,
+            fallback_thread_id=scanned_message.thread_id if scanned_message is not None else None,
         )
 
 
@@ -597,6 +696,7 @@ def _merge_resolved_message_state(
     target_event_id: str,
     message: ResolvedVisibleMessage,
     requester_user_id: str | None,
+    fallback_thread_id: str | None = None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
@@ -605,13 +705,29 @@ def _merge_resolved_message_state(
     state.latest_timestamp = message.timestamp
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
-    state.thread_id = message.thread_id
+    state.thread_id = message.thread_id or fallback_thread_id
     state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
 
 
-def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText]) -> dict[str, ResolvedVisibleMessage]:
+async def _scanned_message_data_by_event_id(
+    message_events: list[nio.RoomMessageText],
+) -> dict[str, ResolvedVisibleMessage]:
     """Return raw scanned room-history messages keyed by exact event ID."""
+    event_infos = {
+        event.event_id: EventInfo.from_event(event.source)
+        for event in message_events
+        if isinstance(event.event_id, str)
+    }
+    ordered_event_ids = _ordered_event_ids_from_scanned_event_sources(
+        [event.source for event in message_events],
+    )
+    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+        "",
+        event_infos=event_infos,
+        ordered_event_ids=ordered_event_ids,
+    )
+
     message_data_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     for event in message_events:
         event_id = event.event_id
@@ -627,7 +743,7 @@ def _scanned_message_data_by_event_id(message_events: list[nio.RoomMessageText])
             content=raw_content,
             body=event.body,
             timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-            thread_id=event_info.thread_id,
+            thread_id=resolved_thread_ids.get(event_id) or event_info.thread_id,
         )
     return message_data_by_event_id
 
@@ -1028,22 +1144,21 @@ async def _edit_stale_message(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
     extra_content = _preserved_cleanup_content(preserved_content)
-    content = await build_threaded_edit_content(
-        client,
-        room_id=room_id,
-        new_text=new_text,
-        thread_id=thread_id,
-        latest_thread_event_id=latest_thread_event_id,
-        config=config,
-        runtime_paths=runtime_paths,
+    content = format_message_with_mentions(
+        config,
+        runtime_paths,
+        new_text,
         sender_domain=sender_domain,
+        thread_event_id=thread_id,
+        latest_thread_event_id=latest_thread_event_id,
         extra_content=extra_content,
     )
 
-    response_event_id = await edit_message(
+    delivered = await edit_message_result(
         client,
         room_id,
         target_event_id,
@@ -1051,7 +1166,13 @@ async def _edit_stale_message(
         new_text,
         extra_content=extra_content,
     )
-    if response_event_id:
+    if delivered is not None:
+        if conversation_cache is not None:
+            conversation_cache.notify_outbound_message(
+                room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
         return True
 
     logger.warning(

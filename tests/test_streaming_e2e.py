@@ -20,6 +20,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
@@ -30,10 +31,7 @@ if TYPE_CHECKING:
 
 
 def _matrix_client_mock() -> AsyncMock:
-    client = AsyncMock()
-    client.add_event_callback = MagicMock()
-    client.add_response_callback = MagicMock()
-    return client
+    return make_matrix_client_mock()
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.message_target import MessageTarget
+from tests.conftest import make_event_cache_mock
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -241,7 +242,8 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        conversation_access=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
@@ -282,7 +284,8 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        conversation_access=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
@@ -324,7 +327,8 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        conversation_access=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
@@ -380,7 +384,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     mock_register.assert_called_once_with(
         event_id="$preview",
         room_id="!room:example.org",
-        thread_id="$event",
+        thread_id=None,
         config_path="defaults.markdown",
         old_value=True,
         new_value=False,
@@ -407,7 +411,8 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        conversation_access=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),

@@ -287,8 +287,14 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     strip_transient_enrichment_after_run: bool = False
+    requires_full_thread_history: bool = False
+    prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
+
+
+class PostLockRequestPreparationError(RuntimeError):
+    """Raised when post-lock request preparation fails before generation starts."""
 
 
 @dataclass(frozen=True)
@@ -708,21 +714,40 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
     ) -> ResponseRequest:
-        """Refresh cached thread history once this turn owns the lifecycle lock."""
+        """Refresh thread history once this turn owns the lifecycle lock."""
         if request.thread_id is None:
             return request
 
-        self.deps.resolver.deps.conversation_access.invalidate_turn_thread_history(
-            request.room_id,
-            request.thread_id,
-        )
+        try:
+            refreshed_history = await self.deps.resolver.fetch_thread_history(
+                self._client(),
+                request.room_id,
+                request.thread_id,
+            )
+        except Exception as exc:
+            if request.requires_full_thread_history:
+                raise
+            self.deps.logger.warning(
+                "Failed to refresh thread history after lock; continuing with existing history",
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                error=str(exc),
+            )
+            return request
+        return replace(request, thread_history=refreshed_history, requires_full_thread_history=False)
 
-        refreshed_history = await self.deps.resolver.fetch_thread_history(
-            self._client(),
-            request.room_id,
-            request.thread_id,
-        )
-        return replace(request, thread_history=refreshed_history)
+    async def _prepare_request_after_lock(
+        self,
+        request: ResponseRequest,
+    ) -> ResponseRequest:
+        """Refresh thread history and rebuild any history-derived payload once locked."""
+        try:
+            request = await self._refresh_thread_history_after_lock(request)
+            if request.prepare_after_lock is None:
+                return request
+            return await request.prepare_after_lock(request)
+        except Exception as exc:
+            raise PostLockRequestPreparationError from exc
 
     def _note_pipeline_metadata(
         self,
@@ -878,7 +903,7 @@ class ResponseRunner:
         request = team_request.request
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        request = await self._refresh_thread_history_after_lock(request)
+        request = await self._prepare_request_after_lock(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
@@ -996,6 +1021,7 @@ class ResponseRunner:
             session_type=session_type,
             create_storage=team_storage_factory,
         )
+
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
             nonlocal delivery_result, tracked_event_id, delivery_stage_started
             delivery_request = self._request_for_delivery(delivery_request_base, message_id=message_id)
@@ -1230,8 +1256,8 @@ class ResponseRunner:
                 execution_identity=execution_identity,
                 compaction_outcomes=tuple(compaction_outcomes),
                 interactive_target=resolved_target,
-                thread_summary_room_id=request.room_id if request.thread_id is not None else None,
-                thread_summary_thread_id=request.thread_id,
+                thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
+                thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 strip_transient_enrichment_after_run=request.strip_transient_enrichment_after_run,
                 strip_transient_enrichment_before_effects=True,
@@ -1240,7 +1266,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
+                thread_id=resolved_target.resolved_thread_id,
                 interactive_agent_name=self.deps.agent_name,
                 strip_transient_enrichment=strip_transient_enrichment,
                 persist_response_event_id=persist_response_event_id,
@@ -2105,7 +2131,7 @@ class ResponseRunner:
         resolved_target = resolved_target.with_thread_root(delivery_thread_id)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        request = await self._refresh_thread_history_after_lock(request)
+        request = await self._prepare_request_after_lock(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
@@ -2197,6 +2223,7 @@ class ResponseRunner:
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
         )
+
         def note_delivery_started(event_id: str | None) -> None:
             nonlocal delivery_stage_started, tracked_event_id
             delivery_stage_started = True
@@ -2262,8 +2289,8 @@ class ResponseRunner:
                 execution_identity=execution_identity,
                 compaction_outcomes=tuple(compaction_outcomes),
                 interactive_target=resolved_target,
-                thread_summary_room_id=request.room_id if request.thread_id is not None else None,
-                thread_summary_thread_id=request.thread_id,
+                thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
+                thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 memory_prompt=memory_prompt,
                 memory_thread_history=memory_thread_history,
@@ -2272,7 +2299,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
+                thread_id=resolved_target.resolved_thread_id,
                 interactive_agent_name=self.deps.agent_name,
                 strip_transient_enrichment=strip_transient_enrichment,
                 queue_memory_persistence=queue_memory_persistence,

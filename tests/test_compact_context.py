@@ -35,7 +35,14 @@ from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    delivered_matrix_side_effect,
+    install_runtime_cache_support,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -449,6 +456,7 @@ async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(t
         rooms=["!room:localhost"],
     )
     bot.client = AsyncMock()
+    install_runtime_cache_support(bot)
     outcome = CompactionOutcome(
         mode="auto",
         session_id="session-1",
@@ -471,7 +479,10 @@ async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(t
         current_prompt_tokens=62,
     )
 
-    with patch("mindroom.delivery_gateway.send_message", new=AsyncMock(return_value="$notice")) as mock_send:
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
+    ) as mock_send:
         event_id = await bot._delivery_gateway.send_compaction_notice(
             CompactionNoticeRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$incoming"),
@@ -801,6 +812,8 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         active_model_name="large",
         session_id="session-1",
     )
@@ -878,6 +891,8 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         active_model_name=None,
         session_id="session-1",
     )
@@ -951,6 +966,8 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         active_model_name=None,
         session_id="session-1",
     )

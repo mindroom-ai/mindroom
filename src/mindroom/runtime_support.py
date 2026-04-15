@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.event_cache import EventCache
-from mindroom.matrix.event_cache_write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.conversation_cache import EventCache as _EventCache
+from mindroom.matrix.conversation_cache import EventCacheWriteCoordinator as _EventCacheWriteCoordinator
 
 if TYPE_CHECKING:
     import structlog
@@ -19,8 +19,42 @@ if TYPE_CHECKING:
 class StandaloneRuntimeSupport:
     """Concrete standalone-owned runtime support services for one bot."""
 
-    event_cache: EventCache | None
-    event_cache_write_coordinator: EventCacheWriteCoordinator | None
+    event_cache: _EventCache
+    event_cache_write_coordinator: _EventCacheWriteCoordinator
+
+
+def _build_standalone_runtime_support(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    logger: structlog.stdlib.BoundLogger,
+    background_task_owner: object,
+) -> StandaloneRuntimeSupport:
+    """Build standalone runtime support without initializing the event cache."""
+    return StandaloneRuntimeSupport(
+        event_cache=_EventCache(config.cache.resolve_db_path(runtime_paths)),
+        event_cache_write_coordinator=_EventCacheWriteCoordinator(
+            logger=logger,
+            background_task_owner=background_task_owner,
+        ),
+    )
+
+
+async def initialize_standalone_runtime_support(
+    support: StandaloneRuntimeSupport,
+    *,
+    logger: structlog.stdlib.BoundLogger,
+) -> None:
+    """Initialize the standalone-owned event cache, degrading to no-cache on SQLite errors."""
+    try:
+        await support.event_cache.initialize()
+    except Exception as exc:
+        support.event_cache.disable(f"standalone_runtime_init_failed:{exc}")
+        logger.warning(
+            "Event cache init failed; continuing without advisory cache",
+            db_path=str(support.event_cache.db_path),
+            error=str(exc),
+        )
 
 
 async def create_standalone_runtime_support(
@@ -30,30 +64,15 @@ async def create_standalone_runtime_support(
     logger: structlog.stdlib.BoundLogger,
     background_task_owner: object,
 ) -> StandaloneRuntimeSupport:
-    """Create the standalone runtime support services for one direct bot runtime.
-
-    The event cache is advisory, so SQLite init failures degrade to no cache support.
-    The cache and its write coordinator are therefore injected together or not at all.
-    """
-    event_cache = await _initialize_standalone_event_cache(
+    """Build and initialize the standalone runtime support services for one direct bot runtime."""
+    support = _build_standalone_runtime_support(
         config=config,
         runtime_paths=runtime_paths,
         logger=logger,
-    )
-    if event_cache is None:
-        return StandaloneRuntimeSupport(
-            event_cache=None,
-            event_cache_write_coordinator=None,
-        )
-
-    event_cache_write_coordinator = EventCacheWriteCoordinator(
-        logger=logger,
         background_task_owner=background_task_owner,
     )
-    return StandaloneRuntimeSupport(
-        event_cache=event_cache,
-        event_cache_write_coordinator=event_cache_write_coordinator,
-    )
+    await initialize_standalone_runtime_support(support, logger=logger)
+    return support
 
 
 async def close_standalone_runtime_support(
@@ -69,32 +88,11 @@ async def close_standalone_runtime_support(
     await _close_standalone_event_cache(support.event_cache, logger=logger)
 
 
-async def _initialize_standalone_event_cache(
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    logger: structlog.stdlib.BoundLogger,
-) -> EventCache | None:
-    event_cache = EventCache(config.cache.resolve_db_path(runtime_paths))
-    try:
-        await event_cache.initialize()
-    except Exception as exc:
-        logger.warning("Failed to initialize event cache", error=str(exc))
-        try:
-            await event_cache.close()
-        except Exception as close_exc:
-            logger.warning("Failed to close partially initialized event cache", error=str(close_exc))
-        return None
-    return event_cache
-
-
 async def _close_standalone_event_cache_write_coordinator(
-    event_cache_write_coordinator: EventCacheWriteCoordinator | None,
+    event_cache_write_coordinator: _EventCacheWriteCoordinator,
     *,
     logger: structlog.stdlib.BoundLogger,
 ) -> None:
-    if event_cache_write_coordinator is None:
-        return
     try:
         await event_cache_write_coordinator.close()
     except Exception as exc:
@@ -102,12 +100,10 @@ async def _close_standalone_event_cache_write_coordinator(
 
 
 async def _close_standalone_event_cache(
-    event_cache: EventCache | None,
+    event_cache: _EventCache,
     *,
     logger: structlog.stdlib.BoundLogger,
 ) -> None:
-    if event_cache is None:
-        return
     try:
         await event_cache.close()
     except Exception as exc:

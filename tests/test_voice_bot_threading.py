@@ -19,6 +19,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_generate_response_mock,
+    install_runtime_cache_support,
     replace_turn_controller_deps,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -30,12 +31,14 @@ from tests.conftest import (
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    return AgentBot(
-        agent_user=agent_user,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=rooms,
+    return install_runtime_cache_support(
+        AgentBot(
+            agent_user=agent_user,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=rooms,
+        ),
     )
 
 
@@ -88,8 +91,17 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
     """Audio in the main room should reply in a thread rooted at the audio event."""
     bot = mock_home_bot
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(True, "$voice123", []),
+        return_value=(False, None, []),
     )
+    mock_context = MagicMock()
+    mock_context.am_i_mentioned = False
+    mock_context.is_thread = True
+    mock_context.thread_id = "$voice123"
+    mock_context.thread_history = []
+    mock_context.mentioned_agents = []
+    mock_context.has_non_agent_mentions = False
+    mock_context.requires_full_thread_history = False
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -124,6 +136,15 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
         return_value=(True, "$thread_root", []),
     )
+    mock_context = MagicMock()
+    mock_context.am_i_mentioned = False
+    mock_context.is_thread = True
+    mock_context.thread_id = "$thread_root"
+    mock_context.thread_history = []
+    mock_context.mentioned_agents = []
+    mock_context.has_non_agent_mentions = False
+    mock_context.requires_full_thread_history = False
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -162,8 +183,10 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
 
 
 @pytest.mark.asyncio
-async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_home_bot: AgentBot) -> None:
-    """Plain replies into a thread should resolve to the thread root before dispatch."""
+async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Plain-reply audio should inherit thread context transitively from the replied-to event."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -178,25 +201,18 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_home_bo
         source={"content": {"m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg"}}}},
     )
 
-    bot.client.room_get_event = AsyncMock(
-        return_value=nio.RoomGetEventResponse.from_dict(
-            {
-                "content": {
-                    "body": "Earlier thread message",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-                },
-                "event_id": "$thread_msg",
-                "sender": "@mindroom_general:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": "!test:server",
-                "type": "m.room.message",
-            },
-        ),
-    )
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
         return_value=(True, "$thread_root", []),
     )
+    mock_context = MagicMock()
+    mock_context.am_i_mentioned = False
+    mock_context.is_thread = True
+    mock_context.thread_id = "$thread_root"
+    mock_context.thread_history = []
+    mock_context.mentioned_agents = []
+    mock_context.has_non_agent_mentions = False
+    mock_context.requires_full_thread_history = False
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,

@@ -23,6 +23,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     make_matrix_client_mock,
     make_visible_message,
     runtime_paths_for,
@@ -77,7 +78,7 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
-    return bot
+    return install_runtime_cache_support(bot)
 
 
 @pytest.fixture

@@ -16,7 +16,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import _extract_mentioned_agents_from_text
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 
 def _bind_runtime_paths(config: Config) -> Config:
@@ -33,7 +33,8 @@ def _make_context(config: Config) -> ToolRuntimeContext:
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_access=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
         room=MagicMock(),
         reply_to_event_id=None,
         storage_path=None,
@@ -95,7 +96,8 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "config": context.config,
         "runtime_paths": context.runtime_paths,
         "room": context.room,
-        "conversation_access": context.conversation_access,
+        "conversation_cache": context.conversation_cache,
+        "event_cache": context.event_cache,
         "new_thread": False,
     }
     assert mock_schedule.await_args_list[1].kwargs == {
@@ -107,7 +109,8 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "config": context.config,
         "runtime_paths": context.runtime_paths,
         "room": context.room,
-        "conversation_access": context.conversation_access,
+        "conversation_cache": context.conversation_cache,
+        "event_cache": context.event_cache,
         "new_thread": True,
     }
 
@@ -146,7 +149,8 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=context.room,
-        conversation_access=context.conversation_access,
+        conversation_cache=context.conversation_cache,
+        event_cache=context.event_cache,
         thread_id=context.resolved_thread_id,
     )
 
