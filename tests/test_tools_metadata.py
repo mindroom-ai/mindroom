@@ -9,18 +9,23 @@ from agno.tools import Toolkit
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
+from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
     AUTHORED_OVERRIDE_INHERIT,
     TOOL_METADATA,
     ConfigField,
+    ToolAuthoredOverrideValidator,
     ToolCategory,
     ToolConfigOverrideError,
     ToolManagedInitArg,
+    deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
     register_tool_with_metadata,
+    resolved_tool_validation_snapshot_for_runtime,
+    serialize_tool_validation_snapshot,
     validate_authored_overrides,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
@@ -430,6 +435,38 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
+
+
+def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: Path) -> None:
+    """Validation snapshots should preserve explicit MCP override-validator semantics."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
+    config = Config.model_validate(
+        {
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-5.4",
+                },
+            },
+            "agents": {},
+            "router": {"model": "default"},
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-everything"],
+                },
+            },
+        },
+        context={"runtime_paths": runtime_paths},
+    )
+
+    snapshot = resolved_tool_validation_snapshot_for_runtime(runtime_paths, config)
+    payload = serialize_tool_validation_snapshot(snapshot)
+    restored_snapshot = deserialize_tool_validation_snapshot(payload)
+
+    assert restored_snapshot["mcp_demo"].authored_override_validator == ToolAuthoredOverrideValidator.MCP
+    assert restored_snapshot["mcp_demo"].agent_override_fields is not None
 
 
 def test_secret_like_config_fields_are_marked_password() -> None:

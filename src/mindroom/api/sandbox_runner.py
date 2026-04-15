@@ -29,17 +29,17 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
-    ToolCategory,
     ToolConfigOverrideError,
     ToolInitOverrideError,
-    ToolMetadata,
-    ToolStatus,
-    SetupType,
+    ToolMetadataValidationError,
+    deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
     get_tool_by_name,
+    resolved_tool_validation_snapshot_for_runtime,
     sanitize_tool_init_overrides,
     validate_authored_overrides,
 )
+from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.sandbox_proxy import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -62,7 +62,7 @@ logger = get_logger(__name__)
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
-_ALLOWED_TOOL_NAMES_ENV = "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON"
+_TOOL_VALIDATION_SNAPSHOT_ENV = "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"
 
 
 def _startup_runtime_paths_from_env() -> RuntimePaths:
@@ -105,52 +105,11 @@ def _startup_runner_token_from_env() -> str | None:
     return raw_token or None
 
 
-def _upstream_allowed_tool_names_from_env() -> frozenset[str]:
-    raw_payload = os.environ.get(_ALLOWED_TOOL_NAMES_ENV, "").strip()
+def _upstream_tool_validation_snapshot_from_env() -> dict[str, object]:
+    raw_payload = os.environ.get(_TOOL_VALIDATION_SNAPSHOT_ENV, "").strip()
     if not raw_payload:
-        return frozenset()
-    payload = json.loads(raw_payload)
-    if not isinstance(payload, list) or any(not isinstance(item, str) for item in payload):
-        msg = f"{_ALLOWED_TOOL_NAMES_ENV} must contain a JSON array of tool names."
-        raise TypeError(msg)
-    return frozenset(item.strip() for item in payload if item.strip())
-
-
-def _validation_placeholder_tool_factory() -> type[Toolkit]:
-    """Fail fast if a validation-only placeholder ever reaches runtime execution."""
-    msg = "Validation placeholder tool factory should never be instantiated."
-    raise RuntimeError(msg)
-
-
-def _placeholder_tool_metadata(tool_name: str) -> ToolMetadata:
-    """Return metadata for an upstream-validated tool unavailable in this worker."""
-    return ToolMetadata(
-        name=tool_name,
-        display_name=tool_name,
-        description="Tool validated in the primary runtime but unavailable in this worker runtime.",
-        category=ToolCategory.INTEGRATIONS,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
-        factory=_validation_placeholder_tool_factory,
-    )
-
-
-def _tool_state_with_upstream_allowed_names(
-    tool_registry: dict[str, Callable[[], type[Toolkit]]],
-    tool_metadata: dict[str, ToolMetadata],
-    *,
-    allowed_tool_names: frozenset[str],
-) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
-    """Augment worker-visible tool state with upstream-approved missing tool names."""
-    if not allowed_tool_names:
-        return tool_registry, tool_metadata
-
-    augmented_registry = tool_registry.copy()
-    augmented_metadata = tool_metadata.copy()
-    for tool_name in sorted(allowed_tool_names - set(augmented_metadata)):
-        augmented_registry[tool_name] = _validation_placeholder_tool_factory
-        augmented_metadata[tool_name] = _placeholder_tool_metadata(tool_name)
-    return augmented_registry, augmented_metadata
+        return {}
+    return deserialize_tool_validation_snapshot(json.loads(raw_payload))
 
 
 def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
@@ -172,29 +131,24 @@ def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
             context={"runtime_paths": runtime_paths},
         )
         config = _config_with_available_plugins(config, runtime_paths)
-        allowed_tool_names = _upstream_allowed_tool_names_from_env()
-
-        # Validate authored tool references against the worker-visible registry
-        # plus the upstream-approved tool names from the primary runtime.
-        from mindroom.tool_system.metadata import (  # noqa: PLC0415
-            ToolConfigOverrideError,
-            ToolMetadataValidationError,
-            resolved_tool_state_for_runtime,
-        )
-        from mindroom.tool_system.plugins import PluginValidationError  # noqa: PLC0415
 
         try:
-            tool_registry, tool_metadata = resolved_tool_state_for_runtime(runtime_paths, config)
-            validated_registry, validated_metadata = _tool_state_with_upstream_allowed_names(
-                tool_registry,
-                tool_metadata,
-                allowed_tool_names=allowed_tool_names,
+            tool_validation_snapshot = _upstream_tool_validation_snapshot_from_env()
+            if not tool_validation_snapshot:
+                tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
+                    runtime_paths,
+                    config,
+                )
+            config._validate_authored_tool_entries_with_snapshot(
+                tool_validation_snapshot=tool_validation_snapshot,
             )
-            config._validate_authored_tool_entries_with_state(
-                tool_registry=validated_registry,
-                tool_metadata=validated_metadata,
-            )
-        except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
+        except (
+            PluginValidationError,
+            ToolConfigOverrideError,
+            ToolMetadataValidationError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
     return Config.validate_with_runtime({}, runtime_paths)

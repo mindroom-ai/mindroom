@@ -56,19 +56,16 @@ from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.tool_system.metadata import (
     ToolConfigOverrideError,
     ToolMetadataValidationError,
-    resolved_tool_state_for_runtime,
+    ToolValidationInfo,
+    resolved_tool_validation_snapshot_for_runtime,
+    validate_authored_tool_entry_overrides,
 )
 from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from agno.tools.toolkit import Toolkit
-
     from mindroom.matrix.identity import MatrixID
-    from mindroom.tool_system.metadata import ToolMetadata
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
@@ -1209,29 +1206,19 @@ class Config(BaseModel):
         entry: ToolConfigEntry,
         *,
         config_path_prefix: str,
-        tool_registry: dict[str, Any],
-        tool_metadata: dict[str, Any],
+        tool_validation_snapshot: dict[str, ToolValidationInfo],
     ) -> None:
-        """Validate one authored tool entry against the loaded tool metadata."""
-        from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER, validate_mcp_agent_overrides  # noqa: PLC0415
-        from mindroom.tool_system.metadata import validate_authored_overrides  # noqa: PLC0415
-
-        if entry.name not in tool_metadata and not self.is_tool_preset(entry.name):
+        """Validate one authored tool entry against the resolved validation snapshot."""
+        if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
 
-        validated_overrides = validate_authored_overrides(
+        validate_authored_tool_entry_overrides(
             entry.name,
             entry.overrides,
             config_path_prefix=config_path_prefix,
-            tool_metadata=tool_metadata,
+            tool_metadata=tool_validation_snapshot,
         )
-        tool_factory = tool_registry.get(entry.name)
-        if tool_factory is not None and getattr(tool_factory, _MCP_TOOL_FACTORY_MARKER, False):
-            try:
-                validate_mcp_agent_overrides(entry.name, validated_overrides)
-            except ValueError as exc:
-                raise ToolConfigOverrideError(str(exc)) from exc
 
     def _validate_authored_tool_entries(
         self,
@@ -1239,38 +1226,34 @@ class Config(BaseModel):
         *,
         tolerate_plugin_load_errors: bool = False,
     ) -> None:
-        """Validate defaults and per-agent authored tool overrides with runtime metadata loaded."""
-        tool_registry, tool_metadata = resolved_tool_state_for_runtime(
+        """Validate authored tool references against one resolved validation snapshot."""
+        tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
             runtime_paths,
             self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
-        self._validate_authored_tool_entries_with_state(
-            tool_registry=tool_registry,
-            tool_metadata=tool_metadata,
+        self._validate_authored_tool_entries_with_snapshot(
+            tool_validation_snapshot=tool_validation_snapshot,
         )
 
-    def _validate_authored_tool_entries_with_state(
+    def _validate_authored_tool_entries_with_snapshot(
         self,
         *,
-        tool_registry: dict[str, Callable[[], type[Toolkit]]],
-        tool_metadata: dict[str, ToolMetadata],
+        tool_validation_snapshot: dict[str, ToolValidationInfo],
     ) -> None:
-        """Validate authored tool references against one already-resolved tool state."""
+        """Validate authored tool references against one already-resolved validation snapshot."""
         for index, entry in enumerate(self.defaults.tools):
             self._validate_authored_tool_entry(
                 entry,
                 config_path_prefix=f"defaults.tools[{index}]",
-                tool_registry=tool_registry,
-                tool_metadata=tool_metadata,
+                tool_validation_snapshot=tool_validation_snapshot,
             )
         for agent_name, agent_config in self.agents.items():
             for index, entry in enumerate(agent_config.tools):
                 self._validate_authored_tool_entry(
                     entry,
                     config_path_prefix=f"agents.{agent_name}.tools[{index}]",
-                    tool_registry=tool_registry,
-                    tool_metadata=tool_metadata,
+                    tool_validation_snapshot=tool_validation_snapshot,
                 )
         for toolkit_name, toolkit in self.toolkits.items():
             for index, entry in enumerate(toolkit.tools):
@@ -1281,7 +1264,8 @@ class Config(BaseModel):
                         f"control-plane tool '{entry.name}'."
                     )
                     raise ValueError(msg)
-                if entry.name not in tool_registry:
+                validation_info = tool_validation_snapshot.get(entry.name)
+                if validation_info is None or not validation_info.runtime_loadable:
                     msg = (
                         f"{config_path_prefix}.{entry.name}: Toolkit tools must resolve through the normal "
                         f"tool registry; '{entry.name}' is not supported."
@@ -1290,8 +1274,7 @@ class Config(BaseModel):
                 self._validate_authored_tool_entry(
                     entry,
                     config_path_prefix=config_path_prefix,
-                    tool_registry=tool_registry,
-                    tool_metadata=tool_metadata,
+                    tool_validation_snapshot=tool_validation_snapshot,
                 )
 
     def get_toolkit_tool_configs(self, toolkit_name: str) -> list[ResolvedToolConfig]:

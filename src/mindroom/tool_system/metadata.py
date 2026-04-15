@@ -64,6 +64,13 @@ class ToolMetadataValidationError(ValueError):
     """Raised when runtime tool metadata derived from authored config is invalid."""
 
 
+class ToolAuthoredOverrideValidator(str, Enum):
+    """Explicit authored-override validation modes for a tool."""
+
+    DEFAULT = "default"
+    MCP = "mcp"
+
+
 @dataclass(frozen=True)
 class _ToolRegistrySnapshot:
     registry: dict[str, Callable[[], type[Toolkit]]]
@@ -271,7 +278,7 @@ def _agent_override_field(
     tool_name: str,
     field_name: str,
     *,
-    tool_metadata: dict[str, ToolMetadata] | None = None,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> ConfigField | None:
     """Return one tool's agent override field metadata when it exists."""
     metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
@@ -287,7 +294,7 @@ def _validate_text_authored_override_value(
     value: object,
     *,
     full_path: str,
-    tool_metadata: dict[str, ToolMetadata] | None = None,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> object:
     """Validate one authored override for a text-like config field."""
     agent_override_field = _agent_override_field(tool_name, field.name, tool_metadata=tool_metadata)
@@ -313,7 +320,7 @@ def _validate_authored_override_value(
     value: object,
     *,
     full_path: str,
-    tool_metadata: dict[str, ToolMetadata] | None = None,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
     if is_authored_override_inherit(value):
@@ -354,7 +361,7 @@ def validate_authored_overrides(
     overrides: dict[str, object] | None,
     *,
     config_path_prefix: str | None = None,
-    tool_metadata: dict[str, ToolMetadata] | None = None,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> dict[str, object]:
     """Validate authored YAML overrides against one tool's declared config fields."""
     if not overrides:
@@ -393,6 +400,53 @@ def validate_authored_overrides(
             tool_metadata=tool_metadata,
         )
     return validated
+
+
+def _run_authored_override_validator(
+    tool_name: str,
+    overrides: dict[str, object],
+    *,
+    validator: ToolAuthoredOverrideValidator,
+) -> None:
+    """Run one tool-specific authored-override validator against normalized overrides."""
+    if not overrides or validator == ToolAuthoredOverrideValidator.DEFAULT:
+        return
+    if validator == ToolAuthoredOverrideValidator.MCP:
+        from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
+
+        validate_mcp_agent_overrides(tool_name, overrides)
+        return
+    msg = f"Unsupported authored override validator '{validator}'."
+    raise ValueError(msg)
+
+
+def validate_authored_tool_entry_overrides(
+    tool_name: str,
+    overrides: dict[str, object] | None,
+    *,
+    config_path_prefix: str | None = None,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
+) -> dict[str, object]:
+    """Validate authored overrides, including any tool-specific validation mode."""
+    validated_overrides = validate_authored_overrides(
+        tool_name,
+        overrides,
+        config_path_prefix=config_path_prefix,
+        tool_metadata=tool_metadata,
+    )
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name.get(tool_name)
+    if metadata is None:
+        return validated_overrides
+    try:
+        _run_authored_override_validator(
+            tool_name,
+            validated_overrides,
+            validator=metadata.authored_override_validator,
+        )
+    except ValueError as exc:
+        raise ToolConfigOverrideError(str(exc)) from exc
+    return validated_overrides
 
 
 def sanitize_tool_init_overrides(
@@ -712,6 +766,17 @@ class ConfigField:
     authored_override: bool = True
 
 
+@dataclass(frozen=True)
+class ToolValidationInfo:
+    """Validation-only metadata for authored tool references."""
+
+    name: str
+    config_fields: tuple[ConfigField, ...] = ()
+    agent_override_fields: tuple[ConfigField, ...] = ()
+    authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
+    runtime_loadable: bool = True
+
+
 @dataclass
 class ToolMetadata:
     """Complete metadata for a tool."""
@@ -727,6 +792,7 @@ class ToolMetadata:
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
     agent_override_fields: list[ConfigField] | None = None  # Safe per-agent override field definitions
+    authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     dependencies: list[str] | None = None  # Required pip packages
     auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
@@ -752,6 +818,7 @@ def register_tool_with_metadata(
     icon_color: str | None = None,
     config_fields: list[ConfigField] | None = None,
     agent_override_fields: list[ConfigField] | None = None,
+    authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT,
     dependencies: list[str] | None = None,
     auth_provider: str | None = None,
     docs_url: str | None = None,
@@ -775,6 +842,7 @@ def register_tool_with_metadata(
         icon_color: CSS color class for the icon
         config_fields: List of configuration fields
         agent_override_fields: Safe per-agent override fields serialized via config.yaml
+        authored_override_validator: Explicit authored-override validation mode for the tool
         dependencies: Required Python packages
         auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
@@ -800,6 +868,7 @@ def register_tool_with_metadata(
             icon_color=icon_color,
             config_fields=config_fields,
             agent_override_fields=agent_override_fields,
+            authored_override_validator=authored_override_validator,
             dependencies=dependencies,
             auth_provider=auth_provider,
             docs_url=docs_url,
@@ -1068,6 +1137,108 @@ def resolved_tool_metadata_for_runtime(
     return desired_metadata
 
 
+def tool_validation_snapshot_from_state(
+    tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
+    tool_metadata: Mapping[str, ToolMetadata],
+) -> dict[str, ToolValidationInfo]:
+    """Project runtime tool state into a validation-only snapshot."""
+    return {
+        tool_name: ToolValidationInfo(
+            name=tool_name,
+            config_fields=tuple(metadata.config_fields or ()),
+            agent_override_fields=tuple(metadata.agent_override_fields or ()),
+            authored_override_validator=metadata.authored_override_validator,
+            runtime_loadable=tool_name in tool_registry,
+        )
+        for tool_name, metadata in tool_metadata.items()
+    }
+
+
+def resolved_tool_validation_snapshot_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> dict[str, ToolValidationInfo]:
+    """Return validation-only tool state visible for one runtime config."""
+    tool_registry, desired_metadata = resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+    return tool_validation_snapshot_from_state(tool_registry, desired_metadata)
+
+
+def serialize_tool_validation_snapshot(
+    tool_validation_snapshot: Mapping[str, ToolValidationInfo],
+) -> dict[str, dict[str, object]]:
+    """Export one validation snapshot as a JSON-serializable object."""
+    return {
+        tool_name: {
+            "config_fields": [asdict(field) for field in info.config_fields],
+            "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
+            "authored_override_validator": info.authored_override_validator.value,
+            "runtime_loadable": info.runtime_loadable,
+        }
+        for tool_name, info in sorted(tool_validation_snapshot.items())
+    }
+
+
+def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) -> tuple[ConfigField, ...]:
+    """Deserialize one serialized config-field list from a validation snapshot."""
+    if raw_fields is None:
+        return ()
+    if not isinstance(raw_fields, list):
+        msg = f"{field_name} must be a list of config field objects."
+        raise TypeError(msg)
+    fields: list[ConfigField] = []
+    for index, raw_field in enumerate(raw_fields):
+        if not isinstance(raw_field, dict):
+            msg = f"{field_name}[{index}] must be an object."
+            raise TypeError(msg)
+        fields.append(ConfigField(**raw_field))
+    return tuple(fields)
+
+
+def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValidationInfo]:
+    """Deserialize one JSON payload into validation-only tool metadata."""
+    if not isinstance(payload, dict) or any(not isinstance(tool_name, str) for tool_name in payload):
+        msg = "Tool validation snapshot must be a JSON object keyed by tool name."
+        raise TypeError(msg)
+
+    snapshot: dict[str, ToolValidationInfo] = {}
+    for tool_name, raw_info in payload.items():
+        if not isinstance(raw_info, dict):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
+            raise TypeError(msg)
+        raw_validator = raw_info.get(
+            "authored_override_validator",
+            ToolAuthoredOverrideValidator.DEFAULT.value,
+        )
+        try:
+            authored_override_validator = ToolAuthoredOverrideValidator(raw_validator)
+        except ValueError as exc:
+            msg = (
+                f"Tool validation snapshot entry for '{tool_name}' has unsupported "
+                f"authored_override_validator '{raw_validator}'."
+            )
+            raise TypeError(msg) from exc
+        snapshot[tool_name] = ToolValidationInfo(
+            name=tool_name,
+            config_fields=_deserialize_tool_validation_fields(
+                raw_info.get("config_fields", []),
+                field_name=f"{tool_name}.config_fields",
+            ),
+            agent_override_fields=_deserialize_tool_validation_fields(
+                raw_info.get("agent_override_fields", []),
+                field_name=f"{tool_name}.agent_override_fields",
+            ),
+            authored_override_validator=authored_override_validator,
+            runtime_loadable=bool(raw_info.get("runtime_loadable", True)),
+        )
+    return snapshot
+
+
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:
     """Return the tool names that default to worker execution."""
     selected_tools: list[str] = []
@@ -1089,6 +1260,7 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
+        tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)
@@ -1175,12 +1347,11 @@ def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, objec
             raise ValueError(msg) from exc
         if normalized_value is not None:
             normalized[field_name] = normalized_value
-
-    from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER, validate_mcp_agent_overrides  # noqa: PLC0415
-
-    tool_factory = _TOOL_REGISTRY.get(tool_name)
-    if tool_factory is not None and getattr(tool_factory, _MCP_TOOL_FACTORY_MARKER, False):
-        validate_mcp_agent_overrides(tool_name, normalized)
+    _run_authored_override_validator(
+        tool_name,
+        normalized,
+        validator=metadata.authored_override_validator,
+    )
     return normalized
 
 

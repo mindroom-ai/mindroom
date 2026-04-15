@@ -10,6 +10,7 @@ from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ConfigField,
     SetupType,
+    ToolAuthoredOverrideValidator,
     ToolCategory,
     ToolMetadata,
     ToolStatus,
@@ -122,6 +123,7 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         setup_type=SetupType.NONE,
         config_fields=_tool_override_fields(),
         agent_override_fields=_tool_override_fields(),
+        authored_override_validator=ToolAuthoredOverrideValidator.MCP,
     )
 
 
