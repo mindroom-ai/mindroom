@@ -558,7 +558,6 @@ def conversation_cache_thread_membership_access_for_client(
     *,
     conversation_cache: ConversationCacheProtocol | None,
     fetch_event_info: EventInfoLookup | None = None,
-    strict_event_fetch: bool = True,
 ) -> ThreadMembershipAccess:
     """Build room-scan membership access backed by conversation-cache lookups when available."""
 
@@ -578,7 +577,7 @@ def conversation_cache_thread_membership_access_for_client(
             conversation_cache,
             lookup_room_id,
             lookup_event_id,
-            strict=strict_event_fetch,
+            strict=True,
         )
 
     return room_scan_thread_membership_access_for_client(
@@ -627,7 +626,6 @@ async def resolve_thread_root_event_id_for_client(
                 lookup_event_id,
                 strict=False,
             ),
-            strict_event_fetch=False,
         ),
     )
 
