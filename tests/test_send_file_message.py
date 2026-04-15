@@ -27,6 +27,7 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room = MagicMock()
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
+    client.olm = None
     return client
 
 
@@ -443,6 +444,32 @@ class TestSendMessageResult:
         assert result is None
         mock_prepare.assert_not_awaited()
         client.room_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_raw_send_when_room_missing_from_cache_but_room_is_unencrypted(self) -> None:
+        """Unencrypted sends should not depend on nio's room cache."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.access_token = "token"  # noqa: S105
+        client.room_send.side_effect = nio.LocalProtocolError("No such room with id !room:localhost found.")
+        client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+            "not found",
+            status_code="M_NOT_FOUND",
+        )
+        client._send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+
+        prepared_content = {"body": "hello", "msgtype": "m.text"}
+        with patch("mindroom.matrix.client.prepare_large_message", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = prepared_content
+            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+        assert result is not None
+        assert result.event_id == "$evt:localhost"
+        assert result.content_sent == prepared_content
+        mock_prepare.assert_awaited_once()
+        client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
+        client.room_send.assert_awaited_once()
+        client._send.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_treats_non_dict_room_cache_as_unknown_room(self) -> None:
