@@ -13,7 +13,11 @@ import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_id,
+    room_scan_thread_membership_access,
+)
 
 if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -832,17 +836,22 @@ def _thread_membership_access(
             lookup_event_id,
         )
 
-    async def thread_root_has_children(lookup_room_id: str, thread_root_id: str) -> bool:
-        return await _thread_root_has_children(
+    async def fetch_thread_event_sources(
+        lookup_room_id: str,
+        thread_root_id: str,
+    ) -> tuple[list[dict[str, object]], bool]:
+        from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
+
+        return await _fetch_thread_event_sources_via_room_messages(
             client,
             lookup_room_id,
-            thread_root_id=thread_root_id,
+            thread_root_id,
         )
 
-    return ThreadMembershipAccess(
+    return room_scan_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
-        thread_root_has_children=thread_root_has_children,
+        fetch_thread_event_sources=fetch_thread_event_sources,
     )
 
 
@@ -854,25 +863,6 @@ async def _lookup_thread_id_from_cache(
     if conversation_cache is None:
         return None
     return await conversation_cache.get_thread_id_for_event(room_id, event_id)
-
-
-async def _thread_root_has_children(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    thread_root_id: str,
-) -> bool:
-    from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
-
-    try:
-        event_sources, _root_message_found = await _fetch_thread_event_sources_via_room_messages(
-            client,
-            room_id,
-            thread_root_id,
-        )
-    except Exception:
-        return False
-    return any(event.get("event_id") != thread_root_id for event in event_sources)
 
 
 async def get_thread_tags(

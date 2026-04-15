@@ -4,13 +4,24 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from mindroom.matrix.event_info import EventInfo
 
 type ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
 type ThreadRootChildrenLookup = Callable[[str, str], Awaitable[bool]]
+type ThreadEventSourcesLookup = Callable[[str, str], Awaitable[tuple[Sequence[Mapping[str, object]], bool]]]
 _MAX_THREAD_MEMBERSHIP_HOPS = 512
+
+
+class SupportsEventId(Protocol):
+    """Minimal protocol for snapshot entries used during thread-root checks."""
+
+    event_id: str
+
+
+type ThreadSnapshotLookup = Callable[[str, str], Awaitable[Sequence[SupportsEventId]]]
 
 
 def _next_related_event_target(
@@ -124,6 +135,78 @@ def map_backed_thread_membership_access(
                 )
             )
             for event_id, event_info in event_infos.items()
+        )
+
+    return ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        thread_root_has_children=thread_root_has_children,
+    )
+
+
+async def snapshot_thread_root_has_children(
+    room_id: str,
+    thread_root_id: str,
+    *,
+    fetch_thread_snapshot: ThreadSnapshotLookup,
+) -> bool:
+    """Return whether one snapshot-backed lookup proves child replies exist."""
+    try:
+        snapshot = await fetch_thread_snapshot(room_id, thread_root_id)
+    except Exception:
+        return False
+    return any(message.event_id != thread_root_id for message in snapshot)
+
+
+async def room_scan_thread_root_has_children(
+    room_id: str,
+    thread_root_id: str,
+    *,
+    fetch_thread_event_sources: ThreadEventSourcesLookup,
+) -> bool:
+    """Return whether one room-scan-backed lookup proves child replies exist."""
+    try:
+        event_sources, _root_found = await fetch_thread_event_sources(room_id, thread_root_id)
+    except Exception:
+        return False
+    return any(event_source.get("event_id") != thread_root_id for event_source in event_sources)
+
+
+def snapshot_thread_membership_access(
+    *,
+    lookup_thread_id: ThreadIdLookup,
+    fetch_event_info: EventInfoLookup,
+    fetch_thread_snapshot: ThreadSnapshotLookup,
+) -> ThreadMembershipAccess:
+    """Build shared membership access backed by authoritative thread snapshots."""
+
+    async def thread_root_has_children(room_id: str, thread_root_id: str) -> bool:
+        return await snapshot_thread_root_has_children(
+            room_id,
+            thread_root_id,
+            fetch_thread_snapshot=fetch_thread_snapshot,
+        )
+
+    return ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        thread_root_has_children=thread_root_has_children,
+    )
+
+
+def room_scan_thread_membership_access(
+    *,
+    lookup_thread_id: ThreadIdLookup,
+    fetch_event_info: EventInfoLookup,
+    fetch_thread_event_sources: ThreadEventSourcesLookup,
+) -> ThreadMembershipAccess:
+    """Build shared membership access backed by authoritative room scans."""
+
+    async def thread_root_has_children(room_id: str, thread_root_id: str) -> bool:
+        return await room_scan_thread_root_has_children(
+            room_id,
+            thread_root_id,
+            fetch_thread_event_sources=fetch_thread_event_sources,
         )
 
     return ThreadMembershipAccess(

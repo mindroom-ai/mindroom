@@ -15,7 +15,11 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_id,
+    snapshot_thread_membership_access,
+)
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import check_agent_mentioned
 
@@ -307,18 +311,15 @@ class ConversationResolver:
         dispatch_safe: bool,
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver."""
-
-        async def thread_root_has_children(lookup_room_id: str, thread_root_id: str) -> bool:
-            return await self._thread_root_has_children(
-                lookup_room_id,
-                thread_root_id,
-                dispatch_safe=dispatch_safe,
-            )
-
-        return ThreadMembershipAccess(
+        fetch_snapshot = (
+            self.deps.conversation_cache.get_dispatch_thread_snapshot
+            if dispatch_safe
+            else self.deps.conversation_cache.get_thread_snapshot
+        )
+        return snapshot_thread_membership_access(
             lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
             fetch_event_info=self._event_info_for_event_id,
-            thread_root_has_children=thread_root_has_children,
+            fetch_thread_snapshot=fetch_snapshot,
         )
 
     async def _event_info_for_event_id(
@@ -330,25 +331,6 @@ class ConversationResolver:
         if not isinstance(target_event, nio.RoomGetEventResponse):
             return None
         return EventInfo.from_event(target_event.event.source)
-
-    async def _thread_root_has_children(
-        self,
-        room_id: str,
-        thread_root_id: str,
-        *,
-        dispatch_safe: bool,
-    ) -> bool:
-        """Return whether authoritative snapshot data proves child replies exist."""
-        fetch_snapshot = (
-            self.deps.conversation_cache.get_dispatch_thread_snapshot
-            if dispatch_safe
-            else self.deps.conversation_cache.get_thread_snapshot
-        )
-        try:
-            snapshot = await fetch_snapshot(room_id, thread_root_id)
-        except Exception:
-            return False
-        return any(message.event_id != thread_root_id for message in snapshot)
 
     async def derive_conversation_context(
         self,

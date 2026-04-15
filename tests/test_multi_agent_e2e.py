@@ -94,7 +94,7 @@ def mock_general_agent() -> AgentMatrixUser:
 
 @pytest.mark.asyncio
 @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
-async def test_agent_processes_direct_mention(  # noqa: PLR0915
+async def test_agent_processes_direct_mention(
     mock_fetch_history: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
@@ -105,12 +105,12 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
     test_user_id = "@alice:localhost"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
-        # Mock the client
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
-        mock_client.add_response_callback = MagicMock()
+        mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.access_token = mock_calculator_agent.access_token
+        mock_client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse("$placeholder:localhost", test_room_id),
+        )
         mock_login.return_value = mock_client
 
         config = _make_config(tmp_path)
@@ -156,7 +156,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "15% of 200 is 30"
 
-        mock_ai = AsyncMock(return_value=mock_streaming_response())
+        mock_ai = MagicMock(return_value=mock_streaming_response())
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",

@@ -972,6 +972,11 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
     return False
 
 
+def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
+    """Return one room from nio's in-memory room cache if present."""
+    return client.rooms.get(room_id)
+
+
 def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
     """Return whether one outbound room operation can proceed with current nio E2EE support."""
     room = cached_room(client, room_id)
@@ -984,6 +989,7 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
         hint="Install `mindroom[matrix_e2ee]` or `matrix-nio[e2e]` to use encrypted Matrix rooms.",
     )
     return False
+
 
 async def send_message_result(
     client: nio.AsyncClient,

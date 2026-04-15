@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
@@ -51,7 +52,10 @@ from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
+    resolve_related_event_thread_id,
     resolve_thread_ids_for_event_infos,
+    room_scan_thread_membership_access,
+    snapshot_thread_membership_access,
 )
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -2575,6 +2579,110 @@ class TestThreadingBehavior:
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 thread_root_has_children=thread_root_has_children,
+            ),
+        )
+
+        assert resolved_thread_id == thread_root_id
+
+    @pytest.mark.asyncio
+    async def test_room_scan_thread_membership_access_treats_root_with_children_as_threaded(
+        self,
+    ) -> None:
+        """Room-scan-backed access should apply one shared root-children rule."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        root_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "root",
+                    "msgtype": "m.text",
+                },
+                "event_id": thread_root_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return root_event_info if event_id == thread_root_id else None
+
+        async def fetch_thread_event_sources(
+            lookup_room_id: str,
+            requested_thread_root_id: str,
+        ) -> tuple[list[dict[str, object]], bool]:
+            assert lookup_room_id == room_id
+            assert requested_thread_root_id == thread_root_id
+            return [
+                {"event_id": thread_root_id},
+                {"event_id": "$child:localhost"},
+            ], True
+
+        resolved_thread_id = await resolve_related_event_thread_id(
+            room_id,
+            thread_root_id,
+            access=room_scan_thread_membership_access(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                fetch_thread_event_sources=fetch_thread_event_sources,
+            ),
+        )
+
+        assert resolved_thread_id == thread_root_id
+
+    @pytest.mark.asyncio
+    async def test_snapshot_thread_membership_access_treats_root_with_children_as_threaded(
+        self,
+    ) -> None:
+        """Snapshot-backed access should apply the same root-children contract."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        root_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "root",
+                    "msgtype": "m.text",
+                },
+                "event_id": thread_root_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        @dataclass(frozen=True)
+        class SnapshotMessage:
+            event_id: str
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return root_event_info if event_id == thread_root_id else None
+
+        async def fetch_thread_snapshot(
+            lookup_room_id: str,
+            requested_thread_root_id: str,
+        ) -> list[SnapshotMessage]:
+            assert lookup_room_id == room_id
+            assert requested_thread_root_id == thread_root_id
+            return [
+                SnapshotMessage(event_id=thread_root_id),
+                SnapshotMessage(event_id="$child:localhost"),
+            ]
+
+        resolved_thread_id = await resolve_related_event_thread_id(
+            room_id,
+            thread_root_id,
+            access=snapshot_thread_membership_access(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                fetch_thread_snapshot=fetch_thread_snapshot,
             ),
         )
 

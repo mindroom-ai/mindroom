@@ -13,7 +13,7 @@ from mindroom.matrix.client import (
     _msgtype_for_mimetype,
     _upload_file_as_mxc,
     send_file_message,
-    send_message,
+    send_message_result,
 )
 
 if TYPE_CHECKING:
@@ -425,8 +425,8 @@ class TestMsgtypeForMimetype:
         assert _msgtype_for_mimetype(mimetype) == expected
 
 
-class TestSendMessage:
-    """Tests for send_message."""
+class TestSendMessageResult:
+    """Tests for send_message_result."""
 
     @pytest.mark.asyncio
     async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self) -> None:
@@ -437,7 +437,7 @@ class TestSendMessage:
             patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
             patch("mindroom.matrix.client.prepare_large_message", new_callable=AsyncMock) as mock_prepare,
         ):
-            result = await send_message(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
         assert result is None
         mock_prepare.assert_not_awaited()
