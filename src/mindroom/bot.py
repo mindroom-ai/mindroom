@@ -663,6 +663,7 @@ class AgentBot:
                     normalized_target_event_id,
                     access=access,
                     allow_reply_hop=True,
+                    allow_cached_membership=True,
                 )
             except Exception as exc:
                 self.logger.debug(

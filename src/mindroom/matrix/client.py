@@ -1922,7 +1922,6 @@ async def _resolve_scanned_thread_message_sources(
                 for candidate_thread_id in (
                     event_info.thread_id,
                     event_info.thread_id_from_edit,
-                    resolved_thread_ids.get(event_id),
                 )
             )
             for event_id, event_info in event_infos.items()

@@ -565,19 +565,6 @@ class MatrixApiTools(Toolkit):
             policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)
         ) is not None:
             return policy_error
-        requires_conversation_cache_write = await self._requires_conversation_cache_write(
-            context,
-            room_id=room_id,
-            event_type=normalized_event_type,
-            content=normalized_content,
-        )
-        if requires_conversation_cache_write and context.conversation_cache is None:
-            return self._error_payload(
-                action="send_event",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                message="Conversation cache is required for threaded Matrix message sends.",
-            )
 
         if dry_run:
             return self._payload(
@@ -590,6 +577,20 @@ class MatrixApiTools(Toolkit):
                     "event_type": normalized_event_type,
                     "content": normalized_content,
                 },
+            )
+
+        requires_conversation_cache_write = await self._requires_conversation_cache_write(
+            context,
+            room_id=room_id,
+            event_type=normalized_event_type,
+            content=normalized_content,
+        )
+        if requires_conversation_cache_write and context.conversation_cache is None:
+            return self._error_payload(
+                action="send_event",
+                room_id=room_id,
+                event_type=normalized_event_type,
+                message="Conversation cache is required for threaded Matrix message sends.",
             )
 
         if (limit_error := self._check_rate_limit(context, room_id, action="send_event")) is not None:

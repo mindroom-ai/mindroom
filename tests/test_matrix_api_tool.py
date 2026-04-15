@@ -923,6 +923,35 @@ async def test_matrix_api_send_event_dry_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_dry_run_stays_local_for_plain_reply_to_thread_root() -> None:
+    """send_event dry runs should not hit Matrix or cache lookups for threaded-target classification."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    ctx.client.room_messages = AsyncMock()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content={
+                    "body": "preview",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-root:localhost"}},
+                },
+                dry_run=True,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["dry_run"] is True
+    ctx.client.room_send.assert_not_awaited()
+    ctx.client.room_messages.assert_not_awaited()
+    ctx.event_cache.get_thread_id_for_event.assert_not_awaited()
+    ctx.event_cache.get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_put_state_dry_run() -> None:
     """put_state dry runs should not call Matrix."""
     tool = MatrixApiTools()

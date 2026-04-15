@@ -1298,6 +1298,54 @@ class TestThreadHistory:
         assert set(resolved) == {"$root", "$z-parent", "$a-child"}
 
     @pytest.mark.asyncio
+    async def test_room_scan_does_not_promote_second_plain_reply_hop(self) -> None:
+        """Cold room scans must not treat a promoted plain reply as a new inheritance source."""
+        resolved = await _resolve_scanned_thread_message_sources(
+            room_id="!room:localhost",
+            thread_id="$root",
+            scanned_message_sources={
+                "$root": {
+                    "event_id": "$root",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"msgtype": "m.text", "body": "root"},
+                },
+                "$thread_reply": {
+                    "event_id": "$thread_reply",
+                    "origin_server_ts": 1500,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "thread reply",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+                    },
+                },
+                "$plain1": {
+                    "event_id": "$plain1",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "plain one",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_reply"}},
+                    },
+                },
+                "$plain2": {
+                    "event_id": "$plain2",
+                    "origin_server_ts": 2500,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "plain two",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1"}},
+                    },
+                },
+            },
+        )
+
+        assert list(resolved) == ["$root", "$thread_reply", "$plain1"]
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_keeps_same_timestamp_promoted_descendant(self) -> None:
         """Cold history reconstruction should keep promoted descendants even when event-id sort is non-causal."""
         client = AsyncMock()
