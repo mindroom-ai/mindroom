@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.matrix.client import _msgtype_for_mimetype, _upload_file_as_mxc, send_file_message
+from mindroom.matrix.client import _msgtype_for_mimetype, _upload_file_as_mxc, send_file_message, send_message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -183,6 +183,7 @@ class TestSendFileMessage:
         file.write_bytes(b"\x00" * 8)
 
         with (
+            patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", True),
             patch(
                 "mindroom.matrix.client.crypto.attachments.encrypt_attachment",
                 return_value=(
@@ -251,6 +252,23 @@ class TestSendFileMessage:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self, tmp_path: Path) -> None:
+        """Encrypted-room file sends should fail early when nio E2EE support is disabled."""
+        client = _mock_client(encrypted=True)
+
+        file = tmp_path / "secret.bin"
+        file.write_bytes(b"\x00" * 8)
+
+        with (
+            patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
+            patch("mindroom.matrix.client._upload_file_as_mxc", new_callable=AsyncMock) as mock_upload,
+        ):
+            result = await send_file_message(client, "!room:localhost", file)
+
+        assert result is None
+        mock_upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_caption_overrides_body(self, tmp_path: Path) -> None:
         """When caption is set, body should use it instead of filename."""
         client = _mock_client(encrypted=False)
@@ -296,6 +314,25 @@ class TestMsgtypeForMimetype:
     def test_mimetype_mapping(self, mimetype: str, expected: str) -> None:
         """Verify MIME type to Matrix msgtype mapping."""
         assert _msgtype_for_mimetype(mimetype) == expected
+
+
+class TestSendMessage:
+    """Tests for send_message."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self) -> None:
+        """Encrypted-room text sends should fail before sidecar prep when nio E2EE support is disabled."""
+        client = _mock_client(encrypted=True)
+
+        with (
+            patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
+            patch("mindroom.matrix.client.prepare_large_message", new_callable=AsyncMock) as mock_prepare,
+        ):
+            result = await send_message(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+        assert result is None
+        mock_prepare.assert_not_awaited()
+        client.room_send.assert_not_called()
 
 
 class TestSendFileMessageMsgtype:

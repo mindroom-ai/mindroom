@@ -35,7 +35,7 @@ dependencies = [
   "humanize>=4.12.3",
   "json5>=0.13",
   "markdown-it-py>=4",
-  "matrix-nio[e2e]>=0.25",
+  "matrix-nio>=0.25",
   "mcp[cli]>=1.12.4",
   "mem0ai>=0.1.115",
   "openai",
@@ -235,6 +235,9 @@ optional-dependencies.lumalabs = [
   "lumaai",
 ]
 optional-dependencies.matrix_api = [  ]
+optional-dependencies.matrix_e2ee = [
+  "matrix-nio[e2e]>=0.25",
+]
 optional-dependencies.matrix_message = [  ]
 optional-dependencies.matrix_room = [  ]
 optional-dependencies.mem0 = [

@@ -965,6 +965,20 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
     return False
 
 
+def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
+    """Return whether one outbound room operation can proceed with current nio E2EE support."""
+    room = cached_room(client, room_id)
+    if room is None or not room.encrypted or crypto.ENCRYPTION_ENABLED:
+        return True
+    logger.error(
+        "matrix_e2ee_support_required",
+        room_id=room_id,
+        operation=operation,
+        hint="Install `mindroom[matrix_e2ee]` or `matrix-nio[e2e]` to use encrypted Matrix rooms.",
+    )
+    return False
+
+
 async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
     """Send a message to a Matrix room.
 
@@ -980,6 +994,9 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         The event ID of the sent message, or None if sending failed
 
     """
+    if not _can_send_to_encrypted_room(client, room_id, operation="send_message"):
+        return None
+
     # Handle large messages if needed
     content = await prepare_large_message(client, room_id, content)
 
@@ -1098,6 +1115,8 @@ async def send_file_message(
     resolved_path = Path(file_path).expanduser().resolve()
     if not resolved_path.is_file():
         logger.error("Cannot send non-file attachment", path=str(resolved_path))
+        return None
+    if not _can_send_to_encrypted_room(client, room_id, operation="send_file_message"):
         return None
 
     mimetype = _guess_mimetype(resolved_path)
