@@ -40,6 +40,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    make_matrix_client_mock,
     patch_response_runner_module,
     replace_response_runner_deps,
     runtime_paths_for,
@@ -58,11 +59,7 @@ async def _aiter(*events: object) -> AsyncIterator[object]:
 
 
 def _make_matrix_client_mock() -> AsyncMock:
-    client = AsyncMock()
-    client.rooms = {}
-    client.next_batch = "s_test_token"
-    client.add_event_callback = MagicMock()
-    client.add_response_callback = MagicMock()
+    client = make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     return client
 

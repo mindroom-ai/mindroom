@@ -32,6 +32,7 @@ from mindroom.thread_summary import (
     thread_summary_message_count_hint,
     update_last_summary_count,
 )
+from tests.conftest import make_matrix_client_mock
 
 
 def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
@@ -81,9 +82,7 @@ def _make_summary_notice_message(
 
 def _mock_client() -> AsyncMock:
     """Return a typed AsyncClient mock with an initialized room cache."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
-    return client
+    return make_matrix_client_mock()
 
 
 # -- model validation --

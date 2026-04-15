@@ -9,7 +9,7 @@ import json
 import mimetypes
 import ssl as ssl_module
 import time
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, MutableMapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -870,7 +870,7 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
         rooms = client.rooms
-        if isinstance(rooms, dict) and response.room_id not in rooms:
+        if isinstance(rooms, MutableMapping) and response.room_id not in rooms:
             rooms[response.room_id] = nio.MatrixRoom(
                 room_id=response.room_id,
                 own_user_id=client.user_id or "",
@@ -980,10 +980,10 @@ def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
     return cached_rooms(client).get(room_id)
 
 
-def cached_rooms(client: nio.AsyncClient) -> dict[str, nio.MatrixRoom]:
+def cached_rooms(client: nio.AsyncClient) -> Mapping[str, nio.MatrixRoom]:
     """Return the client room cache when nio has initialized it."""
     rooms = client.rooms
-    return rooms if isinstance(rooms, dict) else {}
+    return rooms if isinstance(rooms, Mapping) else {}
 
 
 def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
@@ -1023,8 +1023,8 @@ async def send_message_result(
         return None
 
     rooms = client.rooms
-    room = rooms.get(room_id) if isinstance(rooms, dict) else None
-    cache_bypass = isinstance(rooms, dict) and room is None
+    room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
+    cache_bypass = isinstance(rooms, Mapping) and room is None
     if cache_bypass:
         encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
         if isinstance(encryption_state, nio.RoomGetStateEventResponse):
@@ -1109,8 +1109,7 @@ async def _upload_file_as_mxc(
         return None, None
 
     info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
-    rooms = client.rooms
-    room = rooms.get(room_id) if isinstance(rooms, dict) else None
+    room = cached_room(client, room_id)
     if room is None:
         logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
         return None, None

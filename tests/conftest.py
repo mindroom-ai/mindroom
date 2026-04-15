@@ -2,7 +2,7 @@
 
 import os
 import re
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
@@ -104,11 +104,41 @@ def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
     return response
 
 
+class _AutoRoomCache(MutableMapping[str, nio.MatrixRoom]):
+    """Mutable test room cache that lazily vends joined unencrypted rooms."""
+
+    def __init__(self, own_user_id: str) -> None:
+        self._own_user_id = own_user_id
+        self._rooms: dict[str, nio.MatrixRoom] = {}
+
+    def __getitem__(self, room_id: str) -> nio.MatrixRoom:
+        room = self._rooms.get(room_id)
+        if room is not None:
+            return room
+        if not room_id.startswith("!"):
+            raise KeyError(room_id)
+        room = nio.MatrixRoom(room_id, self._own_user_id)
+        self._rooms[room_id] = room
+        return room
+
+    def __setitem__(self, room_id: str, room: nio.MatrixRoom) -> None:
+        self._rooms[room_id] = room
+
+    def __delitem__(self, room_id: str) -> None:
+        del self._rooms[room_id]
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._rooms
+
+    def __len__(self) -> int:
+        return len(self._rooms)
+
+
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
-    client.rooms = {}
     client.user_id = user_id
+    client.rooms = _AutoRoomCache(user_id)
     client.next_batch = "s_test_token"
     presence_response = MagicMock()
     presence_response.presence = "offline"
