@@ -598,11 +598,12 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
     """Post-lock refresh failures should route through the normalized preparation error boundary."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
 
     with (
         patch.object(
-            coordinator,
-            "_refresh_thread_history_after_lock",
+            resolver,
+            "fetch_thread_history",
             new=AsyncMock(side_effect=RuntimeError("repair required")),
         ),
         pytest.raises(PostLockRequestPreparationError) as excinfo,
@@ -615,6 +616,7 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
+                requires_full_thread_history=True,
             ),
         )
 

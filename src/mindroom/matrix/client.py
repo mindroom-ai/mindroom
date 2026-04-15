@@ -45,6 +45,7 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     visible_body_from_event_source,
 )
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -1849,14 +1850,14 @@ async def _fetch_thread_history_via_room_messages_with_events(
     )
 
 
-def _record_scanned_thread_event_source(
+def _record_scanned_room_message_source(
     event: nio.Event,
     *,
     thread_id: str,
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-    relevant_message_sources: dict[str, dict[str, Any]],
+    scanned_message_sources: dict[str, dict[str, Any]],
 ) -> bool:
-    """Record one scanned event source and return whether the thread root was found."""
+    """Record one scanned room-message source and return whether the thread root was found."""
     if not _is_room_message_event(event):
         return False
 
@@ -1870,9 +1871,72 @@ def _record_scanned_thread_event_source(
     if event_info.is_edit:
         return False
 
-    if event.event_id == thread_id or (event_info.is_thread and event_info.thread_id == thread_id):
-        relevant_message_sources[event.event_id] = _event_source_for_cache(event)
+    scanned_message_sources[event.event_id] = _event_source_for_cache(event)
     return event.event_id == thread_id
+
+
+async def _resolve_scanned_thread_message_sources(
+    *,
+    room_id: str,
+    thread_id: str,
+    scanned_message_sources: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Filter scanned room messages down to events that belong to one thread."""
+    event_infos = {
+        event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
+    }
+    resolved_thread_ids: dict[str, str] = {thread_id: thread_id}
+
+    async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+        return resolved_thread_ids.get(event_id)
+
+    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+        return event_infos.get(event_id)
+
+    async def thread_root_has_children(_room_id: str, thread_root_id: str) -> bool:
+        return any(
+            event_id != thread_root_id
+            and thread_root_id
+            in {
+                event_info.thread_id,
+                event_info.thread_id_from_edit,
+                resolved_thread_ids.get(event_id),
+            }
+            for event_id, event_info in event_infos.items()
+        )
+
+    access = ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        thread_root_has_children=thread_root_has_children,
+    )
+    relevant_message_sources = {
+        thread_id: scanned_message_sources[thread_id],
+    }
+    ordered_sources = sorted(
+        scanned_message_sources.values(),
+        key=lambda event_source: (
+            int(event_source.get("origin_server_ts", 0)),
+            str(event_source.get("event_id", "")),
+        ),
+    )
+
+    for event_source in ordered_sources:
+        event_id = event_source.get("event_id")
+        if not isinstance(event_id, str) or event_id == thread_id:
+            continue
+        event_info = event_infos[event_id]
+        event_thread_id = await resolve_event_thread_id(
+            room_id,
+            event_info,
+            access=access,
+        )
+        if event_thread_id != thread_id:
+            continue
+        resolved_thread_ids[event_id] = thread_id
+        relevant_message_sources[event_id] = event_source
+
+    return relevant_message_sources
 
 
 async def _fetch_thread_event_sources_via_room_messages(
@@ -1882,7 +1946,7 @@ async def _fetch_thread_event_sources_via_room_messages(
 ) -> tuple[list[dict[str, Any]], bool]:
     """Fetch thread event sources by scanning room history pages."""
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
-    relevant_message_sources: dict[str, dict[str, Any]] = {}
+    scanned_message_sources: dict[str, dict[str, Any]] = {}
     from_token = None
     root_message_found = False
 
@@ -1906,11 +1970,11 @@ async def _fetch_thread_event_sources_via_room_messages(
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
-            if _record_scanned_thread_event_source(
+            if _record_scanned_room_message_source(
                 event,
                 thread_id=thread_id,
                 latest_edits_by_original_event_id=latest_edits_by_original_event_id,
-                relevant_message_sources=relevant_message_sources,
+                scanned_message_sources=scanned_message_sources,
             ):
                 root_message_found = True
 
@@ -1924,10 +1988,15 @@ async def _fetch_thread_event_sources_via_room_messages(
             "Thread room scan ended without finding root",
             room_id=room_id,
             thread_id=thread_id,
-            scanned_event_count=len(relevant_message_sources),
+            scanned_event_count=len(scanned_message_sources),
         )
         raise RuntimeError(msg)
 
+    relevant_message_sources = await _resolve_scanned_thread_message_sources(
+        room_id=room_id,
+        thread_id=thread_id,
+        scanned_message_sources=scanned_message_sources,
+    )
     relevant_event_ids = set(relevant_message_sources)
     event_sources = list(relevant_message_sources.values())
     event_sources.extend(

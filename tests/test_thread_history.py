@@ -1176,6 +1176,61 @@ class TestThreadHistory:
         assert serialized[1]["msgtype"] == "m.notice"
 
     @pytest.mark.asyncio
+    async def test_room_scan_includes_promoted_plain_reply_to_thread_message(self) -> None:
+        """Cold room scans should keep plain replies whose direct target already belongs to the thread."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "root"},
+        )
+        thread_reply = self._make_text_event(
+            event_id="$thread_reply",
+            sender="@agent:localhost",
+            body="explicit reply",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "explicit reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        plain_reply = self._make_text_event(
+            event_id="$plain_reply",
+            sender="@bridge:localhost",
+            body="bridged reply",
+            server_timestamp=3000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "bridged reply",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_reply"}},
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [plain_reply, thread_reply, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = (
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                hydrate_sidecars=True,
+            )
+        ).history
+
+        assert [message.event_id for message in history] == [
+            "$thread_root",
+            "$thread_reply",
+            "$plain_reply",
+        ]
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:
         """When multiple edits exist, keep the latest one deterministically."""
         client = AsyncMock()

@@ -1011,6 +1011,7 @@ class TurnController:
                     matrix_run_metadata=request.matrix_run_metadata,
                     system_enrichment_items=prepared_payload.system_enrichment_items,
                     strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                    requires_full_thread_history=False,
                     on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
                     pipeline_timing=request.pipeline_timing,
                 )
@@ -1030,6 +1031,7 @@ class TurnController:
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
                         matrix_run_metadata=matrix_run_metadata,
+                        requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
                     ),
@@ -1049,6 +1051,7 @@ class TurnController:
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
                         matrix_run_metadata=matrix_run_metadata,
+                        requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
                     ),

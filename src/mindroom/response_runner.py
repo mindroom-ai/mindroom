@@ -287,6 +287,7 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     strip_transient_enrichment_after_run: bool = False
+    requires_full_thread_history: bool = False
     prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
@@ -724,6 +725,8 @@ class ResponseRunner:
                 request.thread_id,
             )
         except Exception as exc:
+            if request.requires_full_thread_history:
+                raise
             self.deps.logger.warning(
                 "Failed to refresh thread history after lock; continuing with existing history",
                 room_id=request.room_id,
@@ -731,7 +734,7 @@ class ResponseRunner:
                 error=str(exc),
             )
             return request
-        return replace(request, thread_history=refreshed_history)
+        return replace(request, thread_history=refreshed_history, requires_full_thread_history=False)
 
     async def _prepare_request_after_lock(
         self,
