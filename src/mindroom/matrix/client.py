@@ -1022,20 +1022,13 @@ async def send_message_result(
     if not _can_send_to_encrypted_room(client, room_id, operation="send_message"):
         return None
 
-    content_sent = await prepare_large_message(client, room_id, content)
-    cache_bypass = False
-    try:
-        response = await client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content_sent,
-        )
-    except nio.LocalProtocolError as exc:
-        if "No such room with id" not in str(exc):
-            raise
+    rooms = client.rooms
+    room = rooms.get(room_id) if isinstance(rooms, dict) else None
+    cache_bypass = isinstance(rooms, dict) and room is None
+    if cache_bypass:
         encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
         if isinstance(encryption_state, nio.RoomGetStateEventResponse):
-            logger.exception(
+            logger.error(
                 "matrix_encrypted_room_send_requires_synced_room_cache",
                 room_id=room_id,
                 operation="send_message",
@@ -1045,17 +1038,20 @@ async def send_message_result(
         if not (
             isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND"
         ):
-            logger.exception(
+            logger.error(
                 "matrix_room_send_requires_known_encryption_state",
                 room_id=room_id,
                 operation="send_message",
                 hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
             )
             return None
+
+    content_sent = await prepare_large_message(client, room_id, content)
+    if cache_bypass:
         access_token = client.access_token
         if not access_token:
             msg = "Matrix client access token is required to send a message."
-            raise nio.LocalProtocolError(msg) from exc
+            raise nio.LocalProtocolError(msg)
         method, path, data = Api.room_send(
             access_token,
             room_id,
@@ -1070,7 +1066,12 @@ async def send_message_result(
             data,
             response_data=(room_id,),
         )
-        cache_bypass = True
+    else:
+        response = await client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content_sent,
+        )
     if isinstance(response, nio.RoomSendResponse):
         logger.debug(
             "matrix_message_sent",
@@ -1086,12 +1087,6 @@ async def send_message_result(
         cache_bypass=cache_bypass,
     )
     return None
-
-
-async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
-    """Send a message to a Matrix room and return its event id."""
-    delivered = await send_message_result(client, room_id, content)
-    return delivered.event_id if delivered is not None else None
 
 
 def _guess_mimetype(file_path: Path) -> str:

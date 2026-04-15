@@ -450,8 +450,9 @@ class TestSendMessageResult:
         """Unencrypted sends should not depend on nio's room cache."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
+        client.olm = None
         client.access_token = "token"  # noqa: S105
-        client.room_send.side_effect = nio.LocalProtocolError("No such room with id !room:localhost found.")
+        client.room_send.return_value = nio.RoomSendResponse("$wrong:localhost", "!room:localhost")
         client.room_get_state_event.return_value = nio.RoomGetStateEventError(
             "not found",
             status_code="M_NOT_FOUND",
@@ -468,8 +469,34 @@ class TestSendMessageResult:
         assert result.content_sent == prepared_content
         mock_prepare.assert_awaited_once()
         client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
-        client.room_send.assert_awaited_once()
+        client.room_send.assert_not_awaited()
         client._send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_uncached_encrypted_room_without_olm(self) -> None:
+        """Encrypted sends should fail closed until nio has synced the room cache."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = None
+        client.access_token = "token"  # noqa: S105
+        client.room_send.return_value = nio.RoomSendResponse("$wrong:localhost", "!room:localhost")
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+            "m.room.encryption",
+            "",
+            "!room:localhost",
+        )
+
+        with patch(
+            "mindroom.matrix.client.prepare_large_message",
+            new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
+        ):
+            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+        assert result is None
+        client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
+        client.room_send.assert_not_awaited()
+        client._send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_treats_non_dict_room_cache_as_unknown_room(self) -> None:
