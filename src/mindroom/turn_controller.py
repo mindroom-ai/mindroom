@@ -573,9 +573,6 @@ class TurnController:
                 command_tool=command_tool,
                 skill_name=skill_name,
                 args_text=args_text,
-                requester_user_id=requester_user_id,
-                room_id=room_id,
-                thread_id=thread_id,
                 runtime_context=runtime_context,
             )
 

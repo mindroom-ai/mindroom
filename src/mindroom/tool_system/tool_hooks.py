@@ -64,7 +64,6 @@ class _DeferredAsyncToolHookResult:
 def _resolved_thread_id(
     default_thread_id: str | None,
     execution_identity: ToolExecutionIdentity | None,
-    request_execution_identity: ToolExecutionIdentity | None,
     runtime_context: ToolRuntimeContext | None,
 ) -> str | None:
     if runtime_context is not None and runtime_context.resolved_thread_id is not None:
@@ -72,9 +71,6 @@ def _resolved_thread_id(
 
     if execution_identity is not None and execution_identity.resolved_thread_id is not None:
         return execution_identity.resolved_thread_id
-
-    if request_execution_identity is not None and request_execution_identity.resolved_thread_id is not None:
-        return request_execution_identity.resolved_thread_id
 
     return default_thread_id
 
@@ -132,9 +128,7 @@ def _resolve_tool_context(
     runtime_paths: RuntimePaths | None,
 ) -> _ResolvedToolContext:
     runtime_context = get_tool_runtime_context()
-    request_execution_identity = active_tool_execution_identity(None)
-
-    resolved_execution_identity = execution_identity or request_execution_identity
+    resolved_execution_identity = active_tool_execution_identity(execution_identity)
     bindings = resolve_tool_runtime_hook_bindings(runtime_context) if runtime_context is not None else None
     return _ResolvedToolContext(
         agent_name=(
@@ -148,21 +142,18 @@ def _resolve_tool_context(
         room_id=_coalesce(
             room_id,
             runtime_context.room_id if runtime_context is not None else None,
-            execution_identity.room_id if execution_identity is not None else None,
-            request_execution_identity.room_id if request_execution_identity is not None else None,
+            resolved_execution_identity.room_id if resolved_execution_identity is not None else None,
         ),
-        thread_id=_resolved_thread_id(thread_id, execution_identity, request_execution_identity, runtime_context),
+        thread_id=_resolved_thread_id(thread_id, resolved_execution_identity, runtime_context),
         requester_id=_coalesce(
             requester_id,
             runtime_context.requester_id if runtime_context is not None else None,
-            execution_identity.requester_id if execution_identity is not None else None,
-            request_execution_identity.requester_id if request_execution_identity is not None else None,
+            resolved_execution_identity.requester_id if resolved_execution_identity is not None else None,
         ),
         session_id=_coalesce(
             session_id,
-            execution_identity.session_id if execution_identity is not None else None,
-            request_execution_identity.session_id if request_execution_identity is not None else None,
             runtime_context.session_id if runtime_context is not None else None,
+            resolved_execution_identity.session_id if resolved_execution_identity is not None else None,
         ),
         channel=resolved_execution_identity.channel if resolved_execution_identity is not None else None,
         config=runtime_context.config if runtime_context is not None else config,
@@ -323,7 +314,7 @@ async def _execute_bridge(
                 requester_id=resolved_context.requester_id,
                 session_id=resolved_context.session_id,
                 correlation_id=resolved_context.correlation_id,
-                execution_identity=execution_identity or active_tool_execution_identity(None),
+                execution_identity=active_tool_execution_identity(execution_identity),
                 runtime_paths=resolved_context.runtime_paths,
             )
             logger.warning(

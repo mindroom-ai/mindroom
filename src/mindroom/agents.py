@@ -894,10 +894,20 @@ def _build_agent_tool_hook_bridge(
     runtime_paths: constants.RuntimePaths,
 ) -> Callable[..., Any] | None:
     active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
+    hook_execution_identity = execution_identity
+    if (
+        hook_execution_identity is not None
+        and hook_execution_identity.requester_id is None
+        and hook_execution_identity.room_id is None
+        and hook_execution_identity.thread_id is None
+        and hook_execution_identity.resolved_thread_id is None
+        and hook_execution_identity.session_id is None
+    ):
+        hook_execution_identity = None
     return build_tool_hook_bridge(
         active_hook_registry,
         agent_name=agent_name,
-        execution_identity=execution_identity,
+        execution_identity=hook_execution_identity,
         config=config,
         runtime_paths=runtime_paths,
     )

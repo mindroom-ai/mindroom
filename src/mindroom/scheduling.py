@@ -493,56 +493,24 @@ async def _get_pending_task_record(
     return task_record
 
 
-async def _save_one_time_task_status(
-    client: nio.AsyncClient,
-    task: ScheduledTaskRecord,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
-    status: str,
-) -> None:
-    """Persist the terminal status for a one-time task without restarting it."""
-    await _save_scheduled_task(
-        client=client,
-        room_id=task.room_id,
-        task_id=task.task_id,
-        workflow=task.workflow,
-        config=config,
-        runtime_paths=runtime_paths,
-        event_cache=event_cache,
-        status=status,
-        created_at=task.created_at,
-        restart_task=False,
-    )
+def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
+    """Normalize persisted scheduled-task timestamps."""
+    if isinstance(created_at, datetime):
+        return created_at.isoformat()
+    if isinstance(created_at, str) and created_at:
+        return created_at
+    return datetime.now(UTC).isoformat()
 
 
-async def _save_scheduled_task(
+async def _persist_scheduled_task_state(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
     workflow: ScheduledWorkflow,
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
-    event_cache: ConversationEventCache | None = None,
-    conversation_cache: ConversationCacheProtocol | None = None,
     status: str = "pending",
     created_at: datetime | str | None = None,
-    restart_task: bool = True,
 ) -> None:
-    """Persist scheduled task state and optionally restart its in-memory task runner."""
-    if restart_task:
-        if config is None or runtime_paths is None or event_cache is None or conversation_cache is None:
-            msg = "Scheduled task runtime context is required when restart_task=True"
-            raise ValueError(msg)
-        _cancel_running_task(task_id)
-
-    if isinstance(created_at, datetime):
-        created_at_value = created_at.isoformat()
-    elif isinstance(created_at, str) and created_at:
-        created_at_value = created_at
-    else:
-        created_at_value = datetime.now(UTC).isoformat()
-
+    """Persist scheduled task state to Matrix."""
     await client.room_put_state(
         room_id=room_id,
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
@@ -550,18 +518,52 @@ async def _save_scheduled_task(
             "task_id": task_id,
             "workflow": workflow.model_dump_json(),
             "status": status,
-            "created_at": created_at_value,
+            "created_at": _serialize_scheduled_task_created_at(created_at),
             "updated_at": datetime.now(UTC).isoformat(),
         },
         state_key=task_id,
     )
 
-    if restart_task and status == "pending":
-        assert config is not None
-        assert runtime_paths is not None
-        assert event_cache is not None
-        assert conversation_cache is not None
-        _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache)
+
+async def _save_pending_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    event_cache: ConversationEventCache,
+    conversation_cache: ConversationCacheProtocol,
+    *,
+    created_at: datetime | str | None = None,
+) -> None:
+    """Persist one pending task and start or replace its in-memory runner."""
+    _cancel_running_task(task_id)
+    await _persist_scheduled_task_state(
+        client=client,
+        room_id=room_id,
+        task_id=task_id,
+        workflow=workflow,
+        status="pending",
+        created_at=created_at,
+    )
+    _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache)
+
+
+async def _save_one_time_task_status(
+    client: nio.AsyncClient,
+    task: ScheduledTaskRecord,
+    status: str,
+) -> None:
+    """Persist the terminal status for a one-time task without restarting it."""
+    await _persist_scheduled_task_state(
+        client=client,
+        room_id=task.room_id,
+        task_id=task.task_id,
+        workflow=task.workflow,
+        status=status,
+        created_at=task.created_at,
+    )
 
 
 async def save_edited_scheduled_task(
@@ -569,14 +571,9 @@ async def save_edited_scheduled_task(
     room_id: str,
     task_id: str,
     workflow: ScheduledWorkflow,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None,
-    conversation_cache: ConversationCacheProtocol | None,
     existing_task: ScheduledTaskRecord,
-    restart_task: bool = False,
 ) -> ScheduledTaskRecord:
-    """Persist edits to an existing task using shared validation semantics."""
+    """Persist edits to an existing task without touching runtime task runners."""
     if existing_task.status != "pending":
         msg = f"Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
         raise ValueError(msg)
@@ -584,18 +581,13 @@ async def save_edited_scheduled_task(
     if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise ValueError(SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
-    await _save_scheduled_task(
+    await _persist_scheduled_task_state(
         client=client,
         room_id=room_id,
         task_id=task_id,
         workflow=workflow,
-        config=config,
-        runtime_paths=runtime_paths,
-        event_cache=event_cache,
-        conversation_cache=conversation_cache,
         status="pending",
         created_at=existing_task.created_at,
-        restart_task=restart_task,
     )
 
     return ScheduledTaskRecord(
@@ -1001,7 +993,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
+    _event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
 ) -> None:
     """Run a one-time scheduled task."""
@@ -1066,9 +1058,6 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 await _save_one_time_task_status(
                     client=client,
                     task=latest_pending_task,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    event_cache=event_cache,
                     status=final_status,
                 )
             except Exception:
@@ -1110,9 +1099,6 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     await _save_one_time_task_status(
                         client=client,
                         task=latest_pending_task,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        event_cache=event_cache,
                         status="failed",
                     )
                 except Exception:
@@ -1220,7 +1206,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     mentioned_agents: list[MatrixID] | None = None,
     task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
-    restart_task: bool = True,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -1323,15 +1308,10 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 room_id=room_id,
                 task_id=task_id,
                 workflow=workflow_result,
-                config=config,
-                runtime_paths=runtime_paths,
-                event_cache=event_cache,
                 existing_task=existing_task,
-                restart_task=restart_task,
-                conversation_cache=conversation_cache,
             )
         else:
-            await _save_scheduled_task(
+            await _save_pending_scheduled_task(
                 client=client,
                 room_id=room_id,
                 task_id=task_id,
@@ -1340,9 +1320,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 runtime_paths=runtime_paths,
                 event_cache=event_cache,
                 conversation_cache=conversation_cache,
-                status="pending",
                 created_at=datetime.now(UTC).isoformat(),
-                restart_task=restart_task,
             )
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
@@ -1407,7 +1385,6 @@ async def edit_scheduled_task(
         new_thread=target_new_thread,
         task_id=task_id,
         existing_task=existing_task,
-        restart_task=False,
     )
 
     if edited_task_id is None:
@@ -1625,18 +1602,13 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                             missed_by_seconds=missed_by,
                         )
                         try:
-                            await _save_scheduled_task(
+                            await _persist_scheduled_task_state(
                                 client=client,
                                 room_id=room_id,
                                 task_id=task_id,
                                 workflow=workflow,
-                                config=config,
-                                runtime_paths=runtime_paths,
-                                event_cache=event_cache,
-                                conversation_cache=conversation_cache,
                                 status="failed",
                                 created_at=content.get("created_at"),
-                                restart_task=False,
                             )
                         except Exception:
                             logger.exception("Failed to mark ancient task as failed", task_id=task_id)

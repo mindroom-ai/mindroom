@@ -1189,7 +1189,6 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
     assert call_kwargs["room"] is room
     assert call_kwargs["new_thread"] is False
     assert call_kwargs["task_id"] == "task123"
-    assert call_kwargs["restart_task"] is False
     assert call_kwargs["existing_task"].task_id == "task123"
     assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
 
@@ -1305,12 +1304,7 @@ async def test_save_edited_scheduled_task_preserves_created_at() -> None:
         room_id="!test:server",
         task_id="task123",
         workflow=updated_workflow,
-        config=MagicMock(),
-        runtime_paths=_runtime_paths(),
-        event_cache=_event_cache(),
-        conversation_cache=_conversation_cache(),
         existing_task=existing_task,
-        restart_task=False,
     )
 
     assert updated_task.created_at == created_at
@@ -1320,8 +1314,8 @@ async def test_save_edited_scheduled_task_preserves_created_at() -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_edited_scheduled_task_allows_persist_only_without_event_cache() -> None:
-    """State-only edits should not require a runtime event cache."""
+async def test_save_edited_scheduled_task_is_state_only() -> None:
+    """State-only edits should not require runtime-only scheduling collaborators."""
     client = AsyncMock()
     created_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     existing_task = ScheduledTaskRecord(
@@ -1352,12 +1346,7 @@ async def test_save_edited_scheduled_task_allows_persist_only_without_event_cach
         room_id="!test:server",
         task_id="task123",
         workflow=updated_workflow,
-        config=MagicMock(),
-        runtime_paths=_runtime_paths(),
-        event_cache=None,
-        conversation_cache=None,
         existing_task=existing_task,
-        restart_task=False,
     )
 
     assert updated_task.created_at == created_at
@@ -1398,12 +1387,7 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change() -> None
             room_id="!test:server",
             task_id="task123",
             workflow=updated_workflow,
-            config=MagicMock(),
-            runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            conversation_cache=_conversation_cache(),
             existing_task=existing_task,
-            restart_task=False,
         )
 
     client.room_put_state.assert_not_called()

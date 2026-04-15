@@ -970,9 +970,6 @@ async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_contex
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            requester_user_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id="$thread",
             runtime_context=runtime_context,
         )
     finally:
@@ -982,6 +979,66 @@ async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_contex
         TOOL_METADATA.update(original_metadata)
 
     assert result == "1:True:True:True"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_rejects_mixed_runtime_shapes() -> None:
+    """Skill tool dispatch should accept either raw Matrix coordinates or a runtime context, not both."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            return "ok"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+        )
+
+        with pytest.raises(ValueError, match="either runtime_context or raw Matrix coordinates"):
+            await _run_skill_command_tool(
+                config=config,
+                runtime_paths=runtime_paths,
+                agent_name="code",
+                command_tool="demo",
+                skill_name="dispatch",
+                args_text="hello",
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+                runtime_context=runtime_context,
+            )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
 
 
 @pytest.mark.asyncio
