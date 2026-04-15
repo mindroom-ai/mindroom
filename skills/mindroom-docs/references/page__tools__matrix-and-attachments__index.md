@@ -64,7 +64,7 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ### What It Does
 
-`thread_tags` exposes `tag_thread()`, `untag_thread()`, and `list_thread_tags()`. All three operations default to the current room and active explicit thread context. When there is no active explicit thread, pass `thread_id` explicitly. The tool normalizes the supplied event into the canonical thread root before reading or writing state. Tags are stored as `com.mindroom.thread.tags` room state. Each `(thread_root_id, tag)` pair uses its own state event, and the state key is the JSON array `[thread_root_id, tag]`. Writes fail unless both the running Matrix client and the human requester have enough power to send that state event in the target room. When the requester differs from the bot account, the requester must also be joined to the target room.
+`thread_tags` exposes `tag_thread()`, `untag_thread()`, and `list_thread_tags()`. All three operations default to the current room and active resolved thread context. When there is no active resolved thread context, pass `thread_id` explicitly. The tool normalizes the supplied event into the canonical thread root before reading or writing state. Tags are stored as `com.mindroom.thread.tags` room state. Each `(thread_root_id, tag)` pair uses its own state event, and the state key is the JSON array `[thread_root_id, tag]`. Writes fail unless both the running Matrix client and the human requester have enough power to send that state event in the target room. When the requester differs from the bot account, the requester must also be joined to the target room.
 
 ### Configuration
 
@@ -97,7 +97,7 @@ list_thread_tags(thread_id="$threadRootEvent")
 
 ### What It Does
 
-`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None)`. The tool defaults to the active room and current thread from `ToolRuntimeContext`. When there is no active explicit thread, pass `thread_id` explicitly. The tool normalizes the target to the canonical thread root before sending a new `m.notice` summary event with `io.mindroom.thread_summary` metadata. Manual summaries are marked with `model_name="manual"` and update the cached last-summary count so later automatic summaries continue from the new baseline. A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
+`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None)`. The tool defaults to the active room and current resolved thread from `ToolRuntimeContext`. When there is no active resolved thread context, pass `thread_id` explicitly. The tool normalizes the target to the canonical thread root before sending a new `m.notice` summary event with `io.mindroom.thread_summary` metadata. Manual summaries are marked with `model_name="manual"` and update the cached last-summary count so later automatic summaries continue from the new baseline. A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
 
 ### Configuration
 

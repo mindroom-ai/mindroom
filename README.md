@@ -289,8 +289,8 @@ defaults:
 ```
 
 Add the `thread_summary` tool to an agent when you want it to write or refresh the one-line summary shown for a Matrix thread.
-`set_thread_summary` uses the current explicit thread by default.
-Outside a thread, pass `thread_id` explicitly.
+`set_thread_summary` uses the current resolved thread context by default.
+Outside a resolved thread context, pass `thread_id` explicitly.
 
 ```yaml
 agents:

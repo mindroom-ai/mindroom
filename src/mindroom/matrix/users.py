@@ -104,6 +104,8 @@ def _save_agent_credentials(
         username: The Matrix username
         password: The Matrix password
         runtime_paths: Explicit runtime context for matrix state persistence
+        device_id: Optional Matrix device ID to persist with the account
+        access_token: Optional Matrix access token to persist with the account
 
     """
     state = MatrixState.load(runtime_paths=runtime_paths)
@@ -726,14 +728,13 @@ async def login_agent_user(
     """
     if agent_user.access_token and agent_user.device_id:
         try:
-            client = await restore_login(
+            restored_client = await restore_login(
                 homeserver,
                 agent_user.user_id,
                 agent_user.device_id,
                 agent_user.access_token,
                 runtime_paths=runtime_paths,
             )
-            return client
         except ValueError:
             logger.warning(
                 "matrix_login_restore_failed_falling_back_to_password",
@@ -741,6 +742,8 @@ async def login_agent_user(
                 user_id=agent_user.user_id,
                 device_id=agent_user.device_id,
             )
+        else:
+            return restored_client
 
     client = await login(
         homeserver,
