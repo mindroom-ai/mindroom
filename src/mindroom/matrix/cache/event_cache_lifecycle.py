@@ -170,9 +170,8 @@ async def reset_stale_cache_if_needed(
     current_table_names = await existing_table_names(db)
     if not current_table_names:
         return
-    if (
-        current_schema_version == EVENT_CACHE_SCHEMA_VERSION
-        and _REQUIRED_EVENT_CACHE_TABLES.issubset(current_table_names)
+    if current_schema_version == EVENT_CACHE_SCHEMA_VERSION and _REQUIRED_EVENT_CACHE_TABLES.issubset(
+        current_table_names,
     ):
         return
 

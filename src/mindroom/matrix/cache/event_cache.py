@@ -17,6 +17,7 @@ from .event_cache_codec import normalize_event_source_for_cache
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     import aiosqlite
@@ -135,7 +136,12 @@ class _EventCache:
     ) -> event_cache_runtime._RoomLockEntry:
         return self._runtime.room_lock_entry(room_id, active_user_increment=active_user_increment)
 
-    def _acquire_room_lock(self, room_id: str, *, operation: str) -> AsyncIterator[None]:
+    def _acquire_room_lock(
+        self,
+        room_id: str,
+        *,
+        operation: str,
+    ) -> AbstractAsyncContextManager[None]:
         return self._runtime.acquire_room_lock(room_id, operation=operation)
 
     def _acquire_db_operation(
@@ -143,7 +149,7 @@ class _EventCache:
         room_id: str,
         *,
         operation: str,
-    ) -> AsyncIterator[aiosqlite.Connection]:
+    ) -> AbstractAsyncContextManager[aiosqlite.Connection]:
         return self._runtime.acquire_db_operation(room_id, operation=operation)
 
     async def initialize(self) -> None:
@@ -205,6 +211,7 @@ class _EventCache:
 
     async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
         """Return durable freshness metadata for one cached thread."""
+
         async def read_cache_state(db: aiosqlite.Connection) -> ThreadCacheState | None:
             row = await event_cache_threads.load_thread_cache_state_row(
                 db,
@@ -220,6 +227,7 @@ class _EventCache:
                 room_invalidated_at=row[3],
                 room_invalidation_reason=row[4],
             )
+
         return await self._read_operation(
             room_id,
             operation="get_thread_cache_state",
@@ -271,7 +279,10 @@ class _EventCache:
                 room_id,
                 operation="store_events_batch",
                 disabled_result=None,
-                writer=lambda db, room_id=room_id, room_events=room_events, cached_at=cached_at: event_cache_events.persist_lookup_events(
+                writer=lambda db,
+                room_id=room_id,
+                room_events=room_events,
+                cached_at=cached_at: event_cache_events.persist_lookup_events(
                     db,
                     room_id=room_id,
                     room_events=room_events,
@@ -401,5 +412,6 @@ class _EventCache:
                 ),
             ),
         )
+
 
 normalize_nio_event_for_cache = event_cache_codec.normalize_nio_event_for_cache

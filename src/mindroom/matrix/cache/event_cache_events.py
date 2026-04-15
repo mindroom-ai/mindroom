@@ -126,12 +126,7 @@ async def redact_event_locked(
         room_id,
         event_ids=removed_event_ids,
     )
-    return (
-        deleted_thread_rows > 0
-        or deleted_event_rows > 0
-        or deleted_edit_rows > 0
-        or deleted_thread_index_rows > 0
-    )
+    return deleted_thread_rows > 0 or deleted_event_rows > 0 or deleted_edit_rows > 0 or deleted_thread_index_rows > 0
 
 
 async def event_or_original_is_redacted(
