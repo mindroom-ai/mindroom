@@ -15,12 +15,6 @@ if TYPE_CHECKING:
 THREAD_CACHE_MAX_AGE_SECONDS = 300.0
 
 
-def event_id_from_event_source(event_source: dict[str, object]) -> str | None:
-    """Return the event ID when one cached event source contains it."""
-    event_id = event_source.get("event_id")
-    return event_id if isinstance(event_id, str) else None
-
-
 def latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) -> str | None:
     """Return the latest visible event ID from one resolved thread history."""
     if not history:

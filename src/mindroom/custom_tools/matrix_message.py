@@ -89,6 +89,14 @@ class MatrixMessageTools(Toolkit):
         )
 
     @classmethod
+    def _conversation_cache_error(cls, *, action: str) -> str:
+        return cls._payload(
+            "error",
+            action=action,
+            message="Matrix messaging conversation cache is unavailable in this runtime path.",
+        )
+
+    @classmethod
     def _read_limit(cls, limit: int | None) -> int:
         if limit is None:
             return cls._DEFAULT_READ_LIMIT
@@ -168,11 +176,12 @@ class MatrixMessageTools(Toolkit):
         ignore_mentions: bool,
     ) -> str | None:
         formatted_text = parse_and_format_interactive(text, extract_mapping=False).formatted_text
-        assert context.conversation_cache is not None
-        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-        )
+        latest_thread_event_id = None
+        if context.conversation_cache is not None:
+            latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
+                room_id,
+                thread_id,
+            )
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
             extra_content["com.mindroom.skip_mentions"] = True
@@ -188,13 +197,13 @@ class MatrixMessageTools(Toolkit):
             extra_content=extra_content or None,
         )
         delivered = await send_message_result(context.client, room_id, content)
-        if delivered is not None:
-            assert context.conversation_cache is not None
+        if delivered is not None and context.conversation_cache is not None:
             context.conversation_cache.notify_outbound_message(
                 room_id,
                 delivered.event_id,
                 delivered.content_sent,
             )
+        if delivered is not None:
             return delivered.event_id
         return None
 
@@ -312,11 +321,12 @@ class MatrixMessageTools(Toolkit):
 
                 first_attachment_path = attachment_paths[0]
                 remaining_attachment_paths = attachment_paths[1:]
-                assert context.conversation_cache is not None
-                latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-                    room_id,
-                    effective_thread_id,
-                )
+                latest_thread_event_id = None
+                if context.conversation_cache is not None:
+                    latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
+                        room_id,
+                        effective_thread_id,
+                    )
                 first_attachment_event_id = await send_file_message(
                     context.client,
                     room_id,
@@ -757,8 +767,7 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", action="edit", message="message is required for edit.")
 
         latest_thread_event_id: str | None = None
-        if thread_id is not None:
-            assert context.conversation_cache is not None
+        if thread_id is not None and context.conversation_cache is not None:
             latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
                 room_id,
                 thread_id,
@@ -787,12 +796,12 @@ class MatrixMessageTools(Toolkit):
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
-        assert context.conversation_cache is not None
-        context.conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
+        if context.conversation_cache is not None:
+            context.conversation_cache.notify_outbound_message(
+                room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
 
         if interactive_response.option_map and interactive_response.options_list:
             register_interactive_question(
@@ -867,6 +876,8 @@ class MatrixMessageTools(Toolkit):
         limit: int | None,
         page_token: str | None,
     ) -> str:
+        if action in {"send", "thread-reply", "reply", "edit"} and context.conversation_cache is None:
+            return self._conversation_cache_error(action=action)
         if action in {"send", "thread-reply", "reply"}:
             allow_context_fallback = action in {"thread-reply", "reply"}
             effective_thread_id = resolve_context_thread_id(

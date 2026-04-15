@@ -146,6 +146,19 @@ async def test_sessions_send_requires_runtime_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sessions_send_returns_structured_error_without_conversation_cache(tmp_path: Path) -> None:
+    """sessions_send should fail gracefully when conversation-cache support is unavailable."""
+    ctx = replace(_make_context(tmp_path), conversation_cache=None)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().sessions_send(message="hello"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_send"
+    assert "conversation cache" in payload["message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_sessions_send_rejects_empty_message(tmp_path: Path) -> None:
     """sessions_send should validate non-empty message content."""
     ctx = _make_context(tmp_path)
@@ -351,6 +364,19 @@ async def test_sessions_spawn_requires_runtime_context() -> None:
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
     assert "context" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_returns_structured_error_without_conversation_cache(tmp_path: Path) -> None:
+    """sessions_spawn should fail gracefully when conversation-cache support is unavailable."""
+    ctx = replace(_make_context(tmp_path), conversation_cache=None)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().sessions_spawn(task="do this", summary=TEST_SUMMARY, tag=TEST_TAG))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_spawn"
+    assert "conversation cache" in payload["message"].lower()
 
 
 @pytest.mark.asyncio
