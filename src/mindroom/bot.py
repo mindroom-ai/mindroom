@@ -41,7 +41,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_related_event_thread_id
+from mindroom.matrix.thread_membership import resolve_related_event_thread_id
 from mindroom.matrix.users import (
     AgentMatrixUser,
     create_agent_user,
@@ -647,21 +647,10 @@ class AgentBot:
         thread_id: str | None = None
         if normalized_target_event_id:
             try:
-                access = ThreadMembershipAccess(
-                    lookup_thread_id=self._conversation_cache.get_thread_id_for_event,
-                    fetch_event_info=self._conversation_resolver._event_info_for_event_id,
-                    thread_root_has_children=(
-                        lambda lookup_room_id, thread_root_id: self._conversation_resolver._thread_root_has_children(
-                            lookup_room_id,
-                            thread_root_id,
-                            dispatch_safe=True,
-                        )
-                    ),
-                )
                 thread_id = await resolve_related_event_thread_id(
                     room_id,
                     normalized_target_event_id,
-                    access=access,
+                    access=self._conversation_resolver.thread_membership_access(dispatch_safe=True),
                 )
             except Exception as exc:
                 self.logger.debug(
@@ -958,10 +947,12 @@ class AgentBot:
         """Initialize standalone runtime support services or accept a full injected pair."""
         binding_state = self._runtime_support_binding_state()
         if binding_state == "injected":
+            self._runtime_view.mark_runtime_started()
             return
         if binding_state == "mixed":
             msg = self._partial_runtime_support_injection_error()
             raise RuntimeError(msg)
+        self._runtime_view.mark_runtime_started()
         if binding_state == "uninitialized":
             support = await create_standalone_runtime_support(
                 config=self.config,

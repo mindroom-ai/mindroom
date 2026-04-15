@@ -9,7 +9,7 @@ import json
 import mimetypes
 import ssl as ssl_module
 import time
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -46,7 +46,9 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     visible_body_from_event_source,
 )
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
+from mindroom.matrix.thread_membership import (
+    resolve_thread_ids_for_event_infos,
+)
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -1425,6 +1427,30 @@ def _sort_thread_event_sources_root_first(
     return grouped_sources
 
 
+def _ordered_event_ids_from_scanned_event_sources(
+    event_sources: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Return scanned event IDs in stable chronological discovery order."""
+    event_source_list = list(event_sources)
+    input_order_by_event_id = {
+        event_id: index
+        for index, event_source in enumerate(event_source_list)
+        if isinstance((event_id := event_source.get("event_id")), str)
+    }
+    return [
+        event_id
+        for event_source in sorted(
+            event_source_list,
+            key=lambda source: (
+                int(source.get("origin_server_ts", 0)),
+                input_order_by_event_id.get(str(source.get("event_id", "")), 0),
+                str(source.get("event_id", "")),
+            ),
+        )
+        if isinstance((event_id := event_source.get("event_id")), str)
+    ]
+
+
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
     """Parse one event dict into a room-message event when possible."""
     try:
@@ -2108,63 +2134,22 @@ async def _resolve_scanned_thread_message_sources(
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
-    resolved_thread_ids: dict[str, str] = {}
-
-    async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
-        return resolved_thread_ids.get(event_id)
-
-    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-        return event_infos.get(event_id)
-
-    async def thread_root_has_children(_room_id: str, thread_root_id: str) -> bool:
-        return any(
-            event_id != thread_root_id
-            and any(
-                candidate_thread_id == thread_root_id
-                for candidate_thread_id in (
-                    event_info.thread_id,
-                    event_info.thread_id_from_edit,
-                )
-            )
-            for event_id, event_info in event_infos.items()
-        )
-
-    access = ThreadMembershipAccess(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        thread_root_has_children=thread_root_has_children,
-    )
-    input_order_by_event_id = {event_id: index for index, event_id in enumerate(scanned_message_sources)}
     relevant_message_sources = {
         thread_id: scanned_message_sources[thread_id],
     }
-    ordered_sources = sorted(
-        scanned_message_sources.values(),
-        key=lambda event_source: (
-            int(event_source.get("origin_server_ts", 0)),
-            input_order_by_event_id.get(str(event_source.get("event_id", "")), 0),
-            str(event_source.get("event_id", "")),
-        ),
+    ordered_event_ids = _ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
+    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+        room_id,
+        event_infos=event_infos,
+        ordered_event_ids=ordered_event_ids,
     )
 
-    progress_made = True
-    while progress_made:
-        progress_made = False
-        for event_source in ordered_sources:
-            event_id = event_source.get("event_id")
-            if not isinstance(event_id, str) or event_id == thread_id or event_id in relevant_message_sources:
-                continue
-            event_info = event_infos[event_id]
-            event_thread_id = await resolve_event_thread_id(
-                room_id,
-                event_info,
-                access=access,
-            )
-            if event_thread_id != thread_id:
-                continue
-            resolved_thread_ids[event_id] = thread_id
-            relevant_message_sources[event_id] = event_source
-            progress_made = True
+    for event_id in ordered_event_ids:
+        if event_id == thread_id or event_id in relevant_message_sources:
+            continue
+        if resolved_thread_ids.get(event_id) != thread_id:
+            continue
+        relevant_message_sources[event_id] = scanned_message_sources[event_id]
 
     ordered_relevant_sources = _sort_thread_event_sources_root_first(
         list(relevant_message_sources.values()),

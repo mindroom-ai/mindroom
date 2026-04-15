@@ -27,6 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
+from mindroom.matrix.cache.thread_cache_helpers import thread_cache_state_is_usable
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
@@ -47,7 +48,11 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_id,
+    resolve_thread_ids_for_event_infos,
+)
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1095,6 +1100,41 @@ class TestThreadingBehavior:
         assert second_support is not None
         assert second_support is not first_support
         assert second_support.event_cache.db_path == tmp_path / "event-cache-second.db"
+
+        await bot._close_runtime_support_services()
+
+    @pytest.mark.asyncio
+    async def test_standalone_runtime_support_refreshes_runtime_started_at_on_same_instance_restart(
+        self,
+        bot: AgentBot,
+        tmp_path: Path,
+    ) -> None:
+        """Same-instance restart should advance runtime freshness so old thread cache rows are rejected."""
+        bot.event_cache = None
+        bot.event_cache_write_coordinator = None
+        bot.config.cache.db_path = str(tmp_path / "event-cache-runtime-refresh.db")
+
+        with patch("mindroom.bot_runtime_view.time.time", side_effect=[100.0, 200.0]):
+            await bot._initialize_runtime_support_services()
+            first_runtime_started_at = bot._runtime_view.runtime_started_at
+            await bot._close_runtime_support_services()
+            await bot._initialize_runtime_support_services()
+            second_runtime_started_at = bot._runtime_view.runtime_started_at
+
+        assert first_runtime_started_at == 100.0
+        assert second_runtime_started_at == 200.0
+        assert second_runtime_started_at > first_runtime_started_at
+        assert not thread_cache_state_is_usable(
+            ThreadCacheState(
+                validated_at=150.0,
+                invalidated_at=None,
+                invalidation_reason=None,
+                room_invalidated_at=None,
+                room_invalidation_reason=None,
+            ),
+            runtime_started_at=second_runtime_started_at,
+            now=201.0,
+        )
 
         await bot._close_runtime_support_services()
 
@@ -2385,6 +2425,80 @@ class TestThreadingBehavior:
         )
 
         assert resolved_thread_id == thread_root_id
+
+    @pytest.mark.asyncio
+    async def test_resolve_thread_ids_for_event_infos_reaches_fixpoint_across_transitive_chain(
+        self,
+    ) -> None:
+        """Map-backed resolution should derive thread IDs even when children are visited before parents."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        thread_reply_id = "$thread_reply:localhost"
+        plain_reply_1_id = "$plain_reply_1:localhost"
+        plain_reply_2_id = "$plain_reply_2:localhost"
+        event_infos = {
+            thread_reply_id: EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": thread_root_id,
+                        },
+                    },
+                    "event_id": thread_reply_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            ),
+            plain_reply_1_id: EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "plain reply 1",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
+                    },
+                    "event_id": plain_reply_1_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            ),
+            plain_reply_2_id: EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "plain reply 2",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": plain_reply_1_id}},
+                    },
+                    "event_id": plain_reply_2_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 3,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            ),
+        }
+
+        resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+            room_id,
+            event_infos=event_infos,
+            ordered_event_ids=[
+                plain_reply_2_id,
+                plain_reply_1_id,
+                thread_reply_id,
+            ],
+        )
+
+        assert resolved_thread_ids == {
+            thread_reply_id: thread_root_id,
+            plain_reply_1_id: thread_root_id,
+            plain_reply_2_id: thread_root_id,
+        }
 
     @pytest.mark.asyncio
     async def test_resolve_event_thread_id_follows_reaction_target_transitively(

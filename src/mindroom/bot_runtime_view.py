@@ -50,3 +50,7 @@ class BotRuntimeState:
     event_cache: ConversationEventCache | None
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
     runtime_started_at: float = field(default_factory=time.time)
+
+    def mark_runtime_started(self) -> None:
+        """Advance the runtime freshness boundary for one bot start or restart."""
+        self.runtime_started_at = time.time()

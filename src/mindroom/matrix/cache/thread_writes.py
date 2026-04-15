@@ -204,15 +204,10 @@ class ThreadWritePolicy:
             target_event_info = await self._event_info_for_thread_resolution(room_id, redacted_event_id)
             if target_event_info is not None and not _redaction_can_affect_thread_cache(target_event_info):
                 return None
-            access = ThreadMembershipAccess(
-                lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
-                fetch_event_info=self._event_info_for_thread_resolution,
-                thread_root_has_children=self._thread_root_has_children,
-            )
             return await resolve_related_event_thread_id(
                 room_id,
                 redacted_event_id,
-                access=access,
+                access=self._thread_membership_access(),
             )
         except Exception as exc:
             self.logger.warning(
@@ -317,15 +312,10 @@ class ThreadWritePolicy:
         context: str,
     ) -> str | None:
         try:
-            access = ThreadMembershipAccess(
-                lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
-                fetch_event_info=self._event_info_for_thread_resolution,
-                thread_root_has_children=self._thread_root_has_children,
-            )
             thread_id = await resolve_event_thread_id(
                 room_id,
                 event_info,
-                access=access,
+                access=self._thread_membership_access(),
             )
         except Exception as exc:
             self.logger.warning(
@@ -364,6 +354,14 @@ class ThreadWritePolicy:
         except Exception:
             return False
         return any(event.get("event_id") != thread_root_id for event in event_sources)
+
+    def _thread_membership_access(self) -> ThreadMembershipAccess:
+        """Return the shared thread-membership accessors for cache mutations."""
+        return ThreadMembershipAccess(
+            lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
+            fetch_event_info=self._event_info_for_thread_resolution,
+            thread_root_has_children=self._thread_root_has_children,
+        )
 
     async def _append_event_to_cache(
         self,

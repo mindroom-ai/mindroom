@@ -979,6 +979,54 @@ async def test_cleanup_uses_same_timestamp_descendant_for_threaded_edit_fallback
 
 
 @pytest.mark.asyncio
+async def test_cleanup_uses_bot_promoted_plain_reply_as_latest_thread_event(tmp_path: Path) -> None:
+    """Cleanup should prefer the threaded scanned copy when the stale bot message is itself a promoted plain reply."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Start here",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$zzz_parent",
+            body="Explicit parent",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+        ),
+        _make_message_event(
+            event_id="$aaa_child",
+            body="Interrupted bot reply",
+            sender=BOT_USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS - 1_000),
+            relates_to={"m.in_reply_to": {"event_id": "$zzz_parent"}},
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.format_message_with_mentions",
+            return_value={"body": "cleanup", "msgtype": "m.text"},
+        ) as mock_format,
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert len(interrupted) == 1
+    assert interrupted[0].target_event_id == "$aaa_child"
+    assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$aaa_child"
+
+
+@pytest.mark.asyncio
 async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visible_reply_target(tmp_path: Path) -> None:
     """Edited bot messages should recover requester from scanned history before any API fetch."""
     config = _make_config(tmp_path)

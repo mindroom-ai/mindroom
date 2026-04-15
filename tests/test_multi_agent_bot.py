@@ -1497,7 +1497,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
-        mock_stream_agent_response = AsyncMock(return_value=mock_streaming_response())
+        mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with patch(
             "mindroom.delivery_gateway.send_streaming_response",
             new_callable=AsyncMock,
@@ -1788,7 +1788,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
-        mock_stream_agent_response = AsyncMock(return_value=mock_streaming_response())
+        mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
@@ -1966,7 +1966,7 @@ class TestAgentBot:
         _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
-        mock_stream_agent_response = AsyncMock(return_value=mock_streaming_response())
+        mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
@@ -2033,7 +2033,7 @@ class TestAgentBot:
         )
 
         try:
-            mock_stream = AsyncMock(return_value=mock_streaming_response())
+            mock_stream = MagicMock(return_value=mock_streaming_response())
             with patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
@@ -3010,6 +3010,11 @@ class TestAgentBot:
     ) -> None:
         """Room-mode skill dispatch should keep the canonical room-level session key."""
 
+        def discard_background_task(coro: object, **_kwargs: object) -> None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
         @asynccontextmanager
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
@@ -3043,7 +3048,7 @@ class TestAgentBot:
             ai_response=mock_ai,
             reprioritize_auto_flush_sessions=mock_reprioritize,
             mark_auto_flush_dirty_session=MagicMock(),
-            create_background_task=MagicMock(),
+            create_background_task=MagicMock(side_effect=discard_background_task),
         ):
             await bot._response_runner.send_skill_command_response(
                 room_id="!test:localhost",

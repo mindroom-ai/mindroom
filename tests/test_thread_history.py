@@ -30,6 +30,7 @@ from mindroom.matrix.client import (
     ThreadHistoryResult,
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
+    _ordered_event_ids_from_scanned_event_sources,
     _resolve_scanned_thread_message_sources,
     _resolve_thread_history_from_event_sources_timed,
     get_room_threads_page,
@@ -1344,6 +1345,18 @@ class TestThreadHistory:
         )
 
         assert list(resolved) == ["$root", "$thread_reply", "$plain1", "$plain2"]
+
+    def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
+        """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""
+        ordered_event_ids = _ordered_event_ids_from_scanned_event_sources(
+            [
+                {"event_id": "$zzz_parent", "origin_server_ts": 2000},
+                {"event_id": "$aaa_child", "origin_server_ts": 2000},
+                {"event_id": "$root", "origin_server_ts": 1000},
+            ],
+        )
+
+        assert ordered_event_ids == ["$root", "$zzz_parent", "$aaa_child"]
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_keeps_same_timestamp_promoted_descendant(self) -> None:

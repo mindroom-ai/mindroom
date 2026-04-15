@@ -23,6 +23,7 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
+    _ordered_event_ids_from_scanned_event_sources,
     _sort_thread_history_root_first,
     edit_message_result,
     get_joined_rooms,
@@ -34,7 +35,7 @@ from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
+from mindroom.matrix.thread_membership import resolve_thread_ids_for_event_infos
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -532,20 +533,39 @@ def _latest_thread_event_id_by_thread(
 def _messages_by_thread_for_cleanup(
     messages: list[ResolvedVisibleMessage],
 ) -> dict[str, list[ResolvedVisibleMessage]]:
-    """Group visible messages by thread while preserving first-seen message order."""
+    """Group visible messages by thread while preferring the strongest copy per visible event."""
     thread_root_ids = {message.thread_id for message in messages if message.thread_id is not None}
     messages_by_thread: dict[str, list[ResolvedVisibleMessage]] = {}
-    seen_visible_event_ids: set[str] = set()
+    best_message_by_visible_event_id: dict[str, ResolvedVisibleMessage] = {}
 
     for message in messages:
-        if message.visible_event_id in seen_visible_event_ids:
+        existing_message = best_message_by_visible_event_id.get(message.visible_event_id)
+        if existing_message is not None and not _cleanup_message_is_better_candidate(message, existing_message):
             continue
-        seen_visible_event_ids.add(message.visible_event_id)
+        best_message_by_visible_event_id[message.visible_event_id] = message
+
+    for message in best_message_by_visible_event_id.values():
         thread_key = _cleanup_thread_key(message, thread_root_ids)
         if thread_key is None:
             continue
         messages_by_thread.setdefault(thread_key, []).append(message)
     return messages_by_thread
+
+
+def _cleanup_message_is_better_candidate(
+    candidate: ResolvedVisibleMessage,
+    current: ResolvedVisibleMessage,
+) -> bool:
+    """Return whether one cleanup message copy should replace the current visible-event winner."""
+    return (
+        candidate.thread_id is not None,
+        candidate.timestamp,
+        candidate.latest_event_id,
+    ) > (
+        current.thread_id is not None,
+        current.timestamp,
+        current.latest_event_id,
+    )
 
 
 def _cleanup_thread_key(
@@ -699,54 +719,14 @@ async def _scanned_message_data_by_event_id(
         for event in message_events
         if isinstance(event.event_id, str)
     }
-    resolved_thread_ids: dict[str, str] = {}
-
-    async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
-        return resolved_thread_ids.get(event_id)
-
-    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-        return event_infos.get(event_id)
-
-    async def thread_root_has_children(_room_id: str, thread_root_id: str) -> bool:
-        return any(
-            event_id != thread_root_id
-            and any(
-                candidate_thread_id == thread_root_id
-                for candidate_thread_id in (
-                    event_info.thread_id,
-                    event_info.thread_id_from_edit,
-                )
-            )
-            for event_id, event_info in event_infos.items()
-        )
-
-    access = ThreadMembershipAccess(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        thread_root_has_children=thread_root_has_children,
+    ordered_event_ids = _ordered_event_ids_from_scanned_event_sources(
+        [event.source for event in message_events],
     )
-    ordered_event_ids = [
-        event_id
-        for event in sorted(
-            message_events,
-            key=lambda event: (
-                event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
-                event.event_id if isinstance(event.event_id, str) else "",
-            ),
-        )
-        if isinstance((event_id := event.event_id), str)
-    ]
-    progress_made = True
-    while progress_made:
-        progress_made = False
-        for event_id in ordered_event_ids:
-            if event_id in resolved_thread_ids:
-                continue
-            thread_id = await resolve_event_thread_id("", event_infos[event_id], access=access)
-            if thread_id is None:
-                continue
-            resolved_thread_ids[event_id] = thread_id
-            progress_made = True
+    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+        "",
+        event_infos=event_infos,
+        ordered_event_ids=ordered_event_ids,
+    )
 
     message_data_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     for event in message_events:

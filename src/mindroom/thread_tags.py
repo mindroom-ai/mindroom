@@ -801,29 +801,48 @@ async def normalize_thread_root_event_id(
             if normalized_original_thread_id is not None:
                 return normalized_original_thread_id
 
-    access = ThreadMembershipAccess(
-        lookup_thread_id=(
-            lambda lookup_room_id, lookup_event_id: _lookup_thread_id_from_cache(
-                conversation_cache,
-                lookup_room_id,
-                lookup_event_id,
-            )
-        ),
-        fetch_event_info=lambda lookup_room_id, lookup_event_id: _event_info_for_event_id(
-            client,
-            lookup_room_id,
-            lookup_event_id,
-        ),
-        thread_root_has_children=lambda lookup_room_id, thread_root_id: _thread_root_has_children(
-            client,
-            lookup_room_id,
-            thread_root_id=thread_root_id,
-        ),
-    )
     return await resolve_event_thread_id(
         room_id,
         event_info,
-        access=access,
+        access=_thread_membership_access(
+            client,
+            conversation_cache=conversation_cache,
+        ),
+    )
+
+
+def _thread_membership_access(
+    client: nio.AsyncClient,
+    *,
+    conversation_cache: ConversationCacheProtocol | None,
+) -> ThreadMembershipAccess:
+    """Return the shared thread-membership accessors for thread-tag normalization."""
+
+    async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
+        return await _lookup_thread_id_from_cache(
+            conversation_cache,
+            lookup_room_id,
+            lookup_event_id,
+        )
+
+    async def fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
+        return await _event_info_for_event_id(
+            client,
+            lookup_room_id,
+            lookup_event_id,
+        )
+
+    async def thread_root_has_children(lookup_room_id: str, thread_root_id: str) -> bool:
+        return await _thread_root_has_children(
+            client,
+            lookup_room_id,
+            thread_root_id=thread_root_id,
+        )
+
+    return ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        thread_root_has_children=thread_root_has_children,
     )
 
 

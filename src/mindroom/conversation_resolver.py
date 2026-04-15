@@ -295,21 +295,30 @@ class ConversationResolver:
         dispatch_safe: bool,
     ) -> str | None:
         """Resolve canonical thread membership for one event."""
-        access = ThreadMembershipAccess(
-            lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
-            fetch_event_info=self._event_info_for_event_id,
-            thread_root_has_children=(
-                lambda lookup_room_id, thread_root_id: self._thread_root_has_children(
-                    lookup_room_id,
-                    thread_root_id,
-                    dispatch_safe=dispatch_safe,
-                )
-            ),
-        )
         return await resolve_event_thread_id(
             room_id,
             event_info,
-            access=access,
+            access=self.thread_membership_access(dispatch_safe=dispatch_safe),
+        )
+
+    def thread_membership_access(
+        self,
+        *,
+        dispatch_safe: bool,
+    ) -> ThreadMembershipAccess:
+        """Return the shared thread-membership accessors for this resolver."""
+
+        async def thread_root_has_children(lookup_room_id: str, thread_root_id: str) -> bool:
+            return await self._thread_root_has_children(
+                lookup_room_id,
+                thread_root_id,
+                dispatch_safe=dispatch_safe,
+            )
+
+        return ThreadMembershipAccess(
+            lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
+            fetch_event_info=self._event_info_for_event_id,
+            thread_root_has_children=thread_root_has_children,
         )
 
     async def _event_info_for_event_id(
