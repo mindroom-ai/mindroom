@@ -90,10 +90,12 @@ class ThreadWritePolicy:
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
         require_client: typing.Callable[[], nio.AsyncClient],
+        fetch_event_info_for_thread_resolution: typing.Callable[[str, str], typing.Awaitable[EventInfo | None]],
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self.require_client = require_client
+        self._fetch_event_info_for_thread_resolution = fetch_event_info_for_thread_resolution
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
@@ -289,7 +291,7 @@ class ThreadWritePolicy:
         try:
             access = ThreadMembershipAccess(
                 lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
-                fetch_event_info=self._cached_event_info_for_event_id,
+                fetch_event_info=self._event_info_for_thread_resolution,
                 thread_root_has_children=self._thread_root_has_children,
             )
             thread_id = await resolve_event_thread_id(
@@ -313,15 +315,12 @@ class ThreadWritePolicy:
             return event_info.thread_id or event_info.thread_id_from_edit
         return None
 
-    async def _cached_event_info_for_event_id(
+    async def _event_info_for_thread_resolution(
         self,
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
-        related_event = await self.runtime.event_cache.get_event(room_id, event_id)
-        if not isinstance(related_event, dict):
-            return None
-        return EventInfo.from_event(related_event)
+        return await self._fetch_event_info_for_thread_resolution(room_id, event_id)
 
     async def _thread_root_has_children(
         self,

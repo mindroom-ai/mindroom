@@ -267,6 +267,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             require_client=self._require_client,
+            fetch_event_info_for_thread_resolution=self._event_info_for_thread_resolution,
         )
         self._reads = ThreadReadPolicy(
             logger_getter=lambda: self.logger,
@@ -333,6 +334,17 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if turn_cache is not None:
             turn_cache[cache_key] = response
         return response
+
+    async def _event_info_for_thread_resolution(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> EventInfo | None:
+        """Resolve one related event through the shared conversation-cache lookup path."""
+        response = await self.get_event(room_id, event_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return None
+        return EventInfo.from_event(response.event.source)
 
     async def _fetch_thread_history_from_client(
         self,

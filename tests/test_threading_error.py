@@ -46,6 +46,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
+from mindroom.matrix.thread_membership import ThreadMembershipAccess, resolve_event_thread_id
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -2014,6 +2015,161 @@ class TestThreadingBehavior:
             assert await real_event_cache.get_thread_id_for_event(room_id, second_plain_reply_id) == thread_root_id
         finally:
             await real_event_cache.close()
+
+    @pytest.mark.asyncio
+    async def test_media_ingress_primes_transitive_ancestors_before_persisting_membership(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Cold-start media ingress should persist the same transitive thread membership used at runtime."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        thread_reply_id = "$thread_reply:localhost"
+        plain_reply_id = "$plain_reply:localhost"
+        audio_event_id = "$audio_reply:localhost"
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = room_id
+        real_event_cache = _EventCache(bot.storage_path / "media-ingress-thread-membership.db")
+        await real_event_cache.initialize()
+        bot.event_cache = real_event_cache
+        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=bot._runtime_view,
+        )
+        audio_event = nio.RoomMessageAudio.from_dict(
+            {
+                "content": {
+                    "body": "voice-note.ogg",
+                    "msgtype": "m.audio",
+                    "url": "mxc://localhost/voice-note",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": plain_reply_id}},
+                },
+                "event_id": audio_event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        prechecked_event = MagicMock(event=audio_event, requester_user_id="@user:localhost")
+        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
+        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+
+        def room_get_event_response(event_id: str, content: dict[str, object]) -> nio.RoomGetEventResponse:
+            return nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": content,
+                    "event_id": event_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+
+        async def fetch_related_event(fetch_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            assert fetch_room_id == room_id
+            if event_id == plain_reply_id:
+                return room_get_event_response(
+                    plain_reply_id,
+                    {
+                        "body": "bridge reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
+                    },
+                )
+            if event_id == thread_reply_id:
+                return room_get_event_response(
+                    thread_reply_id,
+                    {
+                        "body": "thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": thread_root_id,
+                        },
+                    },
+                )
+            msg = f"unexpected event lookup: {event_id}"
+            raise AssertionError(msg)
+
+        bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
+
+        try:
+            await bot._turn_controller.handle_media_event(room, audio_event)
+            await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
+
+            assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
+        finally:
+            await real_event_cache.close()
+
+    @pytest.mark.asyncio
+    async def test_transitive_thread_membership_handles_long_reply_chains(
+        self,
+    ) -> None:
+        """The shared transitive resolver should handle reply chains longer than the old 32-hop ceiling."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        threaded_event_id = "$thread_reply:localhost"
+        last_event_id = "$plain_reply_33:localhost"
+        event_infos: dict[str, EventInfo] = {
+            threaded_event_id: EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": thread_root_id,
+                        },
+                    },
+                    "event_id": threaded_event_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            ),
+        }
+        for index in range(1, 34):
+            event_id = f"$plain_reply_{index}:localhost"
+            reply_target_id = threaded_event_id if index == 1 else f"$plain_reply_{index - 1}:localhost"
+            event_infos[event_id] = EventInfo.from_event(
+                {
+                    "content": {
+                        "body": f"plain reply {index}",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": reply_target_id}},
+                    },
+                    "event_id": event_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": index + 1,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return event_infos.get(event_id)
+
+        async def thread_root_has_children(_room_id: str, _thread_root_id: str) -> bool:
+            return False
+
+        resolved_thread_id = await resolve_event_thread_id(
+            room_id,
+            event_infos[last_event_id],
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                thread_root_has_children=thread_root_has_children,
+            ),
+        )
+
+        assert resolved_thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_live_edit_of_promoted_plain_reply_persists_event_thread_membership(

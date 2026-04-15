@@ -10,7 +10,7 @@ from mindroom.matrix.event_info import EventInfo
 type ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
 type ThreadRootChildrenLookup = Callable[[str, str], Awaitable[bool]]
-_MAX_THREAD_MEMBERSHIP_HOPS = 32
+_MAX_THREAD_MEMBERSHIP_HOPS = 512
 
 
 def _next_related_event_target(

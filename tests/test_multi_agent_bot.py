@@ -4776,6 +4776,7 @@ class TestAgentBot:
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         bot._conversation_cache.append_live_event = AsyncMock()
+        bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
@@ -4786,6 +4787,7 @@ class TestAgentBot:
         append_args = bot._conversation_cache.append_live_event.await_args
         assert append_args.args == ("!test:localhost", event)
         assert append_args.kwargs["event_info"].is_edit is False
+        bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
         bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -4802,6 +4804,11 @@ class TestAgentBot:
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         bot._conversation_cache.append_live_event = AsyncMock()
+
+        async def record_coalescing(_room: object, _event: object) -> None:
+            assert bot._conversation_cache.append_live_event.await_count == 0
+
+        bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_coalescing)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
@@ -4809,6 +4816,7 @@ class TestAgentBot:
         await bot._turn_controller._handle_media_message_inner(room, event)
 
         bot._conversation_cache.append_live_event.assert_awaited_once()
+        bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio
