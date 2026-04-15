@@ -29,6 +29,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     install_send_response_mock,
     install_send_skill_command_response_mock,
+    make_matrix_client_mock,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
@@ -536,8 +537,7 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            bot.client = AsyncMock()
-            bot.client.user_id = bot.agent_user.user_id
+            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
             bot.logger = MagicMock()
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
@@ -600,8 +600,7 @@ class TestCommandHandling:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            bot.client = AsyncMock()
-            bot.client.user_id = bot.agent_user.user_id
+            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
             bot.logger = MagicMock()
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)

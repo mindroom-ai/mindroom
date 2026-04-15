@@ -35,7 +35,13 @@ from mindroom.tool_system.runtime_context import (
     get_plugin_state_root,
     tool_runtime_context,
 )
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -304,6 +310,7 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         hook_registry=registry,
         correlation_id="corr-tool",
     )

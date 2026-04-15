@@ -40,6 +40,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_runtime_cache_support,
+    make_conversation_cache_mock,
     make_event_cache_mock,
 )
 
@@ -812,6 +813,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         active_model_name="large",
         session_id="session-1",
     )
@@ -890,6 +892,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         active_model_name=None,
         session_id="session-1",
     )
@@ -964,6 +967,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         active_model_name=None,
         session_id="session-1",
     )

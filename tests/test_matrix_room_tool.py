@@ -19,7 +19,13 @@ from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 _NEXT_BATCH_PAGE_TOKEN = "next_batch"  # noqa: S105
 _THREAD_PAGE_TOKEN = "tok123"  # noqa: S105
@@ -52,6 +58,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         room=None,
     )
 

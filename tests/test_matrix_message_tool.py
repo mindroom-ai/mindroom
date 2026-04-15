@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import tempfile
 from pathlib import Path
@@ -27,7 +26,9 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
+    make_conversation_cache_mock,
     make_event_cache_mock,
+    make_matrix_client_mock,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -91,13 +92,13 @@ def _make_context(
         ),
         test_runtime_paths(runtime_root),
     )
-    client = AsyncMock()
+    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     client.room_send = AsyncMock()
     client.room_messages = AsyncMock()
     client.room_get_event_relations = MagicMock(
         side_effect=lambda *_args, **_kwargs: _empty_async_iterator(),
     )
-    conversation_cache = AsyncMock()
+    conversation_cache = make_conversation_cache_mock()
     conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     conversation_cache.notify_outbound_message = Mock()
     conversation_cache.notify_outbound_redaction = Mock()
@@ -208,42 +209,6 @@ async def test_matrix_message_requires_runtime_context() -> None:
     assert payload["status"] == "error"
     assert payload["tool"] == "matrix_message"
     assert "context" in payload["message"]
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_send_returns_structured_error_without_conversation_cache() -> None:
-    """Send should fail gracefully when threaded bookkeeping support is unavailable."""
-    tool = MatrixMessageTools()
-    ctx = _make_context()
-    ctx = dataclasses.replace(ctx, conversation_cache=None)
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="send", message="hello"))
-
-    assert payload["status"] == "error"
-    assert payload["tool"] == "matrix_message"
-    assert "conversation cache" in payload["message"]
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_edit_returns_structured_error_without_conversation_cache() -> None:
-    """Edit should fail gracefully when threaded bookkeeping support is unavailable."""
-    tool = MatrixMessageTools()
-    ctx = _make_context()
-    ctx = dataclasses.replace(ctx, conversation_cache=None)
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_message(
-                action="edit",
-                target="$target",
-                message="updated text",
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert payload["tool"] == "matrix_message"
-    assert "conversation cache" in payload["message"]
 
 
 @pytest.mark.asyncio

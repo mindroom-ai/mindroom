@@ -19,6 +19,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     install_runtime_cache_support,
+    make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
@@ -61,8 +62,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     )
 
     # Mock client and initialize required components
-    bot.client = AsyncMock()
-    bot.client.user_id = "@mindroom_router:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     install_runtime_cache_support(bot)
 
     # Create mock room and event
@@ -162,8 +162,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     )
 
     # Mock client and initialize required components
-    bot.client = AsyncMock()
-    bot.client.user_id = "@mindroom_router:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     install_runtime_cache_support(bot)
 
     # Create mock room and event
@@ -296,8 +295,7 @@ async def test_unknown_command_with_reply_stays_plain_reply(tmp_path: Path) -> N
     )
 
     # Mock client and initialize required components
-    bot.client = AsyncMock()
-    bot.client.user_id = "@mindroom_router:localhost"
+    bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     install_runtime_cache_support(bot)
 
     # Create mock room and event

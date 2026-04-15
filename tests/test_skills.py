@@ -35,7 +35,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     tool_execution_identity,
 )
-from tests.conftest import FakeCredentialsManager, make_event_cache_mock
+from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -815,6 +815,7 @@ async def test_skill_command_tool_dispatch_uses_canonical_runtime_thread_identit
             config=config,
             runtime_paths=runtime_paths,
             event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
             reply_to_event_id="$reply:example.org",
         )
 
@@ -875,6 +876,7 @@ async def test_skill_command_tool_dispatch_ignores_raw_room_mode_thread_id() -> 
             config=config,
             runtime_paths=runtime_paths,
             event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
             reply_to_event_id="$reply:example.org",
             session_id=create_session_id("!room:example.org", None),
         )
@@ -954,6 +956,7 @@ async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_contex
             config=config,
             runtime_paths=runtime_paths,
             event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
             hook_message_sender=_message_sender,
             room_state_querier=AsyncMock(return_value={}),
             room_state_putter=AsyncMock(return_value=True),

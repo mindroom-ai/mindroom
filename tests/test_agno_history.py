@@ -89,7 +89,12 @@ from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, make_visible_message
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+    make_visible_message,
+)
 
 
 @dataclass
@@ -349,6 +354,7 @@ def _hook_runtime_context(
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         session_id=session_id,
         hook_registry=registry,
         correlation_id="corr-compaction",
@@ -1031,6 +1037,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         session_id="session-1",
         hook_registry=registry,
         correlation_id="corr-compaction",

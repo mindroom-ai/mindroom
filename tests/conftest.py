@@ -21,12 +21,14 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import (
     DeliveredMatrixEvent,
     ResolvedVisibleMessage,
     build_edit_event_content,
 )
+from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.turn_controller import TurnController
 from mindroom.turn_policy import TurnPolicy
@@ -48,6 +50,7 @@ __all__ = [
     "install_runtime_cache_support",
     "install_send_response_mock",
     "install_send_skill_command_response_mock",
+    "make_conversation_cache_mock",
     "make_event_cache_mock",
     "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
@@ -182,6 +185,28 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.append_event.return_value = True
     event_cache.redact_event.return_value = False
     return event_cache
+
+
+def make_conversation_cache_mock() -> AsyncMock:
+    """Return an async mock shaped like the conversation cache protocol."""
+    conversation_cache = AsyncMock(spec=ConversationCacheProtocol)
+    conversation_cache.get_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id),
+    )
+    conversation_cache.get_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    conversation_cache.get_thread_history = AsyncMock(return_value=[])
+    conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+    conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    conversation_cache.append_live_event = AsyncMock()
+    conversation_cache.notify_outbound_message = MagicMock()
+    conversation_cache.notify_outbound_redaction = MagicMock()
+    return conversation_cache
 
 
 def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> _EventCacheWriteCoordinator:

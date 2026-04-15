@@ -73,7 +73,7 @@ class ToolRuntimeContext:
     config: Config
     runtime_paths: RuntimePaths
     event_cache: ConversationEventCache
-    conversation_cache: ConversationCacheProtocol | None = None
+    conversation_cache: ConversationCacheProtocol
     active_model_name: str | None = None
     session_id: str | None = None
     room: nio.MatrixRoom | None = None

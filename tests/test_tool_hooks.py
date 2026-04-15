@@ -49,7 +49,13 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_cache_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -174,6 +180,7 @@ def _tool_runtime_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
         correlation_id="corr-runtime",
         hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,

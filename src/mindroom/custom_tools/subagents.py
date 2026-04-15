@@ -57,14 +57,6 @@ def _context_error(tool_name: str) -> str:
     )
 
 
-def _conversation_cache_error(tool_name: str) -> str:
-    return _payload(
-        tool_name,
-        "error",
-        message="Conversation cache is unavailable in this runtime path.",
-    )
-
-
 def _get_context() -> ToolRuntimeContext | None:
     context = get_tool_runtime_context()
     if context is None or context.storage_path is None:
@@ -264,7 +256,7 @@ async def _send_matrix_text(
 ) -> str | None:
     """Send a formatted text message to a Matrix room, optionally in a thread."""
     latest_thread_event_id = None
-    if thread_id is not None and context.conversation_cache is not None:
+    if thread_id is not None:
         latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
@@ -280,7 +272,7 @@ async def _send_matrix_text(
     if original_sender:
         content[ORIGINAL_SENDER_KEY] = original_sender
     delivered = await send_message_result(context.client, room_id, content)
-    if delivered is not None and context.conversation_cache is not None:
+    if delivered is not None:
         context.conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
     if delivered is not None:
         return delivered.event_id
@@ -309,7 +301,6 @@ async def _spawn_followup_warnings(
     last_summary_count: int | None = 1,
 ) -> list[str]:
     warnings: list[str] = []
-    assert context.conversation_cache is not None
     try:
         summary_event_id = await send_thread_summary_event(
             context.client,
@@ -534,8 +525,6 @@ class SubAgentsTools(Toolkit):
         context = _get_context()
         if context is None:
             return _context_error("sessions_send")
-        if context.conversation_cache is None:
-            return _conversation_cache_error("sessions_send")
 
         if not message.strip():
             return _payload("sessions_send", "error", message="Message cannot be empty.")
@@ -609,8 +598,6 @@ class SubAgentsTools(Toolkit):
         context = _get_context()
         if context is None:
             return _context_error("sessions_spawn")
-        if context.conversation_cache is None:
-            return _conversation_cache_error("sessions_spawn")
 
         normalized_task = task.strip()
         if not normalized_task:

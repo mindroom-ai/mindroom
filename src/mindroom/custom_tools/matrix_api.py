@@ -397,9 +397,7 @@ class MatrixApiTools(Toolkit):
         event_id: str,
     ) -> str | None:
         """Resolve one event's cached thread root through the public conversation cache when available."""
-        if context.conversation_cache is not None:
-            return await context.conversation_cache.get_thread_id_for_event(room_id, event_id)
-        return await context.event_cache.get_thread_id_for_event(room_id, event_id)
+        return await context.conversation_cache.get_thread_id_for_event(room_id, event_id)
 
     @staticmethod
     async def _event_info_for_event(
@@ -408,20 +406,14 @@ class MatrixApiTools(Toolkit):
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
-        if context.conversation_cache is not None:
-            response = await context.conversation_cache.get_event(room_id, event_id)
-            if isinstance(response, nio.RoomGetEventResponse):
-                return EventInfo.from_event(response.event.source)
-            if isinstance(response, RoomGetEventError) and response.status_code == "M_NOT_FOUND":
-                return None
-            detail = response.message if isinstance(response, RoomGetEventError) else "unknown error"
-            msg = f"Failed to resolve Matrix event {event_id}: {detail}"
-            raise RuntimeError(msg)
-
-        event = await context.event_cache.get_event(room_id, event_id)
-        if not isinstance(event, dict):
+        response = await context.conversation_cache.get_event(room_id, event_id)
+        if isinstance(response, nio.RoomGetEventResponse):
+            return EventInfo.from_event(response.event.source)
+        if isinstance(response, RoomGetEventError) and response.status_code == "M_NOT_FOUND":
             return None
-        return EventInfo.from_event(event)
+        detail = response.message if isinstance(response, RoomGetEventError) else "unknown error"
+        msg = f"Failed to resolve Matrix event {event_id}: {detail}"
+        raise RuntimeError(msg)
 
     @staticmethod
     async def _requires_conversation_cache_write(
@@ -505,11 +497,7 @@ class MatrixApiTools(Toolkit):
         requires_conversation_cache_write: bool,
     ) -> None:
         """Record a successful threaded room-message send in the local conversation cache."""
-        if (
-            event_type != "m.room.message"
-            or context.conversation_cache is None
-            or not requires_conversation_cache_write
-        ):
+        if event_type != "m.room.message" or not requires_conversation_cache_write:
             return
         context.conversation_cache.notify_outbound_message(
             room_id,
@@ -573,14 +561,6 @@ class MatrixApiTools(Toolkit):
                 event_type=normalized_event_type,
                 message="Failed to resolve threaded Matrix message send target.",
             )
-        if requires_conversation_cache_write and context.conversation_cache is None:
-            return self._error_payload(
-                action="send_event",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                message="Conversation cache is required for threaded Matrix message sends.",
-            )
-
         if dry_run:
             return self._payload(
                 "ok",
@@ -895,7 +875,7 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
-    async def _redact(  # noqa: C901,PLR0911
+    async def _redact(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -934,9 +914,6 @@ class MatrixApiTools(Toolkit):
             )
             error_message = "Failed to resolve redaction target thread mapping."
             requires_conversation_cache_write = False
-        else:
-            if requires_conversation_cache_write and context.conversation_cache is None:
-                error_message = "Conversation cache is required for threaded Matrix message redactions."
 
         if dry_run:
             if error_message is not None:
@@ -995,7 +972,7 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomRedactResponse):
-            if requires_conversation_cache_write and context.conversation_cache is not None:
+            if requires_conversation_cache_write:
                 context.conversation_cache.notify_outbound_redaction(
                     room_id,
                     normalized_event_id,

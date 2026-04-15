@@ -47,7 +47,7 @@ from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerSpec
-from tests.conftest import FakeCredentialsManager, make_event_cache_mock
+from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1158,6 +1158,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         ),
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -1264,6 +1265,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
         ),
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
     )
 
     with tool_runtime_context(runtime_context):

@@ -26,6 +26,7 @@ from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.conftest import (
     bind_runtime_paths,
     install_runtime_cache_support,
+    make_matrix_client_mock,
     make_visible_message,
     patch_response_runner_module,
     runtime_paths_for,
@@ -52,11 +53,7 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGene
 
 
 def _make_matrix_client_mock() -> AsyncMock:
-    client = AsyncMock()
-    client.rooms = {}
-    client.next_batch = "s_test_token"
-    client.add_event_callback = MagicMock()
-    client.add_response_callback = MagicMock()
+    client = make_matrix_client_mock()
     client.room_get_event_relations = MagicMock(return_value=_empty_event_iterator())
     return client
 

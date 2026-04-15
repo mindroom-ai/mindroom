@@ -40,6 +40,7 @@ from tests.conftest import (
     delivered_matrix_event,
     install_runtime_cache_support,
     install_send_response_mock,
+    make_conversation_cache_mock,
     make_event_cache_mock,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -561,6 +562,7 @@ class TestCreateSessionIdWithNoneThread:
             config=config,
             runtime_paths=runtime_paths_for(config),
             event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
             reply_to_event_id="$event456",
             session_id=create_session_id("!room:localhost", None),
         )

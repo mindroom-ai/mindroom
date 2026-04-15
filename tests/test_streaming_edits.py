@@ -19,6 +19,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -34,11 +35,7 @@ async def _empty_event_iterator() -> AsyncGenerator[object, None]:
 
 
 def _make_matrix_client_mock() -> AsyncMock:
-    client = AsyncMock()
-    client.rooms = {}
-    client.next_batch = "s_test_token"
-    client.add_event_callback = MagicMock()
-    client.add_response_callback = MagicMock()
+    client = make_matrix_client_mock(user_id="@mindroom_calculator:localhost")
     client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _empty_event_iterator())
     return client
 
