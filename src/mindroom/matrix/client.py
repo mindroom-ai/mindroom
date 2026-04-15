@@ -1208,9 +1208,16 @@ def _sort_thread_history_root_first(
     messages: list[ResolvedVisibleMessage],
     *,
     thread_id: str,
+    input_order_by_event_id: dict[str, int] | None = None,
 ) -> None:
     """Keep the thread root first, then order the remaining messages chronologically."""
-    messages.sort(key=lambda message: (message.timestamp, message.event_id))
+    messages.sort(
+        key=lambda message: (
+            message.timestamp,
+            input_order_by_event_id.get(message.event_id, 0) if input_order_by_event_id is not None else 0,
+            message.event_id,
+        ),
+    )
     root_index = next((index for index, message in enumerate(messages) if message.event_id == thread_id), None)
     if root_index not in (None, 0):
         messages.insert(0, messages.pop(root_index))
@@ -1284,6 +1291,11 @@ async def _resolve_thread_history_from_event_sources_timed(
     hydrate_sidecars: bool = True,
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Resolve visible thread history and return approximate sidecar hydration time."""
+    input_order_by_event_id: dict[str, int] = {}
+    for index, event_source in enumerate(event_sources):
+        event_id = event_source.get("event_id")
+        if isinstance(event_id, str):
+            input_order_by_event_id[event_id] = index
     parsed_events = [
         parsed_event
         for event_source in event_sources
@@ -1322,7 +1334,11 @@ async def _resolve_thread_history_from_event_sources_timed(
         required_thread_id=thread_id,
     )
     messages = list(messages_by_event_id.values())
-    _sort_thread_history_root_first(messages, thread_id=thread_id)
+    _sort_thread_history_root_first(
+        messages,
+        thread_id=thread_id,
+        input_order_by_event_id=input_order_by_event_id,
+    )
     return messages, round((time.perf_counter() - sidecar_hydration_started) * 1000, 1)
 
 

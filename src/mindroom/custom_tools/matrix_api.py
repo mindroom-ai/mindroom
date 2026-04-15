@@ -479,7 +479,7 @@ class MatrixApiTools(Toolkit):
                 original_event_id=event_info.original_event_id,
                 error=str(exc),
             )
-            return True
+            return False
 
     @staticmethod
     async def _redaction_requires_conversation_cache_write(
@@ -505,7 +505,7 @@ class MatrixApiTools(Toolkit):
                 target_event_id=event_id,
                 error=str(exc),
             )
-            return True
+            return False
 
     @staticmethod
     async def _record_send_event_outbound_cache_write(

@@ -1298,6 +1298,69 @@ class TestThreadHistory:
         assert set(resolved) == {"$root", "$z-parent", "$a-child"}
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_keeps_same_timestamp_promoted_descendant(self) -> None:
+        """Cold history reconstruction should keep promoted descendants even when event-id sort is non-causal."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "root"},
+        )
+        explicit_reply = self._make_text_event(
+            event_id="$explicit",
+            sender="@agent:localhost",
+            body="explicit reply",
+            server_timestamp=1500,
+            source_content={
+                "msgtype": "m.text",
+                "body": "explicit reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+            },
+        )
+        plain_parent = self._make_text_event(
+            event_id="$zzz_parent",
+            sender="@bridge:localhost",
+            body="bridged parent",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "bridged parent",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$root"}},
+            },
+        )
+        plain_child = self._make_text_event(
+            event_id="$aaa_child",
+            sender="@bridge:localhost",
+            body="bridged child",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "bridged child",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$zzz_parent"}},
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [plain_child, plain_parent, explicit_reply, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = (
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$root",
+                hydrate_sidecars=True,
+            )
+        ).history
+
+        event_ids = [message.event_id for message in history]
+        assert event_ids == ["$root", "$explicit", "$zzz_parent", "$aaa_child"]
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_multiple_edits_keeps_latest(self) -> None:
         """When multiple edits exist, keep the latest one deterministically."""
         client = AsyncMock()

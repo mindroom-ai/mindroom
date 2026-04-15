@@ -459,6 +459,40 @@ async def test_matrix_api_send_event_room_mode_edit_with_cache_does_not_notify_t
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_send_event_room_mode_edit_fails_open_on_thread_lookup_error() -> None:
+    """Room-mode edits should still send when advisory thread lookup fails."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    ctx.event_cache.get_thread_id_for_event.side_effect = RuntimeError("db broken")
+    content = {
+        "body": "* updated",
+        "msgtype": "m.text",
+        "m.new_content": {"body": "updated", "msgtype": "m.text"},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message"},
+    }
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$send:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="send_event",
+                event_type="m.room.message",
+                content=content,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.client.room_send.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        message_type="m.room.message",
+        content=content,
+    )
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_send_event_rejects_threaded_edit_without_conversation_cache() -> None:
     """Threaded edits must require cache write-through even when only the cached original reveals the thread."""
     tool = MatrixApiTools()
@@ -649,6 +683,34 @@ async def test_matrix_api_redact_room_level_target_does_not_notify_thread_bookke
 
     assert payload["status"] == "ok"
     ctx.conversation_cache.notify_outbound_redaction.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_redact_room_level_target_fails_open_on_thread_lookup_error() -> None:
+    """Room-level redactions should still proceed when advisory thread lookup fails."""
+    tool = MatrixApiTools()
+    ctx = _make_context(conversation_cache=None)
+    ctx.event_cache.get_thread_id_for_event.side_effect = RuntimeError("db broken")
+    ctx.client.room_redact.return_value = nio.RoomRedactResponse(
+        event_id="$redaction:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$target:localhost",
+                reason="cleanup",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.client.room_redact.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        event_id="$target:localhost",
+        reason="cleanup",
+    )
 
 
 @pytest.mark.asyncio
