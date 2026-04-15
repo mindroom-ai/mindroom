@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.ollama import OllamaEmbedder
@@ -128,40 +128,70 @@ def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_pa
     git_config = base_config.git
     return (
         *_indexing_settings_key(config, storage_path, base_id, knowledge_path),
+        str(base_config.embedding_max_in_flight_requests),
         str(base_config.watch),
         str(git_config.poll_interval_seconds) if git_config is not None else "",
         git_config.credentials_service or "" if git_config is not None else "",
     )
 
 
-def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
+class _ThrottledEmbedder:
+    """Cap concurrent async embedding calls."""
+
+    def __init__(self, embedder: Embedder, *, max_concurrent: int) -> None:
+        self._embedder = embedder
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._embedder, name)
+
+    def get_embedding(self, text: str) -> list[float]:
+        return self._embedder.get_embedding(text)
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        return self._embedder.get_embedding_and_usage(text)
+
+    async def async_get_embedding(self, text: str) -> list[float]:
+        async with self._semaphore:
+            return await self._embedder.async_get_embedding(text)
+
+    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        async with self._semaphore:
+            return await self._embedder.async_get_embedding_and_usage(text)
+
+
+def _create_embedder(config: Config, runtime_paths: RuntimePaths, base_id: str) -> Embedder:
     provider = config.memory.embedder.provider
     embedder_config = config.memory.embedder.config
+    max_in_flight_requests = config.get_knowledge_base_config(base_id).embedding_max_in_flight_requests
 
     if provider == "openai":
-        return MindRoomOpenAIEmbedder(
+        embedder: Embedder = MindRoomOpenAIEmbedder(
             id=embedder_config.model,
             api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
             base_url=embedder_config.host,
             dimensions=embedder_config.dimensions,
         )
-
-    if provider == "ollama":
+    elif provider == "ollama":
         host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or "http://localhost:11434"
-        return OllamaEmbedder(id=embedder_config.model, host=host)
-
-    if provider == "sentence_transformers":
-        return create_sentence_transformers_embedder(
+        embedder = OllamaEmbedder(id=embedder_config.model, host=host)
+    elif provider == "sentence_transformers":
+        embedder = create_sentence_transformers_embedder(
             runtime_paths,
             embedder_config.model,
             dimensions=embedder_config.dimensions,
         )
+    else:
+        msg = (
+            f"Unsupported knowledge embedder provider: {provider}. "
+            "Supported providers: openai, ollama, sentence_transformers"
+        )
+        raise ValueError(msg)
 
-    msg = (
-        f"Unsupported knowledge embedder provider: {provider}. "
-        "Supported providers: openai, ollama, sentence_transformers"
-    )
-    raise ValueError(msg)
+    if max_in_flight_requests <= 0:
+        return embedder
+
+    return cast("Embedder", _ThrottledEmbedder(embedder, max_concurrent=max_in_flight_requests))
 
 
 def _coerce_int(value: object) -> int | None:
@@ -400,9 +430,15 @@ class KnowledgeManager:
             collection=_collection_name(self.base_id, self.knowledge_path),
             path=str(self._base_storage_path),
             persistent_client=True,
-            embedder=_create_embedder(self.config, self.runtime_paths),
+            embedder=_create_embedder(self.config, self.runtime_paths, self.base_id),
         )
         self._knowledge = Knowledge(vector_db=vector_db)
+        if base_config.embedding_max_in_flight_requests > 0:
+            logger.info(
+                "Knowledge indexing embedding backpressure enabled",
+                base_id=self.base_id,
+                max_in_flight_requests=base_config.embedding_max_in_flight_requests,
+            )
 
     def _set_settings(
         self,
@@ -432,7 +468,7 @@ class KnowledgeManager:
     ) -> None:
         self._set_settings(config, runtime_paths, storage_path, knowledge_path)
         if isinstance(self._knowledge.vector_db, ChromaDb):
-            self._knowledge.vector_db.embedder = _create_embedder(config, runtime_paths)
+            self._knowledge.vector_db.embedder = _create_embedder(config, runtime_paths, self.base_id)
 
     def _knowledge_source_path(self) -> Path:
         knowledge_path = self.knowledge_path
