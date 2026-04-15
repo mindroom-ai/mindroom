@@ -2,6 +2,8 @@ import type { PROVIDERS } from '@/lib/providers';
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
+export type ConnectionAuthKind = 'api_key' | 'google_adc' | 'oauth_client' | 'none';
+export type ConnectionPurpose = 'chat_model' | 'embedder' | 'memory_llm' | 'voice_stt';
 export type WorkerScope = 'shared' | 'user' | 'user_agent';
 export type PrivateWorkerScope = Exclude<WorkerScope, 'shared'>;
 export type AgentPolicySource =
@@ -16,9 +18,16 @@ export const SHARED_CONTEXT_FILE_PLACEHOLDER = 'SOUL.md';
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
+  connection?: string | null;
   context_window?: number | null;
   host?: string; // For ollama
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
+}
+
+export interface ConnectionConfig {
+  provider: string;
+  service?: string | null;
+  auth_kind: ConnectionAuthKind;
 }
 
 export interface MemoryConfig {
@@ -28,8 +37,19 @@ export interface MemoryConfig {
     provider: string;
     config: {
       model: string;
+      connection?: string | null;
       host?: string;
       dimensions?: number;
+    };
+  };
+  llm?: {
+    provider: string;
+    connection?: string | null;
+    config: {
+      model?: string;
+      host?: string;
+      base_url?: string;
+      openai_base_url?: string;
     };
   };
   file?: {
@@ -237,7 +257,7 @@ export interface Room {
 export interface VoiceSTTConfig {
   provider: string;
   model: string;
-  api_key?: string;
+  connection?: string | null;
   host?: string;
 }
 
@@ -253,6 +273,7 @@ export interface VoiceConfig {
 }
 
 export interface Config {
+  connections?: Record<string, ConnectionConfig>;
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   cultures?: Record<string, Omit<Culture, 'id'>>; // Culture configurations
@@ -282,6 +303,41 @@ export interface Config {
   teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
+}
+
+export function canonicalConnectionProvider(provider: string): string {
+  return provider === 'gemini' ? 'google' : provider;
+}
+
+export function defaultConnectionIdForPurpose(
+  provider: string,
+  purpose: ConnectionPurpose,
+  _connections?: Record<string, ConnectionConfig> | null
+): string | null {
+  const canonicalProvider = canonicalConnectionProvider(provider);
+  let connectionId: string | null = null;
+  if (canonicalProvider === 'vertexai_claude') {
+    connectionId = 'vertexai_claude/default';
+  } else if (purpose === 'embedder') {
+    connectionId = canonicalProvider === 'openai' ? 'openai/embeddings' : null;
+  } else if (purpose === 'voice_stt') {
+    connectionId = canonicalProvider === 'openai' ? 'openai/stt' : null;
+  } else if (
+    canonicalProvider === 'openai' ||
+    canonicalProvider === 'anthropic' ||
+    canonicalProvider === 'google' ||
+    canonicalProvider === 'openrouter' ||
+    canonicalProvider === 'deepseek' ||
+    canonicalProvider === 'cerebras' ||
+    canonicalProvider === 'groq'
+  ) {
+    connectionId = `${canonicalProvider}/default`;
+  }
+
+  if (connectionId === null) {
+    return null;
+  }
+  return connectionId;
 }
 
 export interface AgentPolicy {

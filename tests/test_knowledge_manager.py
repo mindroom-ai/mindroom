@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateK
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
@@ -162,6 +163,21 @@ def _mind_private_agent(
     )
 
 
+def _openai_embedder_connections() -> dict[str, dict[str, str]]:
+    return {
+        "openai/embeddings": {
+            "provider": "openai",
+            "service": "openai",
+            "auth_kind": "api_key",
+        },
+    }
+
+
+def _knowledge_test_config(**kwargs: object) -> Config:
+    connections = kwargs.pop("connections", _openai_embedder_connections())
+    return Config(connections=connections, **kwargs)
+
+
 def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Config:
     memory: dict[str, object] | None = None
     if embedder_dimensions is not None:
@@ -175,7 +191,7 @@ def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Confi
                 },
             },
         }
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -196,7 +212,7 @@ def _make_git_config(
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
 ) -> Config:
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -221,7 +237,9 @@ def _make_git_config(
 
 
 def _runtime_paths(config_path: Path, storage_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+    get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-openai-key")
+    return runtime_paths
 
 
 @pytest.fixture
@@ -251,7 +269,7 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
     config_dir.mkdir(parents=True, exist_ok=True)
     runtime_paths = _runtime_paths(config_dir / "config.yaml", tmp_path / "storage")
 
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -280,7 +298,7 @@ async def test_knowledge_manager_treats_missing_dotted_path_as_directory(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     knowledge_path = tmp_path / "docs.v1"
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -350,7 +368,7 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
 
     storage_path = tmp_path / "storage"
     knowledge_path = (tmp_path / "knowledge").resolve()
-    implicit_default = Config(
+    implicit_default = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -365,7 +383,7 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
             },
         },
     )
-    explicit_default = Config(
+    explicit_default = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -408,7 +426,7 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr("mindroom.knowledge.manager.create_sentence_transformers_embedder", _fake_create)
 
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         memory={
@@ -471,7 +489,7 @@ async def test_index_file_uses_configured_chunk_settings(
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -829,7 +847,7 @@ async def test_initialize_shared_knowledge_managers_maintains_registry(
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -843,7 +861,7 @@ async def test_initialize_shared_knowledge_managers_maintains_registry(
     assert set(managers) == {"research", "legal"}
     assert _get_shared_knowledge_manager("research") is managers["research"]
 
-    updated_config = Config(
+    updated_config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -868,7 +886,7 @@ async def test_initialize_shared_knowledge_managers_full_reindex_on_settings_cha
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -881,7 +899,7 @@ async def test_initialize_shared_knowledge_managers_full_reindex_on_settings_cha
     original_manager = managers["research"]
 
     # Change chunk_size to trigger an index-affecting settings mismatch.
-    updated_config = Config(
+    updated_config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -917,7 +935,7 @@ async def test_initialize_shared_knowledge_managers_non_index_setting_change_reu
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -929,7 +947,7 @@ async def test_initialize_shared_knowledge_managers_non_index_setting_change_reu
     managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     original_manager = managers["research"]
 
-    updated_config = Config(
+    updated_config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -963,7 +981,7 @@ async def test_private_knowledge_managers_copy_template_and_isolate_private_inst
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     template_dir = build_private_template_dir()
-    config = Config(
+    config = _knowledge_test_config(
         agents={
             "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
         },
@@ -1057,7 +1075,7 @@ async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassifi
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     docs_path = tmp_path / "nested" / "docs.v1"
-    config = Config(
+    config = _knowledge_test_config(
         agents={
             "researcher": AgentConfig(
                 display_name="Researcher",
@@ -1108,7 +1126,7 @@ async def test_worker_scoped_private_knowledge_refreshes_on_access_without_backg
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     template_dir = build_private_template_dir()
-    config = Config(
+    config = _knowledge_test_config(
         agents={
             "mind": _mind_private_agent(watch=True, template_dir=str(template_dir)),
         },
@@ -1155,7 +1173,7 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     template_dir = build_private_template_dir()
-    config = Config(
+    config = _knowledge_test_config(
         agents={
             "mind": _mind_private_agent(
                 watch=watch,
@@ -1253,7 +1271,7 @@ async def test_private_request_knowledge_managers_are_not_registered_globally(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     template_dir = build_private_template_dir()
-    config = Config(
+    config = _knowledge_test_config(
         agents={
             "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
         },
@@ -1309,7 +1327,7 @@ async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ens
     docs_path = tmp_path / "docs"
     docs_path.mkdir(parents=True, exist_ok=True)
     (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
-    config = Config(
+    config = _knowledge_test_config(
         agents={
             "researcher": AgentConfig(
                 display_name="Researcher",
@@ -1351,7 +1369,7 @@ async def test_get_knowledge_for_base_does_not_fall_back_to_stale_shared_manager
     (docs_b / "guide.md").write_text("Shared docs B.\n", encoding="utf-8")
 
     config_a = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
@@ -1359,7 +1377,7 @@ async def test_get_knowledge_for_base_does_not_fall_back_to_stale_shared_manager
         _runtime_paths(tmp_path / "config-a.yaml", tmp_path / "storage-a"),
     )
     config_b = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
@@ -1392,7 +1410,7 @@ async def test_get_knowledge_for_base_treats_stale_lookup_as_cache_miss(
     (docs_b / "guide.md").write_text("Shared docs B.\n", encoding="utf-8")
 
     config_a = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
@@ -1400,7 +1418,7 @@ async def test_get_knowledge_for_base_treats_stale_lookup_as_cache_miss(
         _runtime_paths(tmp_path / "config-a.yaml", tmp_path / "storage-a"),
     )
     config_b = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
@@ -1444,7 +1462,7 @@ async def test_initialize_shared_knowledge_managers_refreshes_runtime_paths_on_r
     docs_path.mkdir(parents=True, exist_ok=True)
     (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
     config_a = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
@@ -1452,7 +1470,7 @@ async def test_initialize_shared_knowledge_managers_refreshes_runtime_paths_on_r
         _runtime_paths(tmp_path / "cfg-a" / "config.yaml", tmp_path / "storage"),
     )
     config_b = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
@@ -1493,12 +1511,12 @@ async def test_initialize_shared_knowledge_managers_full_reindex_on_cold_setting
     docs_path.mkdir(parents=True, exist_ok=True)
     (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
-    config_a = Config(
+    config_a = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={"research": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
     )
-    config_b = Config(
+    config_b = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={
@@ -1616,7 +1634,7 @@ async def test_initialize_shared_knowledge_managers_refreshes_shared_managers_on
     docs_path.mkdir(parents=True, exist_ok=True)
     (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
     config = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=True)},
@@ -1664,7 +1682,7 @@ async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys
     (docs_b / "guide.md").write_text("Docs B.\n", encoding="utf-8")
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path)
     config_a = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
@@ -1672,7 +1690,7 @@ async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys
         runtime_paths,
     )
     config_b = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
@@ -1714,7 +1732,7 @@ async def test_request_scoped_knowledge_manager_initialization_serializes_per_bi
     """Concurrent request-scoped ensures should serialize creation for the same binding."""
     template_dir = build_private_template_dir()
     config = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={"mind": _mind_private_agent(watch=False, template_dir=str(template_dir))},
             models={},
         ),
@@ -1781,7 +1799,7 @@ async def test_ensure_agent_knowledge_managers_replaces_stale_shared_key_under_c
     (docs_b / "guide.md").write_text("Docs B.\n", encoding="utf-8")
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path)
     config_a = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
@@ -1789,7 +1807,7 @@ async def test_ensure_agent_knowledge_managers_replaces_stale_shared_key_under_c
         runtime_paths,
     )
     config_b = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
             models={},
             knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
@@ -1864,14 +1882,14 @@ async def test_recreated_request_knowledge_managers_full_reindex_on_settings_cha
     template_dir = build_private_template_dir()
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
     config_a = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={"mind": _mind_private_agent(watch=False, template_dir=str(template_dir))},
             models={},
         ),
         runtime_paths,
     )
     config_b = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -1945,7 +1963,7 @@ async def test_private_request_knowledge_managers_are_created_fresh_per_call(
     template_dir = build_private_template_dir()
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path)
     config = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2005,7 +2023,7 @@ async def test_request_bound_private_manager_stays_usable_after_later_private_re
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
     template_dir = build_private_template_dir()
-    config = Config(
+    config = _knowledge_test_config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
@@ -2095,7 +2113,7 @@ async def test_degraded_request_scoped_knowledge_does_not_fall_back_to_cached_pr
 
     template_dir = build_private_template_dir()
     config = bind_runtime_paths(
-        Config(
+        _knowledge_test_config(
             agents={
                 "mind": _mind_private_agent(
                     watch=False,
@@ -2192,7 +2210,7 @@ async def test_sync_git_repository_indexes_files_after_initial_clone(
     await asyncio.to_thread(_run_git, "git", "add", "doc.md")
     await asyncio.to_thread(_run_git, "git", "commit", "-m", "init")
 
-    config = Config(
+    config = _knowledge_test_config(
         agents={},
         models={},
         knowledge_bases={

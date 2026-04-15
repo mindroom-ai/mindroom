@@ -1,12 +1,4 @@
-import {
-  type Dispatch,
-  type ReactNode,
-  type SetStateAction,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react';
+import { type Dispatch, type ReactNode, type SetStateAction, useMemo, useState } from 'react';
 import {
   type Column,
   type ColumnDef,
@@ -27,13 +19,13 @@ import {
 } from '@/components/ui/select';
 import { EditorPanel } from '@/components/shared/EditorPanel';
 import { showSaveFailureToastIfNeeded } from '@/components/shared';
-import { ArrowUpDown, Copy, Pencil, Plus, Save, Settings, Trash2, X } from 'lucide-react';
+import { ArrowUpDown, Pencil, Plus, Save, Settings, Trash2 } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { ProviderLogo } from './ProviderLogos';
 import { getProviderInfo, getProviderList } from '@/lib/providers';
-import type { ProviderType } from '@/types/config';
+import { defaultConnectionIdForPurpose, type ProviderType } from '@/types/config';
 
 interface RowDraft {
   modelName: string;
@@ -41,23 +33,7 @@ interface RowDraft {
   modelId: string;
   baseUrl: string;
   contextWindow: string;
-  apiKey: string;
-  selectedKeySourceModel: string;
-  clearCustomKey: boolean;
-}
-
-interface KeyStatus {
-  hasKey: boolean;
-  source: string | null;
-  maskedKey: string | null;
-}
-
-interface KeyDisplayInfo {
-  hasKey: boolean;
-  label: string;
-  maskedKey: string | null;
-  keyId: string | null;
-  sourceLabel: string;
+  connection: string;
 }
 
 interface ModelRowData {
@@ -67,7 +43,8 @@ interface ModelRowData {
   modelId: string;
   openAIBaseUrl: string | null;
   contextWindow: number | null;
-  keyDisplay: KeyDisplayInfo | null;
+  connection: string | null;
+  effectiveConnection: string | null;
 }
 
 const EMPTY_DRAFT: RowDraft = {
@@ -76,62 +53,10 @@ const EMPTY_DRAFT: RowDraft = {
   modelId: '',
   baseUrl: '',
   contextWindow: '',
-  apiKey: '',
-  selectedKeySourceModel: '',
-  clearCustomKey: false,
+  connection: '',
 };
 
-const NONE_OPTION_VALUE = '__none__';
-
-const KEY_BADGE_COLORS = [
-  'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/25',
-  'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25',
-  'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25',
-  'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25',
-  'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/25',
-  'bg-lime-500/10 text-lime-700 dark:text-lime-300 border-lime-500/25',
-  'bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/25',
-  'bg-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/25',
-  'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25',
-];
-
-const NO_KEY_BADGE_COLOR = 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25';
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
-
-function hashString(value: string): number {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) % 2147483647;
-  }
-  return Math.abs(hash);
-}
-
-function getKeyBadgeColorClass(keyId: string | null): string {
-  if (!keyId) {
-    return NO_KEY_BADGE_COLOR;
-  }
-  return KEY_BADGE_COLORS[hashString(keyId) % KEY_BADGE_COLORS.length];
-}
-
-function providerToService(provider: string): string {
-  return provider === 'gemini' ? 'google' : provider;
-}
-
-function sourceToLabel(source: string | null, hasKey: boolean): string {
-  if (!hasKey) {
-    return 'Not set';
-  }
-  if (source === 'env') {
-    return '.env';
-  }
-  if (source === 'ui') {
-    return 'UI';
-  }
-  if (source) {
-    return source;
-  }
-  return '.env';
-}
 
 function getOpenAIBaseUrl(modelConfig: { extra_kwargs?: Record<string, unknown> }): string | null {
   const extraKwargs = modelConfig.extra_kwargs;
@@ -170,105 +95,9 @@ function parseOptionalPositiveInteger(value: string): number | null {
   return parsed;
 }
 
-async function fetchKeyStatus(service: string): Promise<KeyStatus> {
-  try {
-    const res = await fetch(`/api/credentials/${service}/api-key?key_name=api_key`);
-    if (!res.ok) {
-      return { hasKey: false, source: null, maskedKey: null };
-    }
-
-    const data = await res.json();
-    return {
-      hasKey: data.has_key,
-      source: data.source || null,
-      maskedKey: data.masked_key || null,
-    };
-  } catch {
-    return { hasKey: false, source: null, maskedKey: null };
-  }
-}
-
-async function fetchApiKeyValue(service: string): Promise<string | null> {
-  try {
-    const res = await fetch(
-      `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`
-    );
-    if (!res.ok) {
-      return null;
-    }
-
-    const data = await res.json();
-    return data.api_key || null;
-  } catch {
-    return null;
-  }
-}
-
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fall back to document.execCommand below
-    }
-  }
-
-  if (typeof document === 'undefined') {
-    return false;
-  }
-
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  const copied = document.execCommand('copy');
-  document.body.removeChild(textarea);
-  return copied;
-}
-
-function getKeyStatusDisplay(
-  modelName: string,
-  provider: string,
-  modelKeys: Record<string, KeyStatus>,
-  providerKeys: Record<string, KeyStatus>
-): KeyDisplayInfo | null {
-  if (provider === 'ollama') {
-    return null;
-  }
-
-  const modelKey = modelKeys[modelName];
-  if (modelKey?.hasKey) {
-    return {
-      hasKey: true,
-      label: 'Custom key',
-      maskedKey: modelKey.maskedKey,
-      keyId: modelKey.maskedKey ? `key:${modelKey.maskedKey}` : `model:${modelName}`,
-      sourceLabel: sourceToLabel(modelKey.source, true),
-    };
-  }
-
-  const providerKey = providerKeys[provider];
-  if (providerKey?.hasKey) {
-    return {
-      hasKey: true,
-      label: 'Provider key',
-      maskedKey: providerKey.maskedKey,
-      keyId: providerKey.maskedKey ? `key:${providerKey.maskedKey}` : `provider:${provider}`,
-      sourceLabel: sourceToLabel(providerKey.source, true),
-    };
-  }
-
-  return {
-    hasKey: false,
-    label: 'No API key',
-    maskedKey: null,
-    keyId: null,
-    sourceLabel: sourceToLabel(null, false),
-  };
+function normalizeConnection(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed || null;
 }
 
 function SortableHeader({
@@ -300,157 +129,131 @@ function renderTableValue<TContext>(
   return renderer;
 }
 
+function renderOpenAIEndpointEditor(draft: RowDraft, setDraft: Dispatch<SetStateAction<RowDraft>>) {
+  if (draft.provider !== 'openai') {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2" onClick={event => event.stopPropagation()}>
+      <Input
+        value={draft.baseUrl}
+        onChange={event => {
+          const baseUrl = event.target.value;
+          setDraft(current => ({ ...current, baseUrl }));
+        }}
+        onClick={event => event.stopPropagation()}
+        placeholder={DEFAULT_OPENAI_BASE_URL}
+        className="h-8 text-xs"
+      />
+      <p className="text-xs text-muted-foreground">
+        Leave empty to use{' '}
+        <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{DEFAULT_OPENAI_BASE_URL}</code>.
+      </p>
+    </div>
+  );
+}
+
+function renderContextWindowEditor(draft: RowDraft, setDraft: Dispatch<SetStateAction<RowDraft>>) {
+  return (
+    <div className="space-y-2" onClick={event => event.stopPropagation()}>
+      <Input
+        value={draft.contextWindow}
+        onChange={event => {
+          const contextWindow = event.target.value;
+          setDraft(current => ({ ...current, contextWindow }));
+        }}
+        onClick={event => event.stopPropagation()}
+        placeholder="optional context window"
+        inputMode="numeric"
+        className="h-8 text-xs"
+      />
+      <p className="text-xs text-muted-foreground">
+        Required for compaction-aware budgeting when the provider does not report it elsewhere.
+      </p>
+    </div>
+  );
+}
+
+function renderConnectionSummary(row: Pick<ModelRowData, 'connection' | 'effectiveConnection'>) {
+  if (row.connection) {
+    return (
+      <div className="space-y-1">
+        <Badge variant="outline" className="text-xs">
+          Explicit connection
+        </Badge>
+        <p className="font-mono text-xs text-muted-foreground">{row.connection}</p>
+      </div>
+    );
+  }
+
+  if (row.effectiveConnection) {
+    return (
+      <div className="space-y-1">
+        <Badge variant="outline" className="text-xs">
+          Configured default
+        </Badge>
+        <p className="font-mono text-xs text-muted-foreground">{row.effectiveConnection}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <Badge variant="outline" className="text-xs">
+        No default connection
+      </Badge>
+      <p className="font-mono text-xs text-muted-foreground">Set an explicit connection id.</p>
+    </div>
+  );
+}
+
+function renderConnectionEditor(
+  draft: RowDraft,
+  setDraft: Dispatch<SetStateAction<RowDraft>>,
+  defaultConnection: string | null
+) {
+  return (
+    <div className="space-y-2" onClick={event => event.stopPropagation()}>
+      <Input
+        value={draft.connection}
+        onChange={event => {
+          const connection = event.target.value;
+          setDraft(current => ({ ...current, connection }));
+        }}
+        onClick={event => event.stopPropagation()}
+        placeholder={defaultConnection ?? 'explicit connection id'}
+        className="h-8 text-xs"
+      />
+      {defaultConnection ? (
+        <p className="text-xs text-muted-foreground">
+          Leave empty to use{' '}
+          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{defaultConnection}</code>.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          No default connection is configured for this provider. Set an explicit connection id.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ModelConfig() {
   const { config, updateModel, deleteModel, saveConfig, isLoading } = useConfigStore();
 
-  const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>({});
-  const [modelKeys, setModelKeys] = useState<Record<string, KeyStatus>>({});
   const [sorting, setSorting] = useState<SortingState>([
     { id: 'provider', desc: false },
     { id: 'modelName', desc: false },
   ]);
-
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
   const [isSavingRow, setIsSavingRow] = useState(false);
-
   const [isAddingRow, setIsAddingRow] = useState(false);
   const [newRowDraft, setNewRowDraft] = useState<RowDraft>(EMPTY_DRAFT);
   const [isSavingNewRow, setIsSavingNewRow] = useState(false);
 
   const models = useMemo(() => config?.models ?? {}, [config?.models]);
-
-  const fetchAllKeyStatuses = useCallback(async () => {
-    if (!config) {
-      return;
-    }
-
-    const modelEntries = Object.entries(config.models);
-    const uniqueProviders = [...new Set(modelEntries.map(([_, model]) => model.provider))].filter(
-      provider => provider !== 'ollama'
-    );
-
-    const [providerResults, modelResults] = await Promise.all([
-      Promise.all(
-        uniqueProviders.map(async provider => {
-          return [provider, await fetchKeyStatus(providerToService(provider))] as const;
-        })
-      ),
-      Promise.all(
-        modelEntries
-          .filter(([_, model]) => model.provider !== 'ollama')
-          .map(async ([modelName]) => {
-            return [modelName, await fetchKeyStatus(`model:${modelName}`)] as const;
-          })
-      ),
-    ]);
-
-    const nextProviderKeys = Object.fromEntries(providerResults);
-    const nextModelKeys = Object.fromEntries(modelResults);
-    setProviderKeys(nextProviderKeys);
-    setModelKeys(nextModelKeys);
-  }, [config]);
-
-  useEffect(() => {
-    fetchAllKeyStatuses();
-  }, [fetchAllKeyStatuses]);
-
-  const saveModelApiKey = async (modelName: string, apiKey: string): Promise<boolean> => {
-    try {
-      const res = await fetch(`/api/credentials/model:${modelName}/api-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          service: `model:${modelName}`,
-          api_key: apiKey,
-          key_name: 'api_key',
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error('Failed to save API key');
-      }
-
-      return true;
-    } catch {
-      toast({ title: 'Error', description: 'Failed to save API key', variant: 'destructive' });
-      return false;
-    }
-  };
-
-  const copyModelApiKey = async (
-    targetModelName: string,
-    sourceModelName: string
-  ): Promise<boolean> => {
-    try {
-      const res = await fetch(
-        `/api/credentials/model:${targetModelName}/copy-from/model:${sourceModelName}`,
-        { method: 'POST' }
-      );
-
-      if (!res.ok) {
-        throw new Error('Failed to copy API key');
-      }
-
-      return true;
-    } catch {
-      toast({ title: 'Error', description: 'Failed to copy API key', variant: 'destructive' });
-      return false;
-    }
-  };
-
-  const deleteModelApiKey = async (modelName: string): Promise<boolean> => {
-    try {
-      const res = await fetch(`/api/credentials/model:${modelName}`, { method: 'DELETE' });
-      if (!res.ok) {
-        throw new Error('Failed to clear API key');
-      }
-
-      return true;
-    } catch {
-      toast({ title: 'Error', description: 'Failed to clear API key', variant: 'destructive' });
-      return false;
-    }
-  };
-
-  const getProviderScopedKeyModels = (provider: string, excludedModelNames: string[] = []) => {
-    return Object.entries(models)
-      .filter(
-        ([modelName, modelConfig]) =>
-          !excludedModelNames.includes(modelName) &&
-          modelConfig.provider === provider &&
-          modelKeys[modelName]?.hasKey
-      )
-      .map(([modelName]) => ({ modelName, maskedKey: modelKeys[modelName]?.maskedKey || null }));
-  };
-
-  const copyApiKeyForRow = async (modelName: string, provider: string) => {
-    const service = modelKeys[modelName]?.hasKey
-      ? `model:${modelName}`
-      : providerToService(provider);
-
-    const apiKey = await fetchApiKeyValue(service);
-    if (!apiKey) {
-      toast({
-        title: 'Error',
-        description: 'API key is not available for copying',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    const copied = await copyTextToClipboard(apiKey);
-    if (!copied) {
-      toast({
-        title: 'Error',
-        description: 'Failed to copy API key',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    toast({ title: 'Copied', description: `API key copied from ${service}` });
-  };
 
   const startEditingRow = (row: ModelRowData) => {
     setEditingRowId(row.modelName);
@@ -460,9 +263,7 @@ export function ModelConfig() {
       modelId: row.modelId,
       baseUrl: row.openAIBaseUrl || '',
       contextWindow: row.contextWindow != null ? String(row.contextWindow) : '',
-      apiKey: '',
-      selectedKeySourceModel: '',
-      clearCustomKey: false,
+      connection: row.connection || '',
     });
   };
 
@@ -579,38 +380,9 @@ export function ModelConfig() {
       return;
     }
     const normalizedContextWindow = contextWindowValidation.value;
+    const normalizedConnection = normalizeConnection(rowDraft.connection);
 
     setIsSavingRow(true);
-
-    const renamed = targetModelName !== originalModelName;
-    const hadCustomKey = Boolean(modelKeys[originalModelName]?.hasKey);
-    const hasManualApiKey = Boolean(rowDraft.apiKey.trim());
-    const hasKeyReuseSource = Boolean(rowDraft.selectedKeySourceModel);
-
-    let keyOperationOk = true;
-
-    if (rowDraft.provider !== 'ollama') {
-      if (hasKeyReuseSource) {
-        keyOperationOk = await copyModelApiKey(targetModelName, rowDraft.selectedKeySourceModel);
-      } else if (hasManualApiKey) {
-        keyOperationOk = await saveModelApiKey(targetModelName, rowDraft.apiKey.trim());
-      } else if (rowDraft.clearCustomKey && hadCustomKey) {
-        keyOperationOk = await deleteModelApiKey(originalModelName);
-      } else if (renamed && hadCustomKey) {
-        keyOperationOk = await copyModelApiKey(targetModelName, originalModelName);
-      }
-    } else if (hadCustomKey) {
-      keyOperationOk = await deleteModelApiKey(originalModelName);
-    }
-
-    if (keyOperationOk && renamed && hadCustomKey && !rowDraft.clearCustomKey) {
-      keyOperationOk = await deleteModelApiKey(originalModelName);
-    }
-
-    if (!keyOperationOk) {
-      setIsSavingRow(false);
-      return;
-    }
 
     const nextModelConfig = {
       ...originalModelConfig,
@@ -628,27 +400,35 @@ export function ModelConfig() {
     } else {
       delete nextExtraKwargs.base_url;
     }
+
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
     } else {
       delete nextModelConfig.extra_kwargs;
     }
+
     if (normalizedContextWindow != null) {
       nextModelConfig.context_window = normalizedContextWindow;
     } else {
       delete nextModelConfig.context_window;
     }
 
+    if (normalizedConnection) {
+      nextModelConfig.connection = normalizedConnection;
+    } else {
+      delete nextModelConfig.connection;
+    }
+
     if (rowDraft.provider !== 'ollama') {
       delete nextModelConfig.host;
     }
 
+    const renamed = targetModelName !== originalModelName;
     updateModel(targetModelName, nextModelConfig);
     if (renamed) {
       deleteModel(originalModelName);
     }
 
-    await fetchAllKeyStatuses();
     setIsSavingRow(false);
     cancelEditingRow();
 
@@ -692,32 +472,24 @@ export function ModelConfig() {
       return;
     }
     const normalizedContextWindow = contextWindowValidation.value;
+    const normalizedConnection = normalizeConnection(newRowDraft.connection);
 
     setIsSavingNewRow(true);
-
-    let keyOperationOk = true;
-    if (newRowDraft.provider !== 'ollama') {
-      if (newRowDraft.selectedKeySourceModel) {
-        keyOperationOk = await copyModelApiKey(modelName, newRowDraft.selectedKeySourceModel);
-      } else if (newRowDraft.apiKey.trim()) {
-        keyOperationOk = await saveModelApiKey(modelName, newRowDraft.apiKey.trim());
-      }
-    }
-
-    if (!keyOperationOk) {
-      setIsSavingNewRow(false);
-      return;
-    }
 
     const nextModelConfig: {
       provider: ProviderType;
       id: string;
+      connection?: string;
       context_window?: number;
       extra_kwargs?: Record<string, unknown>;
     } = {
       provider: newRowDraft.provider as ProviderType,
       id: modelId,
     };
+
+    if (normalizedConnection) {
+      nextModelConfig.connection = normalizedConnection;
+    }
     if (newRowDraft.provider === 'openai' && normalizedBaseUrl) {
       nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
     }
@@ -727,7 +499,6 @@ export function ModelConfig() {
 
     updateModel(modelName, nextModelConfig);
 
-    await fetchAllKeyStatuses();
     setIsSavingNewRow(false);
     cancelAddingRow();
 
@@ -757,14 +528,13 @@ export function ModelConfig() {
 
   const rows = useMemo<ModelRowData[]>(() => {
     return Object.entries(models).map(([modelName, modelConfig]) => {
-      const keyDisplay = getKeyStatusDisplay(
-        modelName,
-        modelConfig.provider,
-        modelKeys,
-        providerKeys
-      );
       const openAIBaseUrl =
         modelConfig.provider === 'openai' ? getOpenAIBaseUrl(modelConfig) : null;
+      const configuredDefaultConnection = defaultConnectionIdForPurpose(
+        modelConfig.provider,
+        'chat_model',
+        config?.connections
+      );
 
       return {
         modelName,
@@ -773,251 +543,12 @@ export function ModelConfig() {
         modelId: modelConfig.id,
         openAIBaseUrl,
         contextWindow: modelConfig.context_window ?? null,
-        keyDisplay,
+        connection: normalizeConnection(modelConfig.connection ?? ''),
+        effectiveConnection:
+          normalizeConnection(modelConfig.connection ?? '') ?? configuredDefaultConnection,
       };
     });
-  }, [models, modelKeys, providerKeys]);
-
-  const renderReadonlyKeyStatus = (
-    keyDisplay: KeyDisplayInfo | null,
-    modelName?: string,
-    provider?: string
-  ) => {
-    if (!keyDisplay) {
-      return <span className="text-sm text-muted-foreground">N/A</span>;
-    }
-
-    return (
-      <div className="space-y-1">
-        <div className="flex items-center gap-1.5">
-          <Badge
-            variant="outline"
-            className={cn(
-              'text-xs',
-              getKeyBadgeColorClass(keyDisplay.hasKey ? keyDisplay.keyId : null)
-            )}
-          >
-            {keyDisplay.label}
-            {keyDisplay.maskedKey && (
-              <span className="ml-1 font-mono opacity-80">{keyDisplay.maskedKey}</span>
-            )}
-          </Badge>
-          {keyDisplay.hasKey && modelName && provider && (
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-6 w-6"
-              title="Copy API key"
-              onClick={event => {
-                event.stopPropagation();
-                void copyApiKeyForRow(modelName, provider);
-              }}
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </Button>
-          )}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Source:{' '}
-          {keyDisplay.sourceLabel === '.env' ? (
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">.env</code>
-          ) : (
-            keyDisplay.sourceLabel
-          )}
-        </p>
-      </div>
-    );
-  };
-
-  const renderEditableApiCell = (
-    draft: RowDraft,
-    setDraft: Dispatch<SetStateAction<RowDraft>>,
-    currentModelName?: string
-  ) => {
-    if (draft.provider === 'ollama') {
-      return <span className="text-xs text-muted-foreground">No key needed for Ollama</span>;
-    }
-
-    const providerKeyOptions = getProviderScopedKeyModels(
-      draft.provider,
-      currentModelName ? [currentModelName] : []
-    );
-
-    const hasCustomKey = Boolean(currentModelName && modelKeys[currentModelName]?.hasKey);
-    const hasManualApiKey = Boolean(draft.apiKey.trim());
-    const hasReuseSource = Boolean(draft.selectedKeySourceModel);
-    const isClearingCustomKey =
-      hasCustomKey && draft.clearCustomKey && !hasManualApiKey && !hasReuseSource;
-    const providerFallbackKey = providerKeys[draft.provider];
-    const currentStatus = currentModelName
-      ? getKeyStatusDisplay(currentModelName, draft.provider, modelKeys, providerKeys)
-      : null;
-
-    return (
-      <div className="space-y-2" onClick={event => event.stopPropagation()}>
-        {currentStatus && currentModelName && (
-          <div className="space-y-1">
-            {renderReadonlyKeyStatus(currentStatus, currentModelName, draft.provider)}
-            {hasCustomKey && (
-              <>
-                <Button
-                  size="sm"
-                  variant={isClearingCustomKey ? 'outline' : 'ghost'}
-                  className={cn(
-                    'h-7 px-2 text-xs',
-                    isClearingCustomKey
-                      ? 'border-amber-500/40 text-amber-700 dark:text-amber-300'
-                      : 'text-destructive hover:text-destructive'
-                  )}
-                  onClick={() => {
-                    setDraft(current => ({
-                      ...current,
-                      clearCustomKey: !isClearingCustomKey,
-                      apiKey: '',
-                      selectedKeySourceModel: '',
-                    }));
-                  }}
-                >
-                  <X className="mr-1 h-3 w-3" />
-                  {isClearingCustomKey ? 'Undo clear key' : 'Clear custom key'}
-                </Button>
-                {isClearingCustomKey && (
-                  <p className="text-xs text-amber-700 dark:text-amber-300">
-                    Custom key will be removed on save.
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        <Input
-          type="password"
-          value={draft.apiKey}
-          onChange={event => {
-            const apiKey = event.target.value;
-            setDraft(current => ({
-              ...current,
-              apiKey,
-              selectedKeySourceModel: '',
-              clearCustomKey: false,
-            }));
-          }}
-          placeholder="Paste new API key"
-          className="h-8 text-xs"
-        />
-
-        {providerKeyOptions.length > 0 && (
-          <Select
-            value={draft.selectedKeySourceModel || NONE_OPTION_VALUE}
-            onValueChange={modelName => {
-              if (modelName === NONE_OPTION_VALUE) {
-                setDraft(current => ({ ...current, selectedKeySourceModel: '' }));
-                return;
-              }
-
-              setDraft(current => ({
-                ...current,
-                selectedKeySourceModel: modelName,
-                apiKey: '',
-                clearCustomKey: false,
-              }));
-            }}
-          >
-            <SelectTrigger className="h-8 text-xs">
-              <div className="flex items-center gap-1.5 truncate">
-                <Copy className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">
-                  {draft.selectedKeySourceModel
-                    ? `Reuse key from ${draft.selectedKeySourceModel}`
-                    : 'Reuse from same provider'}
-                </span>
-              </div>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE_OPTION_VALUE}>Do not reuse key</SelectItem>
-              {providerKeyOptions.map(option => (
-                <SelectItem key={option.modelName} value={option.modelName}>
-                  <div className="flex items-center gap-2">
-                    <span>{option.modelName}</span>
-                    {option.maskedKey && (
-                      <span className="text-xs text-muted-foreground">({option.maskedKey})</span>
-                    )}
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
-
-        {!hasManualApiKey && !hasReuseSource && (
-          <p className="text-xs text-muted-foreground">
-            {providerFallbackKey?.hasKey
-              ? `No custom key provided. This model will use the provider key (${sourceToLabel(
-                  providerFallbackKey.source,
-                  true
-                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ''}).`
-              : 'No custom key provided. This model will use the provider key (for example from .env) when available.'}
-          </p>
-        )}
-      </div>
-    );
-  };
-
-  const renderOpenAIEndpointEditor = (
-    draft: RowDraft,
-    setDraft: Dispatch<SetStateAction<RowDraft>>
-  ) => {
-    if (draft.provider !== 'openai') {
-      return null;
-    }
-
-    return (
-      <div className="space-y-2" onClick={event => event.stopPropagation()}>
-        <Input
-          value={draft.baseUrl}
-          onChange={event => {
-            const baseUrl = event.target.value;
-            setDraft(current => ({ ...current, baseUrl }));
-          }}
-          onClick={event => event.stopPropagation()}
-          placeholder={DEFAULT_OPENAI_BASE_URL}
-          className="h-8 text-xs"
-        />
-        <p className="text-xs text-muted-foreground">
-          Leave empty to use{' '}
-          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
-            {DEFAULT_OPENAI_BASE_URL}
-          </code>
-          .
-        </p>
-      </div>
-    );
-  };
-
-  const renderContextWindowEditor = (
-    draft: RowDraft,
-    setDraft: Dispatch<SetStateAction<RowDraft>>
-  ) => {
-    return (
-      <div className="space-y-2" onClick={event => event.stopPropagation()}>
-        <Input
-          value={draft.contextWindow}
-          onChange={event => {
-            const contextWindow = event.target.value;
-            setDraft(current => ({ ...current, contextWindow }));
-          }}
-          onClick={event => event.stopPropagation()}
-          placeholder="optional context window"
-          inputMode="numeric"
-          className="h-8 text-xs"
-        />
-        <p className="text-xs text-muted-foreground">
-          Required for compaction-aware budgeting when the provider does not report it elsewhere.
-        </p>
-      </div>
-    );
-  };
+  }, [config?.connections, models]);
 
   const columns: ColumnDef<ModelRowData>[] = [
     {
@@ -1069,9 +600,7 @@ export function ModelConfig() {
                         ...current,
                         provider,
                         baseUrl: provider === 'openai' ? current.baseUrl : '',
-                        apiKey: '',
-                        selectedKeySourceModel: '',
-                        clearCustomKey: provider === 'ollama' ? true : current.clearCustomKey,
+                        connection: '',
                       }
                     : current
                 );
@@ -1145,23 +674,19 @@ export function ModelConfig() {
       },
     },
     {
-      id: 'apiKey',
-      accessorFn: row => row.keyDisplay?.keyId || '',
-      header: ({ column }) => <SortableHeader label="API Key" column={column} />,
+      id: 'connection',
+      accessorFn: row => row.effectiveConnection,
+      header: ({ column }) => <SortableHeader label="Connection" column={column} />,
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
-          return renderReadonlyKeyStatus(
-            row.original.keyDisplay,
-            row.original.modelName,
-            row.original.provider
-          );
+          return renderConnectionSummary(row.original);
         }
 
-        return renderEditableApiCell(
+        return renderConnectionEditor(
           rowDraft,
           setRowDraft as Dispatch<SetStateAction<RowDraft>>,
-          row.original.modelName
+          defaultConnectionIdForPurpose(rowDraft.provider, 'chat_model', config?.connections)
         );
       },
     },
@@ -1177,7 +702,7 @@ export function ModelConfig() {
             <div className="flex justify-end gap-1" onClick={event => event.stopPropagation()}>
               <Button
                 size="sm"
-                onClick={handleSaveRow}
+                onClick={() => void handleSaveRow()}
                 disabled={isSavingRow}
                 className="h-7 px-2 text-xs"
               >
@@ -1258,7 +783,7 @@ export function ModelConfig() {
 
         <div className="rounded-lg border">
           <div className="overflow-x-auto" data-testid="models-table-scroll-container">
-            <table className="w-full min-w-[840px] text-sm">
+            <table className="w-full min-w-[880px] text-sm">
               <thead>
                 {table.getHeaderGroups().map(headerGroup => (
                   <tr key={headerGroup.id} className="border-b bg-muted/50">
@@ -1300,9 +825,8 @@ export function ModelConfig() {
                           setNewRowDraft(current => ({
                             ...current,
                             provider,
-                            apiKey: '',
-                            selectedKeySourceModel: '',
                             baseUrl: provider === 'openai' ? current.baseUrl : '',
+                            connection: '',
                           }));
                         }}
                       >
@@ -1337,13 +861,21 @@ export function ModelConfig() {
                       </div>
                     </td>
                     <td className="px-4 py-2.5 align-middle">
-                      {renderEditableApiCell(newRowDraft, setNewRowDraft)}
+                      {renderConnectionEditor(
+                        newRowDraft,
+                        setNewRowDraft,
+                        defaultConnectionIdForPurpose(
+                          newRowDraft.provider,
+                          'chat_model',
+                          config?.connections
+                        )
+                      )}
                     </td>
                     <td className="px-4 py-2.5 align-middle text-right">
                       <div className="flex justify-end gap-1">
                         <Button
                           size="sm"
-                          onClick={handleSaveNewRow}
+                          onClick={() => void handleSaveNewRow()}
                           disabled={isSavingNewRow}
                           className="h-7 px-2 text-xs"
                         >

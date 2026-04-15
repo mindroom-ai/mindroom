@@ -7,7 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import IO, TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
+from mindroom.cli import config as cli_config_module
 from mindroom.cli.config import _activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.config.main import Config
@@ -29,13 +30,48 @@ from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
 from tests.conftest import normalize_console_output
 
-runner = CliRunner()
+if TYPE_CHECKING:
+    from click.testing import Result
+
+
+class _StableCliRunner:
+    """CliRunner wrapper with a deterministic terminal width for Rich/Typer output."""
+
+    def __init__(self) -> None:
+        self._runner = CliRunner()
+
+    def invoke(
+        self,
+        app: typer.Typer,
+        args: str | list[str] | None = None,
+        input: bytes | str | IO[str] | IO[bytes] | None = None,  # noqa: A002
+        env: dict[str, str | None] | None = None,
+        catch_exceptions: bool = True,
+        color: bool = False,
+        **extra: object,
+    ) -> Result:
+        extra.setdefault("terminal_width", 200)
+        return self._runner.invoke(
+            app,
+            args,
+            input=input,
+            env=env,
+            catch_exceptions=catch_exceptions,
+            color=color,
+            **extra,
+        )
+
+
+runner = _StableCliRunner()
 
 
 @pytest.fixture(autouse=True)
 def _clear_runtime_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("LINES", "50")
+    monkeypatch.setattr(cli_config_module.console, "_width", 200)
 
 
 def _runtime_path_env(config_path: Path, *, storage_path: Path | None = None) -> dict[str, str]:
@@ -52,11 +88,11 @@ def _invoke_with_runtime(
     storage_path: Path | None = None,
     env: dict[str, str] | None = None,
     **kwargs: object,
-) -> object:
+) -> Result:
     command_env = _runtime_path_env(config_path, storage_path=storage_path)
     if env:
         command_env.update(env)
-    return cast("object", runner.invoke(app, args, env=command_env, **kwargs))
+    return runner.invoke(app, args, env=command_env, **kwargs)
 
 
 def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
@@ -646,6 +682,15 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
+    def test_validate_repo_config_template(self) -> None:
+        """The shipped starter template should validate without authored connection blocks."""
+        cfg = Path(__file__).resolve().parents[1] / "src" / "mindroom" / "config_template.yaml"
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "valid" in result.output.lower()
+
     def test_validate_missing_file(self, tmp_path: Path) -> None:
         """Config validate exits 1 when file is missing."""
         missing = tmp_path / "nonexistent.yaml"
@@ -1153,22 +1198,47 @@ class TestAvatarsCommands:
 # mindroom doctor
 # ---------------------------------------------------------------------------
 
-_VALID_CONFIG = (
+_ANTHROPIC_DEFAULT_CONNECTION = (
+    "  anthropic/default:\n    provider: anthropic\n    service: anthropic\n    auth_kind: api_key\n"
+)
+_OPENAI_DEFAULT_CONNECTION = "  openai/default:\n    provider: openai\n    service: openai\n    auth_kind: api_key\n"
+_OPENAI_EMBEDDER_CONNECTION = (
+    "  openai/embeddings:\n    provider: openai\n    service: openai\n    auth_kind: api_key\n"
+)
+_VERTEXAI_CLAUDE_DEFAULT_CONNECTION = (
+    "  vertexai_claude/default:\n"
+    "    provider: vertexai_claude\n"
+    "    service: google_vertex_adc\n"
+    "    auth_kind: google_adc\n"
+)
+
+
+def _with_connections(body: str, *entries: str) -> str:
+    return "connections:\n" + "".join(entries) + body
+
+
+_VALID_CONFIG = _with_connections(
     "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
-    "router:\n  model: default\n"
+    "router:\n  model: default\n",
+    _ANTHROPIC_DEFAULT_CONNECTION,
+    _OPENAI_EMBEDDER_CONNECTION,
 )
-_VALID_VERTEXAI_CLAUDE_CONFIG = (
+_VALID_VERTEXAI_CLAUDE_CONFIG = _with_connections(
     "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4-6\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
-    "router:\n  model: default\n"
+    "router:\n  model: default\n",
+    _VERTEXAI_CLAUDE_DEFAULT_CONNECTION,
+    _OPENAI_EMBEDDER_CONNECTION,
 )
-_VALID_MULTI_VERTEXAI_CLAUDE_CONFIG = (
+_VALID_MULTI_VERTEXAI_CLAUDE_CONFIG = _with_connections(
     "models:\n"
     "  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4-6\n"
     "  fast:\n    provider: vertexai_claude\n    id: claude-haiku-4-5\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
-    "router:\n  model: default\n"
+    "router:\n  model: default\n",
+    _VERTEXAI_CLAUDE_DEFAULT_CONNECTION,
+    _OPENAI_EMBEDDER_CONNECTION,
 )
 
 
@@ -1212,12 +1282,12 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "✓" in result.output
         assert "✗" not in result.output
-        assert "6 passed" in result.output
+        assert "7 passed" in result.output
         assert "0 failed" in result.output
         assert "1 warning" in result.output  # memory LLM not configured
         assert "Providers:" in result.output
         assert "anthropic (1 model)" in result.output
-        assert "API key valid" in result.output
+        assert "connection 'anthropic/default' valid" in result.output
 
     def test_doctor_uses_active_config_sibling_env_from_exported_config_path(
         self,
@@ -1265,9 +1335,10 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert len(status_messages) == 6
+        assert len(status_messages) == 7
         assert any("Matrix homeserver" in msg for msg in status_messages)
         assert any("memory config" in msg for msg in status_messages)
+        assert any("voice config" in msg for msg in status_messages)
 
     def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when config file is missing."""
@@ -1301,8 +1372,8 @@ class TestDoctor:
         assert "Config invalid" in result.output
         assert "Could not read configuration text" in result.output
 
-    def test_missing_api_key_is_warning(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor warns (not fails) on missing API keys."""
+    def test_missing_api_key_is_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor fails when required active connections are missing API keys."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
@@ -1311,9 +1382,12 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 0
-        assert "ANTHROPIC_API_KEY not set" in result.output
-        assert "3 warnings" in result.output
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1
+        assert "anthropic model 'default' connection error" in output
+        assert "Connection 'anthropic/default' is missing credentials" in output
+        assert "Memory embedder connection error" in output
+        assert "Connection 'openai/embeddings' is missing credentials" in output
 
     def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when Matrix homeserver is unreachable."""
@@ -1367,18 +1441,23 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
-        assert "API key invalid" in result.output
+        assert "anthropic connection 'anthropic/default' invalid" in result.output
 
     def test_provider_summary_multiple_providers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor shows provider summary with correct model counts."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n"
-            "  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "  fast:\n    provider: anthropic\n    id: claude-haiku-4-5\n"
-            "  gpt:\n    provider: openai\n    id: gpt-4o\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            _with_connections(
+                "models:\n"
+                "  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "  fast:\n    provider: anthropic\n    id: claude-haiku-4-5\n"
+                "  gpt:\n    provider: openai\n    id: gpt-4o\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+                _OPENAI_DEFAULT_CONNECTION,
+                _OPENAI_EMBEDDER_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1402,6 +1481,9 @@ class TestDoctor:
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        adc_path = tmp_path / "vertex-adc.json"
+        adc_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
         _patch_homeserver_ok(monkeypatch)
 
         called: dict[str, object] = {}
@@ -1427,7 +1509,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "vertexai_claude connection valid for claude-sonnet-4-6" in result.output
+        assert "vertexai_claude connection valid for model 'default' (claude-sonnet-4-6)" in result.output
         assert called["model_id"] == "claude-sonnet-4-6"
         assert called["client_kwargs"] == {
             "id": "claude-sonnet-4-6",
@@ -1454,6 +1536,9 @@ class TestDoctor:
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        adc_path = tmp_path / "vertex-adc.json"
+        adc_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
         _patch_homeserver_ok(monkeypatch)
 
         created_models: list[str] = []
@@ -1478,10 +1563,46 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "vertexai_claude connection valid for claude-sonnet-4-6" in result.output
-        assert "vertexai_claude connection valid for claude-haiku-4-5" in result.output
+        assert "vertexai_claude connection valid for model 'default' (claude-sonnet-4-6)" in result.output
+        assert "vertexai_claude connection valid for model 'fast' (claude-haiku-4-5)" in result.output
         assert created_models == ["claude-sonnet-4-6", "claude-haiku-4-5"]
         assert requested_models == ["claude-sonnet-4-6", "claude-haiku-4-5"]
+
+    def test_vertexai_claude_allows_ambient_adc_without_stored_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor should allow ambient ADC when no credentials file path is stored."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS_FILE", raising=False)
+        _patch_homeserver_ok(monkeypatch)
+
+        class _FakeMessages:
+            def create(self, **_kwargs: object) -> SimpleNamespace:
+                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
+
+        class _FakeVertexModel:
+            def __init__(self, **kwargs: object) -> None:
+                self.id = str(kwargs["id"])
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_FakeMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        assert result.exit_code == 0
+        assert "vertexai_claude connection valid for model 'default' (claude-sonnet-4-6)" in result.output
 
     def test_vertexai_claude_missing_env_is_warning(
         self,
@@ -1497,6 +1618,9 @@ class TestDoctor:
         monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
         monkeypatch.delenv("CLOUD_ML_REGION_FILE", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        adc_path = tmp_path / "vertex-adc.json"
+        adc_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
         _patch_homeserver_ok(monkeypatch)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
@@ -1517,6 +1641,9 @@ class TestDoctor:
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        adc_path = tmp_path / "vertex-adc.json"
+        adc_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
         _patch_homeserver_ok(monkeypatch)
 
         class _MissingCredentialsMessages:
@@ -1554,6 +1681,9 @@ class TestDoctor:
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        adc_path = tmp_path / "vertex-adc.json"
+        adc_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
         _patch_homeserver_ok(monkeypatch)
 
         class _RejectedMessages:
@@ -1576,21 +1706,25 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
-        assert "vertexai_claude connection failed for claude-sonnet-4-6" in result.output
+        assert "vertexai_claude connection failed for model 'default' (claude-sonnet-4-6)" in result.output
         assert "HTTP 403" in result.output
 
     def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor validates against custom base_url when configured."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n"
-            "  default:\n"
-            "    provider: openai\n"
-            "    id: local-model\n"
-            "    extra_kwargs:\n"
-            "      base_url: http://localhost:9292/v1\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            _with_connections(
+                "models:\n"
+                "  default:\n"
+                "    provider: openai\n"
+                "    id: local-model\n"
+                "    extra_kwargs:\n"
+                "      base_url: http://localhost:9292/v1\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n",
+                _OPENAI_DEFAULT_CONNECTION,
+                _OPENAI_EMBEDDER_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("OPENAI_API_KEY", "sk-local")
@@ -1623,15 +1757,18 @@ class TestDoctor:
         """Doctor checks ollama embedder reachability via /api/tags."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  embedder:\n"
-            "    provider: ollama\n"
-            "    config:\n"
-            "      model: nomic-embed-text\n"
-            "      host: http://localhost:11434\n",
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  embedder:\n"
+                "    provider: ollama\n"
+                "    config:\n"
+                "      model: nomic-embed-text\n"
+                "      host: http://localhost:11434\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1649,14 +1786,19 @@ class TestDoctor:
         """Doctor validates configured memory LLM API key."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  llm:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: gpt-4o-mini\n",
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  llm:\n"
+                "    provider: openai\n"
+                "    config:\n"
+                "      model: gpt-4o-mini\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+                _OPENAI_DEFAULT_CONNECTION,
+                _OPENAI_EMBEDDER_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1668,22 +1810,27 @@ class TestDoctor:
         assert "Memory LLM: openai/gpt-4o-mini API key valid" in result.output
         assert "Memory embedder:" in result.output
 
-    def test_memory_llm_missing_key_is_warning(
+    def test_memory_llm_missing_key_is_failure(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor warns when memory LLM API key is not set."""
+        """Doctor fails when the configured memory LLM connection is missing its API key."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  llm:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: gpt-4o-mini\n",
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  llm:\n"
+                "    provider: openai\n"
+                "    config:\n"
+                "      model: gpt-4o-mini\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+                _OPENAI_DEFAULT_CONNECTION,
+                _OPENAI_EMBEDDER_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1691,8 +1838,10 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 0
-        assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1
+        assert "Memory LLM connection error" in output
+        assert "Connection 'openai/default' is missing credentials" in output
 
     def test_memory_llm_openai_base_url_used_when_host_absent(
         self,
@@ -1702,15 +1851,20 @@ class TestDoctor:
         """Doctor uses openai_base_url from mem0 LLM config when host is absent."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  llm:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: gpt-oss-low\n"
-            "      openai_base_url: http://localllm:9292/v1\n",
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  llm:\n"
+                "    provider: openai\n"
+                "    config:\n"
+                "      model: gpt-oss-low\n"
+                "      openai_base_url: http://localllm:9292/v1\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+                _OPENAI_DEFAULT_CONNECTION,
+                _OPENAI_EMBEDDER_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1743,15 +1897,19 @@ class TestDoctor:
         """Doctor validates custom OpenAI embedder hosts using /embeddings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  embedder:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: embeddinggemma:300m\n"
-            "      host: http://llama.local/v1\n",
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  embedder:\n"
+                "    provider: openai\n"
+                "    config:\n"
+                "      model: embeddinggemma:300m\n"
+                "      host: http://llama.local/v1\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+                _OPENAI_EMBEDDER_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1779,15 +1937,19 @@ class TestDoctor:
         """Doctor adds a local-network hint for .local routing failures."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  embedder:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: embeddinggemma:300m\n"
-            "      host: http://llama.local/v1\n",
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  embedder:\n"
+                "    provider: openai\n"
+                "    config:\n"
+                "      model: embeddinggemma:300m\n"
+                "      host: http://llama.local/v1\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+                _OPENAI_EMBEDDER_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1808,6 +1970,43 @@ class TestDoctor:
         assert "reachable LAN" in output
         assert "instead of .local" in output
 
+    def test_doctor_reports_auth_free_openai_voice_stt_connection_as_valid(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor should treat auth-free OpenAI-compatible STT connections as valid."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  embedder:\n"
+                "    provider: sentence_transformers\n"
+                "    config:\n"
+                "      model: sentence-transformers/all-MiniLM-L6-v2\n"
+                "voice:\n"
+                "  enabled: true\n"
+                "  stt:\n"
+                "    provider: openai\n"
+                "    model: whisper-1\n"
+                "    host: http://localhost:9292\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+                "  openai/default:\n    provider: openai\n    auth_kind: none\n",
+            ),
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        output = normalize_console_output(result.output)
+
+        assert result.exit_code == 0
+        assert "Voice STT (openai) connection 'openai/stt' auth-free (no key required)" in output
+
     def test_memory_sentence_transformers_embedder_runs_local_smoke_test(
         self,
         tmp_path: Path,
@@ -1816,14 +2015,17 @@ class TestDoctor:
         """Doctor validates sentence-transformers embedders by loading the local model."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  embedder:\n"
-            "    provider: sentence_transformers\n"
-            "    config:\n"
-            "      model: sentence-transformers/all-MiniLM-L6-v2\n",
+            _with_connections(
+                "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+                "agents:\n  a:\n    display_name: A\n    model: default\n"
+                "router:\n  model: default\n"
+                "memory:\n"
+                "  embedder:\n"
+                "    provider: sentence_transformers\n"
+                "    config:\n"
+                "      model: sentence-transformers/all-MiniLM-L6-v2\n",
+                _ANTHROPIC_DEFAULT_CONNECTION,
+            ),
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")

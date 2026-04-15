@@ -12,9 +12,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom import constants
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.credentials import (
+    SHARED_CREDENTIALS_PATH_ENV,
+    get_runtime_credentials_manager,
+    get_runtime_shared_credentials_manager,
+)
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
@@ -59,6 +62,11 @@ _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _worker_runtime_google_adc_filename(service: str, source_path: Path) -> str:
+    """Return a collision-resistant mirrored ADC filename for one worker."""
+    return f"{service.replace(':', '_')}-{source_path.name}"
 
 
 class _ApiStatusError(Exception):
@@ -639,28 +647,64 @@ class KubernetesResourceManager:
 
     def _worker_google_application_credentials_path(
         self,
+        worker_key: str,
         dedicated_root: Path,
         *,
         local_dedicated_root: Path,
     ) -> str | None:
-        """Return a worker-visible ADC file path, copying the source into shared storage when needed."""
-        raw_value = self.runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
-        if raw_value is None or not raw_value.strip():
-            return None
-        if not self.storage_root.exists():
-            return None
+        """Return a worker-visible ADC file path and rewrite the mirrored credential payload."""
+        worker_shared_manager = (
+            get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key).shared_manager()
+        )
+        shared_manager = get_runtime_shared_credentials_manager(self.runtime_paths)
+        mirrored_paths: dict[str, str] = {}
+        for service in self._configured_google_adc_services():
+            credentials = shared_manager.load_credentials(service)
+            raw_path = credentials.get("application_credentials_path") if isinstance(credentials, dict) else None
+            if (
+                not isinstance(credentials, dict)
+                or not isinstance(raw_path, str)
+                or not raw_path.strip()
+                or not self.storage_root.exists()
+            ):
+                worker_shared_manager.delete_credentials(service)
+                continue
+            source_path = Path(raw_path).expanduser().resolve()
+            if not source_path.is_file():
+                worker_shared_manager.delete_credentials(service)
+                continue
 
-        source_path = constants.runtime_env_path(self.runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        if source_path is None or not source_path.is_file():
-            return None
+            runtime_dir = local_dedicated_root / ".runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            target_name = _worker_runtime_google_adc_filename(service, source_path)
+            target_path = runtime_dir / target_name
+            if source_path.resolve() != target_path.resolve():
+                shutil.copyfile(source_path, target_path)
+                target_path.chmod(0o600)
+            worker_visible_path = str(dedicated_root / ".runtime" / target_name)
+            worker_credentials = dict(cast("dict[str, object]", credentials))
+            worker_credentials["application_credentials_path"] = worker_visible_path
+            worker_shared_manager.save_credentials(service, worker_credentials)
+            mirrored_paths[service] = worker_visible_path
+        return mirrored_paths.get("google_vertex_adc") or next(iter(mirrored_paths.values()), None)
 
-        runtime_dir = local_dedicated_root / ".runtime"
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        target_path = runtime_dir / source_path.name
-        if source_path.resolve() != target_path.resolve():
-            shutil.copyfile(source_path, target_path)
-            target_path.chmod(0o600)
-        return str(dedicated_root / ".runtime" / source_path.name)
+    def _configured_google_adc_services(self) -> tuple[str, ...]:
+        """Return configured Google ADC services, falling back to the conventional default."""
+        try:
+            from mindroom.config.main import load_config  # noqa: PLC0415
+
+            runtime_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
+        except Exception:
+            return ("google_vertex_adc",)
+
+        services = sorted(
+            {
+                connection.service
+                for connection in runtime_config.connections.values()
+                if connection.service is not None and connection.auth_kind == "google_adc"
+            },
+        )
+        return tuple(services) or ("google_vertex_adc",)
 
     def _worker_runtime_paths(
         self,
@@ -679,6 +723,7 @@ class KubernetesResourceManager:
         env_file_values = dict(self.runtime_paths.env_file_values)
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         if google_application_credentials := self._worker_google_application_credentials_path(
+            worker_key,
             dedicated_root,
             local_dedicated_root=local_dedicated_root,
         ):

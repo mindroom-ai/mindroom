@@ -102,8 +102,13 @@ def _startup_runner_token_from_env() -> str | None:
 def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     """Return the active runtime config, or an explicit empty config if none exists."""
     if runtime_paths.config_path.exists():
-        return load_config(runtime_paths)
-    return Config.validate_with_runtime({}, runtime_paths)
+        return load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    return Config.validate_with_runtime(
+        {},
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+        strict_connection_validation=True,
+    )
 
 
 def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:

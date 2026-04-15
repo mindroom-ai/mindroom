@@ -406,8 +406,10 @@ class DefaultsConfig(BaseModel):
 class EmbedderConfig(BaseModel):
     """Configuration for memory embedder."""
 
+    model_config = ConfigDict(extra="forbid")
+
     model: str = Field(default="text-embedding-3-small", description="Model name for embeddings")
-    api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
+    connection: str | None = Field(default=None, description="Optional named credential connection")
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
     dimensions: int | None = Field(
         default=None,
@@ -419,12 +421,14 @@ class EmbedderConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = Field(
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
+    connection: str | None = Field(default=None, description="Optional named credential connection")
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
-    api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
         description="Additional provider-specific parameters passed directly to the model",
@@ -434,6 +438,19 @@ class ModelConfig(BaseModel):
         ge=1,
         description="Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit compaction.model also needs its own context_window for destructive compaction",
     )
+
+    @model_validator(mode="after")
+    def validate_inline_api_key_bypass(self) -> Self:
+        """Reject inline API key injection in model config."""
+        extra_kwargs = self.extra_kwargs or {}
+        if "api_key" in extra_kwargs:
+            msg = "extra_kwargs.api_key is not allowed. Use a named connection instead."
+            raise ValueError(msg)
+        client_params = extra_kwargs.get("client_params")
+        if isinstance(client_params, dict) and "credentials" in client_params:
+            msg = "extra_kwargs.client_params.credentials is not allowed. Use a named connection instead."
+            raise ValueError(msg)
+        return self
 
 
 class RouterConfig(BaseModel):

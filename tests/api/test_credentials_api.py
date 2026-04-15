@@ -9,16 +9,26 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants
+from mindroom.api import config_lifecycle, main
 from mindroom.api import credentials as credentials_api
-from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+
+
+def _openai_test_connections() -> dict[str, dict[str, str]]:
+    return {
+        "openai/default": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+        "openai/embeddings": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+        "openai/stt": {"provider": "openai", "service": "openai", "auth_kind": "api_key"},
+    }
 
 
 def _config_with_worker_scope(worker_scope: str | None) -> Config:
     config = Config.model_validate(
         {
+            "connections": _openai_test_connections(),
             "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
             "agents": {
                 "general": {
@@ -42,6 +52,7 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
+    context.backend_managed_services = config_lifecycle._backend_managed_services_for_config(config)
 
 
 @pytest.fixture
@@ -232,13 +243,13 @@ class TestCredentialsAPI:
         self,
         client: TestClient,
     ) -> None:
-        """Dashboard credential management should fail early for unsupported worker scopes."""
+        """Backend-managed Google token storage stays hidden even for isolating worker scopes."""
         config = _config_with_worker_scope("user")
         _publish_committed_runtime_config(client.app, config)
         response = client.get("/api/credentials/google?agent_name=general")
 
-        assert response.status_code == 400
-        assert "worker_scope=user" in response.json()["detail"]
+        assert response.status_code == 403
+        assert "not available through the generic credentials API" in response.json()["detail"]
 
     def test_list_services_rejects_unsupported_isolating_scope(
         self,
@@ -256,14 +267,13 @@ class TestCredentialsAPI:
         self,
         client: TestClient,
     ) -> None:
-        """Credential management must reject draft-only execution-scope overrides."""
+        """Backend-managed Google token storage stays hidden before draft scope checks run."""
         config = _config_with_worker_scope(None)
         _publish_committed_runtime_config(client.app, config)
         response = client.get("/api/credentials/google?agent_name=general&execution_scope=user")
 
-        assert response.status_code == 409
-        assert "Save the configuration before managing credentials" in response.json()["detail"]
-        assert "execution_scope=user" in response.json()["detail"]
+        assert response.status_code == 403
+        assert "not available through the generic credentials API" in response.json()["detail"]
 
     def test_execution_scope_override_rejects_draft_unscoped_scope(
         self,
@@ -483,7 +493,337 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/list")
 
         assert response.status_code == 200
-        assert response.json() == ["email", "openai", "github"]
+        assert response.json() == ["email", "github", "openai"]
+
+    def test_list_services_hides_backend_managed_services(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Backend-managed OAuth/ADC services should not appear in the generic listing."""
+        config = Config.model_validate(
+            {
+                "connections": {
+                    **_openai_test_connections(),
+                    "google/oauth": {
+                        "provider": "google",
+                        "service": "google_oauth_custom",
+                        "auth_kind": "oauth_client",
+                    },
+                    "vertexai_claude/default": {
+                        "provider": "vertexai_claude",
+                        "service": "google_vertex_adc_custom",
+                        "auth_kind": "google_adc",
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+                "agents": {},
+            },
+        )
+        _publish_committed_runtime_config(client.app, config)
+        mock_credentials_manager.list_services.return_value = [
+            "google_oauth_custom",
+            "openai",
+            "google_vertex_adc_custom",
+        ]
+
+        response = client.get("/api/credentials/list")
+
+        assert response.status_code == 200
+        assert response.json() == ["google_vertex_adc_custom", "openai"]
+
+    def test_backend_managed_service_rejects_generic_get_credentials(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Backend-managed Google auth services should not expose raw payloads via generic endpoints."""
+        config = Config.model_validate(
+            {
+                "connections": {
+                    **_openai_test_connections(),
+                    "google/oauth": {
+                        "provider": "google",
+                        "service": "google_oauth_custom",
+                        "auth_kind": "oauth_client",
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+                "agents": {},
+            },
+        )
+        _publish_committed_runtime_config(client.app, config)
+        response = client.get("/api/credentials/google_oauth_custom")
+
+        assert response.status_code == 403
+        assert "not available through the generic credentials API" in response.json()["detail"]
+
+    def test_google_adc_service_allows_generic_status(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Google ADC services should remain editable through the generic credentials API."""
+        config = Config.model_validate(
+            {
+                "connections": {
+                    **_openai_test_connections(),
+                    "vertexai_claude/default": {
+                        "provider": "vertexai_claude",
+                        "service": "google_vertex_adc_custom",
+                        "auth_kind": "google_adc",
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+                "agents": {},
+            },
+        )
+        _publish_committed_runtime_config(client.app, config)
+        mock_credentials_manager.load_credentials.return_value = {
+            "application_credentials_path": "/tmp/google-adc.json",  # noqa: S108
+            "_source": "ui",
+        }
+        response = client.get("/api/credentials/google_vertex_adc_custom/status")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "service": "google_vertex_adc_custom",
+            "has_credentials": True,
+            "key_names": ["application_credentials_path"],
+        }
+
+    def test_google_token_bucket_rejects_generic_get_credentials(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Stored Google OAuth tokens must stay hidden from the generic credentials API."""
+        config = Config.model_validate(
+            {
+                "connections": _openai_test_connections(),
+                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+                "agents": {},
+            },
+        )
+        _publish_committed_runtime_config(client.app, config)
+        get_runtime_credentials_manager(main._app_runtime_paths(client.app)).save_credentials(
+            "google",
+            {
+                "refresh_token": "refresh-token",
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "_source": "ui",
+            },
+        )
+
+        response = client.get("/api/credentials/google")
+
+        assert response.status_code == 403
+        assert "not available through the generic credentials API" in response.json()["detail"]
+
+    def test_google_gemini_service_remains_visible_in_generic_listing(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """The default Gemini API-key bucket must stay visible through the generic credentials API."""
+        config = Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "google",
+                        "id": "gemini-2.5-flash",
+                    },
+                },
+                "agents": {},
+            },
+            main._app_runtime_paths(client.app),
+            strict_connection_validation=True,
+        )
+        assert config.connections["google/default"].service == "google_gemini"
+        _publish_committed_runtime_config(client.app, config)
+        mock_credentials_manager.list_services.return_value = [
+            "google",
+            "google_gemini",
+            "openai",
+        ]
+
+        response = client.get("/api/credentials/list")
+
+        assert response.status_code == 200
+        assert response.json() == ["google_gemini", "openai"]
+
+    def test_google_gemini_service_allows_generic_api_key_endpoint(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """The default Gemini API-key bucket must not be treated as backend-managed."""
+        config = Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "gemini",
+                        "id": "gemini-2.5-flash",
+                    },
+                },
+                "agents": {},
+            },
+            main._app_runtime_paths(client.app),
+            strict_connection_validation=True,
+        )
+        assert config.connections["google/default"].service == "google_gemini"
+        _publish_committed_runtime_config(client.app, config)
+        mock_credentials_manager.load_credentials.return_value = {
+            "api_key": "test-google-gemini-key",
+            "_source": "ui",
+        }
+
+        response = client.get("/api/credentials/google_gemini/api-key")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["service"] == "google_gemini"
+        assert data["has_key"] is True
+
+    def test_implicit_default_vertex_connection_keeps_adc_service_visible(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Synthesized Vertex defaults should not hide ADC services from the generic editor."""
+        config = Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "vertexai_claude",
+                        "id": "claude-sonnet-4-6",
+                    },
+                },
+                "agents": {},
+            },
+            main._app_runtime_paths(client.app),
+        )
+        assert "vertexai_claude/default" in config.connections
+        assert "connections" not in config.authored_model_dump()
+        _publish_committed_runtime_config(client.app, config)
+        mock_credentials_manager.list_services.return_value = [
+            "google_vertex_adc",
+            "openai",
+        ]
+        mock_credentials_manager.load_credentials.return_value = {
+            "application_credentials_path": "/tmp/google-adc.json",  # noqa: S108
+            "_source": "ui",
+        }
+
+        list_response = client.get("/api/credentials/list")
+        get_response = client.get("/api/credentials/google_vertex_adc")
+        status_response = client.get("/api/credentials/google_vertex_adc/status")
+
+        assert list_response.status_code == 200
+        assert list_response.json() == ["google_vertex_adc", "openai"]
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "google_vertex_adc",
+            "credentials": {
+                "application_credentials_path": "/tmp/google-adc.json",  # noqa: S108
+            },
+        }
+        assert status_response.status_code == 200
+        assert status_response.json() == {
+            "service": "google_vertex_adc",
+            "has_credentials": True,
+            "key_names": ["application_credentials_path"],
+        }
+
+    def test_openai_only_config_hides_stale_google_env_seeded_credentials(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Only the dedicated Google OAuth client service should stay hidden without config references."""
+        config = Config.model_validate(
+            {
+                "connections": _openai_test_connections(),
+                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+                "agents": {},
+            },
+        )
+        _publish_committed_runtime_config(client.app, config)
+        credentials_manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        adc_path = str(main._app_runtime_paths(client.app).storage_root / "google-adc.json")
+        credentials_manager.save_credentials(
+            "google_vertex_adc",
+            {
+                "application_credentials_path": adc_path,
+                "_source": "env",
+            },
+        )
+        credentials_manager.save_credentials(
+            "google_oauth_client",
+            {
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "_source": "env",
+            },
+        )
+
+        list_response = client.get("/api/credentials/list")
+        vertex_response = client.get("/api/credentials/google_vertex_adc")
+        oauth_response = client.get("/api/credentials/google_oauth_client")
+
+        assert list_response.status_code == 200
+        assert "google_vertex_adc" in list_response.json()
+        assert "google_oauth_client" not in list_response.json()
+        assert vertex_response.status_code == 200
+        assert oauth_response.status_code == 403
+        assert "not available through the generic credentials API" in oauth_response.json()["detail"]
+
+    def test_generic_credentials_api_fails_closed_when_config_is_unavailable(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Generic credential reads should fail closed before config has been loaded."""
+        runtime_credentials = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        runtime_credentials.shared_manager().save_credentials(
+            "google_oauth_custom",
+            {
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "_source": "ui",
+            },
+        )
+
+        response = client.get("/api/credentials/google_oauth_custom")
+
+        assert response.status_code == 503
+        assert "Configuration is unavailable" in response.json()["detail"]
+
+    def test_cached_backend_managed_services_hide_custom_google_oauth_when_config_snapshot_is_missing(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Cached protected-service sets should keep custom Google OAuth buckets hidden across snapshot gaps."""
+        config = Config.model_validate(
+            {
+                "connections": {
+                    **_openai_test_connections(),
+                    "google/oauth": {
+                        "provider": "google",
+                        "service": "google_oauth_custom",
+                        "auth_kind": "oauth_client",
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+                "agents": {},
+            },
+        )
+        _publish_committed_runtime_config(client.app, config)
+        context = main._app_context(client.app)
+        context.config_data = {}
+        context.runtime_config = None
+
+        response = client.get("/api/credentials/google_oauth_custom")
+
+        assert response.status_code == 403
+        assert "not available through the generic credentials API" in response.json()["detail"]
 
     def test_get_api_key_returns_source_env(
         self,

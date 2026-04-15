@@ -25,6 +25,8 @@ from mindroom.config.main import (
     iter_config_validation_messages,
 )
 from mindroom.config.main import load_config as load_runtime_config_model
+from mindroom.connections import canonical_connection_provider
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
 
@@ -34,6 +36,7 @@ _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
 _REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
 _REGISTERED_API_APPS_LOCK = threading.Lock()
+_BACKEND_MANAGED_GOOGLE_SERVICES = frozenset({"google", "google_oauth_client"})
 
 type WatchFileFn = Callable[
     [Path | str, Callable[[], Awaitable[None]], asyncio.Event | None],
@@ -60,6 +63,7 @@ class ApiSnapshot:
     runtime_config: Config | None = None
     config_load_result: ConfigLoadResult | None = None
     auth_state: Any | None = None
+    backend_managed_services: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -181,8 +185,11 @@ def persist_runtime_validated_config(
     """Persist one validated config and immediately publish matching committed API snapshots."""
     validated_payload = runtime_config.authored_model_dump()
     matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
+    backend_managed_services = _backend_managed_services_for_config(runtime_config)
     if not matching_states:
+        previous_config = _load_existing_runtime_config_if_available(runtime_paths)
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(previous_config, runtime_config, runtime_paths)
         return
 
     with ExitStack() as stack:
@@ -196,11 +203,13 @@ def persist_runtime_validated_config(
 
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
         for state, snapshot in locked_snapshots:
+            _cleanup_removed_google_oauth_client_services(snapshot.runtime_config, runtime_config, runtime_paths)
             state.snapshot = _published_snapshot(
                 snapshot,
                 config_data=deepcopy(validated_payload),
                 runtime_config=runtime_config,
                 config_load_result=ConfigLoadResult(success=True),
+                backend_managed_services=backend_managed_services,
             )
 
 
@@ -209,8 +218,58 @@ def _validated_config_payload(
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[Config, dict[str, Any]]:
     """Normalize and validate one config payload against the active runtime."""
-    validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
+    validated_config = Config.validate_with_runtime(
+        raw_config,
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+        strict_connection_validation=True,
+    )
     return validated_config, validated_config.authored_model_dump()
+
+
+def _load_existing_runtime_config_if_available(runtime_paths: constants.RuntimePaths) -> Config | None:
+    """Return the current on-disk config when it can be loaded before an overwrite."""
+    try:
+        return load_runtime_config_model(
+            runtime_paths,
+            tolerate_plugin_load_errors=True,
+        )
+    except Exception:
+        return None
+
+
+def _google_oauth_client_services(config: Config | None) -> set[str]:
+    """Return configured Google OAuth client backing services from one config snapshot."""
+    if config is None:
+        return set()
+    return {
+        connection.service
+        for connection in config.connections.values()
+        if connection.service is not None
+        and connection.auth_kind == "oauth_client"
+        and canonical_connection_provider(connection.provider) == "google"
+    }
+
+
+def _backend_managed_services_for_config(config: Config | None) -> frozenset[str]:
+    """Return the cached generic-API denylist for one validated config snapshot."""
+    if config is None:
+        return frozenset()
+    return _BACKEND_MANAGED_GOOGLE_SERVICES | frozenset(_google_oauth_client_services(config))
+
+
+def _cleanup_removed_google_oauth_client_services(
+    previous_config: Config | None,
+    next_config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    """Delete shared Google OAuth client credentials for services removed from config."""
+    removed_services = _google_oauth_client_services(previous_config) - _google_oauth_client_services(next_config)
+    if not removed_services:
+        return
+    shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
+    for service in sorted(removed_services):
+        shared_manager.delete_credentials(service)
 
 
 def _app_config_state(api_app: FastAPI) -> ApiState:
@@ -280,6 +339,7 @@ def _published_snapshot(
     config_data: dict[str, Any] | None = None,
     runtime_config: Config | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
+    backend_managed_services: frozenset[str] | object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
     updated_config_data = snapshot.config_data if config_data is None else config_data
@@ -291,12 +351,18 @@ def _published_snapshot(
         if config_load_result is _UNSET
         else cast("ConfigLoadResult | None", config_load_result)
     )
+    updated_backend_managed_services = (
+        snapshot.backend_managed_services
+        if backend_managed_services is _UNSET
+        else cast("frozenset[str]", backend_managed_services)
+    )
     return replace(
         snapshot,
         generation=snapshot.generation + 1,
         config_data=updated_config_data,
         runtime_config=updated_runtime_config,
         config_load_result=updated_load_result,
+        backend_managed_services=updated_backend_managed_services,
     )
 
 
@@ -359,11 +425,13 @@ def _commit_mutated_snapshot[T](
             raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(current.runtime_config, validated_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
+            backend_managed_services=_backend_managed_services_for_config(validated_config),
         )
         return result
 
@@ -393,7 +461,10 @@ def _validate_raw_config_source(
         validation_path = Path(tmp.name)
     validation_runtime_paths = replace(runtime_paths, config_path=validation_path)
     try:
-        runtime_config = load_runtime_config_model(validation_runtime_paths)
+        runtime_config = load_runtime_config_model(
+            validation_runtime_paths,
+            tolerate_plugin_load_errors=True,
+        )
         return runtime_config, runtime_config.authored_model_dump()
     finally:
         validation_path.unlink(missing_ok=True)
@@ -415,11 +486,13 @@ def _commit_replaced_snapshot(
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(current.runtime_config, validated_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
+            backend_managed_services=_backend_managed_services_for_config(validated_config),
         )
         return current_state.snapshot.generation
 
@@ -441,11 +514,13 @@ def _commit_raw_replaced_snapshot(
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
         _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
+        _cleanup_removed_google_oauth_client_services(current.runtime_config, validated_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload,
             runtime_config=validated_config,
             config_load_result=ConfigLoadResult(success=True),
+            backend_managed_services=_backend_managed_services_for_config(validated_config),
         )
         return current_state.snapshot.generation
 
@@ -590,11 +665,18 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
+        if runtime_config is not None:
+            _cleanup_removed_google_oauth_client_services(current.runtime_config, runtime_config, runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
             config_data=validated_payload if validated_payload is not None else current.config_data,
             runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
             config_load_result=result,
+            backend_managed_services=(
+                _backend_managed_services_for_config(runtime_config)
+                if runtime_config is not None
+                else current.backend_managed_services
+            ),
         )
     return result.success
 

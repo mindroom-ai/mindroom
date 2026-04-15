@@ -18,13 +18,19 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from mindroom import constants
+from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
     issue_pending_oauth_state,
     load_credentials_for_target,
     resolve_request_credentials_target,
+)
+from mindroom.connections import (
+    canonical_connection_provider,
+    connection_oauth_client,
+    default_connection_id,
+    resolve_connection,
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
@@ -36,6 +42,7 @@ if TYPE_CHECKING:
     from google_auth_oauthlib.flow import Flow
 
     from mindroom.api.config_lifecycle import ApiSnapshot
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
@@ -59,6 +66,13 @@ _SCOPES = [
 ]
 
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
+_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE = (
+    "Google OAuth is not configured. Please configure a google/oauth client connection first."
+)
+
+
+class GoogleOAuthNotConfiguredError(ValueError):
+    """Raised when the dashboard cannot find a google/oauth client connection."""
 
 
 def _mindroom_port(runtime_paths: RuntimePaths) -> str:
@@ -97,13 +111,16 @@ class GoogleAuthUrl(BaseModel):
     auth_url: str
 
 
-def _get_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any] | None:
-    """Get OAuth credentials from environment variables."""
-    client_id = runtime_paths.env_value("GOOGLE_CLIENT_ID")
-    client_secret = runtime_paths.env_value("GOOGLE_CLIENT_SECRET")
-
-    if not client_id or not client_secret:
+def _get_oauth_credentials(
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+) -> dict[str, Any] | None:
+    """Get OAuth credentials from the shared google/oauth connection."""
+    oauth_client = _google_oauth_client_pair(runtime_paths, config=config)
+    if oauth_client is None:
         return None
+    client_id, client_secret = oauth_client
 
     return {
         "web": {
@@ -117,11 +134,40 @@ def _get_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any] | None
     }
 
 
-def _require_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any]:
+def _google_oauth_client_pair(
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+) -> tuple[str, str] | None:
+    """Resolve the active Google OAuth client from the configured google/oauth connection."""
+    connection_id = default_connection_id(provider="google", purpose="google_oauth_client")
+    if connection_id is None or connection_id not in config.connections:
+        return None
+    resolved_connection = resolve_connection(
+        config,
+        provider="google",
+        purpose="google_oauth_client",
+        runtime_paths=runtime_paths,
+    )
+    oauth_client = connection_oauth_client(resolved_connection)
+    if oauth_client is None:
+        msg = f"Connection '{resolved_connection.connection_id}' is missing client_id/client_secret"
+        raise ValueError(msg)
+    return oauth_client
+
+
+def _require_oauth_credentials(
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+) -> dict[str, Any]:
     """Return Google OAuth credentials or raise one consistent API error."""
-    oauth_config = _get_oauth_credentials(runtime_paths)
+    try:
+        oauth_config = _get_oauth_credentials(runtime_paths, config=config)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if oauth_config is None:
-        raise HTTPException(status_code=503, detail="OAuth not configured")
+        raise HTTPException(status_code=503, detail=_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
     return oauth_config
 
 
@@ -131,8 +177,6 @@ def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
         "token": creds.token,
         "refresh_token": creds.refresh_token,
         "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
         "scopes": creds.scopes,
         "_source": "ui",
     }
@@ -143,7 +187,12 @@ def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
     return token_data
 
 
-def _get_google_credentials(target: RequestCredentialsTarget, runtime_paths: RuntimePaths) -> Credentials | None:
+def _get_google_credentials(
+    target: RequestCredentialsTarget,
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+) -> Credentials | None:
     """Get Google credentials from stored token."""
     token_data = load_credentials_for_target("google", target)
     if not token_data:
@@ -151,12 +200,15 @@ def _get_google_credentials(target: RequestCredentialsTarget, runtime_paths: Run
 
     try:
         google_request_cls, credentials_cls, _ = _ensure_google_packages(runtime_paths)
+        oauth_client = _google_oauth_client_pair(runtime_paths, config=config)
+        if oauth_client is None:
+            return None
         creds = credentials_cls(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri"),
-            client_id=token_data.get("client_id"),
-            client_secret=token_data.get("client_secret"),
+            client_id=oauth_client[0],
+            client_secret=oauth_client[1],
             scopes=token_data.get("scopes", _SCOPES),
         )
 
@@ -185,13 +237,25 @@ def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> N
     )
 
 
-def _refresh_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
-    """Reload one runtime context after mutating its sibling `.env` file."""
-    return constants.resolve_runtime_paths(
-        config_path=runtime_paths.config_path,
-        storage_path=runtime_paths.storage_root,
-        process_env=dict(runtime_paths.process_env),
-    )
+def _google_oauth_client_service(config: Config) -> str:
+    """Return the backing credential service for the configured google/oauth connection."""
+    connection_id = default_connection_id(provider="google", purpose="google_oauth_client")
+    if connection_id is None:
+        raise GoogleOAuthNotConfiguredError(_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
+
+    connection_config = config.connections.get(connection_id)
+    if connection_config is None:
+        raise GoogleOAuthNotConfiguredError(_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
+    if canonical_connection_provider(connection_config.provider) != "google":
+        msg = f"Google OAuth connection '{connection_id}' must use provider 'google'"
+        raise ValueError(msg)
+    if connection_config.auth_kind != "oauth_client":
+        msg = f"Google OAuth connection '{connection_id}' must use auth_kind 'oauth_client'"
+        raise ValueError(msg)
+    if connection_config.service is None:
+        msg = "Google OAuth client connection is missing its backing credential service"
+        raise ValueError(msg)
+    return connection_config.service
 
 
 def _require_request_snapshot(request: Request) -> ApiSnapshot:
@@ -205,69 +269,56 @@ def _require_request_snapshot(request: Request) -> ApiSnapshot:
     return snapshot
 
 
-def _save_env_credentials(
+def _save_oauth_client_credentials(
     client_id: str,
     client_secret: str,
     runtime_paths: RuntimePaths,
-    project_id: str | None = None,
+    *,
+    config: Config,
 ) -> RuntimePaths:
-    """Save OAuth credentials to .env file."""
-    env_path = runtime_paths.env_path
-    env_lines = []
-    if env_path.exists():
-        with env_path.open(encoding="utf-8") as f:
-            env_lines = f.readlines()
+    """Save shared Google OAuth client credentials."""
+    get_runtime_credentials_manager(runtime_paths).shared_manager().save_credentials(
+        _google_oauth_client_service(config),
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "_source": "ui",
+        },
+    )
+    return runtime_paths
 
-    # Update or add credentials
-    # Use current environment variable for redirect URI to support multiple deployments
-    current_redirect_uri = _redirect_uri(runtime_paths)
-    env_vars = {
-        "GOOGLE_CLIENT_ID": client_id,
-        "GOOGLE_CLIENT_SECRET": client_secret,
-        "GOOGLE_PROJECT_ID": project_id or "mindroom-integration",
-        "GOOGLE_REDIRECT_URI": current_redirect_uri,
-        "MINDROOM_PORT": _mindroom_port(runtime_paths),
+
+def _reset_google_credentials(
+    runtime_paths: RuntimePaths,
+    *,
+    oauth_client_services: set[str],
+) -> RuntimePaths:
+    """Clear shared Google OAuth client credentials and persisted tokens."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    shared_manager = credentials_manager.shared_manager()
+    for oauth_client_service in sorted(oauth_client_services | {"google_oauth_client"}):
+        shared_manager.delete_credentials(oauth_client_service)
+    credentials_manager.delete_credentials("google")
+    if shared_manager.base_path != credentials_manager.base_path:
+        shared_manager.delete_credentials("google")
+    workers_root = runtime_paths.storage_root / "workers"
+    if workers_root.exists():
+        for credentials_path in workers_root.glob("*/credentials/google_credentials.json"):
+            credentials_path.unlink(missing_ok=True)
+        for credentials_path in workers_root.glob("*/.shared_credentials/google_credentials.json"):
+            credentials_path.unlink(missing_ok=True)
+    return runtime_paths
+
+
+def _google_oauth_client_services(config: Config) -> set[str]:
+    """Return every configured Google OAuth client backing service."""
+    return {
+        connection.service
+        for connection in config.connections.values()
+        if connection.service is not None
+        and connection.auth_kind == "oauth_client"
+        and canonical_connection_provider(connection.provider) == "google"
     }
-
-    for key, value in env_vars.items():
-        found = False
-        for i, line in enumerate(env_lines):
-            if line.startswith(f"{key}="):
-                env_lines[i] = f"{key}={value}\n"
-                found = True
-                break
-        if not found:
-            env_lines.append(f"{key}={value}\n")
-
-    # Write back to .env file
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    with env_path.open("w", encoding="utf-8") as f:
-        f.writelines(env_lines)
-
-    return _refresh_runtime_paths(runtime_paths)
-
-
-def _reset_google_credentials(runtime_paths: RuntimePaths) -> RuntimePaths:
-    """Clear persisted Google credentials and remove Google env vars."""
-    get_runtime_credentials_manager(runtime_paths).delete_credentials("google")
-
-    env_path = runtime_paths.env_path
-    if env_path.exists():
-        with env_path.open(encoding="utf-8") as f:
-            lines = f.readlines()
-
-        google_vars = [
-            "GOOGLE_CLIENT_ID",
-            "GOOGLE_CLIENT_SECRET",
-            "GOOGLE_PROJECT_ID",
-            "GOOGLE_REDIRECT_URI",
-        ]
-        filtered_lines = [line for line in lines if not any(line.startswith(f"{var}=") for var in google_vars)]
-
-        with env_path.open("w", encoding="utf-8") as f:
-            f.writelines(filtered_lines)
-
-    return _refresh_runtime_paths(runtime_paths)
 
 
 @router.get("/status")
@@ -275,11 +326,13 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
     """Check Google integration status."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
     runtime_paths = target.runtime_paths
-    client_id = runtime_paths.env_value("GOOGLE_CLIENT_ID")
-    client_secret = runtime_paths.env_value("GOOGLE_CLIENT_SECRET")
-    has_credentials = bool(client_id and client_secret)
+    config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    try:
+        has_credentials = _get_oauth_credentials(runtime_paths, config=config) is not None
+    except ValueError as exc:
+        return GoogleStatus(connected=False, has_credentials=False, error=str(exc))
 
-    creds = _get_google_credentials(target, runtime_paths)
+    creds = _get_google_credentials(target, runtime_paths, config=config)
 
     if not creds:
         return GoogleStatus(
@@ -328,12 +381,8 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
     """Start Google OAuth flow."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
     runtime_paths = target.runtime_paths
-    oauth_config = _get_oauth_credentials(runtime_paths)
-    if not oauth_config:
-        raise HTTPException(
-            status_code=503,
-            detail="Google OAuth is not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.",
-        )
+    config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    oauth_config = _require_oauth_credentials(runtime_paths, config=config)
 
     try:
         _, _, flow_cls = _ensure_google_packages(runtime_paths)
@@ -388,7 +437,8 @@ async def callback(request: Request) -> RedirectResponse:
             execution_scope_override=pending.execution_scope_override,
         )
         runtime_paths = target.runtime_paths
-        oauth_config = _require_oauth_credentials(runtime_paths)
+        config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+        oauth_config = _require_oauth_credentials(runtime_paths, config=config)
         _, _, flow_cls = _ensure_google_packages(runtime_paths)
 
         # Create OAuth flow and exchange code for tokens
@@ -440,7 +490,6 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
 
     client_id = credentials.get("client_id")
     client_secret = credentials.get("client_secret")
-    project_id = credentials.get("project_id", "mindroom-integration")
 
     if not client_id or not client_secret:
         raise HTTPException(
@@ -451,18 +500,21 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
     try:
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
+        config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
         snapshot = _require_request_snapshot(request)
         _reload_api_runtime_config(
             request.app,
             api_runtime_paths(request),
             expected_snapshot=snapshot,
-            mutate_runtime=lambda runtime_paths: _save_env_credentials(
+            mutate_runtime=lambda runtime_paths: _save_oauth_client_credentials(
                 client_id,
                 client_secret,
                 runtime_paths,
-                project_id,
+                config=config,
             ),
         )
+    except GoogleOAuthNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -475,15 +527,21 @@ async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
+    oauth_client_services: set[str] = set()
     try:
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
+        config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
         snapshot = _require_request_snapshot(request)
+        oauth_client_services = _google_oauth_client_services(config)
         _reload_api_runtime_config(
             request.app,
             api_runtime_paths(request),
             expected_snapshot=snapshot,
-            mutate_runtime=_reset_google_credentials,
+            mutate_runtime=lambda runtime_paths: _reset_google_credentials(
+                runtime_paths,
+                oauth_client_services=oauth_client_services,
+            ),
         )
     except HTTPException:
         raise

@@ -469,6 +469,98 @@ def test_load_plugins_rejects_malformed_manifests(
         _bind_runtime_paths(Config(plugins=["./plugins/bad-plugin"]), config_path)
 
 
+def test_load_config_tolerates_malformed_manifest_on_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tolerant startup should warn and continue past malformed plugin manifests."""
+    good_root = tmp_path / "plugins" / "good"
+    bad_root = tmp_path / "plugins" / "bad"
+    good_root.mkdir(parents=True)
+    bad_root.mkdir(parents=True)
+    (good_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "good_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (good_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='good_plugin_tool',\n"
+        "    display_name='Good Plugin Tool',\n"
+        "    description='Should still load',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    (bad_root / "mindroom.plugin.json").write_text('{"name": "bad_plugin",', encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - good_plugin_tool\n"
+            "plugins:\n"
+            "  - ./plugins/good\n"
+            "  - ./plugins/bad\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
+
+    try:
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+        assert config.get_agent("assistant").tool_names == ["good_plugin_tool"]
+        assert any(
+            call.args == ("Failed to load plugin, skipping",)
+            and call.kwargs["path"] == str(bad_root.resolve())
+            and "Failed to parse plugin manifest" in call.kwargs["error"]
+            for call in mock_logger.warning.call_args_list
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
 def test_load_plugins_rejects_missing_plugin_directory(tmp_path: Path) -> None:
     """Configured plugins must exist on disk instead of being silently skipped."""
     config_path = tmp_path / "config.yaml"
@@ -1510,8 +1602,10 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
             path=str((tmp_path / "plugins" / "missing").resolve()),
         )
         assert any(
-            call.args == ("Failed to load plugin, skipping",) and call.kwargs["path"] == str(bad_root.resolve())
-            for call in mock_logger.exception.call_args_list
+            call.args == ("Failed to load plugin, skipping",)
+            and call.kwargs["path"] == str(bad_root.resolve())
+            and "definitely_missing_plugin_dependency" in call.kwargs["error"]
+            for call in mock_logger.warning.call_args_list
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -1589,8 +1683,10 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
         assert "good_plugin_tool" in _TOOL_REGISTRY
         assert "good_plugin_tool" in TOOL_METADATA
         assert any(
-            call.args == ("Failed to load plugin, skipping",) and call.kwargs["path"] == str(bad_root.resolve())
-            for call in mock_logger.exception.call_args_list
+            call.args == ("Failed to load plugin, skipping",)
+            and call.kwargs["path"] == str(bad_root.resolve())
+            and "definitely_missing_plugin_dependency" in call.kwargs["error"]
+            for call in mock_logger.warning.call_args_list
         )
     finally:
         _TOOL_REGISTRY.clear()

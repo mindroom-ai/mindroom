@@ -9,7 +9,6 @@ from mindroom import constants as constants_mod
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager
 from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
-    get_api_key_for_provider,
     get_ollama_host,
     get_secret_from_env,
     sync_env_to_credentials,
@@ -54,10 +53,15 @@ class TestCredentialsSync:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Supported shared provider/bootstrap env values should seed credentials."""
+        google_vertex_adc_path = temp_credentials_dir.parent / "google-vertex-adc.json"
+
         # Set shared provider/bootstrap env values.
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-key")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-anthropic-key")
         monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(google_vertex_adc_path))
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "google-client-id")
+        monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "google-client-secret")
         monkeypatch.setenv("OLLAMA_HOST", "http://test:11434")
 
         runtime_paths = _runtime_paths(
@@ -71,27 +75,161 @@ class TestCredentialsSync:
         # Verify files were created
         openai_file = temp_credentials_dir / "openai_credentials.json"
         anthropic_file = temp_credentials_dir / "anthropic_credentials.json"
-        google_file = temp_credentials_dir / "google_credentials.json"
+        google_gemini_file = temp_credentials_dir / "google_gemini_credentials.json"
+        google_vertex_adc_file = temp_credentials_dir / "google_vertex_adc_credentials.json"
+        google_oauth_client_file = temp_credentials_dir / "google_oauth_client_credentials.json"
         ollama_file = temp_credentials_dir / "ollama_credentials.json"
 
         assert openai_file.exists()
         assert anthropic_file.exists()
-        assert google_file.exists()
-        assert ollama_file.exists()
+        assert google_gemini_file.exists()
+        assert google_vertex_adc_file.exists()
+        assert google_oauth_client_file.exists()
+        assert not ollama_file.exists()
 
         # Verify content
         cm = CredentialsManager(base_path=temp_credentials_dir)
         assert cm.get_api_key("openai") == "sk-test-openai-key"
         assert cm.get_api_key("anthropic") == "sk-test-anthropic-key"
-        assert cm.get_api_key("google") == "test-google-key"
+        assert cm.get_api_key("google_gemini") == "test-google-key"
 
         # Verify source metadata is tracked
         openai_creds = cm.load_credentials("openai")
         assert openai_creds["_source"] == "env"
 
-        ollama_creds = cm.load_credentials("ollama")
-        assert ollama_creds["host"] == "http://test:11434"
-        assert ollama_creds["_source"] == "env"
+        vertex_adc_creds = cm.load_credentials("google_vertex_adc")
+        assert vertex_adc_creds == {
+            "application_credentials_path": str(google_vertex_adc_path),
+            "_source": "env",
+        }
+
+        oauth_client_creds = cm.load_credentials("google_oauth_client")
+        assert oauth_client_creds == {
+            "client_id": "google-client-id",
+            "client_secret": "google-client-secret",
+            "_source": "env",
+        }
+
+        assert get_ollama_host(runtime_paths=runtime_paths) == "http://test:11434"
+
+    def test_sync_env_uses_fixed_default_services_even_when_config_uses_custom_services(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Env sync should only seed the conventional default service buckets."""
+        google_vertex_adc_path = temp_credentials_dir.parent / "google-vertex-adc.json"
+        config_path = temp_credentials_dir.parent / "config.yaml"
+        config_path.write_text(
+            (
+                "connections:\n"
+                "  openai/default:\n"
+                "    provider: openai\n"
+                "    service: openai_team_a\n"
+                "    auth_kind: api_key\n"
+                "  google/oauth:\n"
+                "    provider: google\n"
+                "    service: google_oauth_custom\n"
+                "    auth_kind: oauth_client\n"
+                "  vertexai_claude/default:\n"
+                "    provider: vertexai_claude\n"
+                "    service: google_vertex_adc_custom\n"
+                "    auth_kind: google_adc\n"
+                "models:\n"
+                "  default:\n"
+                "    provider: openai\n"
+                "    id: gpt-5.4\n"
+                "router:\n"
+                "  model: default\n"
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-key")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(google_vertex_adc_path))
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "google-client-id")
+        monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "google-client-secret")
+
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=temp_credentials_dir.parent,
+            process_env={
+                **dict(os.environ),
+                SHARED_CREDENTIALS_PATH_ENV: str(temp_credentials_dir),
+            },
+        )
+
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("openai") == {
+            "api_key": "sk-test-openai-key",
+            "_source": "env",
+        }
+        assert cm.load_credentials("google_oauth_client") == {
+            "client_id": "google-client-id",
+            "client_secret": "google-client-secret",
+            "_source": "env",
+        }
+        assert cm.load_credentials("google_vertex_adc") == {
+            "application_credentials_path": str(google_vertex_adc_path),
+            "_source": "env",
+        }
+        assert cm.load_credentials("openai_team_a") is None
+        assert cm.load_credentials("google_oauth_custom") is None
+        assert cm.load_credentials("google_vertex_adc_custom") is None
+
+    def test_sync_env_does_not_seed_named_non_default_services(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Provider env sync should ignore named connection services beyond the conventional default buckets."""
+        config_path = temp_credentials_dir.parent / "config.yaml"
+        config_path.write_text(
+            (
+                "connections:\n"
+                "  openai/default:\n"
+                "    provider: openai\n"
+                "    service: openai_default_service\n"
+                "    auth_kind: api_key\n"
+                "  openai/research:\n"
+                "    provider: openai\n"
+                "    service: openai_research_service\n"
+                "    auth_kind: api_key\n"
+                "  openai/embeddings:\n"
+                "    provider: openai\n"
+                "    service: openai_embeddings_service\n"
+                "    auth_kind: api_key\n"
+                "models:\n"
+                "  default:\n"
+                "    provider: openai\n"
+                "    id: gpt-5.4\n"
+                "router:\n"
+                "  model: default\n"
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-default-only")
+
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=temp_credentials_dir.parent,
+            process_env={
+                **dict(os.environ),
+                SHARED_CREDENTIALS_PATH_ENV: str(temp_credentials_dir),
+            },
+        )
+
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("openai") == {
+            "api_key": "sk-default-only",
+            "_source": "env",
+        }
+        assert cm.load_credentials("openai_default_service") is None
+        assert cm.load_credentials("openai_research_service") is None
+        assert cm.load_credentials("openai_embeddings_service") is None
 
     def test_sync_env_does_not_overwrite_ui_credentials(
         self,
@@ -193,6 +331,53 @@ class TestCredentialsSync:
         assert cm.get_api_key("openai") == "valid-key"
         assert cm.get_api_key("anthropic") is None
 
+    @pytest.mark.parametrize(
+        ("env_name", "env_value"),
+        [
+            ("GOOGLE_CLIENT_ID", "google-client-id"),
+            ("GOOGLE_CLIENT_SECRET", "google-client-secret"),
+        ],
+    )
+    def test_sync_env_skips_partial_google_oauth_client_config(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        env_name: str,
+        env_value: str,
+    ) -> None:
+        """Google OAuth client credentials should only sync when both id and secret are present."""
+        missing_env_name = "GOOGLE_CLIENT_SECRET" if env_name == "GOOGLE_CLIENT_ID" else "GOOGLE_CLIENT_ID"
+        monkeypatch.delenv(missing_env_name, raising=False)
+        monkeypatch.setenv(env_name, env_value)
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth_client") is None
+
+    def test_sync_env_skips_empty_google_application_credentials_path(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Blank GOOGLE_APPLICATION_CREDENTIALS should not create a partial ADC credential record."""
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_vertex_adc") is None
+
     def test_sync_env_seeds_github_private_from_github_token(
         self,
         temp_credentials_dir: Path,
@@ -242,53 +427,36 @@ class TestCredentialsSync:
         assert github_private["token"] == ui_value
         assert github_private["_source"] == "ui"
 
-    def test_get_api_key_for_provider(self, credentials_manager: CredentialsManager) -> None:
-        """Test getting API key for different providers."""
-        # Set up test data
-        credentials_manager.set_api_key("openai", "test-openai-key")
-        credentials_manager.set_api_key("google", "test-google-key")
-        runtime_paths = _runtime_paths(
-            credentials_manager.storage_root,
-            shared_credentials_dir=credentials_manager.base_path,
-        )
-
-        # Test normal providers
-        assert get_api_key_for_provider("openai", runtime_paths=runtime_paths) == "test-openai-key"
-        assert get_api_key_for_provider("google", runtime_paths=runtime_paths) == "test-google-key"
-
-        # Test gemini alias for google
-        assert get_api_key_for_provider("gemini", runtime_paths=runtime_paths) == "test-google-key"
-
-        # Test ollama returns None
-        assert get_api_key_for_provider("ollama", runtime_paths=runtime_paths) is None
-
-        # Test non-existent provider
-        assert get_api_key_for_provider("anthropic", runtime_paths=runtime_paths) is None
-
     def test_get_ollama_host(self, credentials_manager: CredentialsManager) -> None:
-        """Test getting Ollama host configuration."""
-        # Test when no Ollama config exists
-        runtime_paths = _runtime_paths(
-            credentials_manager.storage_root,
-            shared_credentials_dir=credentials_manager.base_path,
+        """Test getting Ollama host from runtime env only."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=credentials_manager.storage_root / "config.yaml",
+            storage_path=credentials_manager.storage_root,
+            process_env={SHARED_CREDENTIALS_PATH_ENV: str(credentials_manager.base_path)},
         )
         assert get_ollama_host(runtime_paths=runtime_paths) is None
 
-        # Set Ollama host
-        credentials_manager.save_credentials("ollama", {"host": "http://localhost:11434"})
-        assert get_ollama_host(runtime_paths=runtime_paths) == "http://localhost:11434"
+        runtime_paths_with_ollama = constants_mod.resolve_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=runtime_paths.storage_root,
+            process_env={
+                SHARED_CREDENTIALS_PATH_ENV: str(credentials_manager.base_path),
+                "OLLAMA_HOST": "http://localhost:11434",
+            },
+        )
+        assert get_ollama_host(runtime_paths=runtime_paths_with_ollama) == "http://localhost:11434"
 
     def test_all_env_vars_mapped(self) -> None:
         """All supported shared provider/bootstrap env vars should be mapped."""
         expected_services = {
             "OPENAI_API_KEY": "openai",
             "ANTHROPIC_API_KEY": "anthropic",
-            "GOOGLE_API_KEY": "google",
+            "GOOGLE_API_KEY": "google_gemini",
             "OPENROUTER_API_KEY": "openrouter",
             "DEEPSEEK_API_KEY": "deepseek",
             "CEREBRAS_API_KEY": "cerebras",
             "GROQ_API_KEY": "groq",
-            "OLLAMA_HOST": "ollama",
+            "GOOGLE_APPLICATION_CREDENTIALS": "google_vertex_adc",
         }
 
         assert expected_services == _ENV_TO_SERVICE_MAP

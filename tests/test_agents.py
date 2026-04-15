@@ -34,7 +34,11 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.credentials import (
+    CredentialsManager,
+    get_runtime_shared_credentials_manager,
+    load_scoped_credentials,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -59,11 +63,46 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
-def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
-    return resolve_runtime_paths(
+def _runtime_paths(
+    storage_path: Path,
+    *,
+    config_path: Path | None = None,
+    process_env: dict[str, str] | None = None,
+) -> RuntimePaths:
+    runtime_paths = resolve_runtime_paths(
         config_path=config_path or storage_path / "config.yaml",
         storage_path=storage_path,
+        process_env=process_env,
     )
+    credentials_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials_manager.set_api_key("openai", "test-openai-key")
+    credentials_manager.set_api_key("anthropic", "test-anthropic-key")
+    return runtime_paths
+
+
+def _default_test_connections() -> dict[str, dict[str, str]]:
+    return {
+        "openai/default": {
+            "provider": "openai",
+            "service": "openai",
+            "auth_kind": "api_key",
+        },
+        "openai/embeddings": {
+            "provider": "openai",
+            "service": "openai",
+            "auth_kind": "api_key",
+        },
+        "anthropic/default": {
+            "provider": "anthropic",
+            "service": "anthropic",
+            "auth_kind": "api_key",
+        },
+    }
+
+
+def _agent_test_config(**kwargs: object) -> Config:
+    connections = kwargs.pop("connections", _default_test_connections())
+    return Config(connections=connections, **kwargs)
 
 
 def _test_config() -> Config:
@@ -72,7 +111,7 @@ def _test_config() -> Config:
 
     runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
     return bind_runtime_paths(
-        Config(
+        _agent_test_config(
             agents={
                 "general": AgentConfig(
                     display_name="GeneralAgent",
@@ -809,9 +848,9 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
 
 def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_path: Path) -> None:
     """Shared worker scope should not infer worker keys from ambient runtime context."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
+    runtime_paths = _runtime_paths(
         storage_path=tmp_path,
+        config_path=tmp_path / "config.yaml",
         process_env={"CUSTOMER_ID": "tenant-123"},
     )
     config = _bind_runtime_paths(_test_config(), runtime_paths)
@@ -1078,7 +1117,7 @@ def test_create_agent_threads_config_path_to_plugin_loading(
 def test_config_rejects_removed_memory_file_path_field() -> None:
     """Legacy memory_file_path should fail fast with a directed migration error."""
     with pytest.raises(ValidationError, match="memory_file_path"):
-        Config(
+        _agent_test_config(
             agents={
                 "general": {
                     "display_name": "General",
@@ -1380,9 +1419,9 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
 ) -> None:
     """Shared worker credentials should be available when ingress passes explicit shared identity."""
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
+    runtime_paths = _runtime_paths(
         storage_path=tmp_path,
+        config_path=tmp_path / "config.yaml",
         process_env={"CUSTOMER_ID": "tenant-123"},
     )
     config = _bind_runtime_paths(_test_config(), runtime_paths)
@@ -1656,7 +1695,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
 ) -> None:
     """The default starter Mind profile should materialize its workspace under the active runtime root."""
     runtime_storage = tmp_path / "runtime-storage"
-    config = Config(
+    config = _agent_test_config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
@@ -1882,9 +1921,9 @@ def test_bind_runtime_paths_allows_missing_private_template_dir_for_dedicated_sa
         root="mind_data",
         template_dir="./missing-template",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
+    runtime_paths = _runtime_paths(
         storage_path=tmp_path,
+        config_path=tmp_path / "config.yaml",
         process_env={
             "MINDROOM_SANDBOX_RUNNER_MODE": "true",
             "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:user:alice",
@@ -2099,7 +2138,7 @@ def test_create_agent_private_root_requires_execution_identity(
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
     """Agents must not reference unknown knowledge bases."""
     with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):
-        Config(
+        _agent_test_config(
             agents={
                 "calculator": AgentConfig(
                     display_name="CalculatorAgent",
@@ -2116,7 +2155,7 @@ def test_config_rejects_legacy_agent_knowledge_base_field() -> None:
         ValidationError,
         match=re.escape("Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."),
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "calculator": {
                     "display_name": "CalculatorAgent",
@@ -2138,7 +2177,7 @@ def test_config_rejects_legacy_agent_memory_dir_field() -> None:
         ValidationError,
         match=re.escape("Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."),
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "calculator": {
                     "display_name": "CalculatorAgent",
@@ -2154,7 +2193,7 @@ def test_config_rejects_legacy_agent_sandbox_tools_field() -> None:
         ValidationError,
         match=re.escape("Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."),
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "calculator": {
                     "display_name": "CalculatorAgent",
@@ -2170,7 +2209,7 @@ def test_config_rejects_legacy_defaults_sandbox_tools_field() -> None:
         ValidationError,
         match=re.escape("defaults.sandbox_tools was removed. Use defaults.worker_tools instead."),
     ):
-        Config(
+        _agent_test_config(
             defaults={
                 "sandbox_tools": ["shell"],
             },
@@ -2188,7 +2227,7 @@ def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
         ValidationError,
         match=re.escape("defaults.allowed_toolkits was removed. Use defaults.tools instead."),
     ):
-        Config(
+        _agent_test_config(
             defaults={"allowed_toolkits": ["shell"]},
             agents={"calculator": {"display_name": "CalculatorAgent"}},
         )
@@ -2197,7 +2236,7 @@ def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
         ValidationError,
         match=re.escape("defaults.initial_toolkits was removed. Use defaults.tools instead."),
     ):
-        Config(
+        _agent_test_config(
             defaults={"initial_toolkits": ["shell"]},
             agents={"calculator": {"display_name": "CalculatorAgent"}},
         )
@@ -2206,7 +2245,7 @@ def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
 def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
     """Each agent knowledge base assignment should be unique."""
     with pytest.raises(ValidationError, match="Duplicate knowledge bases are not allowed: research"):
-        Config(
+        _agent_test_config(
             agents={
                 "calculator": AgentConfig(
                     display_name="CalculatorAgent",
@@ -2224,7 +2263,7 @@ def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
 
 def test_config_resolves_per_agent_memory_backend_override() -> None:
     """Per-agent memory backend overrides should take precedence over global defaults."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "general": AgentConfig(display_name="General"),
             "writer": AgentConfig(display_name="Writer", memory_backend="file"),
@@ -2238,7 +2277,7 @@ def test_config_resolves_per_agent_memory_backend_override() -> None:
 
 def test_config_reports_mixed_memory_backend_usage() -> None:
     """Config helper methods should report effective mixed backend usage."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "general": AgentConfig(display_name="General", memory_backend="file"),
             "writer": AgentConfig(display_name="Writer", memory_backend="mem0"),
@@ -2256,7 +2295,7 @@ def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
         ValidationError,
         match="memory_file_path",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "general": {
                     "display_name": "General",
@@ -2270,7 +2309,7 @@ def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
 def test_config_rejects_memory_file_path_even_with_file_backend() -> None:
     """memory_file_path should stay removed even when the agent uses file memory."""
     with pytest.raises(ValidationError, match="memory_file_path"):
-        Config(
+        _agent_test_config(
             agents={
                 "general": {
                     "display_name": "General",
@@ -2284,7 +2323,7 @@ def test_config_rejects_memory_file_path_even_with_file_backend() -> None:
 
 def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     """Agent knowledge base assignment is valid when the base is configured."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "calculator": AgentConfig(
                 display_name="CalculatorAgent",
@@ -2311,7 +2350,7 @@ def test_config_rejects_reserved_private_knowledge_base_prefix() -> None:
             "invalid keys: __agent_private__:mind",
         ),
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(display_name="Mind"),
             },
@@ -2329,7 +2368,7 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
             "agents.<name>.private.knowledge.path is required when private.knowledge is enabled; invalid agents: mind",
         ),
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2359,7 +2398,7 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
 def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:
     """Private roots must stay out of runtime-managed directories and the private-instance root itself."""
     with pytest.raises(ValidationError, match=re.escape(expected_message)):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2375,7 +2414,7 @@ def test_config_rejects_invalid_private_root_values(root: str, expected_message:
 def test_config_rejects_removed_room_thread_private_scope() -> None:
     """Private requester scopes should no longer accept room-thread isolation."""
     with pytest.raises(ValidationError, match="Input should be 'user' or 'user_agent'"):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2388,7 +2427,7 @@ def test_config_rejects_removed_room_thread_private_scope() -> None:
 def test_config_rejects_removed_room_thread_worker_scope() -> None:
     """Worker scope should no longer accept room-thread reuse."""
     with pytest.raises(ValidationError, match="Input should be 'shared', 'user' or 'user_agent'"):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2402,7 +2441,7 @@ def test_config_rejects_removed_room_thread_worker_scope() -> None:
 def test_config_rejects_blank_private_knowledge_path(path: str) -> None:
     """Blank private knowledge paths should be rejected explicitly."""
     with pytest.raises(ValidationError, match=re.escape("private.knowledge.path must not be empty")):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2417,7 +2456,7 @@ def test_config_rejects_blank_private_knowledge_path(path: str) -> None:
 
 def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
     """A dot path is allowed to index the entire private root explicitly."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
@@ -2441,7 +2480,7 @@ def test_config_rejects_private_agents_in_teams() -> None:
         ValidationError,
         match="Team 'mixed_team' includes private agent 'mind'; private agents cannot participate in teams yet",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2462,7 +2501,7 @@ def test_config_rejects_private_agents_in_teams() -> None:
 def test_config_rejects_empty_teams() -> None:
     """Configured teams must name at least one member."""
     with pytest.raises(ValidationError, match="List should have at least 1 item"):
-        Config(
+        _agent_test_config(
             agents={"calculator": AgentConfig(display_name="Calculator")},
             teams={
                 "empty_team": TeamConfig(
@@ -2477,7 +2516,7 @@ def test_config_rejects_empty_teams() -> None:
 def test_config_rejects_duplicate_team_members() -> None:
     """Configured teams must preserve an exact member set with no duplicates."""
     with pytest.raises(ValidationError, match="Duplicate agents are not allowed in a team: calculator"):
-        Config(
+        _agent_test_config(
             agents={"calculator": AgentConfig(display_name="Calculator")},
             teams={
                 "duplicate_team": TeamConfig(
@@ -2498,7 +2537,7 @@ def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> 
             "via delegation; private agents cannot participate in teams yet"
         ),
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "leader": AgentConfig(display_name="Leader", delegate_to=["mind"]),
                 "helper": AgentConfig(display_name="Helper"),
@@ -2523,7 +2562,7 @@ def test_config_rejects_shared_only_integrations_for_isolating_worker_scope() ->
         ValidationError,
         match=r"general -> gmail \(worker_scope=user\)",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "general": AgentConfig(
                     display_name="General",
@@ -2540,7 +2579,7 @@ def test_config_rejects_shared_only_integrations_inherited_from_defaults() -> No
         ValidationError,
         match=r"mind -> homeassistant \(private\.per=user_agent\)",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2553,7 +2592,7 @@ def test_config_rejects_shared_only_integrations_inherited_from_defaults() -> No
 
 def test_config_private_and_shared_knowledge_coexist() -> None:
     """Agents can combine requester-private knowledge with shared top-level knowledge bases."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
@@ -2579,7 +2618,7 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
 
 def test_template_dir_does_not_imply_private_knowledge() -> None:
     """Copying from a template directory alone should not create a private knowledge base."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
@@ -2597,7 +2636,7 @@ def test_template_dir_does_not_imply_private_knowledge() -> None:
 
 def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
     """Synthetic private base IDs should resolve only while private knowledge is actually active."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
@@ -2622,7 +2661,7 @@ def test_get_private_knowledge_base_agent_requires_active_private_knowledge() ->
 def test_config_rejects_duplicate_default_tools() -> None:
     """Default tools should be unique."""
     with pytest.raises(ValidationError, match="Duplicate default tools are not allowed: scheduler"):
-        Config(
+        _agent_test_config(
             defaults={"tools": ["scheduler", "scheduler"]},
         )
 
@@ -2630,7 +2669,7 @@ def test_config_rejects_duplicate_default_tools() -> None:
 def test_config_rejects_culture_with_unknown_agent() -> None:
     """Culture assignments must reference configured agents."""
     with pytest.raises(ValidationError, match="Cultures reference unknown agents: engineering -> missing_agent"):
-        Config(
+        _agent_test_config(
             agents={
                 "calculator": AgentConfig(display_name="CalculatorAgent"),
             },
@@ -2650,7 +2689,7 @@ def test_config_rejects_agents_in_multiple_cultures() -> None:
         ValidationError,
         match="Agents cannot belong to multiple cultures: calculator -> engineering, support",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "calculator": AgentConfig(display_name="CalculatorAgent"),
             },
@@ -2663,7 +2702,7 @@ def test_config_rejects_agents_in_multiple_cultures() -> None:
 
 def test_config_accepts_valid_culture_assignment() -> None:
     """Config should expose culture assignment helpers for valid culture definitions."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "calculator": AgentConfig(display_name="CalculatorAgent"),
             "summary": AgentConfig(display_name="SummaryAgent"),
@@ -2691,7 +2730,7 @@ def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree(
         ValidationError,
         match=r"git-backed private knowledge at 'memory'.*dedicated subtree",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2717,7 +2756,7 @@ def test_config_rejects_git_backed_private_knowledge_at_memory_entrypoint() -> N
         ValidationError,
         match=r"git-backed private knowledge at 'MEMORY.md'.*dedicated subtree",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2739,7 +2778,7 @@ def test_config_rejects_git_backed_private_knowledge_at_memory_entrypoint() -> N
 
 def test_config_allows_git_backed_private_knowledge_in_dedicated_subtree() -> None:
     """Dedicated private knowledge subtrees remain valid for git-backed sync."""
-    config = Config(
+    config = _agent_test_config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
@@ -2769,7 +2808,7 @@ def test_config_rejects_git_backed_private_knowledge_at_private_root() -> None:
         ValidationError,
         match=r"git-backed private knowledge at '\.'.*dedicated subtree",
     ):
-        Config(
+        _agent_test_config(
             agents={
                 "mind": AgentConfig(
                     display_name="Mind",
@@ -2802,7 +2841,7 @@ def test_config_rejects_git_backed_private_knowledge_overlapping_template_conten
         match=r"git-backed private knowledge at 'docs'.*scaffolded private workspace content",
     ):
         bind_runtime_paths(
-            Config(
+            _agent_test_config(
                 agents={
                     "mind": AgentConfig(
                         display_name="Mind",
@@ -2834,7 +2873,7 @@ def test_create_agent_shares_culture_manager_for_same_culture(
 ) -> None:
     """Agents in the same culture should share one CultureManager and culture DB."""
     _CULTURE_MANAGER_CACHE.clear()
-    config = Config(
+    config = _agent_test_config(
         agents={
             "agent_one": AgentConfig(
                 display_name="Agent One",
@@ -2906,7 +2945,7 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
 ) -> None:
     """Culture manager should not require models.default when an agent model is configured."""
     _CULTURE_MANAGER_CACHE.clear()
-    config = Config(
+    config = _agent_test_config(
         agents={
             "agent_one": AgentConfig(
                 display_name="Agent One",
@@ -2959,7 +2998,7 @@ def test_create_private_agent_scopes_culture_storage_per_requester(
     """Private agents should not share culture storage across requester instances."""
     _CULTURE_MANAGER_CACHE.clear()
     _PRIVATE_CULTURE_MANAGER_CACHE.clear()
-    config = Config(
+    config = _agent_test_config(
         agents={
             "general": AgentConfig(
                 display_name="GeneralAgent",
@@ -3050,7 +3089,7 @@ def test_private_agents_share_culture_manager_within_same_requester_scope(
     """Private agents in the same culture should share one requester-scoped culture manager."""
     _CULTURE_MANAGER_CACHE.clear()
     _PRIVATE_CULTURE_MANAGER_CACHE.clear()
-    config = Config(
+    config = _agent_test_config(
         agents={
             "agent_one": AgentConfig(
                 display_name="Agent One",
@@ -3145,7 +3184,7 @@ def test_private_user_agent_agents_share_culture_manager_within_same_requester_s
     """Private user_agent cultures should share one requester-scoped culture manager."""
     _CULTURE_MANAGER_CACHE.clear()
     _PRIVATE_CULTURE_MANAGER_CACHE.clear()
-    config = Config(
+    config = _agent_test_config(
         agents={
             "agent_one": AgentConfig(
                 display_name="Agent One",
