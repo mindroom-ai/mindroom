@@ -12,6 +12,7 @@ import nio
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.matrix.client import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_content import resolve_event_source_content
@@ -498,10 +499,7 @@ class ConversationResolver:
         client = self.deps.runtime.client
         if client is None:
             return None
-        rooms = client.rooms
-        if not isinstance(rooms, dict):
-            return None
-        return rooms.get(room_id)
+        return matrix_cached_room(client, room_id)
 
     @asynccontextmanager
     async def turn_thread_cache_scope(self) -> AsyncIterator[None]:

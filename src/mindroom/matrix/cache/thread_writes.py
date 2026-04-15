@@ -10,13 +10,12 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache, normalize_nio_event_for_cache
-from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
     resolve_related_event_thread_id,
-    room_scan_thread_membership_access,
+    room_scan_thread_membership_access_for_client,
 )
 
 if TYPE_CHECKING:
@@ -343,21 +342,10 @@ class ThreadWritePolicy:
 
     def _thread_membership_access(self) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for cache mutations."""
-
-        async def fetch_thread_event_sources(
-            room_id: str,
-            thread_root_id: str,
-        ) -> tuple[list[dict[str, object]], bool]:
-            return await _fetch_thread_event_sources_via_room_messages(
-                self.require_client(),
-                room_id,
-                thread_root_id,
-            )
-
-        return room_scan_thread_membership_access(
+        return room_scan_thread_membership_access_for_client(
+            self.require_client(),
             lookup_thread_id=self.runtime.event_cache.get_thread_id_for_event,
             fetch_event_info=self._event_info_for_thread_resolution,
-            fetch_thread_event_sources=fetch_thread_event_sources,
         )
 
     async def _append_event_to_cache(

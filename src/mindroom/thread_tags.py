@@ -16,7 +16,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
-    room_scan_thread_membership_access,
+    room_scan_thread_membership_access_for_client,
 )
 
 if TYPE_CHECKING:
@@ -836,22 +836,10 @@ def _thread_membership_access(
             lookup_event_id,
         )
 
-    async def fetch_thread_event_sources(
-        lookup_room_id: str,
-        thread_root_id: str,
-    ) -> tuple[list[dict[str, object]], bool]:
-        from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
-
-        return await _fetch_thread_event_sources_via_room_messages(
-            client,
-            lookup_room_id,
-            thread_root_id,
-        )
-
-    return room_scan_thread_membership_access(
+    return room_scan_thread_membership_access_for_client(
+        client,
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
-        fetch_thread_event_sources=fetch_thread_event_sources,
     )
 
 

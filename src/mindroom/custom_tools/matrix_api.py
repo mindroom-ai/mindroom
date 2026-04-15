@@ -13,13 +13,12 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
     resolve_related_event_thread_id,
-    room_scan_thread_membership_access,
+    room_scan_thread_membership_access_for_client,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -503,20 +502,10 @@ class MatrixApiTools(Toolkit):
                 event_id=lookup_event_id,
             )
 
-        async def fetch_thread_event_sources(
-            lookup_room_id: str,
-            thread_root_id: str,
-        ) -> tuple[list[dict[str, object]], bool]:
-            return await _fetch_thread_event_sources_via_room_messages(
-                context.client,
-                lookup_room_id,
-                thread_root_id,
-            )
-
-        return room_scan_thread_membership_access(
+        return room_scan_thread_membership_access_for_client(
+            context.client,
             lookup_thread_id=lookup_thread_id,
             fetch_event_info=fetch_event_info,
-            fetch_thread_event_sources=fetch_thread_event_sources,
         )
 
     @staticmethod

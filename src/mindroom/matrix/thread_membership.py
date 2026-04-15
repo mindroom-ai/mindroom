@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.matrix.event_info import EventInfo
+
+if TYPE_CHECKING:
+    import nio
 
 type ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
@@ -213,6 +216,33 @@ def room_scan_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
         thread_root_has_children=thread_root_has_children,
+    )
+
+
+def room_scan_thread_membership_access_for_client(
+    client: nio.AsyncClient,
+    *,
+    lookup_thread_id: ThreadIdLookup,
+    fetch_event_info: EventInfoLookup,
+) -> ThreadMembershipAccess:
+    """Build shared membership access using room scans from one Matrix client."""
+
+    async def fetch_thread_event_sources(
+        room_id: str,
+        thread_root_id: str,
+    ) -> tuple[list[dict[str, object]], bool]:
+        from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
+
+        return await _fetch_thread_event_sources_via_room_messages(
+            client,
+            room_id,
+            thread_root_id,
+        )
+
+    return room_scan_thread_membership_access(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        fetch_thread_event_sources=fetch_thread_event_sources,
     )
 
 

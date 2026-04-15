@@ -1442,7 +1442,7 @@ class TestAgentBot:
         bot.client = AsyncMock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot._handle_interactive_question = AsyncMock()
-        mock_stream_agent_response = AsyncMock()
+        mock_stream_agent_response = MagicMock()
 
         with patch(
             "mindroom.delivery_gateway.send_streaming_response",
@@ -2953,10 +2953,21 @@ class TestAgentBot:
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        def discard_background_task(coro: object, *, _name: str) -> None:
-            close = getattr(coro, "close", None)
-            if callable(close):
-                close()
+        scheduled_tasks: list[asyncio.Task[None]] = []
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+            owner: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
 
         config = _runtime_bound_config(
             Config(
@@ -2985,7 +2996,8 @@ class TestAgentBot:
         with patch_response_runner_module(
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
-            create_background_task=MagicMock(side_effect=discard_background_task),
+            create_background_task=schedule_background_task,
+            store_conversation_memory=fake_store_conversation_memory,
         ):
             await bot._response_runner.send_skill_command_response(
                 room_id="!test:localhost",
@@ -2997,6 +3009,8 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 reply_to_event=None,
             )
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
 
         assert mock_ai.call_args.kwargs["show_tool_calls"] is True
         assert mock_ai.call_args.kwargs["prompt"].startswith("[")
@@ -3010,14 +3024,25 @@ class TestAgentBot:
     ) -> None:
         """Room-mode skill dispatch should keep the canonical room-level session key."""
 
-        def discard_background_task(coro: object, **_kwargs: object) -> None:
-            close = getattr(coro, "close", None)
-            if callable(close):
-                close()
-
         @asynccontextmanager
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
+
+        scheduled_tasks: list[asyncio.Task[None]] = []
+
+        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def schedule_background_task(
+            coro: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            error_handler: object | None = None,  # noqa: ARG001
+            owner: object | None = None,  # noqa: ARG001
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+            scheduled_tasks.append(task)
+            return task
 
         config = _runtime_bound_config(
             Config(
@@ -3048,7 +3073,8 @@ class TestAgentBot:
             ai_response=mock_ai,
             reprioritize_auto_flush_sessions=mock_reprioritize,
             mark_auto_flush_dirty_session=MagicMock(),
-            create_background_task=MagicMock(side_effect=discard_background_task),
+            create_background_task=schedule_background_task,
+            store_conversation_memory=fake_store_conversation_memory,
         ):
             await bot._response_runner.send_skill_command_response(
                 room_id="!test:localhost",
@@ -3060,6 +3086,8 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 reply_to_event=None,
             )
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
 
         assert mock_ai.call_args.kwargs["session_id"] == "!test:localhost"
         assert mock_reprioritize.call_args.kwargs["active_session_id"] == "!test:localhost"
