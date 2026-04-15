@@ -864,6 +864,11 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     """
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
+        if response.room_id not in client.rooms:
+            client.rooms[response.room_id] = nio.MatrixRoom(
+                room_id=response.room_id,
+                own_user_id=client.user_id or "",
+            )
         logger.info("matrix_room_joined", room_id=room_id)
         return True
     logger.warning("matrix_room_join_failed", room_id=room_id, error=str(response))

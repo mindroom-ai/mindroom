@@ -163,8 +163,6 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 # Constants
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
-_JOINED_ROOM_CACHE_WAIT_ATTEMPTS = 20
-_JOINED_ROOM_CACHE_WAIT_SECONDS = 0.1
 
 
 def _create_task_wrapper(
@@ -1209,12 +1207,6 @@ class AgentBot:
         if not response.chunk:
             # Room is completely empty
             self.logger.info("Room is empty, sending welcome message", room_id=room_id)
-            if not await self._wait_for_joined_room_cache(room_id):
-                self.logger.warning(
-                    "Skipping welcome message because the joined room is not cached yet",
-                    room_id=room_id,
-                )
-                return
 
             # Generate and send the welcome message
             welcome_msg = _generate_welcome_message(room_id, self.config, self.runtime_paths)
@@ -1238,18 +1230,6 @@ class AgentBot:
                 return
             # Otherwise, room has a different message, don't send welcome
         # Room has other messages, don't send welcome
-
-    async def _wait_for_joined_room_cache(self, room_id: str) -> bool:
-        """Wait briefly for one newly joined room to appear in the Matrix client's local room cache."""
-        assert self.client is not None
-        if room_id in self.client.rooms:
-            return True
-
-        for _ in range(_JOINED_ROOM_CACHE_WAIT_ATTEMPTS):
-            await asyncio.sleep(_JOINED_ROOM_CACHE_WAIT_SECONDS)
-            if room_id in self.client.rooms:
-                return True
-        return False
 
     def _maybe_start_deferred_overdue_task_drain(self) -> None:
         """Start draining queued overdue tasks once Matrix sync is ready."""

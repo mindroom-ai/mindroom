@@ -182,6 +182,62 @@ async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_cache_preserves_insertion_order_for_same_timestamp_events(tmp_path: Path) -> None:
+    """Cached reads should preserve the stored order when timestamps tie."""
+    cache = _EventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+
+    try:
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[
+                {
+                    "event_id": "$thread_root",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"body": "Root message", "msgtype": "m.text"},
+                },
+                {
+                    "event_id": "$zzz_parent",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "Parent",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_root"}},
+                    },
+                },
+                {
+                    "event_id": "$aaa_child",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "Child",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$zzz_parent"}},
+                    },
+                },
+            ],
+        )
+
+        cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
+    finally:
+        await cache.close()
+
+    assert cached_events is not None
+    assert [event["event_id"] for event in cached_events] == [
+        "$thread_root",
+        "$zzz_parent",
+        "$aaa_child",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_individual_event_cache_store_and_retrieve(tmp_path: Path) -> None:
     """Individually cached events should round-trip by event ID."""
     cache = _EventCache(tmp_path / "event_cache.db")

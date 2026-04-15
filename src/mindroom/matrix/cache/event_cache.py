@@ -361,7 +361,7 @@ class _EventCache:
                 SELECT event_json
                 FROM thread_events
                 WHERE room_id = ? AND thread_id = ?
-                ORDER BY origin_server_ts ASC, event_id ASC
+                ORDER BY origin_server_ts ASC, rowid ASC
                 """,
                 (room_id, thread_id),
             )

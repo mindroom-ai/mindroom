@@ -170,7 +170,9 @@ set_thread_summary(
 It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
-Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked.
+Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
+Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
+Hard-blocked state event types like `m.room.create` remain blocked.
 
 ### Configuration
 

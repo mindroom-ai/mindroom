@@ -27,6 +27,8 @@ def normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[li
 
 def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester may act in the given room."""
+    if not isinstance(room_id, str) or not room_id:
+        return False
     if room_id == context.room_id:
         return True
     room_alias = room_id if room_id.startswith("#") else None
@@ -37,6 +39,21 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         context.runtime_paths,
         room_alias=room_alias,
     )
+
+
+def resolve_requested_room_id(
+    context: ToolRuntimeContext,
+    room_id: object,
+) -> tuple[str | None, str | None]:
+    """Resolve the requested room target or return a validation error."""
+    if room_id is None:
+        return context.room_id, None
+    if not isinstance(room_id, str):
+        return None, "room_id must be a non-empty string."
+    normalized_room_id = room_id.strip()
+    if not normalized_room_id:
+        return None, "room_id must be a non-empty string."
+    return normalized_room_id, None
 
 
 def resolve_context_thread_id(

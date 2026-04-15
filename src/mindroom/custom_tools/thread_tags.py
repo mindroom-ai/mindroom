@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
+from mindroom.custom_tools.attachment_helpers import (
+    resolve_context_thread_id,
+    resolve_requested_room_id,
+    room_access_allowed,
+)
 from mindroom.thread_tags import (
     ThreadTagRecord,
     ThreadTagsError,
@@ -107,7 +111,15 @@ class ThreadTagsTools(Toolkit):
         if context is None:
             return self._context_error()
 
-        resolved_room_id = room_id or context.room_id
+        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        if room_error is not None:
+            return self._payload(
+                "error",
+                action="tag",
+                room_id=room_id,
+                message=room_error,
+            )
+        assert resolved_room_id is not None
         if not room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
@@ -197,7 +209,15 @@ class ThreadTagsTools(Toolkit):
         if context is None:
             return self._context_error()
 
-        resolved_room_id = room_id or context.room_id
+        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        if room_error is not None:
+            return self._payload(
+                "error",
+                action="untag",
+                room_id=room_id,
+                message=room_error,
+            )
+        assert resolved_room_id is not None
         if not room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
@@ -289,7 +309,15 @@ class ThreadTagsTools(Toolkit):
         if context is None:
             return self._context_error()
 
-        resolved_room_id = room_id or context.room_id
+        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        if room_error is not None:
+            return self._payload(
+                "error",
+                action="list",
+                room_id=room_id,
+                message=room_error,
+            )
+        assert resolved_room_id is not None
         if not room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",

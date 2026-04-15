@@ -431,6 +431,66 @@ async def test_thread_tags_explicit_room_target_requires_authorization(method_na
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "args"),
+    [
+        ("tag_thread", ("resolved",)),
+        ("untag_thread", ("resolved",)),
+        ("list_thread_tags", ()),
+    ],
+)
+async def test_thread_tags_reject_blank_explicit_room_id(
+    method_name: str,
+    args: tuple[str, ...],
+) -> None:
+    """Explicit blank room IDs should not fall back to the current room."""
+    tool = ThreadTagsTools()
+    context = _make_context()
+
+    with tool_runtime_context(context):
+        if method_name == "tag_thread":
+            payload = json.loads(await tool.tag_thread(*args, room_id=""))
+        elif method_name == "untag_thread":
+            payload = json.loads(await tool.untag_thread(*args, room_id=""))
+        else:
+            payload = json.loads(await tool.list_thread_tags(room_id=""))
+
+    assert payload["status"] == "error"
+    assert payload["room_id"] == ""
+    assert "room_id" in payload["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "args"),
+    [
+        ("tag_thread", ("resolved",)),
+        ("untag_thread", ("resolved",)),
+        ("list_thread_tags", ()),
+    ],
+)
+async def test_thread_tags_reject_non_string_room_id(
+    method_name: str,
+    args: tuple[str, ...],
+) -> None:
+    """Explicit non-string room IDs should fail with a normal tool payload."""
+    tool = ThreadTagsTools()
+    context = _make_context()
+
+    with tool_runtime_context(context):
+        if method_name == "tag_thread":
+            payload = json.loads(await tool.tag_thread(*args, room_id=123))
+        elif method_name == "untag_thread":
+            payload = json.loads(await tool.untag_thread(*args, room_id=123))
+        else:
+            payload = json.loads(await tool.list_thread_tags(room_id=123))
+
+    assert payload["status"] == "error"
+    assert payload["room_id"] == 123
+    assert "room_id" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_thread_tags_cross_room_does_not_inherit_context_thread() -> None:
     """Cross-room tagging should not silently reuse the origin room thread context."""
     tool = ThreadTagsTools()

@@ -5265,11 +5265,11 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_router_welcome_waits_for_joined_room_cache_before_send(
+    async def test_router_joined_room_startup_sends_welcome_after_join(
         self,
         tmp_path: Path,
     ) -> None:
-        """Welcome sends should wait until the joined room is cached locally."""
+        """Startup room joins should cache the room locally before sending a welcome."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -5279,8 +5279,12 @@ class TestAgentBot:
         )
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_runtime_cache_support(bot)
+        bot.rooms = ["!welcome:localhost"]
         bot.client = AsyncMock()
+        bot.client.user_id = agent_user.user_id
         bot.client.rooms = {}
+        bot.client.join = AsyncMock(return_value=nio.JoinResponse("!welcome:localhost"))
         bot.client.room_messages = AsyncMock(
             return_value=nio.RoomMessagesResponse(
                 room_id="!welcome:localhost",
@@ -5294,17 +5298,17 @@ class TestAgentBot:
             assert room_id in bot.client.rooms
             return "$welcome"
 
-        async def populate_room_cache(_delay: float) -> None:
-            bot.client.rooms["!welcome:localhost"] = MagicMock()
-
         bot._send_response = AsyncMock(side_effect=fake_send_response)
         with (
             patch("mindroom.bot._generate_welcome_message", return_value="Welcome"),
-            patch("mindroom.bot.asyncio.sleep", new=AsyncMock(side_effect=populate_room_cache)) as mock_sleep,
+            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=[])),
+            patch("mindroom.bot.restore_scheduled_tasks", new=AsyncMock(return_value=0)),
+            patch("mindroom.bot.config_confirmation.restore_pending_changes", new=AsyncMock(return_value=0)),
         ):
-            await bot._send_welcome_message_if_empty("!welcome:localhost")
+            await bot.join_configured_rooms()
 
-        mock_sleep.assert_awaited()
+        assert "!welcome:localhost" in bot.client.rooms
+        bot.client.join.assert_awaited_once_with("!welcome:localhost")
         bot._send_response.assert_awaited_once()
 
     @pytest.mark.asyncio
