@@ -12,13 +12,13 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
+from mindroom.matrix.thread_membership import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     ThreadTagRecord,
     ThreadTagsError,
     get_thread_tags,
     list_tagged_threads,
     normalize_tag_name,
-    normalize_thread_root_event_id,
     remove_thread_tag,
     set_thread_tag,
 )
@@ -152,11 +152,11 @@ class ThreadTagsTools(Toolkit):
                 message="thread_id is required when no active thread context is available for the target room.",
             )
 
-        normalized_thread_id = await normalize_thread_root_event_id(
+        normalized_thread_id = await resolve_thread_root_event_id_for_client(
             context.client,
             resolved_room_id,
             effective_thread_id,
-            context.conversation_cache,
+            conversation_cache=context.conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(
@@ -253,11 +253,11 @@ class ThreadTagsTools(Toolkit):
         if canonical:
             target_thread_id = effective_thread_id
         else:
-            target_thread_id = await normalize_thread_root_event_id(
+            target_thread_id = await resolve_thread_root_event_id_for_client(
                 context.client,
                 resolved_room_id,
                 effective_thread_id,
-                context.conversation_cache,
+                conversation_cache=context.conversation_cache,
             )
             if target_thread_id is None:
                 return self._payload(
@@ -385,11 +385,11 @@ class ThreadTagsTools(Toolkit):
                 },
             )
 
-        normalized_thread_id = await normalize_thread_root_event_id(
+        normalized_thread_id = await resolve_thread_root_event_id_for_client(
             context.client,
             resolved_room_id,
             effective_thread_id,
-            context.conversation_cache,
+            conversation_cache=context.conversation_cache,
         )
         if normalized_thread_id is None:
             return self._payload(

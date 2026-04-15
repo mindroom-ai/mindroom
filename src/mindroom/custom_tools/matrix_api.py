@@ -10,16 +10,14 @@ from typing import ClassVar
 
 import nio
 from agno.tools import Toolkit
-from nio.responses import RoomGetEventError
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
-    ThreadMembershipAccess,
-    resolve_event_thread_id,
-    resolve_related_event_thread_id,
-    room_scan_thread_membership_access_for_client,
+    conversation_cache_thread_membership_access_for_client,
+    event_requires_thread_bookkeeping,
+    fetch_event_info_from_conversation_cache,
+    redaction_requires_thread_bookkeeping,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -390,103 +388,6 @@ class MatrixApiTools(Toolkit):
         return None
 
     @staticmethod
-    async def _get_thread_id_for_event(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event_id: str,
-    ) -> str | None:
-        """Resolve one event's cached thread root through the public conversation cache when available."""
-        return await context.conversation_cache.get_thread_id_for_event(room_id, event_id)
-
-    @staticmethod
-    async def _event_info_for_event(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event_id: str,
-    ) -> EventInfo | None:
-        response = await context.conversation_cache.get_event(room_id, event_id)
-        if isinstance(response, nio.RoomGetEventResponse):
-            return EventInfo.from_event(response.event.source)
-        if isinstance(response, RoomGetEventError) and response.status_code == "M_NOT_FOUND":
-            return None
-        detail = response.message if isinstance(response, RoomGetEventError) else "unknown error"
-        msg = f"Failed to resolve Matrix event {event_id}: {detail}"
-        raise RuntimeError(msg)
-
-    @staticmethod
-    async def _requires_conversation_cache_write(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event_type: str,
-        content: dict[str, object],
-    ) -> bool:
-        """Return whether one send_event payload must update threaded conversation cache state."""
-        if event_type != "m.room.message":
-            return False
-        event_info = EventInfo.from_event({"type": event_type, "content": content})
-        access = MatrixApiTools._thread_membership_access(context)
-        return isinstance(
-            await resolve_event_thread_id(
-                room_id,
-                event_info,
-                access=access,
-            ),
-            str,
-        )
-
-    @staticmethod
-    async def _redaction_requires_conversation_cache_write(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event_id: str,
-    ) -> bool:
-        """Return whether one redact payload must update threaded conversation cache state."""
-        target_event_info = await MatrixApiTools._event_info_for_event(
-            context,
-            room_id=room_id,
-            event_id=event_id,
-        )
-        if target_event_info is not None and target_event_info.is_reaction:
-            return False
-        access = MatrixApiTools._thread_membership_access(context)
-        return isinstance(
-            await resolve_related_event_thread_id(
-                room_id,
-                event_id,
-                access=access,
-            ),
-            str,
-        )
-
-    @staticmethod
-    def _thread_membership_access(context: ToolRuntimeContext) -> ThreadMembershipAccess:
-        """Return the shared thread-membership accessors for Matrix API classification."""
-
-        async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
-            return await MatrixApiTools._get_thread_id_for_event(
-                context,
-                room_id=lookup_room_id,
-                event_id=lookup_event_id,
-            )
-
-        async def fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
-            return await MatrixApiTools._event_info_for_event(
-                context,
-                room_id=lookup_room_id,
-                event_id=lookup_event_id,
-            )
-
-        return room_scan_thread_membership_access_for_client(
-            context.client,
-            lookup_thread_id=lookup_thread_id,
-            fetch_event_info=fetch_event_info,
-        )
-
-    @staticmethod
     async def _record_send_event_outbound_cache_write(
         context: ToolRuntimeContext,
         *,
@@ -542,11 +443,14 @@ class MatrixApiTools(Toolkit):
             return policy_error
 
         try:
-            requires_conversation_cache_write = await self._requires_conversation_cache_write(
-                context,
+            requires_conversation_cache_write = await event_requires_thread_bookkeeping(
                 room_id=room_id,
                 event_type=normalized_event_type,
                 content=normalized_content,
+                access=conversation_cache_thread_membership_access_for_client(
+                    context.client,
+                    conversation_cache=context.conversation_cache,
+                ),
             )
         except Exception as exc:
             logger.warning(
@@ -900,10 +804,20 @@ class MatrixApiTools(Toolkit):
         assert normalized_event_id is not None
 
         try:
-            requires_conversation_cache_write = await self._redaction_requires_conversation_cache_write(
-                context,
+            target_event_info = await fetch_event_info_from_conversation_cache(
+                context.conversation_cache,
+                room_id,
+                normalized_event_id,
+                strict=True,
+            )
+            requires_conversation_cache_write = await redaction_requires_thread_bookkeeping(
                 room_id=room_id,
                 event_id=normalized_event_id,
+                access=conversation_cache_thread_membership_access_for_client(
+                    context.client,
+                    conversation_cache=context.conversation_cache,
+                ),
+                target_event_info=target_event_info,
             )
         except Exception as exc:
             logger.warning(

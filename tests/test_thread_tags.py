@@ -10,12 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom.matrix.thread_membership import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
     ThreadTagsError,
     get_thread_tags,
     list_tagged_threads,
-    normalize_thread_root_event_id,
     remove_thread_tag,
     set_thread_tag,
 )
@@ -1397,7 +1397,7 @@ async def test_get_thread_tags_raises_for_non_missing_state_fetch_error() -> Non
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_root_for_root_event() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_root_for_root_event() -> None:
     """A proven thread root should normalize to itself."""
     client = AsyncMock()
     client.room_get_event.return_value = _message_event_response(
@@ -1439,7 +1439,7 @@ async def test_normalize_thread_root_event_id_returns_root_for_root_event() -> N
     room_messages_response.end = None
     client.room_messages = AsyncMock(return_value=room_messages_response)
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$thread-root:localhost",
@@ -1450,7 +1450,7 @@ async def test_normalize_thread_root_event_id_returns_root_for_root_event() -> N
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_none_for_unproven_root_event() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_none_for_unproven_root_event() -> None:
     """Unproven room-level roots should not normalize as canonical thread IDs."""
     client = AsyncMock()
     client.room_get_event.return_value = _message_event_response(
@@ -1476,7 +1476,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_unproven_root_eve
     room_messages_response.end = None
     client.room_messages = AsyncMock(return_value=room_messages_response)
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$thread-root:localhost",
@@ -1486,7 +1486,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_unproven_root_eve
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_thread_root_for_thread_reply() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_thread_reply() -> None:
     """Native thread replies should normalize to their thread root."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1505,7 +1505,7 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_thread_rep
         ],
     )
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$thread-reply:localhost",
@@ -1517,11 +1517,11 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_thread_rep
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event_id", ["", "   "])
-async def test_normalize_thread_root_event_id_returns_none_for_blank_input(event_id: str) -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_none_for_blank_input(event_id: str) -> None:
     """Blank event IDs should be rejected before any event lookup."""
     client = AsyncMock()
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         event_id,
@@ -1532,7 +1532,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_blank_input(event
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_reply_to_thread_reply() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_plain_reply_to_thread_reply() -> None:
     """Plain replies to explicit thread messages should normalize to the existing thread root."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1559,7 +1559,7 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
         ],
     )
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$plain-reply:localhost",
@@ -1571,7 +1571,7 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_walks_transitively_to_threaded_ancestor() -> None:
+async def test_resolve_thread_root_event_id_for_client_walks_transitively_to_threaded_ancestor() -> None:
     """Plain replies should normalize transitively when the reply chain eventually reaches a threaded ancestor."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1603,7 +1603,7 @@ async def test_normalize_thread_root_event_id_walks_transitively_to_threaded_anc
         ],
     )
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$plain-reply-2:localhost",
@@ -1617,7 +1617,7 @@ async def test_normalize_thread_root_event_id_walks_transitively_to_threaded_anc
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_reply_to_thread_root() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_plain_reply_to_thread_root() -> None:
     """Plain replies to the actual thread root should normalize back to that root."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1674,7 +1674,7 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
     room_messages_response.end = None
     client.room_messages = AsyncMock(return_value=room_messages_response)
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$plain-reply:localhost",
@@ -1685,7 +1685,7 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_none_for_plain_reply_to_plain_root_message() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_reply_to_plain_root_message() -> None:
     """Plain replies to unrelated room roots should not normalize as threads."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1725,7 +1725,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_plain_reply_to_pl
     room_messages_response.end = None
     client.room_messages = AsyncMock(return_value=room_messages_response)
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$plain-reply:localhost",
@@ -1738,7 +1738,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_plain_reply_to_pl
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_none_for_plain_reply() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_reply() -> None:
     """Plain replies should no longer be promoted into synthetic thread roots."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1776,7 +1776,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_plain_reply() -> 
     room_messages_response.end = None
     client.room_messages = AsyncMock(return_value=room_messages_response)
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$reply-two:localhost",
@@ -1789,12 +1789,12 @@ async def test_normalize_thread_root_event_id_returns_none_for_plain_reply() -> 
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_none_when_lookup_fails() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_none_when_lookup_fails() -> None:
     """Missing or unreadable events should not guess a thread root."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(return_value=object())
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$reply-one:localhost",
@@ -1804,14 +1804,14 @@ async def test_normalize_thread_root_event_id_returns_none_when_lookup_fails() -
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_uses_cache_when_event_lookup_misses() -> None:
+async def test_resolve_thread_root_event_id_for_client_uses_cache_when_event_lookup_misses() -> None:
     """Cache-backed normalization should still work when the homeserver lookup misses."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(return_value=object())
     conversation_cache = MagicMock()
     conversation_cache.get_thread_id_for_event = AsyncMock(return_value="$thread-root:localhost")
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$fresh-local-reply:localhost",
@@ -1826,7 +1826,7 @@ async def test_normalize_thread_root_event_id_uses_cache_when_event_lookup_misse
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_resolves_thread_edit_via_original_event() -> None:
+async def test_resolve_thread_root_event_id_for_client_resolves_thread_edit_via_original_event() -> None:
     """Thread edits should normalize directly from explicit thread metadata."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1851,7 +1851,7 @@ async def test_normalize_thread_root_event_id_resolves_thread_edit_via_original_
         ),
     )
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$edit:localhost",
@@ -1862,7 +1862,7 @@ async def test_normalize_thread_root_event_id_resolves_thread_edit_via_original_
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_resolves_thread_reply_edit_via_original_event_without_nested_thread_metadata() -> (
+async def test_resolve_thread_root_event_id_for_client_resolves_thread_reply_edit_via_original_event_without_nested_thread_metadata() -> (
     None
 ):
     """Edits of thread replies should fall back through the original event when nested thread metadata is absent."""
@@ -1898,7 +1898,7 @@ async def test_normalize_thread_root_event_id_resolves_thread_reply_edit_via_ori
         ],
     )
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$edit:localhost",
@@ -1910,7 +1910,9 @@ async def test_normalize_thread_root_event_id_resolves_thread_reply_edit_via_ori
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_resolves_edit_of_promoted_plain_reply_via_original_reply_target() -> None:
+async def test_resolve_thread_root_event_id_for_client_resolves_edit_of_promoted_plain_reply_via_original_reply_target() -> (
+    None
+):
     """Edits of promoted plain replies should reuse the same transitive thread inheritance."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -1952,7 +1954,7 @@ async def test_normalize_thread_root_event_id_resolves_edit_of_promoted_plain_re
         ],
     )
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$edit:localhost",
@@ -1965,7 +1967,7 @@ async def test_normalize_thread_root_event_id_resolves_edit_of_promoted_plain_re
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_resolves_thread_root_edit_via_original_event() -> None:
+async def test_resolve_thread_root_event_id_for_client_resolves_thread_root_edit_via_original_event() -> None:
     """Edits of thread-root messages should normalize back to the original root event."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
@@ -2026,7 +2028,7 @@ async def test_normalize_thread_root_event_id_resolves_thread_root_edit_via_orig
     room_messages_response.end = None
     client.room_messages = AsyncMock(return_value=room_messages_response)
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$edit:localhost",
@@ -2039,7 +2041,7 @@ async def test_normalize_thread_root_event_id_resolves_thread_root_edit_via_orig
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_none_for_cyclic_edit_chain() -> None:
+async def test_resolve_thread_root_event_id_for_client_returns_none_for_cyclic_edit_chain() -> None:
     """Cyclic edit chains should fail closed instead of recursing until crash."""
     client = AsyncMock()
     responses = {
@@ -2066,7 +2068,7 @@ async def test_normalize_thread_root_event_id_returns_none_for_cyclic_edit_chain
         side_effect=lambda _room_id, event_id: responses[event_id],
     )
 
-    normalized = await normalize_thread_root_event_id(
+    normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$edit-a:localhost",
