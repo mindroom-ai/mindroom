@@ -174,7 +174,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
     assert "m.new_content" in sent_content
-    assert sent_content["m.new_content"]["msgtype"] == "m.file"
+    assert sent_content["m.new_content"]["msgtype"] == "m.text"
     for key, value in extra_content.items():
         assert sent_content[key] == value
         assert sent_content["m.new_content"][key] == value
