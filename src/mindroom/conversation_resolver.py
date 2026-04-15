@@ -314,7 +314,7 @@ class ConversationResolver:
                 event_info.reply_to_event_id,
                 dispatch_safe=dispatch_safe,
                 allow_root_snapshot_fallback=True,
-                allow_reply_hop=True,
+                allow_reply_hop=False,
             )
 
         return None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -1500,8 +1500,8 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
 
 
 @pytest.mark.asyncio
-async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_reply_to_promoted_plain_reply() -> None:
-    """One extra reply hop should recover the explicit thread root for promoted plain replies."""
+async def test_normalize_thread_root_event_id_does_not_walk_past_direct_plain_reply_target() -> None:
+    """Plain replies should not inherit a thread by walking past an unclassified direct target."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
         side_effect=[
@@ -1521,17 +1521,6 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
                     "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
                 },
             ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
         ],
     )
 
@@ -1541,10 +1530,131 @@ async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_repl
         "$plain-reply-2:localhost",
     )
 
-    assert normalized == "$thread-root:localhost"
+    assert normalized is None
     assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply-2:localhost")
     assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-reply-1:localhost")
-    assert client.room_get_event.await_args_list[2].args == ("!room:localhost", "$thread-reply:localhost")
+    client.room_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_reply_to_thread_root() -> None:
+    """Plain replies to the actual thread root should normalize back to that root."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$plain-reply:localhost",
+                content={
+                    "body": "Bridge reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-root:localhost"}},
+                },
+            ),
+            _message_event_response(
+                "$thread-root:localhost",
+                content={
+                    "body": "Root",
+                    "msgtype": "m.text",
+                },
+            ),
+        ],
+    )
+    thread_reply = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$thread-reply:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+            "content": {
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread-root:localhost",
+                },
+            },
+        },
+    )
+    thread_root = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$thread-root:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+            "content": {
+                "body": "Root",
+                "msgtype": "m.text",
+            },
+        },
+    )
+    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
+    room_messages_response.chunk = [thread_reply, thread_root]
+    room_messages_response.end = None
+    client.room_messages = AsyncMock(return_value=room_messages_response)
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$plain-reply:localhost",
+    )
+
+    assert normalized == "$thread-root:localhost"
+    client.room_messages.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_returns_none_for_plain_reply_to_plain_root_message() -> None:
+    """Plain replies to unrelated room roots should not normalize as threads."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$plain-reply:localhost",
+                content={
+                    "body": "Plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-root:localhost"}},
+                },
+            ),
+            _message_event_response(
+                "$plain-root:localhost",
+                content={
+                    "body": "Root",
+                    "msgtype": "m.text",
+                },
+            ),
+        ],
+    )
+    plain_root = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$plain-root:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+            "content": {
+                "body": "Root",
+                "msgtype": "m.text",
+            },
+        },
+    )
+    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
+    room_messages_response.chunk = [plain_root]
+    room_messages_response.end = None
+    client.room_messages = AsyncMock(return_value=room_messages_response)
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$plain-reply:localhost",
+    )
+
+    assert normalized is None
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-root:localhost")
+    client.room_messages.assert_awaited_once()
 
 
 @pytest.mark.asyncio

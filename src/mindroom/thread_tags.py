@@ -836,13 +836,32 @@ async def _thread_root_id_for_reply_target(
     normalized_reply_thread_id = _canonical_thread_id(reply_info)
     if normalized_reply_thread_id is not None:
         return normalized_reply_thread_id
-    if reply_info.reply_to_event_id is None:
+    if not reply_info.can_be_thread_root:
         return None
+    return await _thread_root_id_from_room_scan(
+        client,
+        room_id,
+        thread_root_id=reply_to_event_id,
+    )
 
-    second_reply_info = await _event_info_for_event_id(client, room_id, reply_info.reply_to_event_id)
-    if second_reply_info is None:
+
+async def _thread_root_id_from_room_scan(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    thread_root_id: str,
+) -> str | None:
+    from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
+
+    try:
+        event_sources, _root_message_found = await _fetch_thread_event_sources_via_room_messages(
+            client,
+            room_id,
+            thread_root_id,
+        )
+    except Exception:
         return None
-    return _canonical_thread_id(second_reply_info)
+    return thread_root_id if any(event.get("event_id") != thread_root_id for event in event_sources) else None
 
 
 async def get_thread_tags(

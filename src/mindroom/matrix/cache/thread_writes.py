@@ -90,14 +90,21 @@ async def _resolve_thread_id_for_cached_event_append(
         return event_info.thread_id
     if isinstance(event_info.thread_id_from_edit, str):
         return event_info.thread_id_from_edit
-    for related_event_id in (event_info.original_event_id, event_info.reply_to_event_id):
-        if not isinstance(related_event_id, str):
-            continue
+    if isinstance(event_info.original_event_id, str):
         thread_id = await _resolve_thread_id_for_related_cached_event(
             room_id,
-            related_event_id=related_event_id,
+            related_event_id=event_info.original_event_id,
             event_cache=event_cache,
             allow_reply_hop=True,
+        )
+        if thread_id is not None:
+            return thread_id
+    if isinstance(event_info.reply_to_event_id, str):
+        thread_id = await _resolve_thread_id_for_related_cached_event(
+            room_id,
+            related_event_id=event_info.reply_to_event_id,
+            event_cache=event_cache,
+            allow_reply_hop=False,
         )
         if thread_id is not None:
             return thread_id
