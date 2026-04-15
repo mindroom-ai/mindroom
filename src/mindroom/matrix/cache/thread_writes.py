@@ -37,7 +37,7 @@ def _collect_sync_timeline_cache_updates(
         return
 
     event_info = EventInfo.from_event(event_source)
-    if event_info.is_thread or event_info.is_edit:
+    if event_info.is_thread or event_info.is_edit or event_info.is_reply:
         cache_update = _threaded_sync_event_cache_update(room_id, event)
         if cache_update is None:
             return
@@ -68,7 +68,7 @@ def _threaded_sync_event_cache_update(
 ) -> tuple[str, dict[str, object]] | None:
     event_source = event.source if isinstance(event.source, dict) else {}
     event_info = EventInfo.from_event(event_source)
-    if not (event_info.is_thread or event_info.is_edit):
+    if not (event_info.is_thread or event_info.is_edit or event_info.is_reply):
         return None
     event_id = event.event_id
     if not isinstance(event_id, str) or not event_id:
@@ -90,9 +90,13 @@ async def _resolve_thread_id_for_cached_event_append(
         return event_info.thread_id
     if isinstance(event_info.thread_id_from_edit, str):
         return event_info.thread_id_from_edit
-    if not isinstance(event_info.original_event_id, str):
-        return None
-    return await event_cache.get_thread_id_for_event(room_id, event_info.original_event_id)
+    for related_event_id in (event_info.original_event_id, event_info.reply_to_event_id):
+        if not isinstance(related_event_id, str):
+            continue
+        thread_id = await event_cache.get_thread_id_for_event(room_id, related_event_id)
+        if thread_id is not None:
+            return thread_id
+    return None
 
 
 class ThreadWritePolicy:

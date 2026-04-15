@@ -1461,18 +1461,63 @@ async def test_normalize_thread_root_event_id_returns_none_for_blank_input(event
 
 
 @pytest.mark.asyncio
+async def test_normalize_thread_root_event_id_returns_thread_root_for_plain_reply_to_thread_reply() -> None:
+    """Plain replies to explicit thread messages should normalize to the existing thread root."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$plain-reply:localhost",
+                content={
+                    "body": "Bridge reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
+                },
+            ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                    },
+                },
+            ),
+        ],
+    )
+
+    normalized = await normalize_thread_root_event_id(
+        client,
+        "!room:localhost",
+        "$plain-reply:localhost",
+    )
+
+    assert normalized == "$thread-root:localhost"
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
+
+
+@pytest.mark.asyncio
 async def test_normalize_thread_root_event_id_returns_none_for_plain_reply() -> None:
     """Plain replies should no longer be promoted into synthetic thread roots."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(
-        return_value=_message_event_response(
-            "$reply-two:localhost",
-            content={
-                "body": "Reply two",
-                "msgtype": "m.text",
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-one:localhost"}},
-            },
-        ),
+        side_effect=[
+            _message_event_response(
+                "$reply-two:localhost",
+                content={
+                    "body": "Reply two",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-one:localhost"}},
+                },
+            ),
+            _message_event_response(
+                "$reply-one:localhost",
+                content={"body": "Reply one", "msgtype": "m.text"},
+            ),
+        ],
     )
 
     normalized = await normalize_thread_root_event_id(
@@ -1482,7 +1527,8 @@ async def test_normalize_thread_root_event_id_returns_none_for_plain_reply() -> 
     )
 
     assert normalized is None
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply-two:localhost")
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$reply-two:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$reply-one:localhost")
 
 
 @pytest.mark.asyncio

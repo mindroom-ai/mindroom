@@ -294,37 +294,88 @@ class ConversationResolver:
         *,
         dispatch_safe: bool,
     ) -> str | None:
-        """Resolve explicit thread identity for one event without reply-chain inference."""
+        """Resolve explicit thread identity with single-hop inheritance only."""
         resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
-        original_event_id = event_info.original_event_id
-        if resolved_thread_id is not None or not event_info.is_edit or original_event_id is None:
+        if resolved_thread_id is not None:
             return resolved_thread_id
 
-        original_event = await self.deps.conversation_cache.get_event(room_id, original_event_id)
-        if not isinstance(original_event, nio.RoomGetEventResponse):
-            return None
+        if event_info.is_edit and event_info.original_event_id is not None:
+            return await self._thread_id_for_target_event(
+                room_id,
+                event_info.original_event_id,
+                dispatch_safe=dispatch_safe,
+                allow_root_snapshot_fallback=True,
+            )
 
-        original_info = EventInfo.from_event(original_event.event.source)
-        if not original_info.can_be_thread_root:
-            return original_info.thread_id or original_info.thread_id_from_edit
+        if event_info.reply_to_event_id is not None:
+            return await self._thread_id_for_target_event(
+                room_id,
+                event_info.reply_to_event_id,
+                dispatch_safe=dispatch_safe,
+                allow_root_snapshot_fallback=False,
+            )
 
+        return None
+
+    async def _thread_id_for_target_event(
+        self,
+        room_id: str,
+        target_event_id: str,
+        *,
+        dispatch_safe: bool,
+        allow_root_snapshot_fallback: bool,
+    ) -> str | None:
+        """Resolve thread identity for one directly related target event."""
         resolved_thread_id = await self.deps.conversation_cache.get_thread_id_for_event(
             room_id,
-            original_event_id,
+            target_event_id,
         )
-        if resolved_thread_id is None:
-            fetch_snapshot = (
-                self.deps.conversation_cache.get_dispatch_thread_snapshot
-                if dispatch_safe
-                else self.deps.conversation_cache.get_thread_snapshot
+        if resolved_thread_id is not None:
+            return resolved_thread_id
+
+        target_event = await self.deps.conversation_cache.get_event(room_id, target_event_id)
+        if not isinstance(target_event, nio.RoomGetEventResponse):
+            return None
+
+        target_info = EventInfo.from_event(target_event.event.source)
+        explicit_thread_id = target_info.thread_id or target_info.thread_id_from_edit
+        if explicit_thread_id is not None:
+            return explicit_thread_id
+
+        if target_info.is_edit and target_info.original_event_id is not None:
+            return await self._thread_id_for_target_event(
+                room_id,
+                target_info.original_event_id,
+                dispatch_safe=dispatch_safe,
+                allow_root_snapshot_fallback=allow_root_snapshot_fallback,
             )
-            try:
-                snapshot = await fetch_snapshot(room_id, original_event_id)
-            except Exception:
-                return None
-            if any(message.event_id != original_event_id for message in snapshot):
-                resolved_thread_id = original_event_id
-        return resolved_thread_id
+
+        if allow_root_snapshot_fallback and target_info.can_be_thread_root:
+            return await self._thread_root_id_from_snapshot(
+                room_id,
+                target_event_id,
+                dispatch_safe=dispatch_safe,
+            )
+        return None
+
+    async def _thread_root_id_from_snapshot(
+        self,
+        room_id: str,
+        target_event_id: str,
+        *,
+        dispatch_safe: bool,
+    ) -> str | None:
+        """Return the root event ID when snapshot data proves child replies exist."""
+        fetch_snapshot = (
+            self.deps.conversation_cache.get_dispatch_thread_snapshot
+            if dispatch_safe
+            else self.deps.conversation_cache.get_thread_snapshot
+        )
+        try:
+            snapshot = await fetch_snapshot(room_id, target_event_id)
+        except Exception:
+            return None
+        return target_event_id if any(message.event_id != target_event_id for message in snapshot) else None
 
     async def derive_conversation_context(
         self,

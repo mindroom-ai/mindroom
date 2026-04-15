@@ -754,6 +754,16 @@ class _EventCache:
         write_lookup_row: bool,
     ) -> bool:
         """Append one event to an existing cached thread."""
+        event_id = _event_id(normalized_event)
+        if await _event_or_original_is_redacted(
+            db,
+            room_id,
+            event_id=event_id,
+            event=normalized_event,
+        ):
+            return False
+
+        serialized_event = _serialize_cached_event(event_id, normalized_event)
         cursor = await db.execute(
             """
             SELECT 1
@@ -766,17 +776,16 @@ class _EventCache:
         row = await cursor.fetchone()
         await cursor.close()
         if row is None:
+            if write_lookup_row:
+                await _write_lookup_index_rows(
+                    db,
+                    room_id=room_id,
+                    serialized_events=[serialized_event],
+                    cached_at=time.time(),
+                    thread_id=thread_id,
+                )
             return False
 
-        event_id = _event_id(normalized_event)
-        if await _event_or_original_is_redacted(
-            db,
-            room_id,
-            event_id=event_id,
-            event=normalized_event,
-        ):
-            return False
-        serialized_event = _serialize_cached_event(event_id, normalized_event)
         await db.execute(
             """
             INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)

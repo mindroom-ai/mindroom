@@ -133,6 +133,29 @@ def _normalize_non_empty_string(value: object) -> str | None:
     return normalized_value
 
 
+def _canonical_thread_id(event_info: EventInfo, *, fallback_root: str | None = None) -> str | None:
+    """Return the explicit or canonical root thread ID represented by one event."""
+    if event_info.thread_id is not None:
+        return event_info.thread_id
+    if event_info.thread_id_from_edit is not None:
+        return event_info.thread_id_from_edit
+    if fallback_root is not None and event_info.can_be_thread_root:
+        return fallback_root
+    return None
+
+
+async def _event_info_for_event_id(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+) -> EventInfo | None:
+    """Fetch one event and return parsed relation metadata when available."""
+    response = await client.room_get_event(room_id, event_id)
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+    return EventInfo.from_event(response.event.source)
+
+
 def _require_non_empty_string(value: object, *, field_name: str) -> str:
     """Require a stripped non-empty string value."""
     normalized_value = _normalize_non_empty_string(value)
@@ -752,34 +775,27 @@ async def normalize_thread_root_event_id(
     event_id: str,
 ) -> str | None:
     """Resolve one event ID to an explicit thread root when possible."""
-
-    def _canonical_thread_id(event_info: EventInfo, *, fallback_root: str | None = None) -> str | None:
-        if event_info.thread_id is not None:
-            return event_info.thread_id
-        if event_info.thread_id_from_edit is not None:
-            return event_info.thread_id_from_edit
-        if fallback_root is not None and event_info.can_be_thread_root:
-            return fallback_root
-        return None
-
     normalized_event_id = _normalize_non_empty_string(event_id)
     if not normalized_event_id:
         return None
 
-    response = await client.room_get_event(room_id, normalized_event_id)
-    if not isinstance(response, nio.RoomGetEventResponse):
+    event_info = await _event_info_for_event_id(client, room_id, normalized_event_id)
+    if event_info is None:
         return None
 
-    event_info = EventInfo.from_event(response.event.source)
     normalized_thread_id = _canonical_thread_id(event_info, fallback_root=normalized_event_id)
     if normalized_thread_id is not None:
         return normalized_thread_id
     if event_info.is_edit and event_info.original_event_id is not None:
-        original_response = await client.room_get_event(room_id, event_info.original_event_id)
-        if not isinstance(original_response, nio.RoomGetEventResponse):
-            return None
-        original_info = EventInfo.from_event(original_response.event.source)
-        return _canonical_thread_id(original_info, fallback_root=event_info.original_event_id)
+        original_info = await _event_info_for_event_id(client, room_id, event_info.original_event_id)
+        return (
+            None
+            if original_info is None
+            else _canonical_thread_id(original_info, fallback_root=event_info.original_event_id)
+        )
+    if event_info.reply_to_event_id is not None:
+        reply_info = await _event_info_for_event_id(client, room_id, event_info.reply_to_event_id)
+        return None if reply_info is None else _canonical_thread_id(reply_info)
     return None
 
 

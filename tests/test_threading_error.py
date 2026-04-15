@@ -1803,6 +1803,71 @@ class TestThreadingBehavior:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_live_plain_reply_to_threaded_event_persists_event_thread_membership(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Plain replies to threaded events should keep a durable event-to-thread mapping."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        thread_reply_id = "$thread_reply:localhost"
+        plain_reply_id = "$plain_reply:localhost"
+
+        real_event_cache = _EventCache(bot.storage_path / "plain-reply-thread-membership.db")
+        await real_event_cache.initialize()
+        bot.event_cache = real_event_cache
+        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=bot._runtime_view,
+        )
+        try:
+            await real_event_cache.store_event(
+                thread_reply_id,
+                room_id,
+                {
+                    "content": {
+                        "body": "Thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": thread_root_id,
+                        },
+                    },
+                    "event_id": thread_reply_id,
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567894,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+
+            plain_reply_event = nio.RoomMessageText.from_dict(
+                {
+                    "content": {
+                        "body": "bridged plain reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
+                    },
+                    "event_id": plain_reply_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567895,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+
+            await bot._conversation_cache.append_live_event(
+                room_id,
+                plain_reply_event,
+                event_info=EventInfo.from_event(plain_reply_event.source),
+            )
+            await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
+
+            assert await real_event_cache.get_thread_id_for_event(room_id, plain_reply_id) == thread_root_id
+        finally:
+            await real_event_cache.close()
+
+    @pytest.mark.asyncio
     async def test_get_event_queues_persistent_cache_fill_through_room_write_barrier(self) -> None:
         """Point-event cache fills should use the same room-ordered coordinator as other durable writes."""
         event_cache = _runtime_event_cache()
@@ -2854,6 +2919,55 @@ class TestThreadingBehavior:
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_extract_context_plain_reply_to_thread_reply_inherits_existing_thread(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Plain replies to explicit thread messages should stay in that thread."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "follow-up from bridge",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                },
+                "event_id": "$plain_reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        expected_history = [
+            _message(event_id="$thread_root:localhost", body="Root"),
+            _message(event_id="$thread_msg:localhost", body="Thread message"),
+        ]
+        with (
+            patch.object(
+                bot._conversation_cache,
+                "get_thread_id_for_event",
+                AsyncMock(return_value="$thread_root:localhost"),
+            ) as mock_lookup,
+            patch.object(
+                bot._conversation_cache,
+                "get_thread_history",
+                AsyncMock(return_value=expected_history),
+            ) as mock_fetch,
+        ):
+            context = await bot._conversation_resolver.extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == expected_history
+        mock_lookup.assert_awaited_once_with(room.room_id, "$thread_msg:localhost")
+        mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+
+    @pytest.mark.asyncio
     async def test_extract_context_edit_of_thread_root_uses_cached_root_mapping(self, bot: AgentBot) -> None:
         """Edits of a thread root should stay threaded once any child reply taught the cache that thread."""
         room = MagicMock(spec=nio.MatrixRoom)
@@ -2930,7 +3044,7 @@ class TestThreadingBehavior:
             assert context.is_thread is True
             assert context.thread_id == "$thread_root:localhost"
             assert context.thread_history == expected_history
-            bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+            bot.client.room_get_event.assert_not_awaited()
             mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         finally:
             await real_event_cache.close()
