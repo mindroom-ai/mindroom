@@ -12,6 +12,7 @@ from mindroom.matrix.client import (
     DeliveredMatrixEvent,
     _msgtype_for_mimetype,
     _upload_file_as_mxc,
+    join_room,
     send_file_message,
     send_message_result,
 )
@@ -442,6 +443,40 @@ class TestSendMessageResult:
         assert result is None
         mock_prepare.assert_not_awaited()
         client.room_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_treats_non_dict_room_cache_as_unknown_room(self) -> None:
+        """Non-dict room caches should be treated as empty for plain sends."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = AsyncMock()
+        client.room_send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+
+        with patch(
+            "mindroom.matrix.client.prepare_large_message",
+            new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
+        ):
+            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+        assert result is not None
+        assert result.event_id == "$evt:localhost"
+        client.room_send.assert_awaited_once()
+
+
+class TestJoinRoom:
+    """Tests for join_room."""
+
+    @pytest.mark.asyncio
+    async def test_treats_non_dict_room_cache_as_uninitialized(self) -> None:
+        """Join should succeed without mutating when the room cache is not a real dict."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = AsyncMock()
+        client.user_id = "@mindroom_test:localhost"
+        client.join.return_value = nio.JoinResponse("!room:localhost")
+
+        joined = await join_room(client, "!room:localhost")
+
+        assert joined is True
+        client.join.assert_awaited_once_with("!room:localhost")
 
 
 class TestSendFileMessageMsgtype:

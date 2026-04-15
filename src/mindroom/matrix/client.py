@@ -867,8 +867,9 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     """
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
-        if response.room_id not in client.rooms:
-            client.rooms[response.room_id] = nio.MatrixRoom(
+        rooms = client.rooms
+        if isinstance(rooms, dict) and response.room_id not in rooms:
+            rooms[response.room_id] = nio.MatrixRoom(
                 room_id=response.room_id,
                 own_user_id=client.user_id or "",
             )
@@ -974,7 +975,13 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
     """Return one room from nio's in-memory room cache if present."""
-    return client.rooms.get(room_id)
+    return cached_rooms(client).get(room_id)
+
+
+def cached_rooms(client: nio.AsyncClient) -> dict[str, nio.MatrixRoom]:
+    """Return the client room cache when nio has initialized it."""
+    rooms = client.rooms
+    return rooms if isinstance(rooms, dict) else {}
 
 
 def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
