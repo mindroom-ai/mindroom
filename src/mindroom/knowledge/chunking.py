@@ -53,7 +53,7 @@ class SafeFixedSizeChunking(FixedSizeChunking):
                     name=document.name,
                     meta_data=meta_data,
                     content=chunk,
-                )
+                ),
             )
 
             if end >= content_length:
