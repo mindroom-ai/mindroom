@@ -161,42 +161,6 @@ async def resolve_redaction_thread_impact_for_client(
     return _mutation_thread_impact_from_resolution(resolution)
 
 
-async def event_requires_thread_bookkeeping(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    event_type: str,
-    content: Mapping[str, object],
-    conversation_cache: ConversationCacheProtocol | None,
-) -> bool:
-    """Return whether one outbound event payload targets a thread."""
-    impact = await resolve_event_thread_impact_for_client(
-        client,
-        room_id,
-        event_type=event_type,
-        content=content,
-        conversation_cache=conversation_cache,
-    )
-    return impact.state is MutationThreadImpactState.THREADED
-
-
-async def redaction_requires_thread_bookkeeping(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    event_id: str,
-    conversation_cache: ConversationCacheProtocol | None,
-) -> bool:
-    """Return whether one redaction target can affect thread-scoped cache state."""
-    impact = await resolve_redaction_thread_impact_for_client(
-        client,
-        room_id,
-        event_id=event_id,
-        conversation_cache=conversation_cache,
-    )
-    return impact.state is MutationThreadImpactState.THREADED
-
-
 class ThreadMutationResolver:
     """Own thread-membership resolution for thread cache mutations."""
 
