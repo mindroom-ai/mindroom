@@ -459,7 +459,7 @@ class TestThreadHistory:
             },
         )
         event_cache = make_event_cache_mock()
-        event_cache.get_latest_edit.side_effect = lambda room_id, event_id: {
+        event_cache.get_latest_edit.side_effect = lambda _room_id, event_id: {
             "$reply": _event_source_for_cache(newer_edit),
         }.get(event_id)
 

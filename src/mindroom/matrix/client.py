@@ -2434,7 +2434,7 @@ async def _fetch_thread_event_sources_via_relations(
     root_response = await client.room_get_event(room_id, thread_id)
     if not isinstance(root_response, nio.RoomGetEventResponse):
         msg = f"thread root lookup failed for {thread_id}: {root_response}"
-        raise RuntimeError(msg)
+        raise TypeError(msg)
 
     root_event = root_response.event
     collected_events: list[nio.Event] = [root_event]
