@@ -11,13 +11,13 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import normalize_nio_event_for_cache
-from mindroom.matrix.cache.event_cache import (
+from mindroom.matrix.cache import (
     ConversationEventCache,
+    ThreadHistoryResult,
+    ThreadReadPolicy,
+    ThreadWritePolicy,
+    normalize_nio_event_for_cache,
 )
-from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
-from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
 from mindroom.matrix.client import (
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,

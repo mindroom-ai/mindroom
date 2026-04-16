@@ -1,0 +1,40 @@
+exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
+source_roots = ["src"]
+
+[[modules]]
+path = "mindroom.matrix.cache"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.conversation_cache"
+depends_on = ["mindroom.matrix.cache"]
+
+[[modules]]
+path = "mindroom.runtime_support"
+depends_on = ["mindroom.matrix.cache"]
+
+[[interfaces]]
+expose = [
+    "ConversationEventCache",
+    "EventCacheWriteCoordinator",
+    "THREAD_HISTORY_DEGRADED_DIAGNOSTIC",
+    "THREAD_HISTORY_ERROR_DIAGNOSTIC",
+    "THREAD_HISTORY_SOURCE_CACHE",
+    "THREAD_HISTORY_SOURCE_DIAGNOSTIC",
+    "THREAD_HISTORY_SOURCE_HOMESERVER",
+    "THREAD_HISTORY_SOURCE_STALE_CACHE",
+    "ThreadCacheState",
+    "ThreadHistoryResult",
+    "ThreadReadPolicy",
+    "ThreadWritePolicy",
+    "normalize_nio_event_for_cache",
+    "thread_cache_state_is_usable",
+    "thread_history_result",
+]
+from = ["mindroom.matrix.cache"]
+
+[[interfaces]]
+expose = ["_EventCache", "_EventCacheWriteCoordinator"]
+from = ["mindroom.matrix.cache"]
+visibility = ["mindroom.runtime_support"]
+exclusive = true

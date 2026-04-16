@@ -416,6 +416,7 @@ dev = [
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
   "ruff>=0.12.5",
+  "tach>=0.34.1",
   "ty>=0.0.17",
   "zensical",
 ]

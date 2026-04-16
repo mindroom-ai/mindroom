@@ -60,7 +60,7 @@ from mindroom.inbound_turn_normalizer import (
     VoiceNormalizationRequest,
 )
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview

@@ -10,8 +10,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
-    from mindroom.matrix.cache.event_cache import ConversationEventCache
-    from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+    from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
 
 
