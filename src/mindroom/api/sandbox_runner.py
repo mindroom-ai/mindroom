@@ -33,6 +33,7 @@ from mindroom.tool_system.metadata import (
     ToolConfigOverrideError,
     ToolInitOverrideError,
     ToolMetadataValidationError,
+    ToolValidationInfo,
     deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
     get_tool_by_name,
