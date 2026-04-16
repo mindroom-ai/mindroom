@@ -32,6 +32,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     merge_runtime_tool_configs,
     save_loaded_toolkits_for_session,
 )
+from mindroom.tool_system.metadata import ToolConfigOverrideError, ensure_tool_registry_loaded
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
@@ -320,6 +321,30 @@ def test_config_rejects_invalid_mcp_server_name(tmp_path: Path) -> None:
         Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
 
     assert "filesystem-server" in str(exc_info.value)
+
+
+def test_dynamic_toolkit_override_normalization_uses_mcp_specific_validation(tmp_path: Path) -> None:
+    """Dynamic toolkit merging should reject invalid MCP override payloads consistently."""
+    raw = _base_config_data()
+    raw["mcp_servers"] = {
+        "demo": {
+            "transport": "stdio",
+            "command": "python",
+            "args": ["-c", "print(0)"],
+        },
+    }
+    raw["agents"]["code"]["tools"] = ["mcp_demo"]
+    config = _validated_config(tmp_path, raw)
+    ensure_tool_registry_loaded(_runtime_paths(tmp_path), config)
+
+    with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
+        dynamic_toolkits_module._normalize_effective_tool_config_overrides(
+            "mcp_demo",
+            {
+                "include_tools": ["echo"],
+                "exclude_tools": ["echo"],
+            },
+        )
 
 
 def test_dynamic_toolkit_session_initializes_from_initial_toolkits(tmp_path: Path) -> None:

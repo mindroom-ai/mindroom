@@ -220,6 +220,35 @@ def _missing_plugin_path_with_invalid_tool_config_path(tmp_path: Path) -> Path:
     return config_path
 
 
+def _mcp_demo_config_path(tmp_path: Path) -> Path:
+    """Write one config that exposes a valid MCP-backed tool assignment."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "mcp_servers:\n"
+        "  demo:\n"
+        "    transport: stdio\n"
+        "    command: python\n"
+        "    args:\n"
+        "      - -c\n"
+        "      - print(0)\n"
+        "agents:\n"
+        "  code:\n"
+        "    display_name: Code\n"
+        "    role: test\n"
+        "    model: default\n"
+        "    tools:\n"
+        "      - mcp_demo\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -755,6 +784,7 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     config_path = _missing_plugin_path_config_path(tmp_path)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
     _set_sandbox_token(monkeypatch)
 
@@ -763,7 +793,10 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     assert runtime_paths.config_path.exists()
     assert config.plugins == []
 
-    with TestClient(sandbox_runner_app) as client:
+    with (
+        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create),
+        TestClient(sandbox_runner_app) as client,
+    ):
         response = client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -780,6 +813,21 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     assert '"result": 3' in response.json()["result"]
 
 
+def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shared runner startup must keep canonical plugin validation semantics."""
+    config_path = _missing_plugin_path_config_path(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+
+    with pytest.raises(ConfigRuntimeValidationError, match="Configured plugin path does not exist"):
+        _refresh_runner_app_from_env()
+
+
 def test_sandbox_runner_still_rejects_invalid_tools_after_skipping_worker_plugins(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -788,6 +836,7 @@ def test_sandbox_runner_still_rejects_invalid_tools_after_skipping_worker_plugin
     config_path = _missing_plugin_path_with_invalid_tool_config_path(tmp_path)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
@@ -797,6 +846,37 @@ def test_sandbox_runner_still_rejects_invalid_tools_after_skipping_worker_plugin
     assert str(exc_info.value) == (
         "agents.invalid.tools[0].definitely_not_a_tool: Unknown tool 'definitely_not_a_tool'."
     )
+
+
+def test_sandbox_runner_execute_rejects_invalid_mcp_tool_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execute requests should use the same MCP-specific override validation as config loading."""
+    config_path = _mcp_demo_config_path(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    _set_sandbox_token(monkeypatch)
+    _refresh_runner_app_from_env()
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "mcp_demo",
+                "function_name": "demo",
+                "args": [],
+                "kwargs": {},
+                "tool_config_overrides": {
+                    "include_tools": ["echo"],
+                    "exclude_tools": ["echo"],
+                },
+            },
+        )
+
+    assert response.status_code == 400
+    assert "include_tools and exclude_tools overlap" in response.json()["detail"]
 
 
 def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_refresh(

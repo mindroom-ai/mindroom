@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
-from mindroom.config.main import Config, ConfigRuntimeValidationError, _normalized_config_data
+from mindroom.config.main import Config, ConfigRuntimeValidationError, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import sandbox_proxy
@@ -35,9 +35,8 @@ from mindroom.tool_system.metadata import (
     deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
     get_tool_by_name,
-    resolved_tool_validation_snapshot_for_runtime,
     sanitize_tool_init_overrides,
-    validate_authored_overrides,
+    validate_authored_tool_entry_overrides,
 )
 from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.sandbox_proxy import to_json_compatible
@@ -113,45 +112,45 @@ def _upstream_tool_validation_snapshot_from_env() -> dict[str, object]:
 
 
 def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
-    """Return the worker runtime config visible inside one sandbox runner.
-
-    Dedicated workers should load only the plugin surface that is actually
-    installed inside the worker runtime. They should not fail startup because
-    the primary deployment config references plugins that are mounted only in
-    the main app pod.
-    """
+    """Return the runtime config visible inside one sandbox runner."""
     if runtime_paths.config_path.exists():
-        with runtime_paths.config_path.open() as f:
-            data = yaml.safe_load(f) or {}
-
-        # Worker runtimes only need the authored config shape plus the subset
-        # of plugin entries that actually exist in that runtime filesystem.
-        config = Config.model_validate(
-            _normalized_config_data(data),
-            context={"runtime_paths": runtime_paths},
-        )
-        config = _config_with_available_plugins(config, runtime_paths)
-
-        try:
-            tool_validation_snapshot = _upstream_tool_validation_snapshot_from_env()
-            if not tool_validation_snapshot:
-                tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
-                    runtime_paths,
-                    config,
-                )
-            config._validate_authored_tool_entries_with_snapshot(
-                tool_validation_snapshot=tool_validation_snapshot,
-            )
-        except (
-            PluginValidationError,
-            ToolConfigOverrideError,
-            ToolMetadataValidationError,
-            TypeError,
-            ValueError,
-        ) as exc:
-            raise ConfigRuntimeValidationError(str(exc)) from exc
-        return config
+        if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
+            return load_config(runtime_paths)
+        return _dedicated_worker_runtime_config_or_empty(runtime_paths)
     return Config.validate_with_runtime({}, runtime_paths)
+
+
+def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+    """Return dedicated-worker config, tolerating plugins unavailable in that worker image."""
+    with runtime_paths.config_path.open() as f:
+        data = yaml.safe_load(f) or {}
+
+    tool_validation_snapshot = _upstream_tool_validation_snapshot_from_env()
+    if not tool_validation_snapshot:
+        return load_config(runtime_paths)
+
+    # Dedicated workers only need the authored config shape plus the subset of
+    # plugin entries that actually exist in that runtime filesystem. Upstream
+    # validation remains authoritative for the full configured tool surface.
+    config = Config.model_validate(
+        _normalized_config_data(data),
+        context={"runtime_paths": runtime_paths},
+    )
+    config = _config_with_available_plugins(config, runtime_paths)
+
+    try:
+        config._validate_authored_tool_entries_with_snapshot(
+            tool_validation_snapshot=tool_validation_snapshot,
+        )
+    except (
+        PluginValidationError,
+        ToolConfigOverrideError,
+        ToolMetadataValidationError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise ConfigRuntimeValidationError(str(exc)) from exc
+    return config
 
 
 def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) -> Config:
@@ -781,7 +780,7 @@ def _validate_execute_request_payload(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.tool_config_overrides:
         try:
-            payload.tool_config_overrides = validate_authored_overrides(
+            payload.tool_config_overrides = validate_authored_tool_entry_overrides(
                 payload.tool_name,
                 payload.tool_config_overrides,
                 config_path_prefix="request.tool_config_overrides",

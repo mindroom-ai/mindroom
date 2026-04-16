@@ -596,7 +596,7 @@ def _build_tool_instance(
     ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
-    validated_tool_config_overrides = validate_authored_overrides(tool_name, tool_config_overrides)
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
         metadata,

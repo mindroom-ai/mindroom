@@ -9,7 +9,7 @@ from agno.tools import Toolkit
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
@@ -21,6 +21,7 @@ from mindroom.tool_system.metadata import (
     ToolConfigOverrideError,
     ToolManagedInitArg,
     deserialize_tool_validation_snapshot,
+    ensure_tool_registry_loaded,
     export_tools_metadata,
     get_tool_by_name,
     register_tool_with_metadata,
@@ -481,6 +482,49 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadab
                     "runtime_loadable": "yes",
                 },
             },
+        )
+
+
+def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None:
+    """Direct tool construction must enforce the same MCP-specific override rules as config loading."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "mcp_servers:\n"
+        "  demo:\n"
+        "    transport: stdio\n"
+        "    command: python\n"
+        "    args:\n"
+        "      - -c\n"
+        "      - print(0)\n"
+        "agents:\n"
+        "  code:\n"
+        "    display_name: Code\n"
+        "    role: test\n"
+        "    model: default\n"
+        "    tools:\n"
+        "      - mcp_demo\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    config = load_config(runtime_paths)
+    ensure_tool_registry_loaded(runtime_paths, config)
+
+    with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
+        get_tool_by_name(
+            "mcp_demo",
+            runtime_paths,
+            tool_config_overrides={
+                "include_tools": ["echo"],
+                "exclude_tools": ["echo"],
+            },
+            disable_sandbox_proxy=True,
+            worker_target=None,
         )
 
 
