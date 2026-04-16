@@ -78,6 +78,15 @@ def primary_worker_backend_available(
     return False
 
 
+def _require_kubernetes_tool_validation_snapshot(
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None,
+) -> dict[str, dict[str, object]]:
+    if kubernetes_tool_validation_snapshot is None:
+        msg = "Kubernetes worker backend requires an explicit tool validation snapshot."
+        raise WorkerBackendError(msg)
+    return kubernetes_tool_validation_snapshot
+
+
 def _static_runner_backend_config_signature(
     *,
     proxy_url: str | None,
@@ -102,10 +111,9 @@ def _primary_worker_backend_config_signature(
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "kubernetes":
-        if kubernetes_tool_validation_snapshot is None:
-            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
-                runtime_paths,
-            )
+        kubernetes_tool_validation_snapshot = _require_kubernetes_tool_validation_snapshot(
+            kubernetes_tool_validation_snapshot,
+        )
         return (
             *kubernetes_backend_config_signature(
                 runtime_paths,
@@ -138,10 +146,9 @@ def _build_primary_worker_manager(
         if storage_root is None:
             msg = "Kubernetes worker backend requires an explicit runtime storage root."
             raise WorkerBackendError(msg)
-        if kubernetes_tool_validation_snapshot is None:
-            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
-                runtime_paths,
-            )
+        kubernetes_tool_validation_snapshot = _require_kubernetes_tool_validation_snapshot(
+            kubernetes_tool_validation_snapshot,
+        )
         return WorkerManager(
             KubernetesWorkerBackend.from_runtime(
                 runtime_paths,
@@ -164,9 +171,6 @@ def get_primary_worker_manager(
 ) -> WorkerManager:
     """Return the primary-runtime worker manager for the current backend config."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
-
-    if primary_worker_backend_name(runtime_paths) == "kubernetes" and kubernetes_tool_validation_snapshot is None:
-        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(runtime_paths)
 
     config_signature = _primary_worker_backend_config_signature(
         runtime_paths,

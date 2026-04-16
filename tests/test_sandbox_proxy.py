@@ -1412,7 +1412,6 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             "runtime_loadable": False,
         },
     }
-    snapshots = iter([first_snapshot, second_snapshot])
     captured_snapshots: list[dict[str, dict[str, object]]] = []
 
     class FakeKubernetesBackend:
@@ -1459,11 +1458,6 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
         def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
             raise NotImplementedError
 
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "serialized_kubernetes_worker_validation_snapshot",
-        lambda _runtime_paths: next(snapshots),
-    )
     monkeypatch.setattr(workers_runtime_module, "KubernetesWorkerBackend", FakeKubernetesBackend)
 
     first_manager = workers_runtime_module.get_primary_worker_manager(
@@ -1471,16 +1465,48 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
+        kubernetes_tool_validation_snapshot=first_snapshot,
     )
     second_manager = workers_runtime_module.get_primary_worker_manager(
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
+        kubernetes_tool_validation_snapshot=second_snapshot,
     )
 
     assert first_manager is not second_manager
     assert captured_snapshots == [first_snapshot, second_snapshot]
+    workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Kubernetes worker-manager lookup should require the caller to provide a committed snapshot."""
+    workers_runtime_module._reset_primary_worker_manager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="requires an explicit tool validation snapshot",
+    ):
+        workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=_TEST_AUTH_TOKEN,
+            storage_root=tmp_path,
+        )
+
     workers_runtime_module._reset_primary_worker_manager()
 
 

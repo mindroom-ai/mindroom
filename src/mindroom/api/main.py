@@ -163,6 +163,9 @@ def _cleanup_workers_once(
     ):
         return 0
 
+    if runtime_config is None and primary_worker_backend_name(runtime_paths) == "kubernetes":
+        return 0
+
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
     if runtime_config is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
