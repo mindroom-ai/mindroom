@@ -1,4 +1,10 @@
-"""Shared transitive thread membership resolution."""
+"""Canonical Matrix thread resolution.
+
+Ownership map:
+- canonical thread identity: this module
+- mutation/bookkeeping impact: `mindroom.matrix.thread_bookkeeping`
+- tool-facing normalization: `mindroom.custom_tools.attachment_helpers`
+"""
 
 from __future__ import annotations
 

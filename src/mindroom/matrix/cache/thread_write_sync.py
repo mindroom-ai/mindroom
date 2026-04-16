@@ -7,17 +7,14 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.matrix.cache.event_cache import normalize_nio_event_for_cache
-from mindroom.matrix.cache.thread_write_resolution import (
-    MutationThreadImpactState,
-    is_thread_affecting_relation,
-)
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_bookkeeping import MutationThreadImpactState, is_thread_affecting_relation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-    from mindroom.matrix.cache.thread_write_resolution import MutationResolutionContext, ThreadMutationResolver
+    from mindroom.matrix.thread_bookkeeping import MutationResolutionContext, ThreadMutationResolver
 
 
 def _collect_sync_timeline_cache_updates(

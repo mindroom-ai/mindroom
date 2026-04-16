@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_authorized_sender
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -72,3 +75,56 @@ def resolve_context_thread_id(
     if allow_context_fallback and room_id == context.room_id:
         return context.resolved_thread_id
     return None
+
+
+@dataclass(frozen=True)
+class CanonicalToolThreadTarget:
+    """Shared tool-facing thread-target normalization result."""
+
+    requested_thread_id: str | None
+    canonical_thread_id: str | None
+    error: str | None = None
+
+
+async def resolve_canonical_tool_thread_target(
+    context: ToolRuntimeContext,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    normalize_thread_id: Callable[[str, str], Awaitable[str | None]],
+    allow_context_fallback: bool = True,
+    fail_closed_on_normalization_error: bool = False,
+    room_timeline_sentinel: str | None = None,
+) -> CanonicalToolThreadTarget:
+    """Resolve one tool thread target into the canonical thread root or a stable error."""
+    requested_thread_id = resolve_context_thread_id(
+        context,
+        room_id=room_id,
+        thread_id=thread_id,
+        allow_context_fallback=allow_context_fallback,
+        room_timeline_sentinel=room_timeline_sentinel,
+    )
+    if requested_thread_id is None:
+        return CanonicalToolThreadTarget(
+            requested_thread_id=None,
+            canonical_thread_id=None,
+            error="thread_id is required when no active thread context is available for the target room.",
+        )
+
+    try:
+        canonical_thread_id = await normalize_thread_id(room_id, requested_thread_id)
+    except Exception:
+        if not fail_closed_on_normalization_error:
+            raise
+        canonical_thread_id = None
+    if canonical_thread_id is None:
+        return CanonicalToolThreadTarget(
+            requested_thread_id=requested_thread_id,
+            canonical_thread_id=None,
+            error="Failed to resolve a canonical thread root for the target event.",
+        )
+
+    return CanonicalToolThreadTarget(
+        requested_thread_id=requested_thread_id,
+        canonical_thread_id=canonical_thread_id,
+    )

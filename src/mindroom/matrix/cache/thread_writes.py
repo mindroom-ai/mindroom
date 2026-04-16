@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Any
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_write_live import ThreadLiveWritePolicy
 from mindroom.matrix.cache.thread_write_outbound import ThreadOutboundWritePolicy
-from mindroom.matrix.cache.thread_write_resolution import ThreadMutationResolver
 from mindroom.matrix.cache.thread_write_sync import (
     ThreadSyncWritePolicy,
     _collect_sync_timeline_cache_updates,
 )
+from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 
 if TYPE_CHECKING:
     import nio

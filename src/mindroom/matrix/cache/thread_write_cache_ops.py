@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.cache.thread_write_resolution import MutationThreadImpact, MutationThreadImpactState
+from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
 if TYPE_CHECKING:
     import asyncio

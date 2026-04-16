@@ -7,7 +7,7 @@ import json
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import (
-    resolve_context_thread_id,
+    resolve_canonical_tool_thread_target,
     resolve_requested_room_id,
     room_access_allowed,
 )
@@ -82,38 +82,28 @@ class ThreadSummaryTools(Toolkit):
                 room_id=resolved_room_id,
                 message="summary must be a non-empty string.",
             )
-        effective_thread_id = resolve_context_thread_id(
+        thread_target = await resolve_canonical_tool_thread_target(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-        )
-        if effective_thread_id is None:
-            return self._payload(
-                "error",
-                action="set",
-                room_id=resolved_room_id,
-                thread_id=None,
-                message="thread_id is required when no active thread context is available for the target room.",
-            )
-
-        try:
-            normalized_thread_id = await resolve_thread_root_event_id_for_client(
+            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
                 context.client,
-                resolved_room_id,
-                effective_thread_id,
+                normalize_room_id,
+                normalize_event_id,
                 conversation_cache=context.conversation_cache,
-            )
-        except Exception:
-            normalized_thread_id = None
-
-        if normalized_thread_id is None:
+            ),
+            fail_closed_on_normalization_error=True,
+        )
+        if thread_target.error is not None:
             return self._payload(
                 "error",
                 action="set",
                 room_id=resolved_room_id,
-                thread_id=effective_thread_id,
-                message="Failed to resolve a canonical thread root for the target event.",
+                thread_id=thread_target.requested_thread_id,
+                message=thread_target.error,
             )
+        assert thread_target.canonical_thread_id is not None
+        normalized_thread_id = thread_target.canonical_thread_id
 
         try:
             result = await set_manual_thread_summary(
