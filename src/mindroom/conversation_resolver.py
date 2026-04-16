@@ -440,6 +440,53 @@ class ConversationResolver:
             dispatch_safe=True,
         )
 
+    async def extract_trusted_router_relay_context(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+    ) -> MessageContext:
+        """Extract minimal context for router relays and defer thread hydration until after lock."""
+        resolved_event_source = await resolve_event_source_content(event.source, self._client())
+        config = self.deps.runtime.config
+
+        if should_skip_mentions(resolved_event_source):
+            mentioned_agents: list[MatrixID] = []
+            am_i_mentioned = False
+            has_non_agent_mentions = False
+        else:
+            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+                resolved_event_source,
+                self._matrix_id(),
+                config,
+                self.deps.runtime_paths,
+            )
+
+        if am_i_mentioned:
+            self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
+
+        event_info = EventInfo.from_event(resolved_event_source)
+        if (
+            config.get_entity_thread_mode(
+                self.deps.agent_name,
+                self.deps.runtime_paths,
+                room_id=room.room_id,
+            )
+            == "room"
+        ):
+            resolved_thread_id = None
+        else:
+            resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        return MessageContext(
+            am_i_mentioned=am_i_mentioned,
+            is_thread=resolved_thread_id is not None,
+            thread_id=resolved_thread_id,
+            thread_history=(),
+            mentioned_agents=mentioned_agents,
+            has_non_agent_mentions=has_non_agent_mentions,
+            replay_guard_history=(),
+            requires_full_thread_history=resolved_thread_id is not None,
+        )
+
     async def extract_message_context(
         self,
         room: nio.MatrixRoom,

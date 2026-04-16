@@ -216,6 +216,17 @@ class TurnController:
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         return isinstance(original_sender, str) and bool(original_sender)
 
+    def _is_trusted_router_relay_event(self, event: _DispatchEvent) -> bool:
+        """Return whether one trusted internal relay originated from the router."""
+        if not self._is_trusted_internal_relay_event(event):
+            return False
+        sender_agent_name = extract_agent_name(
+            event.sender,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        return sender_agent_name == ROUTER_AGENT_NAME
+
     def _precheck_event(
         self,
         room: nio.MatrixRoom,
@@ -440,7 +451,10 @@ class TurnController:
         handled_turn: HandledTurnState,
     ) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
-        context = await self.deps.resolver.extract_dispatch_context(room, event)
+        if self._is_trusted_router_relay_event(event):
+            context = await self.deps.resolver.extract_trusted_router_relay_context(room, event)
+        else:
+            context = await self.deps.resolver.extract_dispatch_context(room, event)
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=context.thread_id,
