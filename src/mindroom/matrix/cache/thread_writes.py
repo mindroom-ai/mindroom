@@ -14,13 +14,13 @@ from mindroom.matrix.cache.event_cache_events import (
     normalize_nio_event_for_cache,
 )
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-from mindroom.matrix.cache.thread_write_resolution import (
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
     MutationThreadImpactState,
     ThreadMutationResolver,
     is_thread_affecting_relation,
 )
-from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
     import structlog

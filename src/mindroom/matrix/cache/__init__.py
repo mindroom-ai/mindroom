@@ -4,7 +4,7 @@ Developer note:
 - `event_cache.py` owns the public SQLite cache boundary plus runtime, locking, and schema lifecycle.
 - `event_cache_events.py` owns event lookup normalization, lookup/index rows, edits, and redaction tombstones.
 - `event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
-- `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_write_resolution.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
+- `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
 
 Public boundary:
 - `_EventCache` in `event_cache.py` is the durable cache API used by conversation and client code.
