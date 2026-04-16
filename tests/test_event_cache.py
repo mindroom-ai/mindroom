@@ -19,6 +19,7 @@ from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.client import fetch_thread_history
 from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.timing import DispatchPipelineTiming
 
 if TYPE_CHECKING:
@@ -1360,6 +1361,113 @@ async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -
     assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
     client.room_get_event.assert_not_awaited()
     client.room_messages.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mxc_text_cache_round_trips_across_event_cache_reopen(tmp_path: Path) -> None:
+    """Durable MXC text rows should survive closing and reopening the event cache."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+
+    try:
+        await cache.store_mxc_text("!room:localhost", "mxc://server/sidecar", "Full text sidecar")
+    finally:
+        await cache.close()
+
+    reopened_cache = _EventCache(db_path)
+    await reopened_cache.initialize()
+    try:
+        cached_text = await reopened_cache.get_mxc_text("!room:localhost", "mxc://server/sidecar")
+    finally:
+        await reopened_cache.close()
+
+    assert cached_text == "Full text sidecar"
+
+
+@pytest.mark.asyncio
+async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(tmp_path: Path) -> None:
+    """Cached full-history reads should reuse durable sidecar text after a restart."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    _clear_mxc_cache()
+
+    root_event = _make_text_event(
+        event_id="$thread_root",
+        sender="@user:localhost",
+        body="Root message",
+        server_timestamp=1000,
+        source_content={"body": "Root message"},
+    )
+    sidecar_reply = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Preview reply",
+        server_timestamp=2000,
+        source_content={
+            "body": "Preview reply",
+            "msgtype": "m.file",
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://server/sidecar",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+        },
+    )
+    canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
+
+    first_client = MagicMock()
+    first_client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(canonical_sidecar_content).encode("utf-8"),
+        ),
+    )
+    first_client.room_get_event = AsyncMock()
+    first_client.room_messages = AsyncMock()
+    first_client.room_get_event_relations = MagicMock()
+
+    try:
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(sidecar_reply)],
+        )
+
+        first_history = await fetch_thread_history(first_client, "!room:localhost", "$thread_root", event_cache=cache)
+    finally:
+        await cache.close()
+
+    _clear_mxc_cache()
+
+    reopened_cache = _EventCache(db_path)
+    await reopened_cache.initialize()
+    second_client = MagicMock()
+    second_client.download = AsyncMock(
+        return_value=MagicMock(spec=nio.DownloadError),
+    )
+    second_client.room_get_event = AsyncMock()
+    second_client.room_messages = AsyncMock()
+    second_client.room_get_event_relations = MagicMock()
+
+    try:
+        second_history = await fetch_thread_history(
+            second_client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=reopened_cache,
+        )
+    finally:
+        await reopened_cache.close()
+        _clear_mxc_cache()
+
+    assert [message.body for message in first_history] == ["Root message", "Full reply"]
+    assert [message.body for message in second_history] == ["Root message", "Full reply"]
+    first_client.download.assert_awaited_once_with(mxc="mxc://server/sidecar")
+    second_client.download.assert_not_awaited()
 
 
 def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:

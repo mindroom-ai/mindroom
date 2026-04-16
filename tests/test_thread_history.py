@@ -243,6 +243,7 @@ class TestThreadHistory:
             "!room:localhost",
             "$thread_root",
             hydrate_sidecars=True,
+            event_cache=event_cache,
         )
         mock_store.assert_awaited_once_with(
             event_cache,
@@ -1078,6 +1079,7 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
+                event_cache=_event_cache(),
             )
         ).history
         serialized = [message.to_dict() for message in history]
@@ -1136,6 +1138,7 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
+                event_cache=_event_cache(),
             )
         ).history
         serialized = [message.to_dict() for message in history]
@@ -1191,6 +1194,7 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
+                event_cache=_event_cache(),
             )
         ).history
 
@@ -1383,6 +1387,7 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$root",
                 hydrate_sidecars=True,
+                event_cache=_event_cache(),
             )
         ).history
 
@@ -1396,6 +1401,7 @@ class TestThreadHistory:
 
         history, _sidecar_ms = await _resolve_thread_history_from_event_sources_timed(
             client,
+            room_id="!room:localhost",
             thread_id="$root",
             event_sources=[
                 {
@@ -1429,6 +1435,7 @@ class TestThreadHistory:
                 },
             ],
             hydrate_sidecars=True,
+            event_cache=_event_cache(),
         )
 
         assert [message.event_id for message in history] == ["$root", "$zzz_parent", "$aaa_child"]
@@ -1592,8 +1599,10 @@ class TestThreadHistory:
 
         history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
             client,
+            room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
+            event_cache=_event_cache(),
         )
 
         assert [message.event_id for message in history] == ["$thread_root"]
@@ -1630,8 +1639,10 @@ class TestThreadHistory:
         with patch("mindroom.matrix.client.extract_edit_body", new_callable=AsyncMock) as mock_extract_edit_body:
             history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
                 client,
+                room_id="!room:localhost",
                 thread_id="$thread_root",
                 event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(unrelated_edit)],
+                event_cache=_event_cache(),
             )
 
         assert [message.event_id for message in history] == ["$thread_root"]
@@ -1672,8 +1683,10 @@ class TestThreadHistory:
 
         history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
             client,
+            room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
+            event_cache=_event_cache(),
         )
 
         assert [message.event_id for message in history] == ["$thread_root", "$missing_original"]
@@ -1828,6 +1841,7 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
+                event_cache=_event_cache(),
             )
 
     @pytest.mark.asyncio
@@ -1855,6 +1869,7 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
+                event_cache=_event_cache(),
             )
 
 

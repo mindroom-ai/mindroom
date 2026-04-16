@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import time
 from collections import OrderedDict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
 
@@ -91,10 +94,13 @@ def _sidecar_mxc_url(content: dict[str, Any]) -> str | None:
     return file_url if isinstance(file_url, str) else None
 
 
-async def _download_mxc_text(  # noqa: PLR0911, C901
+async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
+    *,
+    event_cache: ConversationEventCache | None = None,
+    room_id: str | None = None,
 ) -> str | None:
     """Download text content from an MXC URL with caching.
 
@@ -102,6 +108,8 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
         client: Matrix client
         mxc_url: The MXC URL to download from
         file_info: Optional encryption info for E2EE rooms
+        event_cache: Optional durable event cache used for restart-safe MXC text reuse
+        room_id: Room scope for event-cache locking when a durable MXC cache is available
     Returns:
         The downloaded text content, or None if download failed
 
@@ -116,6 +124,19 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
             return content
         # Expired, remove from cache
         del _mxc_cache[mxc_url]
+
+    if event_cache is not None and room_id is not None:
+        try:
+            cached_text = await event_cache.get_mxc_text(room_id, mxc_url)
+        except Exception:
+            logger.exception("Failed to read durable MXC text cache")
+        else:
+            if cached_text is not None:
+                _mxc_cache[mxc_url] = (cached_text, current_time)
+                _mxc_cache.move_to_end(mxc_url)
+                _clean_expired_cache()
+                logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
+                return cached_text
 
     try:
         # Parse MXC URL
@@ -162,6 +183,11 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
         _mxc_cache[mxc_url] = (decoded_text, time.time())
         _mxc_cache.move_to_end(mxc_url)
         logger.debug("mxc_content_cached", mxc_url=mxc_url)
+        if event_cache is not None and room_id is not None:
+            try:
+                await event_cache.store_mxc_text(room_id, mxc_url, decoded_text)
+            except Exception:
+                logger.exception("Failed to persist durable MXC text cache")
 
         if len(_mxc_cache) > _mxc_cache_max_entries:
             _clean_expired_cache()
@@ -176,6 +202,9 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
 async def extract_and_resolve_message(
     event: nio.RoomMessageText | nio.RoomMessageNotice,
     client: nio.AsyncClient | None = None,
+    *,
+    event_cache: ConversationEventCache | None = None,
+    room_id: str | None = None,
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
 
@@ -185,6 +214,8 @@ async def extract_and_resolve_message(
     Args:
         event: The Matrix event to extract data from
         client: Optional Matrix client for downloading attachments
+        event_cache: Optional durable event cache used for restart-safe sidecar reuse
+        room_id: Room scope for durable sidecar cache reads and writes
 
     Returns:
         Dict with sender, body, timestamp, event_id, and content fields.
@@ -194,7 +225,12 @@ async def extract_and_resolve_message(
     """
     # Extract basic message data
     preview_content = _normalized_content_dict(event.source.get("content", {}))
-    resolved_content = await _resolve_canonical_content(preview_content, client)
+    resolved_content = await _resolve_canonical_content(
+        preview_content,
+        client,
+        event_cache=event_cache,
+        room_id=room_id,
+    )
     message_data = {
         "sender": event.sender,
         "body": _content_body(resolved_content, event.body),
@@ -211,10 +247,18 @@ async def extract_and_resolve_message(
 async def extract_edit_body(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
+    *,
+    event_cache: ConversationEventCache | None = None,
+    room_id: str | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
     content = _normalized_content_dict(event_source.get("content", {}))
-    resolved_content = await _resolve_canonical_content(content, client)
+    resolved_content = await _resolve_canonical_content(
+        content,
+        client,
+        event_cache=event_cache,
+        room_id=room_id,
+    )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
 
     body = new_content.get("body")
@@ -226,10 +270,18 @@ async def extract_edit_body(
 async def resolve_event_source_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
+    *,
+    event_cache: ConversationEventCache | None = None,
+    room_id: str | None = None,
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
-    resolved_content = await _resolve_canonical_content(preview_content, client)
+    resolved_content = await _resolve_canonical_content(
+        preview_content,
+        client,
+        event_cache=event_cache,
+        room_id=room_id,
+    )
     if resolved_content is preview_content:
         return event_source
 
@@ -241,6 +293,9 @@ async def resolve_event_source_content(
 async def _resolve_canonical_content(
     content: dict[str, Any],
     client: nio.AsyncClient | None,
+    *,
+    event_cache: ConversationEventCache | None,
+    room_id: str | None,
 ) -> dict[str, Any]:
     """Hydrate canonical event content from a v2 JSON sidecar when available."""
     sidecar_content = _sidecar_content_for_resolution(content)
@@ -257,6 +312,8 @@ async def _resolve_canonical_content(
         client,
         mxc_url,
         sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
+        event_cache=event_cache,
+        room_id=room_id,
     )
     if full_text is None:
         return content
