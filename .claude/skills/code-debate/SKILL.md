@@ -8,6 +8,9 @@ argument-hint: "[A|B] [subject: commit, diff, PR, or file to debate]"
 
 A protocol for two coding agents (Claude Code, Gemini CLI, Codex, or any other) to debate code changes through a shared file (`DEBATE.md`). Both agents receive this same prompt. Role is determined by the first argument.
 
+This skill assumes the two debate participants are started externally by a human in separate sessions.
+It is not a peer-orchestration skill.
+
 ## How to use
 
 Open two terminal tabs with coding agents (same or different). Invoke this skill in each, specifying role and subject:
@@ -28,16 +31,34 @@ If no role argument is provided, fall back to file existence:
 
 Do not ask the user which role to play.
 
+## Role isolation beats liveness (MUST)
+
+- If protocol liveness conflicts with role isolation, role isolation wins.
+- A stalled debate waiting for the real peer is allowed.
+- Manufacturing, recruiting, or simulating the missing peer is never allowed.
+
 ## Non-simulation guardrails (MUST)
 
 - Never write content for the opposite role.
 - Never simulate, fabricate, or placeholder the other agent's response.
 - Never append both sides of a debate from one process.
+- Never create, spawn, launch, delegate to, summon, or recruit the opposite debate role.
+- Never use `spawn_agent`, `send_input`, tmux supervision, background shell automation, or any other tool to manufacture the missing peer.
 - Role is immutable for the run: once detected as Agent A or Agent B, keep that role until `## CONSENSUS`.
 - If you are about to write the opposite role, stop and report protocol violation instead of writing.
 - After appending your section, only poll. Do not append another turn unless checksum changed and turn order confirms it is now your turn.
 - If checksum does not change, keep polling until timeout or `## CONSENSUS`.
 - On timeout, append only a timeout `## CONSENSUS` from your own role.
+
+## Forbidden example (MUST NOT)
+
+- Forbidden: after writing `## Response 1` as Agent B, spawning or launching an Agent A subagent so the debate can continue.
+- Correct: leave `DEBATE.md` ready for the real Agent A and keep polling until checksum change or timeout.
+
+## Pre-tool gate (MUST)
+
+- Before using any tool after role detection, ask: could this action cause the opposite role to exist, speak, or advance?
+- If yes, do not do it.
 
 ## Checksum command
 
@@ -78,7 +99,7 @@ Before appending, also verify the last signature line role:
 - When checksum changes, immediately read `DEBATE.md` and continue the protocol.
 - Stop only when `## CONSENSUS` exists or timeout handling completes.
 - Polling is mandatory after every append. Do not return control to the user between append and poll completion.
-- After checksum change, do not ask the user what to do next. Immediately take the next protocol step for your role.
+- After checksum change, do not ask the user what to do next. Immediately take the next protocol step for your role only.
 
 ## Hard Exit Gate (MUST)
 
@@ -114,7 +135,7 @@ Before appending, also verify the last signature line role:
 - It is a protocol violation to stop after writing `## Opening`, `## Response N`, or `## Follow-up N` without entering the poll loop.
 - If `DEBATE.md` does not yet contain `## CONSENSUS`, you must still be in the protocol loop (append or poll).
 - Never send a “done”/“completed” status while waiting for the other agent; continue polling instead.
-- Never pause to request user confirmation between turns. Continue autonomously until consensus/timeout.
+- Never pause to request user confirmation between turns. Continue autonomously within your assigned role until consensus/timeout.
 
 ## Agent A (opener) flow
 
@@ -131,13 +152,14 @@ Before appending, also verify the last signature line role:
 7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
 8. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
 9. Do not ask the user to choose between follow-up or consensus; Agent A must decide and append immediately.
+10. Agent A must never create or recruit Agent B; if the peer never responds, keep polling until timeout.
 
 ## Agent B (responder) flow
 
 1. Ensure `DEBATE.md` exists before reading:
    - If it exists, read it immediately.
    - If it does not exist (for example, you were explicitly designated as Agent B), start polling and wait until it exists, then read it.
-   - If timeout is reached before the file exists, stop and report timeout. Do not create `DEBATE.md` as Agent B.
+   - If timeout is reached before the file exists, stop with a timeout result. Do not create `DEBATE.md` as Agent B and do not start Agent A yourself.
    Example:
    ```bash
    SECONDS=0; while [ ! -f DEBATE.md ]; do sleep 5; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT waiting for DEBATE.md"; exit 0; fi; done
@@ -156,7 +178,8 @@ Before appending, also verify the last signature line role:
 8. Read Agent A's follow-up.
 9. If the file contains `## CONSENSUS` → stop, debate is over.
 10. Otherwise go to step 3.
-11. Do not ask the user whether to continue; continue automatically per turn order.
+11. Do not ask the user whether to continue; continue automatically per turn order within Agent B only.
+12. Agent B must never create or recruit Agent A, even if no further turns arrive.
 
 ## File format
 
