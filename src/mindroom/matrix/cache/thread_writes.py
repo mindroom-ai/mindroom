@@ -593,7 +593,7 @@ class ThreadSyncWritePolicy:
 
 
 class ThreadWritePolicy:
-    """Own the thread-write collaborator set for one conversation cache."""
+    """Own the public thread-write boundary for one conversation cache."""
 
     def __init__(
         self,
@@ -603,25 +603,94 @@ class ThreadWritePolicy:
         require_client: typing.Callable[[], nio.AsyncClient],
         fetch_event_info_for_thread_resolution: typing.Callable[[str, str], typing.Awaitable[EventInfo | None]],
     ) -> None:
-        self.resolver = ThreadMutationResolver(
+        self._resolver = ThreadMutationResolver(
             logger_getter=logger_getter,
             runtime=runtime,
             fetch_event_info_for_thread_resolution=fetch_event_info_for_thread_resolution,
         )
-        self.cache_ops = ThreadMutationCacheOps(
+        self._cache_ops = ThreadMutationCacheOps(
             logger_getter=logger_getter,
             runtime=runtime,
         )
-        self.outbound = ThreadOutboundWritePolicy(
-            resolver=self.resolver,
-            cache_ops=self.cache_ops,
+        self._outbound = ThreadOutboundWritePolicy(
+            resolver=self._resolver,
+            cache_ops=self._cache_ops,
             require_client=require_client,
         )
-        self.live = ThreadLiveWritePolicy(
-            resolver=self.resolver,
-            cache_ops=self.cache_ops,
+        self._live = ThreadLiveWritePolicy(
+            resolver=self._resolver,
+            cache_ops=self._cache_ops,
         )
-        self.sync = ThreadSyncWritePolicy(
-            resolver=self.resolver,
-            cache_ops=self.cache_ops,
+        self._sync = ThreadSyncWritePolicy(
+            resolver=self._resolver,
+            cache_ops=self._cache_ops,
         )
+
+    def notify_outbound_message(
+        self,
+        room_id: str,
+        event_id: str | None,
+        content: dict[str, Any],
+    ) -> None:
+        """Schedule one locally sent threaded message or edit and fail open on bookkeeping errors."""
+        self._run_fail_open_outbound_write(
+            lambda: self._outbound.notify_outbound_message(room_id, event_id, content),
+            cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+            failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
+            room_id=room_id,
+            event_id=event_id,
+        )
+
+    def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
+        """Schedule one locally redacted threaded message and fail open on bookkeeping errors."""
+        self._run_fail_open_outbound_write(
+            lambda: self._outbound.notify_outbound_redaction(room_id, redacted_event_id),
+            cancelled_message="Ignoring cancelled outbound threaded message cache redaction bookkeeping after successful redact",
+            failure_message="Ignoring outbound threaded message cache redaction bookkeeping failure after successful redact",
+            room_id=room_id,
+            redacted_event_id=redacted_event_id,
+        )
+
+    async def append_live_event(
+        self,
+        room_id: str,
+        event: nio.RoomMessage,
+        *,
+        event_info: EventInfo,
+    ) -> None:
+        """Append one live threaded event into the advisory cache when the thread is known."""
+        await self._live.append_live_event(room_id, event, event_info=event_info)
+
+    async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
+        """Apply one redaction to the advisory cache when the affected thread is known."""
+        await self._live.apply_redaction(room_id, event)
+
+    def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
+        """Queue sync timeline persistence through the room-ordered cache barrier."""
+        self._sync.cache_sync_timeline(response)
+
+    def _run_fail_open_outbound_write(
+        self,
+        callback: typing.Callable[[], None],
+        *,
+        cancelled_message: str,
+        failure_message: str,
+        room_id: str,
+        **log_context: object,
+    ) -> None:
+        try:
+            callback()
+        except asyncio.CancelledError as exc:
+            self._cache_ops.logger.warning(
+                cancelled_message,
+                room_id=room_id,
+                error=str(exc),
+                **log_context,
+            )
+        except Exception as exc:
+            self._cache_ops.logger.warning(
+                failure_message,
+                room_id=room_id,
+                error=str(exc),
+                **log_context,
+            )

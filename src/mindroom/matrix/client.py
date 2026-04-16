@@ -24,7 +24,7 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache.event_cache_events import normalize_nio_event_for_cache
+from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.cache.thread_cache_helpers import thread_cache_state_is_usable
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,

@@ -8,6 +8,7 @@ Developer note:
 
 Public boundary:
 - `_EventCache` in `event_cache.py` is the durable cache API used by conversation and client code.
+- `mindroom.matrix.cache.normalize_nio_event_for_cache` is the package-level normalization helper for callers above the cache package.
 - `MatrixConversationCache` remains the higher-level conversation read/write facade above it.
 
 Main invariants:
@@ -15,3 +16,7 @@ Main invariants:
 - Event lookup rows and thread snapshot rows are written together so lookup, edit, and thread indexes stay consistent.
 - Thread invalidation is durable state first, with fail-closed deletion only when stale markers cannot be written.
 """
+
+from .event_cache_events import normalize_nio_event_for_cache
+
+__all__ = ["normalize_nio_event_for_cache"]
