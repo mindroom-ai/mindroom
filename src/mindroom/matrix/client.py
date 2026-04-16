@@ -1590,6 +1590,7 @@ async def refresh_thread_history_from_source(
     *,
     hydrate_sidecars: bool = True,
     allow_stale_fallback: bool = True,
+    cache_write_guard_started_at: float | None = None,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
     try:
@@ -1614,12 +1615,21 @@ async def refresh_thread_history_from_source(
                 return stale_history
         raise
     if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
-        await _store_thread_history_cache(
-            event_cache,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_sources=fetch_result.event_sources,
-        )
+        if cache_write_guard_started_at is None:
+            await _store_thread_history_cache(
+                event_cache,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_sources=fetch_result.event_sources,
+            )
+        else:
+            await _store_thread_history_cache(
+                event_cache,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_sources=fetch_result.event_sources,
+                fetch_started_at=cache_write_guard_started_at,
+            )
     return _thread_history_result(
         fetch_result.history,
         is_full_history=hydrate_sidecars,
@@ -1638,13 +1648,22 @@ async def _store_thread_history_cache(
     room_id: str,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
+    fetch_started_at: float | None = None,
 ) -> bool:
     """Best-effort replacement of one cached thread snapshot."""
     try:
-        await event_cache.replace_thread(
+        if fetch_started_at is None:
+            await event_cache.replace_thread(
+                room_id,
+                thread_id,
+                list(event_sources),
+            )
+            return True
+        return await event_cache.replace_thread_if_not_newer(
             room_id,
             thread_id,
             list(event_sources),
+            fetch_started_at=fetch_started_at,
         )
     except Exception as exc:
         logger.warning(
@@ -1947,6 +1966,7 @@ async def fetch_dispatch_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    cache_write_guard_started_at: float | None = None,
 ) -> ThreadHistoryResult:
     """Fetch strict lightweight dispatch context using only fresh cache data or a homeserver refill."""
     try:
@@ -1975,6 +1995,7 @@ async def fetch_dispatch_thread_snapshot(
         event_cache,
         hydrate_sidecars=False,
         allow_stale_fallback=False,
+        cache_write_guard_started_at=cache_write_guard_started_at,
     )
 
 

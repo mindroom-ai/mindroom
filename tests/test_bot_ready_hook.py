@@ -741,7 +741,44 @@ async def test_failed_room_claim_is_released_for_later_joined_bot(tmp_path: Path
     assert mock_agent_prewarm.await_args.args == ("!room:localhost",)
     assert callable(mock_agent_prewarm.await_args.kwargs["is_shutting_down"])
     mock_background_logger_exception.assert_called_once()
-    assert agent_bot.startup_thread_prewarm_registry._states["!room:localhost"] == "done"
+    state = agent_bot.startup_thread_prewarm_registry._states["!room:localhost"]
+    assert state.running is False
+    assert state.warmed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_later_started_bot_can_reclaim_room_after_older_prewarm(tmp_path: Path) -> None:
+    """A later-started bot should rewarm a room whose last prewarm predates its runtime start."""
+    first_bot = _agent_bot(tmp_path, agent_name="router")
+    first_bot.client = make_matrix_client_mock(user_id=first_bot.agent_user.user_id or "@mindroom_router:localhost")
+    first_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+    later_bot = _agent_bot(tmp_path)
+    later_bot.client = make_matrix_client_mock(user_id=later_bot.agent_user.user_id or "@mindroom_code:localhost")
+    later_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    _bind_shared_runtime_support(orchestrator, {"router": first_bot, "code": later_bot})
+
+    thread_roots = [_thread_root_event("$thread-a:localhost", body="Thread A", origin_server_ts=1)]
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch(
+            "mindroom.matrix.conversation_cache.get_room_threads_page",
+            new=AsyncMock(return_value=(thread_roots, None)),
+        ) as mock_get_room_threads_page,
+    ):
+        await first_bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=first_bot._runtime_view)
+
+        later_bot._runtime_view.mark_runtime_started()
+        await later_bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=later_bot._runtime_view)
+
+    assert mock_get_room_threads_page.await_count == 2
+    assert mock_get_room_threads_page.await_args_list[0].args == (first_bot.client, "!room:localhost")
+    assert mock_get_room_threads_page.await_args_list[0].kwargs == {"limit": 20}
+    assert mock_get_room_threads_page.await_args_list[1].args == (later_bot.client, "!room:localhost")
+    assert mock_get_room_threads_page.await_args_list[1].kwargs == {"limit": 20}
 
 
 @pytest.mark.asyncio

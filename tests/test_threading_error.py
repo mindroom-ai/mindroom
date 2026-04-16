@@ -3432,6 +3432,67 @@ class TestThreadingBehavior:
         restarted_client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_guarded_thread_replace_skips_stale_prewarm_write_after_newer_live_update(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A guarded prewarm write must not overwrite a newer thread snapshot written after the fetch began."""
+        event_cache = _EventCache(tmp_path / "event_cache.db")
+        await event_cache.initialize()
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        old_root_event = _text_event(
+            event_id=thread_id,
+            body="Old root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        old_reply_event = _text_event(
+            event_id="$reply_old:localhost",
+            body="Old reply",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            thread_id=thread_id,
+        )
+        new_root_event = _text_event(
+            event_id=thread_id,
+            body="New root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        new_reply_event = _text_event(
+            event_id="$reply_new:localhost",
+            body="New reply",
+            sender="@agent:localhost",
+            server_timestamp=3000,
+            thread_id=thread_id,
+        )
+
+        try:
+            prewarm_fetch_started_at = time.time()
+            await event_cache.replace_thread(
+                room_id,
+                thread_id,
+                [new_root_event.source, new_reply_event.source],
+                validated_at=prewarm_fetch_started_at + 1,
+            )
+
+            replaced = await event_cache.replace_thread_if_not_newer(
+                room_id,
+                thread_id,
+                [old_root_event.source, old_reply_event.source],
+                fetch_started_at=prewarm_fetch_started_at,
+                validated_at=prewarm_fetch_started_at + 2,
+            )
+            cached_history = await event_cache.get_thread_events(room_id, thread_id)
+        finally:
+            await event_cache.close()
+
+        assert replaced is False
+        assert cached_history is not None
+        assert [event["event_id"] for event in cached_history] == [thread_id, "$reply_new:localhost"]
+
+    @pytest.mark.asyncio
     async def test_lookup_miss_sync_plain_edit_invalidates_room_cache_state(
         self,
         tmp_path: Path,

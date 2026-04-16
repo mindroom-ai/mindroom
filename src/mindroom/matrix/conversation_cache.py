@@ -539,12 +539,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
     ) -> ThreadHistoryResult:
         """Refresh one strict thread snapshot for advisory startup prewarm without the live read barrier."""
+        fetch_started_at = time.time()
         return await fetch_dispatch_thread_snapshot(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            cache_write_guard_started_at=fetch_started_at,
         )
 
     async def prewarm_recent_room_threads(

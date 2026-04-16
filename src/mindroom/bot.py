@@ -687,7 +687,7 @@ class AgentBot:
         except Exception:
             await self.startup_thread_prewarm_registry.release(room_id)
             raise
-        await self.startup_thread_prewarm_registry.mark_done(room_id)
+        await self.startup_thread_prewarm_registry.mark_done(room_id, warmed_at=time.time())
 
     async def _run_startup_thread_prewarm(self) -> None:
         """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
@@ -696,7 +696,10 @@ class AgentBot:
             for room_id in joined_rooms:
                 if self._sync_shutting_down:
                     return
-                if not await self.startup_thread_prewarm_registry.try_claim(room_id):
+                if not await self.startup_thread_prewarm_registry.try_claim(
+                    room_id,
+                    runtime_started_at=self._runtime_view.runtime_started_at,
+                ):
                     continue
                 await self._prewarm_claimed_startup_thread_room(room_id)
         finally:
