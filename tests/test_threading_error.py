@@ -606,6 +606,41 @@ class TestMatrixConversationCacheThreadReads:
         client.room_get_event.assert_awaited_once_with("!test:localhost", "$event:localhost")
         event_cache.store_event.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_turn_scope_memoizes_strict_thread_history_reads(self) -> None:
+        """Strict dispatch thread reads should be memoized for the lifetime of one inbound turn."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=_make_client_mock(), event_cache=_runtime_event_cache()),
+        )
+        expected_history = thread_history_result(
+            [
+                _message(event_id="$thread_root", body="Root"),
+                _message(event_id="$reply", body="Reply"),
+            ],
+            is_full_history=True,
+            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
+        )
+
+        with patch.object(
+            access._reads,
+            "read_thread",
+            new=AsyncMock(return_value=expected_history),
+        ) as mock_read_thread:
+            async with access.turn_scope():
+                first_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
+                second_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
+
+        assert [message.event_id for message in first_history] == ["$thread_root", "$reply"]
+        assert [message.event_id for message in second_history] == ["$thread_root", "$reply"]
+        assert first_history is not second_history
+        mock_read_thread.assert_awaited_once_with(
+            "!test:localhost",
+            "$thread_root",
+            full_history=True,
+            dispatch_safe=True,
+        )
+
     def test_collect_sync_timeline_cache_updates_treats_reference_as_thread_candidate(self) -> None:
         """Sync bookkeeping should classify references alongside other thread-affecting relations."""
         room_threaded_events: dict[str, list[dict[str, object]]] = {}
