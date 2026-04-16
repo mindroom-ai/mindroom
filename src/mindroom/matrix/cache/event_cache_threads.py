@@ -4,25 +4,35 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .event_cache_codec import (
-    event_id_for_cache,
-    normalize_event_source_for_cache,
-    serialize_cacheable_events,
-    serialize_cached_event,
-)
 from .event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
     delete_event_thread_rows,
+    event_id_for_cache,
     event_or_original_is_redacted,
     filter_cacheable_events,
+    normalize_event_source_for_cache,
+    serialize_cacheable_events,
+    serialize_cached_event,
     write_lookup_index_rows,
 )
 
 if TYPE_CHECKING:
     import aiosqlite
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadCacheState:
+    """Durable freshness and invalidation metadata for one cached thread."""
+
+    validated_at: float | None
+    invalidated_at: float | None
+    invalidation_reason: str | None
+    room_invalidated_at: float | None
+    room_invalidation_reason: str | None
 
 
 async def load_thread_events(
@@ -82,6 +92,29 @@ async def load_thread_cache_state_row(
         row[2] if isinstance(row[2], str) else None,
         None if row[3] is None else float(row[3]),
         row[4] if isinstance(row[4], str) else None,
+    )
+
+
+async def load_thread_cache_state(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> ThreadCacheState | None:
+    """Return one thread cache state object joined with room invalidation state."""
+    row = await load_thread_cache_state_row(
+        db,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    if row is None:
+        return None
+    return ThreadCacheState(
+        validated_at=row[0],
+        invalidated_at=row[1],
+        invalidation_reason=row[2],
+        room_invalidated_at=row[3],
+        room_invalidation_reason=row[4],
     )
 
 

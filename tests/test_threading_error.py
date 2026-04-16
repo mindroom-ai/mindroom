@@ -310,7 +310,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._writes.notify_outbound_message = Mock(side_effect=error)
+        access._writes._outbound.notify_outbound_message = Mock(side_effect=error)
 
         access.notify_outbound_message(
             "!room:localhost",
@@ -331,7 +331,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._writes.notify_outbound_redaction = Mock(side_effect=error)
+        access._writes._outbound.notify_outbound_redaction = Mock(side_effect=error)
 
         access.notify_outbound_redaction(
             "!room:localhost",
