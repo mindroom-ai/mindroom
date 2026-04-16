@@ -1789,6 +1789,7 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
     )
+    runtime_config = load_config(runtime_paths)
 
     tool = get_tool_by_name(
         "shell",
@@ -1799,7 +1800,26 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    with pytest.raises(WorkerBackendError, match="MINDROOM_KUBERNETES_WORKER_IMAGE"):
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        pytest.raises(
+            WorkerBackendError,
+            match="MINDROOM_KUBERNETES_WORKER_IMAGE",
+        ),
+    ):
         await entrypoint("pwd")
 
 

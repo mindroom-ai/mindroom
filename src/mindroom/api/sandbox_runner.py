@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.metadata import ToolValidationInfo
     from mindroom.workers.models import WorkerHandle
 
 logger = get_logger(__name__)
@@ -104,7 +105,7 @@ def _startup_runner_token_from_env() -> str | None:
     return raw_token or None
 
 
-def _upstream_tool_validation_snapshot_from_env() -> dict[str, object]:
+def _upstream_tool_validation_snapshot_from_env() -> dict[str, ToolValidationInfo]:
     raw_payload = os.environ.get(_TOOL_VALIDATION_SNAPSHOT_ENV, "").strip()
     if not raw_payload:
         return {}

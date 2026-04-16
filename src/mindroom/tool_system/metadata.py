@@ -1196,7 +1196,7 @@ def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) 
         if not isinstance(raw_field, dict):
             msg = f"{field_name}[{index}] must be an object."
             raise TypeError(msg)
-        fields.append(ConfigField(**raw_field))
+        fields.append(ConfigField(**cast("dict[str, Any]", raw_field)))
     return tuple(fields)
 
 
@@ -1206,12 +1206,14 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         msg = "Tool validation snapshot must be a JSON object keyed by tool name."
         raise TypeError(msg)
 
+    typed_payload = cast("dict[str, object]", payload)
     snapshot: dict[str, ToolValidationInfo] = {}
-    for tool_name, raw_info in payload.items():
+    for tool_name, raw_info in typed_payload.items():
         if not isinstance(raw_info, dict):
             msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
             raise TypeError(msg)
-        raw_validator = raw_info.get(
+        raw_info_dict = cast("dict[str, object]", raw_info)
+        raw_validator = raw_info_dict.get(
             "authored_override_validator",
             ToolAuthoredOverrideValidator.DEFAULT.value,
         )
@@ -1223,18 +1225,18 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 f"authored_override_validator '{raw_validator}'."
             )
             raise TypeError(msg) from exc
-        raw_runtime_loadable = raw_info.get("runtime_loadable", True)
+        raw_runtime_loadable = raw_info_dict.get("runtime_loadable", True)
         if not isinstance(raw_runtime_loadable, bool):
             msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
             raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
-                raw_info.get("config_fields", []),
+                raw_info_dict.get("config_fields", []),
                 field_name=f"{tool_name}.config_fields",
             ),
             agent_override_fields=_deserialize_tool_validation_fields(
-                raw_info.get("agent_override_fields", []),
+                raw_info_dict.get("agent_override_fields", []),
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
