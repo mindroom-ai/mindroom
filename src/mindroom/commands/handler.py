@@ -25,7 +25,6 @@ from mindroom.scheduling import (
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
 from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
     ToolDispatchContext,
     runtime_context_from_dispatch_context,
     tool_runtime_context,
@@ -50,7 +49,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -407,29 +405,6 @@ async def _maybe_await(value: object) -> object:
     if inspect.isawaitable(value):
         return await value
     return value
-
-
-def skill_tool_dispatch_context_from_target(
-    *,
-    agent_name: str,
-    runtime_paths: RuntimePaths,
-    requester_user_id: str | None,
-    target: MessageTarget | None,
-) -> ToolDispatchContext:
-    """Build the non-live dispatch shape from an explicit Matrix target."""
-    return ToolDispatchContext.from_target(
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_user_id=requester_user_id,
-        target=target,
-    )
-
-
-def skill_tool_dispatch_context_from_runtime_context(
-    runtime_context: ToolRuntimeContext,
-) -> LiveToolDispatchContext:
-    """Build the live dispatch shape from one bound runtime context."""
-    return LiveToolDispatchContext.from_runtime_context(runtime_context)
 
 
 async def _run_skill_command_tool(

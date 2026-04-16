@@ -45,8 +45,6 @@ if TYPE_CHECKING:
     from mindroom.hooks.registry import HookRegistry
     from mindroom.hooks.types import HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
     "Tool: {tool_name}\n"
@@ -128,17 +126,19 @@ def _ambient_tool_dispatch_context() -> ToolDispatchContext | None:
 
 
 def _explicit_bridge_dispatch_context(
-    execution_identity: ToolExecutionIdentity | None,
+    dispatch_context: ToolDispatchContext | None,
 ) -> ToolDispatchContext | None:
-    if execution_identity is None:
+    if dispatch_context is None:
         return None
+    if isinstance(dispatch_context, LiveToolDispatchContext):
+        return dispatch_context
     runtime_context = get_tool_runtime_context()
     if runtime_context is not None and execution_identity_matches_tool_runtime_context(
-        execution_identity,
+        dispatch_context.execution_identity,
         runtime_context,
     ):
         return LiveToolDispatchContext.from_runtime_context(runtime_context)
-    return ToolDispatchContext(execution_identity=execution_identity)
+    return dispatch_context
 
 
 def _resolve_tool_context(
@@ -281,16 +281,14 @@ async def _execute_bridge(
     func: Callable[..., Any],
     args: dict[str, Any],
     agent_name: str | None,
-    execution_identity: ToolExecutionIdentity | None,
+    dispatch_context: ToolDispatchContext | None,
     config: Config | None,
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
 ) -> ToolHookResult:
     started_at = time.perf_counter()
-    effective_dispatch_context = (
-        _explicit_bridge_dispatch_context(execution_identity) or _ambient_tool_dispatch_context()
-    )
+    effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
     bridge_context = _ToolHookBridgeContext(
         agent_name=agent_name,
         config=config,
@@ -394,7 +392,7 @@ async def _execute_bridge(
 def build_tool_hook_bridge(
     hook_registry: HookRegistry,
     agent_name: str | None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
 ) -> Callable[..., Any]:
@@ -409,7 +407,7 @@ def build_tool_hook_bridge(
             func=func,
             args=args,
             agent_name=agent_name,
-            execution_identity=execution_identity,
+            dispatch_context=dispatch_context,
             config=config,
             runtime_paths=runtime_paths,
             has_before_hooks=has_before_hooks,
@@ -425,7 +423,7 @@ def build_tool_hook_bridge(
                     func=func,
                     args=args,
                     agent_name=agent_name,
-                    execution_identity=execution_identity,
+                    dispatch_context=dispatch_context,
                     config=config,
                     runtime_paths=runtime_paths,
                     has_before_hooks=has_before_hooks,
@@ -439,7 +437,7 @@ def build_tool_hook_bridge(
                 func=func,
                 args=args,
                 agent_name=agent_name,
-                execution_identity=execution_identity,
+                dispatch_context=dispatch_context,
                 config=config,
                 runtime_paths=runtime_paths,
                 has_before_hooks=has_before_hooks,

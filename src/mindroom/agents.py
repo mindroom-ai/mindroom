@@ -34,6 +34,7 @@ from mindroom.timing import timed
 from mindroom.tool_system.dynamic_toolkits import DynamicToolkitSelection, resolve_dynamic_toolkit_selection
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
@@ -889,7 +890,7 @@ def _build_agent_tool_hook_bridge(
     hook_registry: HookRegistry | None,
     plugins: list[_Plugin],
     agent_name: str,
-    execution_identity: ToolExecutionIdentity | None,
+    dispatch_context: ToolDispatchContext | None,
     config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> Callable[..., Any] | None:
@@ -897,7 +898,7 @@ def _build_agent_tool_hook_bridge(
     return build_tool_hook_bridge(
         active_hook_registry,
         agent_name=agent_name,
-        execution_identity=execution_identity,
+        dispatch_context=dispatch_context,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -1009,7 +1010,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         hook_registry=hook_registry,
         plugins=plugins,
         agent_name=agent_name,
-        execution_identity=execution_identity,
+        dispatch_context=(
+            ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
+        ),
         config=config,
         runtime_paths=runtime_paths,
     )

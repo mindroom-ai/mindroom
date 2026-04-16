@@ -14,8 +14,6 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import (
     _collect_agent_toolkits,
     _run_skill_command_tool,
-    skill_tool_dispatch_context_from_runtime_context,
-    skill_tool_dispatch_context_from_target,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -74,7 +72,7 @@ def _skill_dispatch_context(
         if room_id is not None
         else None
     )
-    return skill_tool_dispatch_context_from_target(
+    return ToolDispatchContext.from_target(
         agent_name=agent_name,
         runtime_paths=runtime_paths,
         requester_user_id=requester_user_id,
@@ -878,7 +876,7 @@ async def test_skill_command_tool_dispatch_uses_canonical_runtime_thread_identit
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -940,7 +938,7 @@ async def test_skill_command_tool_dispatch_ignores_raw_room_mode_thread_id() -> 
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -1022,7 +1020,7 @@ async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_contex
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -1073,7 +1071,7 @@ async def test_skill_command_tool_dispatch_context_from_runtime_context_preserve
             conversation_cache=make_conversation_cache_mock(),
         )
 
-        dispatch_context = skill_tool_dispatch_context_from_runtime_context(runtime_context)
+        dispatch_context = LiveToolDispatchContext.from_runtime_context(runtime_context)
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)
