@@ -442,9 +442,38 @@ class TestMatrixConversationCacheThreadReads:
 
         event_cache.store_events_batch.assert_awaited_once()
         stored_batch = event_cache.store_events_batch.await_args.args[0]
-        assert stored_batch == [
-            (
-                "$reaction:localhost",
+        assert len(stored_batch) == 1
+        stored_event_id, stored_room_id, stored_event_source = stored_batch[0]
+        assert stored_event_id == "$reaction:localhost"
+        assert stored_room_id == "!room:localhost"
+        assert stored_event_source["type"] == "m.reaction"
+        assert stored_event_source["room_id"] == "!room:localhost"
+        assert stored_event_source["event_id"] == "$reaction:localhost"
+        assert stored_event_source["sender"] == "@agent:localhost"
+        assert stored_event_source["content"]["m.relates_to"]["event_id"] == "$thread-reply:localhost"
+        assert stored_event_source["content"]["m.relates_to"]["key"] == "🛑"
+        assert isinstance(stored_event_source.get("origin_server_ts"), int)
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_notify_outbound_reaction_normalizes_event_for_real_cache(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Synthetic outbound reactions should be normalized before durable cache persistence."""
+        event_cache = _EventCache(tmp_path / "event_cache.db")
+        await event_cache.initialize()
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@agent:localhost"
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+
+        try:
+            access.notify_outbound_event(
                 "!room:localhost",
                 {
                     "type": "m.reaction",
@@ -459,11 +488,17 @@ class TestMatrixConversationCacheThreadReads:
                         },
                     },
                 },
-            ),
-        ]
-        event_cache.mark_thread_stale.assert_not_awaited()
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.append_event.assert_not_awaited()
+            )
+            await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+            cached_event = await event_cache.get_event("!room:localhost", "$reaction:localhost")
+        finally:
+            await event_cache.close()
+
+        assert cached_event is not None
+        assert cached_event["event_id"] == "$reaction:localhost"
+        assert cached_event["content"]["m.relates_to"]["key"] == "🛑"
+        assert isinstance(cached_event.get("origin_server_ts"), int)
 
     @pytest.mark.asyncio
     async def test_notify_outbound_message_plain_reply_to_threaded_target_updates_thread_cache(self) -> None:
