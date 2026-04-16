@@ -29,7 +29,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -558,40 +558,48 @@ class MatrixConversationCache(ConversationCacheProtocol):
         content: dict[str, Any],
     ) -> None:
         """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
-        try:
-            self._writes.notify_outbound_message(room_id, event_id, content)
-        except asyncio.CancelledError as exc:
-            self.logger.warning(
-                "Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Ignoring outbound threaded message cache bookkeeping failure after successful send",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
+        self._run_fail_open_outbound_write(
+            lambda: self._writes.notify_outbound_message(room_id, event_id, content),
+            cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+            failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
+            room_id=room_id,
+            event_id=event_id,
+        )
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
+        self._run_fail_open_outbound_write(
+            lambda: self._writes.notify_outbound_redaction(room_id, redacted_event_id),
+            cancelled_message="Ignoring cancelled outbound threaded message cache redaction bookkeeping after successful redact",
+            failure_message="Ignoring outbound threaded message cache redaction bookkeeping failure after successful redact",
+            room_id=room_id,
+            redacted_event_id=redacted_event_id,
+        )
+
+    def _run_fail_open_outbound_write(
+        self,
+        callback: Callable[[], None],
+        *,
+        cancelled_message: str,
+        failure_message: str,
+        room_id: str,
+        **log_context: object,
+    ) -> None:
         try:
-            self._writes.notify_outbound_redaction(room_id, redacted_event_id)
+            callback()
         except asyncio.CancelledError as exc:
             self.logger.warning(
-                "Ignoring cancelled outbound threaded message cache redaction bookkeeping after successful redact",
+                cancelled_message,
                 room_id=room_id,
-                redacted_event_id=redacted_event_id,
                 error=str(exc),
+                **log_context,
             )
         except Exception as exc:
             self.logger.warning(
-                "Ignoring outbound threaded message cache redaction bookkeeping failure after successful redact",
+                failure_message,
                 room_id=room_id,
-                redacted_event_id=redacted_event_id,
                 error=str(exc),
+                **log_context,
             )
 
     async def append_live_event(

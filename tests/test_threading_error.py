@@ -318,6 +318,26 @@ class TestMatrixConversationCacheThreadReads:
             {"body": "hello", "msgtype": "m.text"},
         )
 
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("cache write failed"),
+            asyncio.CancelledError(),
+        ],
+    )
+    def test_notify_outbound_redaction_swallows_internal_write_failure(self, error: BaseException) -> None:
+        """The public outbound redaction bookkeeping boundary must fail open too."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+        access._writes.notify_outbound_redaction = Mock(side_effect=error)
+
+        access.notify_outbound_redaction(
+            "!room:localhost",
+            "$event:localhost",
+        )
+
     @pytest.mark.asyncio
     async def test_notify_outbound_message_plain_edit_lookup_miss_invalidates_room_threads(self) -> None:
         """Plain room-mode edits should fail closed when mutation lookup cannot prove room-level state."""
@@ -658,7 +678,7 @@ class TestMatrixConversationCacheThreadReads:
             runtime=_conversation_runtime(event_cache=event_cache),
         )
 
-        await access._writes._invalidate_known_thread(
+        await access._writes._cache_ops.invalidate_known_thread(
             "!room:localhost",
             "$thread:localhost",
             reason="test_failure",
@@ -676,7 +696,7 @@ class TestMatrixConversationCacheThreadReads:
             runtime=_conversation_runtime(event_cache=event_cache),
         )
 
-        await access._writes._invalidate_room_threads(
+        await access._writes._cache_ops.invalidate_room_threads(
             "!room:localhost",
             reason="test_failure",
         )
@@ -3546,7 +3566,7 @@ class TestThreadingBehavior:
         read_task = asyncio.create_task(access.get_thread_history("!room:localhost", "$thread:localhost"))
         await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
         write_task = asyncio.create_task(
-            access._writes._apply_outbound_message_notification(
+            access._writes._outbound._apply_outbound_message_notification(
                 "!room:localhost",
                 "$reply-new:localhost",
                 new_event_source,
