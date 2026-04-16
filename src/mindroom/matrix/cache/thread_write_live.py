@@ -5,16 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache.event_cache import normalize_nio_event_for_cache
-from mindroom.matrix.cache.thread_write_resolution import (
-    MutationThreadImpactState,
-)
+from mindroom.matrix.thread_bookkeeping import MutationThreadImpactState
 
 if TYPE_CHECKING:
     import nio
 
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-    from mindroom.matrix.cache.thread_write_resolution import ThreadMutationResolver
     from mindroom.matrix.event_info import EventInfo
+    from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 
 
 class ThreadLiveWritePolicy:

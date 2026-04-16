@@ -7,11 +7,8 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.cache.event_cache import normalize_event_source_for_cache
-from mindroom.matrix.cache.thread_write_resolution import (
-    MutationThreadImpactState,
-    is_thread_affecting_relation,
-)
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_bookkeeping import MutationThreadImpactState, is_thread_affecting_relation
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -19,7 +16,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-    from mindroom.matrix.cache.thread_write_resolution import ThreadMutationResolver
+    from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 
 
 class ThreadOutboundWritePolicy:

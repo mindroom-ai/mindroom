@@ -14,6 +14,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_api import MatrixApiTools
+from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -348,9 +349,9 @@ async def test_matrix_api_send_event_delegates_thread_classification_to_shared_h
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_api.event_requires_thread_bookkeeping",
-            new=AsyncMock(return_value=True),
-        ) as mock_requires_thread_bookkeeping,
+            "mindroom.custom_tools.matrix_api.resolve_event_thread_impact_for_client",
+            new=AsyncMock(return_value=MutationThreadImpact.threaded("$thread:localhost")),
+        ) as mock_resolve_thread_impact,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -362,7 +363,7 @@ async def test_matrix_api_send_event_delegates_thread_classification_to_shared_h
         )
 
     assert payload["status"] == "ok"
-    mock_requires_thread_bookkeeping.assert_awaited_once()
+    mock_resolve_thread_impact.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -640,9 +641,9 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_api.redaction_requires_thread_bookkeeping",
-            new=AsyncMock(return_value=True),
-        ) as mock_requires_thread_bookkeeping,
+            "mindroom.custom_tools.matrix_api.resolve_redaction_thread_impact_for_client",
+            new=AsyncMock(return_value=MutationThreadImpact.threaded("$thread:localhost")),
+        ) as mock_resolve_thread_impact,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -654,7 +655,7 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
         )
 
     assert payload["status"] == "ok"
-    mock_requires_thread_bookkeeping.assert_awaited_once()
+    mock_resolve_thread_impact.assert_awaited_once()
 
 
 @pytest.mark.asyncio

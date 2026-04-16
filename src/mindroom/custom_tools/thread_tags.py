@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import (
+    resolve_canonical_tool_thread_target,
     resolve_context_thread_id,
     resolve_requested_room_id,
     room_access_allowed,
@@ -122,35 +123,28 @@ class ThreadTagsTools(Toolkit):
                 message=str(exc),
             )
 
-        effective_thread_id = resolve_context_thread_id(
+        thread_target = await resolve_canonical_tool_thread_target(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
+                context.client,
+                normalize_room_id,
+                normalize_event_id,
+                conversation_cache=context.conversation_cache,
+            ),
         )
-        if effective_thread_id is None:
+        if thread_target.error is not None:
             return self._payload(
                 "error",
                 action="tag",
                 room_id=resolved_room_id,
                 tag=normalized_tag,
-                message="thread_id is required when no active thread context is available for the target room.",
+                thread_id=thread_target.requested_thread_id,
+                message=thread_target.error,
             )
-
-        normalized_thread_id = await resolve_thread_root_event_id_for_client(
-            context.client,
-            resolved_room_id,
-            effective_thread_id,
-            conversation_cache=context.conversation_cache,
-        )
-        if normalized_thread_id is None:
-            return self._payload(
-                "error",
-                action="tag",
-                room_id=resolved_room_id,
-                thread_id=effective_thread_id,
-                tag=normalized_tag,
-                message="Failed to resolve a canonical thread root for the target event.",
-            )
+        assert thread_target.canonical_thread_id is not None
+        normalized_thread_id = thread_target.canonical_thread_id
 
         try:
             state = await set_thread_tag(
@@ -237,21 +231,30 @@ class ThreadTagsTools(Toolkit):
         if canonical:
             target_thread_id = effective_thread_id
         else:
-            target_thread_id = await resolve_thread_root_event_id_for_client(
-                context.client,
-                resolved_room_id,
-                effective_thread_id,
-                conversation_cache=context.conversation_cache,
+            thread_target = await resolve_canonical_tool_thread_target(
+                context,
+                room_id=resolved_room_id,
+                thread_id=effective_thread_id,
+                normalize_thread_id=lambda normalize_room_id,
+                normalize_event_id: resolve_thread_root_event_id_for_client(
+                    context.client,
+                    normalize_room_id,
+                    normalize_event_id,
+                    conversation_cache=context.conversation_cache,
+                ),
+                allow_context_fallback=False,
             )
-            if target_thread_id is None:
+            if thread_target.error is not None:
                 return self._payload(
                     "error",
                     action="untag",
                     room_id=resolved_room_id,
-                    thread_id=effective_thread_id,
+                    thread_id=thread_target.requested_thread_id,
                     tag=normalized_tag,
-                    message="Failed to resolve a canonical thread root for the target event.",
+                    message=thread_target.error,
                 )
+            assert thread_target.canonical_thread_id is not None
+            target_thread_id = thread_target.canonical_thread_id
 
         try:
             state = await remove_thread_tag(
@@ -369,23 +372,31 @@ class ThreadTagsTools(Toolkit):
                 },
             )
 
-        normalized_thread_id = await resolve_thread_root_event_id_for_client(
-            context.client,
-            resolved_room_id,
-            effective_thread_id,
-            conversation_cache=context.conversation_cache,
+        thread_target = await resolve_canonical_tool_thread_target(
+            context,
+            room_id=resolved_room_id,
+            thread_id=effective_thread_id,
+            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
+                context.client,
+                normalize_room_id,
+                normalize_event_id,
+                conversation_cache=context.conversation_cache,
+            ),
+            allow_context_fallback=False,
         )
-        if normalized_thread_id is None:
+        if thread_target.error is not None:
             return self._payload(
                 "error",
                 action="list",
                 room_id=resolved_room_id,
-                thread_id=effective_thread_id,
+                thread_id=thread_target.requested_thread_id,
                 tag=normalized_tag,
                 include_tag=normalized_include_tag,
                 exclude_tag=normalized_exclude_tag,
-                message="Failed to resolve a canonical thread root for the target event.",
+                message=thread_target.error,
             )
+        assert thread_target.canonical_thread_id is not None
+        normalized_thread_id = thread_target.canonical_thread_id
 
         try:
             state = await get_thread_tags(

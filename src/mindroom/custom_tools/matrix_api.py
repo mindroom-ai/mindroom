@@ -14,8 +14,9 @@ from agno.tools import Toolkit
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_bookkeeping import (
-    event_requires_thread_bookkeeping,
-    redaction_requires_thread_bookkeeping,
+    MutationThreadImpactState,
+    resolve_event_thread_impact_for_client,
+    resolve_redaction_thread_impact_for_client,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -404,6 +405,41 @@ class MatrixApiTools(Toolkit):
             content,
         )
 
+    @staticmethod
+    async def _resolve_redaction_cache_write_requirement(
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        event_id: str,
+    ) -> tuple[bool, str | None]:
+        """Return redaction bookkeeping intent plus an optional fail-closed error."""
+        try:
+            thread_impact = await resolve_redaction_thread_impact_for_client(
+                context.client,
+                room_id=room_id,
+                event_id=event_id,
+                conversation_cache=context.conversation_cache,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve redaction target thread mapping for matrix_api redact",
+                room_id=room_id,
+                target_event_id=event_id,
+                error=str(exc),
+            )
+            return False, "Failed to resolve redaction target thread mapping."
+
+        if thread_impact.state is MutationThreadImpactState.UNKNOWN:
+            logger.warning(
+                "Failed to resolve redaction target thread mapping for matrix_api redact",
+                room_id=room_id,
+                target_event_id=event_id,
+                error="thread impact unknown",
+            )
+            return False, "Failed to resolve redaction target thread mapping."
+
+        return thread_impact.state is MutationThreadImpactState.THREADED, None
+
     async def _send_event(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
@@ -441,13 +477,21 @@ class MatrixApiTools(Toolkit):
             return policy_error
 
         try:
-            requires_conversation_cache_write = await event_requires_thread_bookkeeping(
+            thread_impact = await resolve_event_thread_impact_for_client(
                 context.client,
                 room_id=room_id,
                 event_type=normalized_event_type,
                 content=normalized_content,
                 conversation_cache=context.conversation_cache,
             )
+            if thread_impact.state is MutationThreadImpactState.UNKNOWN:
+                return self._error_payload(
+                    action="send_event",
+                    room_id=room_id,
+                    event_type=normalized_event_type,
+                    message="Failed to resolve threaded Matrix message send target.",
+                )
+            requires_conversation_cache_write = thread_impact.state is MutationThreadImpactState.THREADED
         except Exception as exc:
             logger.warning(
                 "Failed to resolve threaded send_event target for matrix_api",
@@ -799,22 +843,16 @@ class MatrixApiTools(Toolkit):
 
         assert normalized_event_id is not None
 
-        try:
-            requires_conversation_cache_write = await redaction_requires_thread_bookkeeping(
-                context.client,
-                room_id=room_id,
-                event_id=normalized_event_id,
-                conversation_cache=context.conversation_cache,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to resolve redaction target thread mapping for matrix_api redact",
-                room_id=room_id,
-                target_event_id=normalized_event_id,
-                error=str(exc),
-            )
-            error_message = "Failed to resolve redaction target thread mapping."
-            requires_conversation_cache_write = False
+        (
+            requires_conversation_cache_write,
+            thread_resolution_error,
+        ) = await self._resolve_redaction_cache_write_requirement(
+            context,
+            room_id=room_id,
+            event_id=normalized_event_id,
+        )
+        if thread_resolution_error is not None:
+            error_message = thread_resolution_error
 
         if dry_run:
             if error_message is not None:
