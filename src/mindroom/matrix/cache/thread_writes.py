@@ -171,7 +171,18 @@ class ThreadOutboundWritePolicy:
         event_info = EventInfo.from_event(event_source)
         if not is_thread_affecting_relation(event_info):
             return
-
+        direct_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        if direct_thread_id is not None:
+            self._schedule_fail_open_thread_update(
+                room_id,
+                direct_thread_id,
+                lambda: self._apply_outbound_message_notification(room_id, event_id, event_source, event_info),
+                name="matrix_cache_notify_outbound_message",
+                cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+                failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
+                log_context={"event_id": event_id, "thread_id": direct_thread_id},
+            )
+            return
         self._schedule_fail_open_room_update(
             room_id,
             lambda: self._apply_outbound_message_notification(room_id, event_id, event_source, event_info),
@@ -283,6 +294,61 @@ class ThreadOutboundWritePolicy:
                 **log_context,
             )
 
+    def _schedule_fail_open_thread_update(
+        self,
+        room_id: str,
+        thread_id: str,
+        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
+        *,
+        name: str,
+        cancelled_message: str,
+        failure_message: str,
+        log_context: dict[str, object],
+    ) -> None:
+        async def safe_update() -> None:
+            try:
+                await update_coro_factory()
+            except asyncio.CancelledError as exc:
+                self._cache_ops.logger.warning(
+                    cancelled_message,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    error=str(exc),
+                    **log_context,
+                )
+            except Exception as exc:
+                self._cache_ops.logger.warning(
+                    failure_message,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    error=str(exc),
+                    **log_context,
+                )
+
+        try:
+            self._cache_ops.queue_thread_cache_update(
+                room_id,
+                thread_id,
+                safe_update,
+                name=name,
+            )
+        except asyncio.CancelledError as exc:
+            self._cache_ops.logger.warning(
+                cancelled_message,
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+                **log_context,
+            )
+        except Exception as exc:
+            self._cache_ops.logger.warning(
+                failure_message,
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+                **log_context,
+            )
+
 
 class ThreadLiveWritePolicy:
     """Own live-event and live-redaction thread cache mutations."""
@@ -351,8 +417,9 @@ class ThreadLiveWritePolicy:
                 )
             return appended
 
-        await self._cache_ops.queue_room_cache_update(
+        await self._cache_ops.queue_thread_cache_update(
             room_id,
+            thread_id,
             append_and_invalidate,
             name="matrix_cache_append_live_event",
         )
@@ -386,6 +453,14 @@ class ThreadLiveWritePolicy:
             )
             return redacted
 
+        if thread_id is not None:
+            await self._cache_ops.queue_thread_cache_update(
+                room_id,
+                thread_id,
+                redact_and_invalidate,
+                name="matrix_cache_apply_redaction",
+            )
+            return
         await self._cache_ops.queue_room_cache_update(
             room_id,
             redact_and_invalidate,
