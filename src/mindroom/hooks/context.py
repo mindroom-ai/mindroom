@@ -171,13 +171,15 @@ class HookContextSupport:
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
         """Return the router-backed Matrix admin helper bound into hook contexts."""
+        orchestrator = self.runtime.orchestrator
+        if orchestrator is not None:
+            admin = orchestrator._hook_matrix_admin()
+            if admin is not None:
+                return admin
         if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
             from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
 
             return build_hook_matrix_admin(self.runtime.client, self.runtime_paths)
-        orchestrator = self.runtime.orchestrator
-        if orchestrator is not None:
-            return orchestrator._hook_matrix_admin()
         return None
 
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:

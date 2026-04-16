@@ -131,12 +131,41 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
     mock_add.assert_awaited_once()
 
 
-def test_hook_context_support_exposes_router_matrix_admin(tmp_path: Path) -> None:
-    """Router hook support should build matrix admin from the live router client."""
+def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path: Path) -> None:
+    """Router hook support should reuse the orchestrator router admin surface when available."""
+    config = _config(tmp_path)
+    orchestrator = MagicMock()
+    sentinel = object()
+    orchestrator._hook_matrix_admin.return_value = sentinel
+    runtime = SimpleNamespace(
+        client=AsyncMock(spec=nio.AsyncClient),
+        orchestrator=orchestrator,
+        config=config,
+    )
+    support = HookContextSupport(
+        runtime=runtime,
+        logger=get_logger("tests.hook_matrix_admin"),
+        runtime_paths=runtime_paths_for(config),
+        agent_name="router",
+        hook_registry_state=HookRegistryState(HookRegistry.empty()),
+        hook_send_message=AsyncMock(),
+    )
+
+    assert hasattr(support, "matrix_admin")
+    with patch("mindroom.hooks.matrix_admin.build_hook_matrix_admin", return_value=sentinel) as mock_build:
+        admin = support.matrix_admin()
+
+    assert admin is sentinel
+    orchestrator._hook_matrix_admin.assert_called_once_with()
+    mock_build.assert_not_called()
+
+
+def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tmp_path: Path) -> None:
+    """Router hook support should build from the live router client when no orchestrator exists."""
     config = _config(tmp_path)
     runtime = SimpleNamespace(
         client=AsyncMock(spec=nio.AsyncClient),
-        orchestrator=MagicMock(),
+        orchestrator=None,
         config=config,
     )
     support = HookContextSupport(
