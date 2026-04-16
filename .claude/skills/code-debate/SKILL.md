@@ -31,12 +31,6 @@ If no role argument is provided, fall back to file existence:
 
 Do not ask the user which role to play.
 
-## Role isolation beats liveness (MUST)
-
-- If protocol liveness conflicts with role isolation, role isolation wins.
-- A stalled debate waiting for the real peer is allowed.
-- Manufacturing, recruiting, or simulating the missing peer is never allowed.
-
 ## Non-simulation guardrails (MUST)
 
 - Never write content for the opposite role.
@@ -49,16 +43,6 @@ Do not ask the user which role to play.
 - After appending your section, only poll. Do not append another turn unless checksum changed and turn order confirms it is now your turn.
 - If checksum does not change, keep polling until timeout or `## CONSENSUS`.
 - On timeout, append only a timeout `## CONSENSUS` from your own role.
-
-## Forbidden example (MUST NOT)
-
-- Forbidden: after writing `## Response 1` as Agent B, spawning or launching an Agent A subagent so the debate can continue.
-- Correct: leave `DEBATE.md` ready for the real Agent A and keep polling until checksum change or timeout.
-
-## Pre-tool gate (MUST)
-
-- Before using any tool after role detection, ask: could this action cause the opposite role to exist, speak, or advance?
-- If yes, do not do it.
 
 ## Checksum command
 
@@ -152,7 +136,6 @@ Before appending, also verify the last signature line role:
 7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
 8. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
 9. Do not ask the user to choose between follow-up or consensus; Agent A must decide and append immediately.
-10. Agent A must never create or recruit Agent B; if the peer never responds, keep polling until timeout.
 
 ## Agent B (responder) flow
 
@@ -179,7 +162,6 @@ Before appending, also verify the last signature line role:
 9. If the file contains `## CONSENSUS` → stop, debate is over.
 10. Otherwise go to step 3.
 11. Do not ask the user whether to continue; continue automatically per turn order within Agent B only.
-12. Agent B must never create or recruit Agent A, even if no further turns arrive.
 
 ## File format
 
