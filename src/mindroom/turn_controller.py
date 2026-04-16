@@ -29,7 +29,6 @@ from mindroom.commands.handler import (
     CommandHandlerContext,
     _run_skill_command_tool,
     handle_command,
-    skill_tool_dispatch_context_from_runtime_context,
 )
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -559,7 +558,7 @@ class TurnController:
                 reply_to_event_id=event.event_id,
                 event_source=event.source,
             )
-            runtime_context = self.deps.tool_runtime.build_required_context(
+            dispatch_context = self.deps.tool_runtime.build_required_live_dispatch_context(
                 target,
                 user_id=requester_user_id,
                 agent_name=agent_name,
@@ -573,7 +572,7 @@ class TurnController:
                 command_tool=command_tool,
                 skill_name=skill_name,
                 args_text=args_text,
-                dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
+                dispatch_context=dispatch_context,
             )
 
         context = CommandHandlerContext(

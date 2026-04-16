@@ -5,13 +5,15 @@ from __future__ import annotations
 from agno.tools import Toolkit
 
 from mindroom.scheduling import (
-    SchedulingRuntime,
     cancel_scheduled_task,
     edit_scheduled_task,
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    build_scheduling_runtime_from_tool_runtime_context,
+    get_tool_runtime_context,
+)
 
 
 class SchedulerTools(Toolkit):
@@ -44,14 +46,7 @@ class SchedulerTools(Toolkit):
         if context is None or context.room is None:
             return "❌ Scheduler tool is unavailable in this context."
 
-        runtime = SchedulingRuntime(
-            client=context.client,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room=context.room,
-            conversation_cache=context.conversation_cache,
-            event_cache=context.event_cache,
-        )
+        runtime = build_scheduling_runtime_from_tool_runtime_context(context)
         _, response_text = await schedule_task(
             runtime=runtime,
             room_id=context.room_id,
@@ -77,14 +72,7 @@ class SchedulerTools(Toolkit):
         if context is None or context.room is None:
             return "❌ Scheduler tool is unavailable in this context."
 
-        runtime = SchedulingRuntime(
-            client=context.client,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room=context.room,
-            conversation_cache=context.conversation_cache,
-            event_cache=context.event_cache,
-        )
+        runtime = build_scheduling_runtime_from_tool_runtime_context(context)
         return await edit_scheduled_task(
             runtime=runtime,
             room_id=context.room_id,

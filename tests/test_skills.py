@@ -12,11 +12,8 @@ from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import (
-    SkillToolDispatchContext,
     _collect_agent_toolkits,
     _run_skill_command_tool,
-    skill_tool_dispatch_context_from_runtime_context,
-    skill_tool_dispatch_context_from_target,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -33,7 +30,12 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     register_tool_with_metadata,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    LiveToolDispatchContext,
+    ToolDispatchContext,
+    ToolRuntimeContext,
+    get_tool_runtime_context,
+)
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -64,13 +66,13 @@ def _skill_dispatch_context(
     requester_user_id: str | None = None,
     room_id: str | None = None,
     thread_id: str | None = None,
-) -> SkillToolDispatchContext:
+) -> ToolDispatchContext:
     target = (
         MessageTarget.resolve(room_id=room_id, thread_id=thread_id, reply_to_event_id=None)
         if room_id is not None
         else None
     )
-    return skill_tool_dispatch_context_from_target(
+    return ToolDispatchContext.from_target(
         agent_name=agent_name,
         runtime_paths=runtime_paths,
         requester_user_id=requester_user_id,
@@ -874,7 +876,7 @@ async def test_skill_command_tool_dispatch_uses_canonical_runtime_thread_identit
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -936,7 +938,7 @@ async def test_skill_command_tool_dispatch_ignores_raw_room_mode_thread_id() -> 
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -1018,7 +1020,7 @@ async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_contex
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -1069,7 +1071,7 @@ async def test_skill_command_tool_dispatch_context_from_runtime_context_preserve
             conversation_cache=make_conversation_cache_mock(),
         )
 
-        dispatch_context = skill_tool_dispatch_context_from_runtime_context(runtime_context)
+        dispatch_context = LiveToolDispatchContext.from_runtime_context(runtime_context)
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)
@@ -1088,6 +1090,38 @@ async def test_skill_command_tool_dispatch_context_from_runtime_context_preserve
         tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
         account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
+
+
+def test_live_skill_dispatch_context_rejects_mismatched_execution_identity() -> None:
+    """Live dispatch contracts should reject identities that do not match the runtime context."""
+    config = _base_config(["dispatch"])
+    runtime_paths = resolve_runtime_paths()
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="@alice:example.org",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+
+    with pytest.raises(ValueError, match="must match the provided tool runtime context"):
+        LiveToolDispatchContext(
+            runtime_context=runtime_context,
+            execution_identity=ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="other-agent",
+                requester_id="@bob:example.org",
+                room_id="!other:example.org",
+                thread_id="$other-thread",
+                resolved_thread_id="$other-thread",
+                session_id="!other:example.org:$other-thread",
+            ),
+        )
 
 
 @pytest.mark.asyncio

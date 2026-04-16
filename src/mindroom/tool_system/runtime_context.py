@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
@@ -87,6 +88,57 @@ class ToolRuntimeContext:
     room_state_querier: HookRoomStateQuerier | None = None
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
+
+
+@dataclass(frozen=True)
+class ToolDispatchContext:
+    """Detached execution identity for tool dispatch outside a live Matrix runtime."""
+
+    execution_identity: ToolExecutionIdentity
+
+    @classmethod
+    def from_target(
+        cls,
+        *,
+        agent_name: str,
+        runtime_paths: RuntimePaths,
+        requester_user_id: str | None,
+        target: MessageTarget | None,
+    ) -> ToolDispatchContext:
+        """Build the detached dispatch contract for one explicit Matrix target."""
+        return cls(
+            execution_identity=build_tool_execution_identity(
+                channel="matrix",
+                agent_name=agent_name,
+                runtime_paths=runtime_paths,
+                requester_id=requester_user_id,
+                room_id=target.room_id if target is not None else None,
+                thread_id=target.resolved_thread_id if target is not None else None,
+                resolved_thread_id=target.resolved_thread_id if target is not None else None,
+                session_id=target.session_id if target is not None else None,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class LiveToolDispatchContext(ToolDispatchContext):
+    """Execution identity paired with one matching live Matrix runtime context."""
+
+    runtime_context: ToolRuntimeContext
+
+    def __post_init__(self) -> None:
+        """Validate that the detached identity and live runtime represent the same dispatch."""
+        if not execution_identity_matches_tool_runtime_context(self.execution_identity, self.runtime_context):
+            msg = "Live tool dispatch execution_identity must match the provided tool runtime context"
+            raise ValueError(msg)
+
+    @classmethod
+    def from_runtime_context(cls, runtime_context: ToolRuntimeContext) -> LiveToolDispatchContext:
+        """Build the live dispatch contract represented by one tool runtime context."""
+        return cls(
+            execution_identity=build_execution_identity_from_runtime_context(runtime_context),
+            runtime_context=runtime_context,
+        )
 
 
 @dataclass(frozen=True)
@@ -147,7 +199,7 @@ class ToolRuntimeSupport:
             conversation_cache=self.resolver.deps.conversation_cache,
             event_cache=event_cache,
             active_model_name=active_model_name,
-            session_id=session_id,
+            session_id=session_id or target.session_id,
             room=self.resolver.cached_room(target_room_id),
             reply_to_event_id=target_reply_to_event_id,
             storage_path=self.storage_path,
@@ -187,6 +239,64 @@ class ToolRuntimeSupport:
             msg = "Live Matrix tool dispatch requires initialized tool runtime support"
             raise RuntimeError(msg)
         return context
+
+    def build_dispatch_context(
+        self,
+        target: MessageTarget,
+        *,
+        user_id: str | None,
+        session_id: str | None = None,
+        agent_name: str | None = None,
+        active_model_name: str | None = None,
+        attachment_ids: list[str] | tuple[str, ...] | None = None,
+        correlation_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
+    ) -> ToolDispatchContext:
+        """Build the canonical detached or live dispatch contract for one tool call."""
+        execution_identity = self.build_execution_identity(
+            target=target,
+            user_id=user_id,
+            session_id=session_id or target.session_id,
+            agent_name=agent_name,
+        )
+        context = self.build_context(
+            target,
+            user_id=user_id,
+            session_id=session_id,
+            agent_name=agent_name,
+            active_model_name=active_model_name,
+            attachment_ids=attachment_ids,
+            correlation_id=correlation_id,
+            source_envelope=source_envelope,
+        )
+        if context is None:
+            return ToolDispatchContext(execution_identity=execution_identity)
+        return LiveToolDispatchContext.from_runtime_context(context)
+
+    def build_required_live_dispatch_context(
+        self,
+        target: MessageTarget,
+        *,
+        user_id: str | None,
+        session_id: str | None = None,
+        agent_name: str | None = None,
+        active_model_name: str | None = None,
+        attachment_ids: list[str] | tuple[str, ...] | None = None,
+        correlation_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
+    ) -> LiveToolDispatchContext:
+        """Build one live Matrix dispatch contract or fail fast if runtime support is unavailable."""
+        context = self.build_required_context(
+            target,
+            user_id=user_id,
+            session_id=session_id,
+            agent_name=agent_name,
+            active_model_name=active_model_name,
+            attachment_ids=attachment_ids,
+            correlation_id=correlation_id,
+            source_envelope=source_envelope,
+        )
+        return LiveToolDispatchContext.from_runtime_context(context)
 
     def build_execution_identity(
         self,
@@ -295,6 +405,50 @@ def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -
         thread_id=target.resolved_thread_id,
         resolved_thread_id=target.resolved_thread_id,
         session_id=target.session_id,
+    )
+
+
+def execution_identity_matches_tool_runtime_context(
+    execution_identity: ToolExecutionIdentity,
+    context: ToolRuntimeContext,
+) -> bool:
+    """Return whether one execution identity represents the same live Matrix tool runtime."""
+    target = MessageTarget.from_runtime_context(context)
+    valid_thread_ids = {target.source_thread_id, target.resolved_thread_id}
+    return (
+        execution_identity.channel == "matrix"
+        and execution_identity.agent_name == context.agent_name
+        and execution_identity.requester_id == context.requester_id
+        and execution_identity.room_id == context.room_id
+        and execution_identity.thread_id in valid_thread_ids
+        and execution_identity.resolved_thread_id == target.resolved_thread_id
+        and execution_identity.session_id == target.session_id
+        and execution_identity.tenant_id == context.runtime_paths.env_value("CUSTOMER_ID")
+        and execution_identity.account_id == context.runtime_paths.env_value("ACCOUNT_ID")
+    )
+
+
+def runtime_context_from_dispatch_context(dispatch_context: ToolDispatchContext) -> ToolRuntimeContext | None:
+    """Return the live runtime context when one dispatch contract is runtime-bound."""
+    if isinstance(dispatch_context, LiveToolDispatchContext):
+        return dispatch_context.runtime_context
+    return None
+
+
+def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeContext) -> SchedulingRuntime:
+    """Build the canonical live scheduling runtime for one Matrix tool context."""
+    from mindroom.scheduling import SchedulingRuntime  # noqa: PLC0415
+
+    if context.room is None:
+        msg = "Scheduling runtime requires a cached Matrix room in tool runtime context"
+        raise RuntimeError(msg)
+    return SchedulingRuntime(
+        client=context.client,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        room=context.room,
+        conversation_cache=context.conversation_cache,
+        event_cache=context.event_cache,
     )
 
 

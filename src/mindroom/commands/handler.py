@@ -24,11 +24,14 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolDispatchContext,
+    runtime_context_from_dispatch_context,
+    tool_runtime_context,
+)
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    build_tool_execution_identity,
     tool_execution_identity,
 )
 
@@ -46,7 +49,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -343,14 +345,6 @@ class _ToolCallArguments:
     error: str | None = None
 
 
-@dataclass(frozen=True)
-class SkillToolDispatchContext:
-    """One explicit runtime shape for tool-dispatched skill execution."""
-
-    execution_identity: ToolExecutionIdentity
-    runtime_context: ToolRuntimeContext | None
-
-
 def _prepare_tool_call_arguments(  # noqa: PLR0911
     entrypoint: Callable[..., object] | None,
     base_args: Mapping[str, object],
@@ -413,39 +407,6 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
-def skill_tool_dispatch_context_from_target(
-    *,
-    agent_name: str,
-    runtime_paths: RuntimePaths,
-    requester_user_id: str | None,
-    target: MessageTarget | None,
-) -> SkillToolDispatchContext:
-    """Build the non-live dispatch shape from an explicit Matrix target."""
-    return SkillToolDispatchContext(
-        execution_identity=build_tool_execution_identity(
-            channel="matrix",
-            agent_name=agent_name,
-            runtime_paths=runtime_paths,
-            requester_id=requester_user_id,
-            room_id=target.room_id if target is not None else None,
-            thread_id=target.resolved_thread_id if target is not None else None,
-            resolved_thread_id=target.resolved_thread_id if target is not None else None,
-            session_id=target.session_id if target is not None else None,
-        ),
-        runtime_context=None,
-    )
-
-
-def skill_tool_dispatch_context_from_runtime_context(
-    runtime_context: ToolRuntimeContext,
-) -> SkillToolDispatchContext:
-    """Build the live dispatch shape from one bound runtime context."""
-    return SkillToolDispatchContext(
-        execution_identity=build_execution_identity_from_runtime_context(runtime_context),
-        runtime_context=runtime_context,
-    )
-
-
 async def _run_skill_command_tool(
     *,
     config: Config,
@@ -455,7 +416,7 @@ async def _run_skill_command_tool(
     command_tool: str,
     skill_name: str,
     args_text: str,
-    dispatch_context: SkillToolDispatchContext,
+    dispatch_context: ToolDispatchContext,
     command_name: str = "skill",
 ) -> str:
     effective_runtime_paths = (
@@ -466,7 +427,7 @@ async def _run_skill_command_tool(
 
     try:
         with (
-            tool_runtime_context(dispatch_context.runtime_context),
+            tool_runtime_context(runtime_context_from_dispatch_context(dispatch_context)),
             tool_execution_identity(
                 dispatch_context.execution_identity,
             ),

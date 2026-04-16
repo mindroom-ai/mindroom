@@ -24,7 +24,13 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
+from mindroom.tool_system.runtime_context import (
+    LiveToolDispatchContext,
+    ToolDispatchContext,
+    execution_identity_matches_tool_runtime_context,
+    get_tool_runtime_context,
+    resolve_tool_runtime_hook_bindings,
+)
 from mindroom.tool_system.tool_failures import record_tool_failure
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
@@ -39,8 +45,6 @@ if TYPE_CHECKING:
     from mindroom.hooks.registry import HookRegistry
     from mindroom.hooks.types import HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
     "Tool: {tool_name}\n"
@@ -95,53 +99,105 @@ class _ResolvedToolContext:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _ToolHookBridgeContext:
+    """Static hook-bridge inputs that remain valid across live and detached calls."""
+
+    agent_name: str | None
+    config: Config | None
+    runtime_paths: RuntimePaths | None
+    dispatch_context: ToolDispatchContext | None
+
+
 def _correlation_id_for_runtime_context(runtime_context: ToolRuntimeContext | None) -> str:
     if runtime_context is not None and runtime_context.correlation_id:
         return runtime_context.correlation_id
     return "tool-hook:" + uuid4().hex
 
 
+def _ambient_tool_dispatch_context() -> ToolDispatchContext | None:
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is not None:
+        return LiveToolDispatchContext.from_runtime_context(runtime_context)
+    execution_identity = active_tool_execution_identity(None)
+    if execution_identity is not None:
+        return ToolDispatchContext(execution_identity=execution_identity)
+    return None
+
+
+def _explicit_bridge_dispatch_context(
+    dispatch_context: ToolDispatchContext | None,
+) -> ToolDispatchContext | None:
+    if dispatch_context is None:
+        return None
+    if isinstance(dispatch_context, LiveToolDispatchContext):
+        return dispatch_context
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is not None and execution_identity_matches_tool_runtime_context(
+        dispatch_context.execution_identity,
+        runtime_context,
+    ):
+        return LiveToolDispatchContext.from_runtime_context(runtime_context)
+    return dispatch_context
+
+
 def _resolve_tool_context(
     *,
-    agent_name: str | None,
-    execution_identity: ToolExecutionIdentity | None,
-    config: Config | None,
-    runtime_paths: RuntimePaths | None,
+    bridge_context: _ToolHookBridgeContext,
 ) -> _ResolvedToolContext:
-    runtime_context = get_tool_runtime_context()
-    resolved_execution_identity = active_tool_execution_identity(execution_identity)
-    bindings = resolve_tool_runtime_hook_bindings(runtime_context) if runtime_context is not None else None
-    if resolved_execution_identity is not None:
+    dispatch_context = bridge_context.dispatch_context
+    if isinstance(dispatch_context, LiveToolDispatchContext):
+        runtime_context = dispatch_context.runtime_context
+        bindings = resolve_tool_runtime_hook_bindings(runtime_context)
         return _ResolvedToolContext(
-            agent_name=agent_name or resolved_execution_identity.agent_name,
-            room_id=resolved_execution_identity.room_id,
-            thread_id=resolved_execution_identity.resolved_thread_id or resolved_execution_identity.thread_id,
-            requester_id=resolved_execution_identity.requester_id,
-            session_id=resolved_execution_identity.session_id,
-            channel=resolved_execution_identity.channel,
-            config=runtime_context.config if runtime_context is not None else config,
-            runtime_paths=runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
+            agent_name=bridge_context.agent_name or dispatch_context.execution_identity.agent_name,
+            room_id=dispatch_context.execution_identity.room_id,
+            thread_id=dispatch_context.execution_identity.resolved_thread_id
+            or dispatch_context.execution_identity.thread_id,
+            requester_id=dispatch_context.execution_identity.requester_id,
+            session_id=dispatch_context.execution_identity.session_id,
+            channel=dispatch_context.execution_identity.channel,
+            config=runtime_context.config,
+            runtime_paths=runtime_context.runtime_paths,
             correlation_id=_correlation_id_for_runtime_context(runtime_context),
-            message_sender=bindings.message_sender if bindings is not None else None,
-            room_state_querier=bindings.room_state_querier if bindings is not None else None,
-            room_state_putter=bindings.room_state_putter if bindings is not None else None,
-            message_received_depth=bindings.message_received_depth if bindings is not None else 0,
+            message_sender=bindings.message_sender,
+            room_state_querier=bindings.room_state_querier,
+            room_state_putter=bindings.room_state_putter,
+            message_received_depth=bindings.message_received_depth,
+        )
+
+    if dispatch_context is not None:
+        return _ResolvedToolContext(
+            agent_name=bridge_context.agent_name or dispatch_context.execution_identity.agent_name,
+            room_id=dispatch_context.execution_identity.room_id,
+            thread_id=dispatch_context.execution_identity.resolved_thread_id
+            or dispatch_context.execution_identity.thread_id,
+            requester_id=dispatch_context.execution_identity.requester_id,
+            session_id=dispatch_context.execution_identity.session_id,
+            channel=dispatch_context.execution_identity.channel,
+            config=bridge_context.config,
+            runtime_paths=bridge_context.runtime_paths,
+            correlation_id=_correlation_id_for_runtime_context(None),
+            message_sender=None,
+            room_state_querier=None,
+            room_state_putter=None,
+            message_received_depth=0,
         )
 
     return _ResolvedToolContext(
-        agent_name=agent_name or (runtime_context.agent_name if runtime_context is not None else ""),
-        room_id=runtime_context.room_id if runtime_context is not None else None,
-        thread_id=runtime_context.resolved_thread_id if runtime_context is not None else None,
-        requester_id=runtime_context.requester_id if runtime_context is not None else None,
-        session_id=runtime_context.session_id if runtime_context is not None else None,
+        agent_name=bridge_context.agent_name or "",
+        room_id=None,
+        thread_id=None,
+        requester_id=None,
+        session_id=None,
         channel=None,
-        config=runtime_context.config if runtime_context is not None else config,
-        runtime_paths=runtime_context.runtime_paths if runtime_context is not None else runtime_paths,
-        correlation_id=_correlation_id_for_runtime_context(runtime_context),
-        message_sender=bindings.message_sender if bindings is not None else None,
-        room_state_querier=bindings.room_state_querier if bindings is not None else None,
-        room_state_putter=bindings.room_state_putter if bindings is not None else None,
-        message_received_depth=bindings.message_received_depth if bindings is not None else 0,
+        config=bridge_context.config,
+        runtime_paths=bridge_context.runtime_paths,
+        correlation_id=_correlation_id_for_runtime_context(None),
+        message_sender=None,
+        room_state_querier=None,
+        room_state_putter=None,
+        message_received_depth=0,
     )
 
 
@@ -225,18 +281,22 @@ async def _execute_bridge(
     func: Callable[..., Any],
     args: dict[str, Any],
     agent_name: str | None,
-    execution_identity: ToolExecutionIdentity | None,
+    dispatch_context: ToolDispatchContext | None,
     config: Config | None,
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
 ) -> ToolHookResult:
     started_at = time.perf_counter()
-    resolved_context = _resolve_tool_context(
+    effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
+    bridge_context = _ToolHookBridgeContext(
         agent_name=agent_name,
-        execution_identity=execution_identity,
         config=config,
         runtime_paths=runtime_paths,
+        dispatch_context=effective_dispatch_context,
+    )
+    resolved_context = _resolve_tool_context(
+        bridge_context=bridge_context,
     )
     hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
 
@@ -281,7 +341,9 @@ async def _execute_bridge(
                 requester_id=resolved_context.requester_id,
                 session_id=resolved_context.session_id,
                 correlation_id=resolved_context.correlation_id,
-                execution_identity=active_tool_execution_identity(execution_identity),
+                execution_identity=(
+                    effective_dispatch_context.execution_identity if effective_dispatch_context is not None else None
+                ),
                 runtime_paths=resolved_context.runtime_paths,
             )
             logger.warning(
@@ -330,7 +392,7 @@ async def _execute_bridge(
 def build_tool_hook_bridge(
     hook_registry: HookRegistry,
     agent_name: str | None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
 ) -> Callable[..., Any]:
@@ -345,7 +407,7 @@ def build_tool_hook_bridge(
             func=func,
             args=args,
             agent_name=agent_name,
-            execution_identity=execution_identity,
+            dispatch_context=dispatch_context,
             config=config,
             runtime_paths=runtime_paths,
             has_before_hooks=has_before_hooks,
@@ -361,7 +423,7 @@ def build_tool_hook_bridge(
                     func=func,
                     args=args,
                     agent_name=agent_name,
-                    execution_identity=execution_identity,
+                    dispatch_context=dispatch_context,
                     config=config,
                     runtime_paths=runtime_paths,
                     has_before_hooks=has_before_hooks,
@@ -375,7 +437,7 @@ def build_tool_hook_bridge(
                 func=func,
                 args=args,
                 agent_name=agent_name,
-                execution_identity=execution_identity,
+                dispatch_context=dispatch_context,
                 config=config,
                 runtime_paths=runtime_paths,
                 has_before_hooks=has_before_hooks,

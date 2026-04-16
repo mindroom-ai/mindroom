@@ -42,6 +42,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
+    ToolDispatchContext,
     ToolRuntimeContext,
     emit_custom_event,
     get_plugin_state_root,
@@ -66,6 +67,8 @@ type SyncBridgeEvent = (
     | tuple[Literal["tool"], str]
     | tuple[Literal["after"], str, bool, str]
 )
+
+_SESSION_ID = "!room:localhost:$resolved-thread"
 
 
 class NonDeepcopyableResult:
@@ -152,7 +155,7 @@ def _before_context(
         room_id=room_id,
         thread_id="$thread",
         requester_id="@user:localhost",
-        session_id="session-1",
+        session_id=_SESSION_ID,
         config=config,
         runtime_paths=runtime_paths_for(config),
         correlation_id="corr-tool",
@@ -181,6 +184,7 @@ def _tool_runtime_context(
         runtime_paths=runtime_paths_for(config),
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
+        session_id=_SESSION_ID,
         correlation_id="corr-runtime",
         hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,
@@ -198,8 +202,16 @@ def _execution_identity() -> ToolExecutionIdentity:
         room_id="!room:localhost",
         thread_id="$thread",
         resolved_thread_id="$resolved-thread",
-        session_id="session-1",
+        session_id=_SESSION_ID,
     )
+
+
+def _dispatch_context(
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> ToolDispatchContext | None:
+    if execution_identity is None:
+        return None
+    return ToolDispatchContext(execution_identity=execution_identity)
 
 
 def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
@@ -254,7 +266,7 @@ def test_tool_before_call_context_decline_helper() -> None:
         room_id="!room:localhost",
         thread_id="$thread",
         requester_id="@user:localhost",
-        session_id="session-1",
+        session_id=_SESSION_ID,
     )
 
     context.decline("blocked")
@@ -383,7 +395,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
         runtime_paths=runtime_context.runtime_paths,
     )
     error = ValueError("boom {'api_key': 'secret'} https://alice:secret@example.com/private")
@@ -436,7 +448,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["room_id"] == "!room:localhost"
     assert records[0]["thread_id"] == "$resolved-thread"
     assert records[0]["requester_id"] == "@user:localhost"
-    assert records[0]["session_id"] == "session-1"
+    assert records[0]["session_id"] == _SESSION_ID
     assert records[0]["correlation_id"] == "corr-runtime"
     assert records[0]["error_type"] == "ValueError"
     assert records[0]["arguments"] == {
@@ -461,7 +473,7 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
     bridge = build_tool_hook_bridge(
         HookRegistry.from_plugins([_plugin("tool-policy", [after])]),
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
         runtime_paths=runtime_context.runtime_paths,
     )
     error = ValueError("boom")
@@ -507,7 +519,7 @@ def test_sync_function_call_execute_runs_tool_hooks(tmp_path: Path) -> None:
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -557,7 +569,7 @@ async def test_sync_tool_function_call_aexecute_runs_tool_hooks(tmp_path: Path) 
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -625,7 +637,7 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -644,7 +656,7 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
             "!room:localhost",
             "$resolved-thread",
             "@user:localhost",
-            "session-1",
+            _SESSION_ID,
         ),
     ]
     assert after_seen == [
@@ -655,7 +667,7 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
             "!room:localhost",
             "$resolved-thread",
             "@user:localhost",
-            "session-1",
+            _SESSION_ID,
         ),
     ]
 
@@ -673,7 +685,7 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -700,7 +712,7 @@ async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_p
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -756,7 +768,7 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -825,7 +837,7 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -888,7 +900,7 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -957,23 +969,26 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
         seen.append((query_result, put_result))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    target = MessageTarget.resolve("!room:localhost", "$thread", None)
+    execution_identity = bot._tool_runtime_support.build_execution_identity(
+        target=target,
+        user_id="@user:localhost",
+        session_id=target.session_id,
+    )
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(execution_identity),
     )
     assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    runtime_context = bot._tool_runtime_support.build_context(
-        MessageTarget.resolve("!room:localhost", "$thread", None),
-        user_id="@user:localhost",
-    )
+    runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context), tool_execution_identity(execution_identity):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -1032,7 +1047,7 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -1091,14 +1106,16 @@ async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_co
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="child-agent",
-        execution_identity=ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="child-agent",
-            requester_id="@user:localhost",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            resolved_thread_id="$resolved-thread",
-            session_id="session-1",
+        dispatch_context=_dispatch_context(
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="child-agent",
+                requester_id="@user:localhost",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                resolved_thread_id="$resolved-thread",
+                session_id=_SESSION_ID,
+            ),
         ),
     )
     assert bridge is not None
@@ -1131,14 +1148,16 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_id
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="child-agent",
-        execution_identity=ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="child-agent",
-            requester_id=None,
-            room_id=None,
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
+        dispatch_context=_dispatch_context(
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="child-agent",
+                requester_id=None,
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
         ),
     )
     assert bridge is not None
@@ -1168,14 +1187,16 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_ru
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="child-agent",
-        execution_identity=ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="child-agent",
-            requester_id=None,
-            room_id=None,
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
+        dispatch_context=_dispatch_context(
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="child-agent",
+                requester_id=None,
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
         ),
     )
     assert bridge is not None
@@ -1208,7 +1229,7 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -1239,7 +1260,7 @@ async def test_tool_hook_bridge_reraises_tool_errors_after_after_call(tmp_path: 
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -1276,7 +1297,7 @@ async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_err
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
@@ -1378,7 +1399,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity = bot._tool_runtime_support.build_execution_identity(
                 target=target,
                 user_id="@user:localhost",
-                session_id="session-1",
+                session_id=target.session_id,
             )
             toolkit = next(tool for tool in bot.agent.tools if tool.name == "tool-hooks-runtime-demo")
             function = _first_function(toolkit)
@@ -1389,7 +1410,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         assert result.status == "success"
         assert result.result == "HI"
         assert before_seen == [
-            ("!room:localhost", "$thread", "@user:localhost", "session-1"),
+            ("!room:localhost", "$thread", "@user:localhost", target.session_id),
         ]
         assert seen == [
             (
@@ -1512,7 +1533,7 @@ async def test_tool_hook_bridge_fails_open_when_before_hook_raises(tmp_path: Pat
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        dispatch_context=_dispatch_context(_execution_identity()),
     )
     assert bridge is not None
 
