@@ -25,6 +25,7 @@ from mindroom.hooks import (
     MessageEnvelope,
     MessageReceivedContext,
     ResponseDraft,
+    build_hook_matrix_admin,
     hook,
 )
 from mindroom.hooks.execution import emit, emit_collect, emit_transform, reset_hook_execution_state
@@ -324,6 +325,7 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         conversation_cache=make_conversation_cache_mock(),
         hook_registry=registry,
         correlation_id="corr-tool",
+        matrix_admin=build_hook_matrix_admin(client, runtime_paths),
     )
 
     with tool_runtime_context(tool_context):

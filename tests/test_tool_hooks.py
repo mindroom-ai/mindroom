@@ -866,8 +866,8 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
 
 
 @pytest.mark.asyncio
-async def test_tool_hook_contexts_expose_matrix_admin(tmp_path: Path) -> None:
-    """tool:* hook contexts should expose the shared matrix admin helper."""
+async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Path) -> None:
+    """tool:* hook contexts should expose the router-backed matrix admin helper."""
     resolved_aliases: list[str | None] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -880,31 +880,58 @@ async def test_tool_hook_contexts_expose_matrix_admin(tmp_path: Path) -> None:
         assert ctx.matrix_admin is not None
         resolved_aliases.append(await ctx.matrix_admin.resolve_alias("#personal-user:localhost"))
 
+    config = _config(tmp_path)
+    bot = _agent_bot(tmp_path, config=config)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.event_cache = MagicMock()
+    bot.client.homeserver = "http://agent.local:8008"
+    bot.client.room_resolve_alias.return_value = nio.RoomResolveAliasError(
+        "not found",
+        status_code="M_NOT_FOUND",
+    )
+
+    router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.client.rooms = {}
+    router_bot.client.homeserver = "http://localhost:8008"
+    router_bot.client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#personal-user:localhost",
+        room_id="!personal:localhost",
+        servers=["localhost"],
+    )
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    bot.orchestrator = orchestrator
+
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    target = MessageTarget.resolve("!room:localhost", "$thread", None)
+    execution_identity = bot._tool_runtime_support.build_execution_identity(
+        target=target,
+        user_id="@user:localhost",
+        session_id=target.session_id,
+    )
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
+        dispatch_context=_dispatch_context(execution_identity),
     )
     assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    runtime_context = _tool_runtime_context(tmp_path, hook_registry=registry)
-    runtime_context.client.homeserver = "http://localhost:8008"
-    runtime_context.client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
-        room_alias="#personal-user:localhost",
-        room_id="!personal:localhost",
-        servers=["localhost"],
-    )
+    runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
+    assert runtime_context is not None
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context), tool_execution_identity(execution_identity):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
     assert resolved_aliases == ["!personal:localhost", "!personal:localhost"]
-    runtime_context.client.room_resolve_alias.assert_awaited_with("#personal-user:localhost")
+    bot.client.room_resolve_alias.assert_not_awaited()
+    assert router_bot.client.room_resolve_alias.await_count == 2
 
 
 @pytest.mark.asyncio

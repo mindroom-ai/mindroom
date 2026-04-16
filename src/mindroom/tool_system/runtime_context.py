@@ -14,7 +14,6 @@ from mindroom.hooks import (
     HookContextSupport,
     HookRegistry,
     MessageEnvelope,
-    build_hook_matrix_admin,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
@@ -86,6 +85,7 @@ class ToolRuntimeContext:
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
     correlation_id: str | None = None
     hook_message_sender: HookMessageSender | None = None
+    matrix_admin: HookMatrixAdmin | None = None
     room_state_querier: HookRoomStateQuerier | None = None
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
@@ -209,6 +209,7 @@ class ToolRuntimeSupport:
             hook_registry=self.hook_context.registry,
             correlation_id=correlation_id,
             hook_message_sender=self.hook_context.message_sender(),
+            matrix_admin=self.hook_context.matrix_admin(),
             room_state_querier=self.hook_context.room_state_querier(),
             room_state_putter=self.hook_context.room_state_putter(),
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
@@ -373,7 +374,7 @@ def resolve_tool_runtime_hook_bindings(context: ToolRuntimeContext) -> ToolRunti
     """Return the canonical hook-facing bindings for one tool runtime context."""
     return ToolRuntimeHookBindings(
         message_sender=context.hook_message_sender,
-        matrix_admin=build_hook_matrix_admin(context.client, context.runtime_paths),
+        matrix_admin=context.matrix_admin,
         room_state_querier=context.room_state_querier or build_hook_room_state_querier(context.client),
         room_state_putter=context.room_state_putter or build_hook_room_state_putter(context.client),
         message_received_depth=context.message_received_depth,
