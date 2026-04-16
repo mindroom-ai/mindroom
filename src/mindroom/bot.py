@@ -1317,7 +1317,11 @@ class AgentBot:
                     message_id=event.reacts_to,
                     requested_by=event.sender,
                 )
-                await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
+                await self.stop_manager.remove_stop_button(
+                    self.client,
+                    event.reacts_to,
+                    notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
+                )
                 await self._send_response(room.room_id, event.reacts_to, _STOPPING_RESPONSE_TEXT, None)
                 return
 

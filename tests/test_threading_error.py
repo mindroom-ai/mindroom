@@ -393,8 +393,10 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_notify_outbound_redaction_lookup_miss_invalidates_room_threads(self) -> None:
-        """Plain redactions should fail closed when mutation lookup cannot prove room-level state."""
+    async def test_notify_outbound_redaction_lookup_miss_without_cached_target_does_not_invalidate_room_threads(
+        self,
+    ) -> None:
+        """Unknown redactions should not poison room caches when nothing was actually removed."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         access = MatrixConversationCache(
@@ -405,12 +407,63 @@ class TestMatrixConversationCacheThreadReads:
         access.notify_outbound_redaction("!room:localhost", "$room-message:localhost")
         await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
 
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
-            "!room:localhost",
-            reason="outbound_redaction_lookup_unavailable",
-        )
+        event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.mark_thread_stale.assert_not_awaited()
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$room-message:localhost")
+
+    @pytest.mark.asyncio
+    async def test_notify_outbound_reaction_persists_lookup_without_thread_invalidation(self) -> None:
+        """Outbound reactions should be cached for later redaction lookups without staling thread history."""
+        event_cache = _runtime_event_cache()
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@agent:localhost"
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+
+        access.notify_outbound_event(
+            "!room:localhost",
+            {
+                "type": "m.reaction",
+                "room_id": "!room:localhost",
+                "event_id": "$reaction:localhost",
+                "sender": "@agent:localhost",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.annotation",
+                        "event_id": "$thread-reply:localhost",
+                        "key": "🛑",
+                    },
+                },
+            },
+        )
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.store_events_batch.assert_awaited_once()
+        stored_batch = event_cache.store_events_batch.await_args.args[0]
+        assert stored_batch == [
+            (
+                "$reaction:localhost",
+                "!room:localhost",
+                {
+                    "type": "m.reaction",
+                    "room_id": "!room:localhost",
+                    "event_id": "$reaction:localhost",
+                    "sender": "@agent:localhost",
+                    "content": {
+                        "m.relates_to": {
+                            "rel_type": "m.annotation",
+                            "event_id": "$thread-reply:localhost",
+                            "key": "🛑",
+                        },
+                    },
+                },
+            ),
+        ]
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_notify_outbound_message_plain_reply_to_threaded_target_updates_thread_cache(self) -> None:
@@ -1675,6 +1728,47 @@ class TestThreadingBehavior:
             reason="sync_thread_lookup_unavailable",
         )
         event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sync_reaction_redaction_lookup_miss_without_cached_target_does_not_invalidate_room_threads(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Sync redaction lookup misses should not poison the room when the target was already removed."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        event_cache.redact_event = AsyncMock(return_value=False)
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(return_value=None)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$reaction:localhost"
+        redaction_event.sender = "@user:localhost"
+        redaction_event.server_timestamp = 1234567891
+        redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$reaction:localhost",
+            "room_id": "!test:localhost",
+            "type": "m.room.redaction",
+        }
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
+        }
+
+        bot._conversation_cache.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$reaction:localhost")
+        event_cache.mark_room_threads_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_unknown_thread_mutations_invalidate_room_threads_once_without_room_scan(
@@ -3625,7 +3719,7 @@ class TestThreadingBehavior:
         read_task = asyncio.create_task(access.get_thread_history("!room:localhost", "$thread:localhost"))
         await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
         write_task = asyncio.create_task(
-            access._outbound._apply_outbound_message_notification(
+            access._outbound._apply_outbound_event_notification(
                 "!room:localhost",
                 "$reply-new:localhost",
                 new_event_source,

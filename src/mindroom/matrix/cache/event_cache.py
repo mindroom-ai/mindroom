@@ -413,6 +413,15 @@ class ConversationEventCache(Protocol):
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""
 
+    async def revalidate_thread_after_incremental_update(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        runtime_started_at: float,
+    ) -> bool:
+        """Refresh thread validation after a safe incremental update in the current runtime."""
+
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""
 
@@ -679,6 +688,28 @@ class _EventCache:
                     room_id=room_id,
                     thread_id=thread_id,
                     normalized_event=normalized_event,
+                ),
+            ),
+        )
+
+    async def revalidate_thread_after_incremental_update(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        runtime_started_at: float,
+    ) -> bool:
+        """Refresh one thread's validated timestamp after a safe incremental update."""
+        return bool(
+            await self._write_operation(
+                room_id,
+                operation="revalidate_thread_after_incremental_update",
+                disabled_result=False,
+                writer=lambda db: event_cache_threads.revalidate_thread_after_incremental_update_locked(
+                    db,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    runtime_started_at=runtime_started_at,
                 ),
             ),
         )

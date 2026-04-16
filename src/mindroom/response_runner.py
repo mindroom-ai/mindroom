@@ -1342,7 +1342,11 @@ class ResponseRunner:
 
                     if show_stop_button:
                         self.deps.logger.info("Adding stop button", message_id=message_to_track)
-                        await self.deps.stop_manager.add_stop_button(self._client(), message_to_track)
+                        await self.deps.stop_manager.add_stop_button(
+                            self._client(),
+                            message_to_track,
+                            notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
+                        )
 
                 try:
                     await task
@@ -1367,6 +1371,7 @@ class ResponseRunner:
                         self._client(),
                         tracked_message_id,
                         show_stop_button=show_stop_button,
+                        notify_outbound_redaction=self.deps.post_response_effects.conversation_cache.notify_outbound_redaction,
                     )
 
                 return message_id

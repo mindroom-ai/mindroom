@@ -107,7 +107,7 @@ class ThreadMutationCacheOps:
                 reason=success_reason if redacted else failure_reason,
             )
             return
-        if impact.state is MutationThreadImpactState.UNKNOWN:
+        if impact.state is MutationThreadImpactState.UNKNOWN and redacted:
             await self.invalidate_room_threads(room_id, reason=lookup_unavailable_reason)
 
     async def invalidate_known_thread(
@@ -187,7 +187,23 @@ class ThreadMutationCacheOps:
                 event_id=event_id,
                 context=context,
             )
-        return bool(appended)
+            return False
+        try:
+            await self.runtime.event_cache.revalidate_thread_after_incremental_update(
+                room_id,
+                thread_id,
+                runtime_started_at=self.runtime.runtime_started_at,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to refresh thread cache validation after incremental update",
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event_id,
+                context=context,
+                error=str(exc),
+            )
+        return True
 
     def _disable_cache_after_fail_closed_invalidation(
         self,

@@ -255,6 +255,7 @@ def clear_tracked_response_message(
     tracked_message_id: str,
     *,
     show_stop_button: bool,
+    notify_outbound_redaction: Callable[[str, str], None] | None = None,
 ) -> None:
     """Clear one tracked response and redact the stop button when still present."""
     tracked = stop_manager.tracked_messages.get(tracked_message_id)
@@ -263,6 +264,7 @@ def clear_tracked_response_message(
         tracked_message_id,
         client=client,
         remove_button=show_stop_button and not button_already_removed,
+        notify_outbound_redaction=notify_outbound_redaction,
     )
 
 

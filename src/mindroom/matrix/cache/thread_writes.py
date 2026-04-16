@@ -96,7 +96,7 @@ class ThreadOutboundWritePolicy:
         self._cache_ops = cache_ops
         self._require_client = require_client
 
-    async def _apply_outbound_message_notification(
+    async def _apply_outbound_event_notification(
         self,
         room_id: str,
         event_id: str,
@@ -110,8 +110,15 @@ class ThreadOutboundWritePolicy:
             context="outbound",
         )
         if impact.state is MutationThreadImpactState.ROOM_LEVEL:
+            if event_info.is_reaction:
+                await self._cache_ops.store_events_batch(
+                    room_id,
+                    [(event_id, room_id, event_source)],
+                    failure_message="Failed to persist outbound reaction lookup to cache",
+                )
+                return
             self._cache_ops.logger.debug(
-                "Skipping outbound thread cache bookkeeping for non-threaded message mutation",
+                "Skipping outbound thread cache bookkeeping for non-threaded event mutation",
                 room_id=room_id,
                 event_id=event_id,
                 original_event_id=event_info.original_event_id,
@@ -136,6 +143,67 @@ class ThreadOutboundWritePolicy:
             context="outbound",
         )
 
+    def notify_outbound_event(
+        self,
+        room_id: str,
+        event_source: dict[str, Any],
+    ) -> None:
+        """Schedule advisory bookkeeping for one locally sent outbound event."""
+        try:
+            if not self._cache_ops.cache_runtime_available():
+                return
+            normalized_event_source = self._normalize_outbound_event_source(room_id, event_source)
+            if normalized_event_source is None:
+                return
+            event_id = normalized_event_source["event_id"]
+
+            event_info = EventInfo.from_event(normalized_event_source)
+            if event_info.is_reaction:
+                self._schedule_fail_open_room_update(
+                    room_id,
+                    lambda: self._cache_ops.store_events_batch(
+                        room_id,
+                        [(event_id, room_id, normalized_event_source)],
+                        failure_message="Failed to persist outbound reaction lookup to cache",
+                    ),
+                    name="matrix_cache_notify_outbound_event",
+                    cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
+                    failure_message="Ignoring outbound cache bookkeeping failure after successful send",
+                    log_context={"event_id": event_id},
+                )
+                return
+            if not is_thread_affecting_relation(event_info):
+                return
+            self._schedule_fail_open_room_update(
+                room_id,
+                lambda: self._apply_outbound_event_notification(
+                    room_id,
+                    event_id,
+                    normalized_event_source,
+                    event_info,
+                ),
+                name="matrix_cache_notify_outbound_event",
+                cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
+                failure_message="Ignoring outbound cache bookkeeping failure after successful send",
+                log_context={"event_id": event_id},
+            )
+        except asyncio.CancelledError as exc:
+            event_id = event_source.get("event_id")
+            self._cache_ops.logger.warning(
+                "Ignoring cancelled outbound cache bookkeeping after successful send",
+                room_id=room_id,
+                event_id=event_id if isinstance(event_id, str) else None,
+                error=str(exc),
+            )
+        except Exception as exc:
+            event_id = event_source.get("event_id")
+            self._cache_ops.logger.warning(
+                "Ignoring outbound cache bookkeeping failure after successful send",
+                room_id=room_id,
+                event_id=event_id if isinstance(event_id, str) else None,
+                error=str(exc),
+            )
+
     def notify_outbound_message(
         self,
         room_id: str,
@@ -143,54 +211,41 @@ class ThreadOutboundWritePolicy:
         content: dict[str, Any],
     ) -> None:
         """Schedule advisory bookkeeping for one locally sent threaded message or edit."""
-        try:
-            if not self._cache_ops.cache_runtime_available():
-                return
-            if not isinstance(event_id, str) or not event_id:
-                return
+        if not self._cache_ops.cache_runtime_available():
+            return
+        if not isinstance(event_id, str) or not event_id:
+            return
 
-            client = self._require_client()
-            sender = client.user_id if isinstance(client.user_id, str) else None
-            origin_server_ts = int(time.time() * 1000)
-            event_source = normalize_event_source_for_cache(
-                {
-                    "type": "m.room.message",
-                    "room_id": room_id,
-                    "event_id": event_id,
-                    "sender": sender,
-                    "origin_server_ts": origin_server_ts,
-                    "content": dict(content),
-                },
-                event_id=event_id,
-                sender=sender,
-                origin_server_ts=origin_server_ts,
-            )
-            event_info = EventInfo.from_event(event_source)
-            if not is_thread_affecting_relation(event_info):
-                return
+        self.notify_outbound_event(
+            room_id,
+            {
+                "type": "m.room.message",
+                "room_id": room_id,
+                "event_id": event_id,
+                "content": dict(content),
+            },
+        )
 
-            self._schedule_fail_open_room_update(
-                room_id,
-                lambda: self._apply_outbound_message_notification(room_id, event_id, event_source, event_info),
-                name="matrix_cache_notify_outbound_message",
-                cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
-                failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
-                log_context={"event_id": event_id},
-            )
-        except asyncio.CancelledError as exc:
-            self._cache_ops.logger.warning(
-                "Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
-        except Exception as exc:
-            self._cache_ops.logger.warning(
-                "Ignoring outbound threaded message cache bookkeeping failure after successful send",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
+    def _normalize_outbound_event_source(
+        self,
+        room_id: str,
+        event_source: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return one outbound event payload normalized for durable cache storage."""
+        event_id = event_source.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            return None
+        client = self._require_client()
+        sender = client.user_id if isinstance(client.user_id, str) else None
+        return normalize_event_source_for_cache(
+            {
+                **event_source,
+                "room_id": room_id,
+            },
+            event_id=event_id,
+            sender=sender,
+            origin_server_ts=int(time.time() * 1000),
+        )
 
     async def _apply_outbound_redaction_notification(
         self,
@@ -507,7 +562,7 @@ class ThreadSyncWritePolicy:
                 failure_message="Failed to apply sync redaction to cache",
             )
             if impact.state is MutationThreadImpactState.UNKNOWN:
-                if not room_threads_invalidated:
+                if redacted and not room_threads_invalidated:
                     await self._cache_ops.invalidate_room_threads(
                         room_id,
                         reason="sync_redaction_lookup_unavailable",
