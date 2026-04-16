@@ -59,6 +59,13 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|src/mindroom/tools/.*\.py)$
 
+      - id: tach-check
+        name: Enforce narrow Tach boundaries
+        entry: bash -c 'env -u VIRTUAL_ENV uv run tach check --dependencies --interfaces'
+        language: system
+        pass_filenames: false
+        files: ^(tach\.toml|pyproject\.toml|\.github/workflows/tach\.yml|src/mindroom/matrix/cache/.*\.py|src/mindroom/matrix/conversation_cache\.py|src/mindroom/runtime_support\.py|src/mindroom/bot_runtime_view\.py|src/mindroom/matrix/client\.py|src/mindroom/conversation_resolver\.py|src/mindroom/commands/handler\.py|src/mindroom/scheduling\.py|src/mindroom/tool_system/runtime_context\.py|src/mindroom/thread_summary\.py|src/mindroom/streaming\.py|src/mindroom/post_response_effects\.py|src/mindroom/hooks/sender\.py|src/mindroom/turn_controller\.py)$
+
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.6.0"
     hooks:
