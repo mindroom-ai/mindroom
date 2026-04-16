@@ -323,7 +323,7 @@ def _start_scheduled_task(
                 runtime_paths,
                 event_cache,
                 conversation_cache,
-                matrix_admin=matrix_admin,
+                matrix_admin,
             ),
         )
     else:
@@ -336,7 +336,7 @@ def _start_scheduled_task(
                 config,
                 runtime_paths,
                 conversation_cache,
-                matrix_admin=matrix_admin,
+                matrix_admin,
             ),
         )
     _running_tasks[task_id] = task
@@ -561,7 +561,6 @@ async def _save_pending_scheduled_task(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
-    *,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
@@ -583,7 +582,7 @@ async def _save_pending_scheduled_task(
         runtime_paths,
         event_cache,
         conversation_cache,
-        matrix_admin=matrix_admin,
+        matrix_admin,
     )
 
 
@@ -996,8 +995,8 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     config,
                     runtime_paths,
                     conversation_cache,
-                    task_id=task_id,
-                    matrix_admin=matrix_admin,
+                    task_id,
+                    matrix_admin,
                 )
                 if task_id not in running_tasks:
                     logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
@@ -1089,11 +1088,11 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             execution_succeeded = await _execute_scheduled_workflow(
                 client,
                 latest_workflow,
-                config=config,
-                runtime_paths=runtime_paths,
-                conversation_cache=conversation_cache,
-                task_id=task_id,
-                matrix_admin=matrix_admin,
+                config,
+                runtime_paths,
+                conversation_cache,
+                task_id,
+                matrix_admin,
             )
             final_status = "completed" if execution_succeeded else "failed"
 
