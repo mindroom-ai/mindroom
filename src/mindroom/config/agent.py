@@ -221,6 +221,10 @@ class AgentConfig(BaseModel):
         default="thread",
         description="Conversation threading mode: 'thread' creates Matrix threads per conversation, 'room' uses a single continuous conversation per room (ideal for bridges/mobile)",
     )
+    startup_thread_prewarm: bool = Field(
+        default=True,
+        description="Whether to prewarm recent thread snapshots in joined rooms after the first sync completes",
+    )
     room_thread_modes: dict[str, Literal["thread", "room"]] = Field(
         default_factory=dict,
         description="Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
@@ -385,6 +389,10 @@ class TeamConfig(BaseModel):
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+    startup_thread_prewarm: bool = Field(
+        default=True,
+        description="Whether to prewarm recent thread snapshots in joined rooms after the first sync completes",
+    )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,
         description="Per-team auto-compaction overrides",

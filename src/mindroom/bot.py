@@ -317,6 +317,7 @@ class AgentBot:
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
+    _startup_thread_prewarm_task: asyncio.Task[None] | None
     _standalone_runtime_support: OwnedRuntimeSupport | None
     _turn_controller: TurnController
 
@@ -354,6 +355,7 @@ class AgentBot:
             event_cache_write_coordinator=None,
         )
         self._deferred_overdue_task_drain_task = None
+        self._startup_thread_prewarm_task = None
         self._init_runtime_components()
 
     def _init_runtime_components(self) -> None:
@@ -623,6 +625,40 @@ class AgentBot:
         if self.agent_name in self.config.teams:
             return "team"
         return "agent"
+
+    def _startup_thread_prewarm_enabled(self) -> bool:
+        """Return whether this runtime entity should prewarm recent thread snapshots on startup."""
+        if self.agent_name == ROUTER_AGENT_NAME:
+            return self.config.router.startup_thread_prewarm
+        if self.agent_name in self.config.teams:
+            return self.config.teams[self.agent_name].startup_thread_prewarm
+        return self.config.agents[self.agent_name].startup_thread_prewarm
+
+    def _maybe_start_startup_thread_prewarm(self) -> None:
+        """Start startup thread prewarm once the first sync is ready."""
+        if self.client is None or self._sync_shutting_down or not self._startup_thread_prewarm_enabled():
+            return
+
+        existing_task = self._startup_thread_prewarm_task
+        if existing_task is not None and not existing_task.done():
+            return
+
+        self._startup_thread_prewarm_task = create_background_task(
+            self._run_startup_thread_prewarm(),
+            name=f"startup_thread_prewarm_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
+    async def _run_startup_thread_prewarm(self) -> None:
+        """Prewarm recent thread snapshots for joined rooms without blocking real dispatch work."""
+        try:
+            await self._conversation_cache.prewarm_recent_threads_for_joined_rooms(
+                is_shutting_down=lambda: self._sync_shutting_down,
+            )
+        finally:
+            current_task = asyncio.current_task()
+            if current_task is not None and self._startup_thread_prewarm_task is current_task:
+                self._startup_thread_prewarm_task = None
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
@@ -910,6 +946,7 @@ class AgentBot:
 
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            self._maybe_start_startup_thread_prewarm()
 
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
@@ -1248,9 +1285,22 @@ class AgentBot:
 
         await asyncio.gather(drain_task, return_exceptions=True)
 
+    async def _cancel_startup_thread_prewarm(self) -> None:
+        """Cancel the startup thread prewarm task if it is still running."""
+        prewarm_task = self._startup_thread_prewarm_task
+        self._startup_thread_prewarm_task = None
+        if prewarm_task is None:
+            return
+
+        if not prewarm_task.done():
+            prewarm_task.cancel()
+
+        await asyncio.gather(prewarm_task, return_exceptions=True)
+
     async def prepare_for_sync_shutdown(self) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
+        await self._cancel_startup_thread_prewarm()
         await self._coalescing_gate.drain_all()
         self._persist_sync_token()
         if self.agent_name != ROUTER_AGENT_NAME:

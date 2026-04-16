@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -23,6 +24,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import BUILTIN_EVENT_NAMES, DEFAULT_EVENT_TIMEOUT_MS, RESERVED_EVENT_NAMESPACES
+from mindroom.matrix.cache import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import (
@@ -30,6 +32,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     install_runtime_cache_support,
+    make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -459,6 +462,194 @@ async def test_bot_ready_context_includes_joined_rooms_from_first_sync(tmp_path:
     assert len(captured_ctx) == 1
     assert captured_ctx[0].rooms == ("!room:localhost",)
     assert captured_ctx[0].joined_room_ids == ("!room:localhost", "!joined:localhost")
+
+
+@pytest.mark.asyncio
+async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path) -> None:
+    """bot:ready should prewarm recent thread snapshots in the background after first sync."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
+    bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+    bot._conversation_cache.logger = MagicMock()
+
+    thread_roots = [
+        nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Thread A", "msgtype": "m.text"},
+                "event_id": "$thread-a:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        ),
+        nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Thread B", "msgtype": "m.text"},
+                "event_id": "$thread-b:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        ),
+    ]
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch(
+            "mindroom.matrix.conversation_cache.get_room_threads_page",
+            new=AsyncMock(return_value=(thread_roots, "next-token")),
+        ) as mock_get_room_threads_page,
+        patch(
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+        ) as mock_fetch_dispatch_thread_snapshot,
+    ):
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    mock_get_room_threads_page.assert_awaited_once_with(
+        bot.client,
+        "!room:localhost",
+        limit=20,
+    )
+    assert [call.args[2] for call in mock_fetch_dispatch_thread_snapshot.await_args_list] == [
+        "$thread-a:localhost",
+        "$thread-b:localhost",
+    ]
+    for call in mock_fetch_dispatch_thread_snapshot.await_args_list:
+        assert call.args[:2] == (bot.client, "!room:localhost")
+        assert call.kwargs["event_cache"] is bot.event_cache
+        assert call.kwargs["runtime_started_at"] == bot._runtime_view.runtime_started_at
+    bot._conversation_cache.logger.info.assert_any_call(
+        "startup_thread_prewarm_complete",
+        room_id="!room:localhost",
+        threads_warmed=2,
+        threads_failed=0,
+        elapsed_ms=ANY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_bot_ready_can_disable_startup_thread_prewarm(tmp_path: Path) -> None:
+    """Per-bot config should allow startup thread prewarm to be disabled."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    rooms=["!room:localhost"],
+                    startup_thread_prewarm=False,
+                ),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    bot = install_runtime_cache_support(
+        AgentBot(
+            agent_user=AgentMatrixUser(
+                agent_name="code",
+                password=TEST_PASSWORD,
+                display_name="Code",
+                user_id="@mindroom_code:localhost",
+            ),
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!room:localhost"],
+        ),
+    )
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
+    bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch(
+            "mindroom.matrix.conversation_cache.get_room_threads_page",
+            new=AsyncMock(),
+        ) as mock_get_room_threads_page,
+        patch(
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+            new=AsyncMock(),
+        ) as mock_fetch_dispatch_thread_snapshot,
+    ):
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    mock_get_room_threads_page.assert_not_awaited()
+    mock_fetch_dispatch_thread_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_skips_failed_threads_and_logs_counts(tmp_path: Path) -> None:
+    """Startup thread prewarm should fail open on individual thread refresh failures."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
+    bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+    bot._conversation_cache.logger = MagicMock()
+
+    thread_roots = [
+        nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Thread A", "msgtype": "m.text"},
+                "event_id": "$thread-a:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        ),
+        nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Thread B", "msgtype": "m.text"},
+                "event_id": "$thread-b:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        ),
+    ]
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch(
+            "mindroom.matrix.conversation_cache.get_room_threads_page",
+            new=AsyncMock(return_value=(thread_roots, None)),
+        ),
+        patch(
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+            new=AsyncMock(
+                side_effect=[
+                    RuntimeError("boom"),
+                    thread_history_result([], is_full_history=False),
+                ],
+            ),
+        ) as mock_fetch_dispatch_thread_snapshot,
+    ):
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert [call.args[2] for call in mock_fetch_dispatch_thread_snapshot.await_args_list] == [
+        "$thread-a:localhost",
+        "$thread-b:localhost",
+    ]
+    bot._conversation_cache.logger.warning.assert_any_call(
+        "startup_thread_prewarm_thread_failed",
+        room_id="!room:localhost",
+        thread_id="$thread-a:localhost",
+        error="boom",
+    )
+    bot._conversation_cache.logger.info.assert_any_call(
+        "startup_thread_prewarm_complete",
+        room_id="!room:localhost",
+        threads_warmed=1,
+        threads_failed=1,
+        elapsed_ms=ANY,
+    )
 
 
 @pytest.mark.asyncio
