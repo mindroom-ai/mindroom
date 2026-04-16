@@ -319,7 +319,10 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("OPENAI_API_KEY=dotenv-secret\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=dotenv-secret\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
+        encoding="utf-8",
+    )
     payload_runtime = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -348,7 +351,10 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("OPENAI_API_KEY=dotenv-secret\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=dotenv-secret\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
+        encoding="utf-8",
+    )
     payload_runtime = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -368,8 +374,12 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
 
     assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert startup_runtime.env_value("OPENAI_API_KEY") is None
+    assert startup_runtime.env_value("OPENAI_BASE_URL") is None
+    assert startup_runtime.env_value("CUSTOM_API_TOKEN") is None
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
     assert "OPENAI_API_KEY" not in execution_env
+    assert "OPENAI_BASE_URL" not in execution_env
+    assert "CUSTOM_API_TOKEN" not in execution_env
 
 
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:

@@ -343,7 +343,12 @@ class DefaultsConfig(BaseModel):
     )
     worker_grantable_credentials: list[str] | None = Field(
         default=None,
-        description="Shared credential service names allowed inside isolated worker runtimes (None = deny by default; explicitly listed services may be mirrored and exposed to worker execution env)",
+        description=(
+            "Credential service names to mirror into isolated workers' shared credential layer "
+            "(None = deny by default). Common built-in examples include openai, anthropic, "
+            "google, google_vertex_adc, google_oauth_client, github_private, and ollama. "
+            "Custom service names are also valid, but they are mirrored only and are not injected as env vars."
+        ),
     )
     allow_self_config: bool = Field(
         default=False,

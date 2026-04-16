@@ -346,7 +346,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # 
 
 
 def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_path: Path) -> None:
-    """Dedicated worker startup payloads should deny ADC by default while preserving public runtime settings."""
+    """Dedicated worker startup payloads should keep worker control env while denying ambient provider and arbitrary runtime env."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -363,9 +363,13 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_NAMESPACE=alpha1234\n"
             "MATRIX_HOMESERVER=http://dotenv-hs\n"
             "MATRIX_SERVER_NAME=alpha.example\n"
+            "CUSTOMER_ID=tenant-123\n"
+            "ACCOUNT_ID=account-456\n"
             f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n"
             "GOOGLE_CLOUD_PROJECT=demo-project\n"
             "GOOGLE_CLOUD_LOCATION=us-central1\n"
+            "OPENAI_BASE_URL=http://example.invalid/v1\n"
+            "CUSTOM_API_TOKEN=custom-secret\n"
             "ANTHROPIC_API_KEY=sk-secret\n"
         ),
         encoding="utf-8",
@@ -394,9 +398,13 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
+    assert committed_runtime.env_value("CUSTOMER_ID") == "tenant-123"
+    assert committed_runtime.env_value("ACCOUNT_ID") == "account-456"
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
-    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
-    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
+    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") is None
+    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") is None
+    assert committed_runtime.env_value("OPENAI_BASE_URL") is None
+    assert committed_runtime.env_value("CUSTOM_API_TOKEN") is None
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
@@ -456,8 +464,8 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
 
-def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_paths_differ(tmp_path: Path) -> None:
-    """Dedicated workers should copy ADC into the local shared storage root even when pod mount paths differ."""
+def test_kubernetes_backend_keeps_adc_out_of_worker_runtime_even_when_service_is_grantable(tmp_path: Path) -> None:
+    """Dedicated workers should not copy or expose ADC paths through isolated runtime env."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -489,11 +497,8 @@ def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_
     state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
     local_adc_copy = local_storage_root / state_subpath / ".runtime" / credentials_path.name
 
-    assert (
-        committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS")
-        == f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
-    )
-    assert local_adc_copy.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
+    assert not local_adc_copy.exists()
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

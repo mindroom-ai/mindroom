@@ -41,6 +41,7 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "POD_NAMESPACE",
     },
 )
+_ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset({"ACCOUNT_ID", "CUSTOMER_ID", "POD_NAMESPACE"})
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
         "MINDROOM_LOCAL_CLIENT_ID",
@@ -267,6 +268,14 @@ def _is_public_runtime_startup_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
+def _is_isolated_runtime_public_env_name(name: str) -> bool:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
+        return False
+    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+
+
 def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = {
@@ -410,6 +419,17 @@ def _execution_runtime_env_layers(
     *,
     allowed_credential_services: Collection[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
+    if allowed_credential_services is not None:
+        env_file_values = {
+            key: value
+            for key, value in runtime_paths.env_file_values.items()
+            if _is_isolated_runtime_public_env_name(key)
+        }
+        process_env = {
+            key: value for key, value in runtime_paths.process_env.items() if _is_isolated_runtime_public_env_name(key)
+        }
+        return process_env, env_file_values
+
     allowed_credential_env_names = _worker_credential_env_names(allowed_credential_services)
     env_file_values = {
         key: value
@@ -471,6 +491,7 @@ def execution_runtime_env_values(
     - config-adjacent ``.env`` values remain visible to execution tools
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
+    - isolated worker execution denies ambient provider env even when credentials are mirrored
     """
     process_env, env_file_values = _execution_runtime_env_layers(
         runtime_paths,

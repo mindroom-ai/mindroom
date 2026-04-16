@@ -552,14 +552,17 @@ def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtim
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Isolated execution should not inherit provider env unless explicitly granted."""
+    """Isolated execution should not inherit provider env or arbitrary runtime `.env` values by default."""
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "MINDROOM_NAMESPACE=alpha1234\nTEST_EXECUTION_ENV=visible-in-shell\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
+        encoding="utf-8",
+    )
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -579,15 +582,18 @@ def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtim
     execution_env = sandbox_proxy_module._execution_env_payload("python", runtime_paths=runtime_paths)
 
     assert execution_env is not None
-    assert execution_env["TEST_EXECUTION_ENV"] == "visible-in-shell"
+    assert execution_env["MINDROOM_NAMESPACE"] == "alpha1234"
+    assert "TEST_EXECUTION_ENV" not in execution_env
     assert "OPENAI_API_KEY" not in execution_env
+    assert "OPENAI_BASE_URL" not in execution_env
+    assert "CUSTOM_API_TOKEN" not in execution_env
 
 
-def test_execution_env_payload_includes_explicitly_granted_provider_env_in_isolated_runtime(
+def test_execution_env_payload_keeps_provider_env_denied_even_with_worker_credential_allowlist(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Isolated execution should inherit provider env only for explicitly granted services."""
+    """Isolated execution should not reintroduce provider env just because credentials are mirrored."""
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -613,7 +619,8 @@ def test_execution_env_payload_includes_explicitly_granted_provider_env_in_isola
     execution_env = sandbox_proxy_module._execution_env_payload("python", runtime_paths=runtime_paths)
 
     assert execution_env is not None
-    assert execution_env["OPENAI_API_KEY"] == "env-openai-key"
+    assert "OPENAI_API_KEY" not in execution_env
+    assert "OPENAI_BASE_URL" not in execution_env
 
 
 @pytest.mark.asyncio
@@ -812,7 +819,7 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     assert result == "sandbox-result"
     assert captured["json"]["extra_env_passthrough"] == "GITEA_*"
     assert captured["json"]["tool_init_overrides"]["shell_path_prepend"] == "/opt/custom/bin"
-    assert captured["json"]["execution_env"]["TEST_EXECUTION_ENV"] == "visible-in-shell"
+    assert "TEST_EXECUTION_ENV" not in captured["json"]["execution_env"]
     assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"  # noqa: S105
     assert "CI_JOB_TOKEN" not in captured["json"]["execution_env"]
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]

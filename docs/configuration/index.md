@@ -253,7 +253,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
-  worker_grantable_credentials: null  # Default: null (deny by default; explicitly listed services may be exposed inside isolated workers)
+  worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to mirror into isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_first_threshold: 5  # Default: 5 (first automatic thread summary)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -262,6 +262,11 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+
+`defaults.worker_grantable_credentials` accepts credential service names, not a closed provider enum.
+Common built-in env-synced examples include `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_vertex_adc`, `google_oauth_client`, and `github_private`.
+Custom credential service names stored through the credentials API or UI are also valid and will be mirrored into the worker shared credential layer.
+This setting does not inject provider env into isolated workers.
 
 # Auto-compaction is destructive inside the active session.
 # It rewrites the stored session summary and removes compacted raw runs from
