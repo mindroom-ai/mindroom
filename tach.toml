@@ -1,0 +1,115 @@
+exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
+source_roots = ["src"]
+
+[[modules]]
+path = "mindroom.matrix.cache"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.conversation_cache"
+depends_on = ["mindroom.matrix.cache", "mindroom.matrix.client"]
+
+[[modules]]
+path = "mindroom.runtime_support"
+depends_on = ["mindroom.matrix.cache"]
+
+[[modules]]
+path = "mindroom.bot_runtime_view"
+depends_on = ["mindroom.matrix.cache"]
+
+[[modules]]
+path = "mindroom.matrix.client"
+depends_on = ["mindroom.matrix.cache", "mindroom.matrix.conversation_cache"]
+
+[[modules]]
+path = "mindroom.conversation_resolver"
+depends_on = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+
+[[modules]]
+path = "mindroom.commands.handler"
+depends_on = [
+    "mindroom.matrix.conversation_cache",
+    "mindroom.scheduling",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.scheduling"
+depends_on = [
+    "mindroom.hooks.sender",
+    "mindroom.matrix.client",
+    "mindroom.matrix.conversation_cache",
+]
+
+[[modules]]
+path = "mindroom.tool_system.runtime_context"
+depends_on = ["mindroom.matrix.conversation_cache", "mindroom.scheduling"]
+
+[[modules]]
+path = "mindroom.thread_summary"
+depends_on = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+
+[[modules]]
+path = "mindroom.streaming"
+depends_on = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+
+[[modules]]
+path = "mindroom.post_response_effects"
+depends_on = ["mindroom.matrix.conversation_cache", "mindroom.thread_summary"]
+
+[[modules]]
+path = "mindroom.hooks.sender"
+depends_on = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+
+[[modules]]
+path = "mindroom.turn_controller"
+depends_on = [
+    "mindroom.commands.handler",
+    "mindroom.matrix.cache",
+    "mindroom.matrix.conversation_cache",
+]
+
+[[interfaces]]
+expose = [
+    "ConversationEventCache",
+    "EventCacheWriteCoordinator",
+    "THREAD_HISTORY_DEGRADED_DIAGNOSTIC",
+    "THREAD_HISTORY_ERROR_DIAGNOSTIC",
+    "THREAD_HISTORY_SOURCE_CACHE",
+    "THREAD_HISTORY_SOURCE_DIAGNOSTIC",
+    "THREAD_HISTORY_SOURCE_HOMESERVER",
+    "THREAD_HISTORY_SOURCE_STALE_CACHE",
+    "ThreadCacheState",
+    "ThreadHistoryResult",
+    "ThreadReadPolicy",
+    "ThreadWritePolicy",
+    "normalize_nio_event_for_cache",
+    "thread_cache_state_is_usable",
+    "thread_history_result",
+]
+from = ["mindroom.matrix.cache"]
+
+[[interfaces]]
+expose = ["_EventCache", "_EventCacheWriteCoordinator"]
+from = ["mindroom.matrix.cache"]
+visibility = ["mindroom.runtime_support"]
+exclusive = true
+
+[[interfaces]]
+expose = [
+    "ConversationCacheProtocol",
+    "ConversationEventCache",
+    "EventLookupResult",
+    "MatrixConversationCache",
+    "ThreadReadResult",
+]
+from = ["mindroom.matrix.conversation_cache"]
+
+[[interfaces]]
+expose = [
+    "OwnedRuntimeSupport",
+    "build_owned_runtime_support",
+    "close_owned_runtime_support",
+    "sync_owned_runtime_support",
+]
+from = ["mindroom.runtime_support"]

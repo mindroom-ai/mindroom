@@ -1,22 +1,55 @@
 """Matrix cache domain ownership.
 
 Developer note:
-- `event_cache.py` owns the public SQLite cache boundary plus runtime, locking, and schema lifecycle.
+- `event_cache.py` owns the concrete durable cache implementation, runtime, locking, and schema lifecycle.
 - `event_cache_events.py` owns event lookup normalization, lookup/index rows, edits, and redaction tombstones.
 - `event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
 
-Public boundary:
-- `_EventCache` in `event_cache.py` is the durable cache API used by conversation and client code.
-- `mindroom.matrix.cache.normalize_nio_event_for_cache` is the package-level normalization helper for callers above the cache package.
-- `MatrixConversationCache` remains the higher-level conversation read/write facade above it.
+Package boundary:
+- `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
+- `_EventCache` and `_EventCacheWriteCoordinator` remain private concrete implementations used by `runtime_support.py` as the composition-root exception.
+- `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package.
 
 Main invariants:
-- Runtime disable and room/db ordering live only in `event_cache.py`.
+- Runtime disable and room/db ordering live only in the concrete event-cache implementation.
 - Event lookup rows and thread snapshot rows are written together so lookup, edit, and thread indexes stay consistent.
 - Thread invalidation is durable state first, with fail-closed deletion only when stale markers cannot be written.
 """
 
+from .event_cache import ConversationEventCache, ThreadCacheState, _EventCache
 from .event_cache_events import normalize_nio_event_for_cache
+from .thread_cache_helpers import thread_cache_state_is_usable
+from .thread_history_result import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+    ThreadHistoryResult,
+    thread_history_result,
+)
+from .thread_reads import ThreadReadPolicy
+from .thread_writes import ThreadWritePolicy
+from .write_coordinator import EventCacheWriteCoordinator, _EventCacheWriteCoordinator
 
-__all__ = ["normalize_nio_event_for_cache"]
+__all__ = [
+    "THREAD_HISTORY_DEGRADED_DIAGNOSTIC",
+    "THREAD_HISTORY_ERROR_DIAGNOSTIC",
+    "THREAD_HISTORY_SOURCE_CACHE",
+    "THREAD_HISTORY_SOURCE_DIAGNOSTIC",
+    "THREAD_HISTORY_SOURCE_HOMESERVER",
+    "THREAD_HISTORY_SOURCE_STALE_CACHE",
+    "ConversationEventCache",
+    "EventCacheWriteCoordinator",
+    "ThreadCacheState",
+    "ThreadHistoryResult",
+    "ThreadReadPolicy",
+    "ThreadWritePolicy",
+    "_EventCache",
+    "_EventCacheWriteCoordinator",
+    "normalize_nio_event_for_cache",
+    "thread_cache_state_is_usable",
+    "thread_history_result",
+]

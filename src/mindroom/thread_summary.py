@@ -404,10 +404,7 @@ async def set_manual_thread_summary(
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
     if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
-        msg = (
-            f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer "
-            "after whitespace normalization."
-        )
+        msg = f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
         raise ThreadSummaryWriteError(msg)
 
     async with thread_summary_lock(room_id, thread_id):
