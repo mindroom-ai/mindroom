@@ -14,6 +14,7 @@ from mindroom.workers.manager import WorkerManager
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
@@ -22,8 +23,10 @@ _PRIMARY_WORKER_MANAGER_CONFIG: tuple[str, ...] | None = None
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 
 
-def _serialized_kubernetes_worker_validation_snapshot(
+def serialized_kubernetes_worker_validation_snapshot(
     runtime_paths: RuntimePaths,
+    *,
+    runtime_config: Config | None = None,
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot in the primary runtime."""
     from mindroom.config.main import load_config  # noqa: PLC0415
@@ -32,8 +35,10 @@ def _serialized_kubernetes_worker_validation_snapshot(
         serialize_tool_validation_snapshot,
     )
 
-    config = load_config(runtime_paths)
-    snapshot = resolved_tool_validation_snapshot_for_runtime(runtime_paths, config)
+    snapshot = resolved_tool_validation_snapshot_for_runtime(
+        runtime_paths,
+        runtime_config or load_config(runtime_paths),
+    )
     return serialize_tool_validation_snapshot(snapshot)
 
 
@@ -98,7 +103,9 @@ def _primary_worker_backend_config_signature(
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "kubernetes":
         if kubernetes_tool_validation_snapshot is None:
-            kubernetes_tool_validation_snapshot = _serialized_kubernetes_worker_validation_snapshot(runtime_paths)
+            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+                runtime_paths,
+            )
         return (
             *kubernetes_backend_config_signature(
                 runtime_paths,
@@ -132,7 +139,9 @@ def _build_primary_worker_manager(
             msg = "Kubernetes worker backend requires an explicit runtime storage root."
             raise WorkerBackendError(msg)
         if kubernetes_tool_validation_snapshot is None:
-            kubernetes_tool_validation_snapshot = _serialized_kubernetes_worker_validation_snapshot(runtime_paths)
+            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+                runtime_paths,
+            )
         return WorkerManager(
             KubernetesWorkerBackend.from_runtime(
                 runtime_paths,
@@ -151,13 +160,13 @@ def get_primary_worker_manager(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None = None,
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
 ) -> WorkerManager:
     """Return the primary-runtime worker manager for the current backend config."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
 
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
-    if primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_tool_validation_snapshot = _serialized_kubernetes_worker_validation_snapshot(runtime_paths)
+    if primary_worker_backend_name(runtime_paths) == "kubernetes" and kubernetes_tool_validation_snapshot is None:
+        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(runtime_paths)
 
     config_signature = _primary_worker_backend_config_signature(
         runtime_paths,

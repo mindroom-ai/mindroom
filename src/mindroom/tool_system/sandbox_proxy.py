@@ -27,6 +27,7 @@ from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
+    serialized_kubernetes_worker_validation_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -360,11 +361,18 @@ def _get_worker_manager(
     storage_root = (
         context.storage_path if context is not None and context.storage_path is not None else runtime_paths.storage_root
     )
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
+        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+            runtime_paths,
+            runtime_config=context.config,
+        )
     return get_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=storage_root,
+        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
     )
 
 

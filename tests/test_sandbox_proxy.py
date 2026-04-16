@@ -19,7 +19,7 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
@@ -35,6 +35,8 @@ from mindroom.tool_system.metadata import (
     ToolInitOverrideError,
     get_tool_by_name,
     register_tool_with_metadata,
+    resolved_tool_validation_snapshot_for_runtime,
+    serialize_tool_validation_snapshot,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -941,11 +943,13 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_url: str | None,
         proxy_token: str | None,
         storage_root: Path | None = None,
+        kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
     ) -> str:
         captured["runtime_paths"] = runtime_paths_arg
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
+        captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
         return "manager"
 
     monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
@@ -1457,7 +1461,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
 
     monkeypatch.setattr(
         workers_runtime_module,
-        "_serialized_kubernetes_worker_validation_snapshot",
+        "serialized_kubernetes_worker_validation_snapshot",
         lambda _runtime_paths: next(snapshots),
     )
     monkeypatch.setattr(workers_runtime_module, "KubernetesWorkerBackend", FakeKubernetesBackend)
@@ -1478,6 +1482,136 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
     assert first_manager is not second_manager
     assert captured_snapshots == [first_snapshot, second_snapshot]
     workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk_when_snapshot_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit validation snapshots should keep manager lookups independent from later disk drift."""
+    workers_runtime_module._reset_primary_worker_manager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nrouter:\n  model: default\nagents: {}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+    runtime_config = load_config(runtime_paths)
+    tool_validation_snapshot = serialize_tool_validation_snapshot(
+        resolved_tool_validation_snapshot_for_runtime(runtime_paths, runtime_config),
+    )
+
+    class FakeKubernetesBackend:
+        backend_name = "kubernetes"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_runtime(
+            cls,
+            runtime_paths: RuntimePaths,
+            *,
+            auth_token: str | None,
+            storage_root: Path,
+            tool_validation_snapshot: dict[str, dict[str, object]],
+        ) -> Self:
+            del runtime_paths, auth_token, storage_root, tool_validation_snapshot
+            return cls()
+
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+        def get_worker(self, worker_key: str, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+        def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+        def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[object]:
+            raise NotImplementedError
+
+        def evict_worker(
+            self,
+            worker_key: str,
+            *,
+            preserve_state: bool = True,
+            now: float | None = None,
+        ) -> object:
+            raise NotImplementedError
+
+        def cleanup_idle_workers(self, *, now: float | None = None) -> list[object]:
+            raise NotImplementedError
+
+        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+    monkeypatch.setattr(workers_runtime_module, "KubernetesWorkerBackend", FakeKubernetesBackend)
+
+    first_manager = workers_runtime_module.get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+    )
+    config_path.write_text("models: [\n", encoding="utf-8")
+    second_manager = workers_runtime_module.get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+    )
+
+    assert first_manager is second_manager
+    workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandbox proxy worker routing should use the committed tool-runtime config snapshot."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    runtime_config = load_config(runtime_paths)
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+        return object()
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+    proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+
+    with tool_runtime_context(runtime_context):
+        sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
+
+    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
 
 
 def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:

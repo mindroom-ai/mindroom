@@ -974,10 +974,23 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
                 ),
             ]
 
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
+    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    captured_kwargs: dict[str, object] = {}
 
-    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 1
+    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
+        captured_kwargs.update(kwargs)
+        return _FakeWorkerManager()
+
+    monkeypatch.setattr(main, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+
+    runtime_paths = main._app_runtime_paths(main.app)
+    runtime_config = Config.validate_with_runtime({}, runtime_paths)
+    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
+    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
 
 
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1000,11 +1013,21 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                 ),
             ]
 
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
+        captured_kwargs.update(kwargs)
+        return _FakeWorkerManager()
+
     monkeypatch.setattr(
         workers_api,
         "get_primary_worker_manager",
-        lambda *_args, **_kwargs: _FakeWorkerManager(),
+        _fake_get_primary_worker_manager,
     )
 
     response = test_client.get("/api/workers")
@@ -1012,6 +1035,7 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.status_code == 200
     assert response.json()["workers"][0]["worker_key"] == "worker-key"
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
+    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
 
 
 def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
