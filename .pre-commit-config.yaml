@@ -61,7 +61,7 @@ repos:
 
       - id: tach-check
         name: Enforce narrow Tach boundaries
-        entry: bash -c 'env -u VIRTUAL_ENV uv run tach check --dependencies --interfaces'
+        entry: bash -c 'env -u VIRTUAL_ENV uv run tach check'
         language: system
         pass_filenames: false
 

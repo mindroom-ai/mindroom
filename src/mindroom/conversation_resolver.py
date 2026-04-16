@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import MatrixConversationCache
+    from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
 
 type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type MediaDispatchEvent = (
@@ -352,7 +352,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
-    ) -> list[ResolvedVisibleMessage]:
+    ) -> ThreadReadResult:
         """Resolve one thread read through the shared cache entrypoint."""
         return await self.deps.conversation_cache.get_thread_messages(
             room_id,
