@@ -7,6 +7,7 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
+from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.credentials import validate_service_name
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
@@ -348,6 +349,7 @@ class DefaultsConfig(BaseModel):
             "(None = deny by default). Common built-in examples include openai, anthropic, "
             "google, google_oauth_client, github_private, and ollama. "
             "Custom service names are also valid, but they are mirrored only and are not injected as env vars. Sandbox-proxied python and shell execution use a deny-by-default env contract, and some credentials may still require worker-specific tool support beyond mirroring."
+            " google_vertex_adc is intentionally unsupported in isolated workers and must stay in the main runtime."
         ),
     )
     allow_self_config: bool = Field(
@@ -421,7 +423,16 @@ class DefaultsConfig(BaseModel):
         """Normalize configured worker-grantable credential service names."""
         if services is None:
             return None
-        return [validate_service_name(service) for service in services]
+        normalized_services = [validate_service_name(service) for service in services]
+        unsupported_services = sorted(set(normalized_services) & UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS)
+        if unsupported_services:
+            msg = (
+                "worker_grantable_credentials does not support "
+                f"{', '.join(unsupported_services)}. These credentials must stay in the main runtime, "
+                "not isolated workers."
+            )
+            raise ValueError(msg)
+        return normalized_services
 
 
 class EmbedderConfig(BaseModel):

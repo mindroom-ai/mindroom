@@ -451,7 +451,6 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path=str(tmp_path / "not-mounted-storage"),
-        worker_grantable_credentials=frozenset({"google_vertex_adc"}),
     )
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
@@ -464,8 +463,8 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
 
-def test_kubernetes_backend_keeps_adc_out_of_worker_runtime_even_when_service_is_grantable(tmp_path: Path) -> None:
-    """Dedicated workers should not copy or expose ADC paths through isolated runtime env."""
+def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Path) -> None:
+    """Dedicated workers should reject google_vertex_adc instead of accepting a non-working grant."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -482,23 +481,12 @@ def test_kubernetes_backend_keeps_adc_out_of_worker_runtime_even_when_service_is
         storage_path=local_storage_root,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
     )
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        storage_mount_path="/app/worker",
-        worker_grantable_credentials=frozenset({"google_vertex_adc"}),
-    )
-
-    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-
-    deployment = apps_api.created_bodies[0]
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
-    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
-    local_adc_copy = local_storage_root / state_subpath / ".runtime" / credentials_path.name
-
-    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
-    assert not local_adc_copy.exists()
+    with pytest.raises(WorkerBackendError, match="google_vertex_adc"):
+        _backend(
+            runtime_paths=runtime_paths,
+            storage_mount_path="/app/worker",
+            worker_grantable_credentials=frozenset({"google_vertex_adc"}),
+        )
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

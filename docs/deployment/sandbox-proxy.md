@@ -241,8 +241,9 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 
 ## Shell env and PATH
 
-The `shell` tool still receives the committed runtime env as explicit execution context when it runs through the sandbox proxy.
-Additional process env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for the variables you want shell execution to inherit.
+When `shell` runs through the sandbox proxy, it receives the stricter sandbox runtime env rather than the main process's ordinary committed runtime `.env`.
+Additional env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit.
+`extra_env_passthrough` does not re-expose config-adjacent `.env` entries that the sandbox contract filtered out.
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`.
 This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates.

@@ -96,6 +96,7 @@ Important behavior and constraints:
 - Credentials are mirrored into the worker's scratch space rather than mounting the shared credentials directory into agent-isolated pods.
 - No shared credentials are mirrored into dedicated workers by default.
 - Only services listed in `defaults.worker_grantable_credentials` may be mirrored into a dedicated worker's shared credential layer.
+- `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
 - Dedicated worker runtime env stays deny-by-default for provider and arbitrary `.env` values, while worker bootstrap plumbing such as `PATH`, `VIRTUAL_ENV`, and linker vars is set separately.
 - This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.

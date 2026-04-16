@@ -1148,3 +1148,8 @@ class TestWorkerGrantableCredentials:
         """worker_grantable_credentials should validate credential service names."""
         with pytest.raises(ValidationError, match="Service name"):
             DefaultsConfig(worker_grantable_credentials=["bad name"])
+
+    def test_worker_grantable_credentials_reject_google_vertex_adc(self) -> None:
+        """Worker credential mirroring should reject google_vertex_adc until workers support ADC safely."""
+        with pytest.raises(ValidationError, match="google_vertex_adc"):
+            DefaultsConfig(worker_grantable_credentials=["google_vertex_adc"])

@@ -795,6 +795,9 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
 # Dedicated workers start with no mirrored/shared credentials by default.
 # Any service exposure into an isolated worker runtime must be explicitly authored.
 DEFAULT_WORKER_GRANTABLE_CREDENTIALS = frozenset()
+# Some credentials are intentionally unsupported in isolated workers because they rely on
+# host-local files or ambient env that the sandbox contract now denies by default.
+UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset({"google_vertex_adc"})
 VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 _CHROMADB_PY314_PATCHED = False

@@ -6,6 +6,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
@@ -41,6 +42,13 @@ class KubernetesWorkerBackend:
         tool_validation_snapshot: dict[str, dict[str, object]],
         worker_grantable_credentials: frozenset[str],
     ) -> None:
+        unsupported_services = sorted(worker_grantable_credentials & UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS)
+        if unsupported_services:
+            msg = (
+                "Dedicated workers do not support "
+                f"{', '.join(unsupported_services)}. Keep these credentials in the primary runtime."
+            )
+            raise WorkerBackendError(msg)
         self.runtime_paths = runtime_paths
         self.config = config
         self.auth_token = auth_token
