@@ -50,6 +50,8 @@ PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
 )
 
 DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
+    ("diag_ingress_cache_append_ms", "ingress_cache_append_start", "ingress_cache_append_ready"),
+    ("diag_ingress_normalize_ms", "ingress_normalize_start", "ingress_normalize_ready"),
     ("diag_dispatch_prepare_ms", "dispatch_prepare_start", "dispatch_prepare_ready"),
     ("diag_dispatch_plan_ms", "dispatch_plan_start", "dispatch_plan_ready"),
     ("diag_response_payload_setup_ms", "response_payload_start", "response_payload_ready"),

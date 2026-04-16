@@ -234,6 +234,10 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     timing.marks.update(
         {
             "message_received": 0.0,
+            "ingress_cache_append_start": 0.2,
+            "ingress_cache_append_ready": 0.7,
+            "ingress_normalize_start": 0.9,
+            "ingress_normalize_ready": 1.4,
             "gate_enter": 1.0,
             "gate_exit": 3.0,
             "dispatch_prepare_start": 4.0,
@@ -272,6 +276,8 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["seg_after_first_visible_ms"] == 5000.0
     assert summary["time_to_first_visible_reply_ms"] == 20000.0
     assert summary["total_pipeline_ms"] == 25000.0
+    assert summary["diag_ingress_cache_append_ms"] == 500.0
+    assert summary["diag_ingress_normalize_ms"] == 500.0
     assert summary["diag_dispatch_prepare_ms"] == 2000.0
     assert summary["diag_dispatch_plan_ms"] == 1000.0
     assert summary["diag_response_payload_setup_ms"] == 1000.0

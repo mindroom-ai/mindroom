@@ -69,6 +69,7 @@ from mindroom.response_runner import PostLockRequestPreparationError, ResponseRe
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import get_configured_agents_for_room
 from mindroom.timing import (
+    DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
     get_dispatch_pipeline_timing,
@@ -370,6 +371,38 @@ class TurnController:
             await self.deps.resolver.coalescing_thread_id(room, event),
             requester_user_id,
         )
+
+    async def _append_live_event_with_timing(
+        self,
+        room_id: str,
+        event: nio.RoomMessage,
+        *,
+        event_info: EventInfo,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        """Persist one ingress cache mutation while recording its contribution to ingress latency."""
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_cache_append_start")
+        await self.deps.conversation_cache.append_live_event(room_id, event, event_info=event_info)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_cache_append_ready")
+
+    async def _resolve_text_event_with_ingress_timing(
+        self,
+        event: nio.RoomMessageText,
+        *,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> PreparedTextEvent:
+        """Normalize one inbound text event while recording ingress timing boundaries."""
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_start")
+        prepared_event = await self.deps.normalizer.resolve_text_event(
+            TextNormalizationRequest(event=event),
+        )
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
+        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
+        return prepared_event
 
     async def _enqueue_for_dispatch(
         self,
@@ -1143,7 +1176,12 @@ class TurnController:
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         event_info = EventInfo.from_event(event.source)
-        await self.deps.conversation_cache.append_live_event(room.room_id, event, event_info=event_info)
+        await self._append_live_event_with_timing(
+            room.room_id,
+            event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
+        )
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1166,10 +1204,10 @@ class TurnController:
             )
             return
 
-        prepared_event = await self.deps.normalizer.resolve_text_event(
-            TextNormalizationRequest(event=prechecked_event.event),
+        prepared_event = await self._resolve_text_event_with_ingress_timing(
+            prechecked_event.event,
+            dispatch_timing=dispatch_timing,
         )
-        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         envelope = self.deps.resolver.build_ingress_envelope(
             room_id=room.room_id,
             event=prepared_event,
@@ -1458,13 +1496,19 @@ class TurnController:
         prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return
+        dispatch_timing = create_dispatch_pipeline_timing(
+            event_id=prechecked_event.event.event_id,
+            room_id=room.room_id,
+        )
+        attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
         # Prime transitive ancestor lookups before writing advisory cache membership.
         await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
         event_info = EventInfo.from_event(prechecked_event.event.source)
-        await self.deps.conversation_cache.append_live_event(
+        await self._append_live_event_with_timing(
             room.room_id,
             prechecked_event.event,
             event_info=event_info,
+            dispatch_timing=dispatch_timing,
         )
 
         if await self._dispatch_special_media_as_text(room, prechecked_event):
@@ -1520,15 +1564,24 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_start")
         normalized_voice = await self.deps.normalizer.prepare_voice_event(
             VoiceNormalizationRequest(
                 room=room,
                 event=event,
             ),
         )
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
         if normalized_voice is None:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
+        attach_dispatch_pipeline_timing(
+            normalized_voice.event.source,
+            dispatch_timing,
+        )
 
         await self._maybe_send_visible_voice_echo(
             room,
@@ -1554,8 +1607,14 @@ class TurnController:
         if not is_v2_sidecar_text_preview(event.source):
             return False
 
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_start")
         prepared_text_event = await self.deps.normalizer.prepare_file_sidecar_text_event(event)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
         assert prepared_text_event is not None
+        attach_dispatch_pipeline_timing(prepared_text_event.source, dispatch_timing)
         envelope = self.deps.resolver.build_ingress_envelope(
             room_id=room.room_id,
             event=prepared_text_event,
