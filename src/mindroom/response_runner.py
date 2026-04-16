@@ -650,6 +650,7 @@ class ResponseRunner:
             logger=self.deps.logger.bind(event_name=EVENT_SESSION_STARTED, session_id=session_id),
             correlation_id=correlation_id,
             message_sender=bindings.message_sender,
+            matrix_admin=bindings.matrix_admin,
             room_state_querier=bindings.room_state_querier,
             room_state_putter=bindings.room_state_putter,
             agent_name=scope.scope_id if scope.kind == "team" else tool_context.agent_name,

@@ -25,6 +25,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
     HookRegistry,
     ScheduleFiredContext,
+    build_hook_matrix_admin,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
@@ -42,6 +43,7 @@ from mindroom.thread_utils import get_agents_in_thread
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.hooks.types import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
 
 logger = get_logger(__name__)
@@ -160,6 +162,7 @@ class SchedulingRuntime:
     room: nio.MatrixRoom
     conversation_cache: ConversationCacheProtocol
     event_cache: ConversationEventCache
+    matrix_admin: HookMatrixAdmin | None = None
 
 
 @dataclass
@@ -299,6 +302,7 @@ def _start_scheduled_task(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> bool:
     """Start the asyncio task for a scheduled workflow and track it globally."""
     existing_task = _running_tasks.get(task_id)
@@ -311,7 +315,16 @@ def _start_scheduled_task(
 
     if workflow.schedule_type == "once":
         task = asyncio.create_task(
-            _run_once_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache),
+            _run_once_task(
+                client,
+                task_id,
+                workflow,
+                config,
+                runtime_paths,
+                event_cache,
+                conversation_cache,
+                matrix_admin,
+            ),
         )
     else:
         task = asyncio.create_task(
@@ -323,6 +336,7 @@ def _start_scheduled_task(
                 config,
                 runtime_paths,
                 conversation_cache,
+                matrix_admin,
             ),
         )
     _running_tasks[task_id] = task
@@ -368,6 +382,7 @@ async def drain_deferred_overdue_tasks(
                 runtime_paths,
                 event_cache,
                 conversation_cache,
+                matrix_admin=build_hook_matrix_admin(client, runtime_paths),
             ):
                 drained_count += 1
         except Exception:
@@ -546,8 +561,8 @@ async def _save_pending_scheduled_task(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
-    *,
     created_at: datetime | str | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Persist one pending task and start or replace its in-memory runner."""
     _cancel_running_task(task_id)
@@ -559,7 +574,16 @@ async def _save_pending_scheduled_task(
         status="pending",
         created_at=created_at,
     )
-    _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache)
+    _start_scheduled_task(
+        client,
+        task_id,
+        workflow,
+        config,
+        runtime_paths,
+        event_cache,
+        conversation_cache,
+        matrix_admin,
+    )
 
 
 async def _save_one_time_task_status(
@@ -796,6 +820,7 @@ async def _execute_scheduled_workflow(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
     task_id: str = "scheduled-task",
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> bool:
     """Execute a scheduled workflow by posting its message to the thread."""
     if not workflow.room_id:
@@ -824,6 +849,7 @@ async def _execute_scheduled_workflow(
                         runtime_paths,
                         conversation_cache=conversation_cache,
                     ),
+                    matrix_admin=matrix_admin,
                     room_state_querier=build_hook_room_state_querier(client),
                     room_state_putter=build_hook_room_state_putter(client),
                     task_id=task_id,
@@ -887,6 +913,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Run a recurring task based on cron schedule."""
     if not workflow.room_id:
@@ -968,7 +995,8 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     config,
                     runtime_paths,
                     conversation_cache,
-                    task_id=task_id,
+                    task_id,
+                    matrix_admin,
                 )
                 if task_id not in running_tasks:
                     logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
@@ -1007,6 +1035,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     runtime_paths: RuntimePaths,
     _event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Run a one-time scheduled task."""
     if not workflow.room_id:
@@ -1059,10 +1088,11 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             execution_succeeded = await _execute_scheduled_workflow(
                 client,
                 latest_workflow,
-                config=config,
-                runtime_paths=runtime_paths,
-                conversation_cache=conversation_cache,
-                task_id=task_id,
+                config,
+                runtime_paths,
+                conversation_cache,
+                task_id,
+                matrix_admin,
             )
             final_status = "completed" if execution_succeeded else "failed"
 
@@ -1335,6 +1365,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 event_cache=event_cache,
                 conversation_cache=conversation_cache,
                 created_at=datetime.now(UTC).isoformat(),
+                matrix_admin=runtime.matrix_admin,
             )
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
@@ -1635,7 +1666,16 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                 continue
 
             # Start the appropriate task
-            if _start_scheduled_task(client, task_id, workflow, config, runtime_paths, event_cache, conversation_cache):
+            if _start_scheduled_task(
+                client,
+                task_id,
+                workflow,
+                config,
+                runtime_paths,
+                event_cache,
+                conversation_cache,
+                matrix_admin=build_hook_matrix_admin(client, runtime_paths),
+            ):
                 restored_count += 1
 
         except (KeyError, ValueError, json.JSONDecodeError):

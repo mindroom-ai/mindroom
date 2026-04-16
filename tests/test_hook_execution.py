@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
@@ -24,6 +25,7 @@ from mindroom.hooks import (
     MessageEnvelope,
     MessageReceivedContext,
     ResponseDraft,
+    build_hook_matrix_admin,
     hook,
 )
 from mindroom.hooks.execution import emit, emit_collect, emit_transform, reset_hook_execution_state
@@ -281,7 +283,7 @@ async def test_emit_recursion_guard_drops_nested_custom_events_after_depth_three
 @pytest.mark.asyncio
 async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_path: Path) -> None:
     """Tool-side custom events should flow through the hook registry and shared storage root."""
-    seen: list[tuple[str, str, Path, dict[str, object] | None, bool]] = []
+    seen: list[tuple[str, str, Path, dict[str, object] | None, bool, str | None]] = []
 
     @hook("todo:item_added")
     async def audit_hook(ctx: CustomEventContext) -> None:
@@ -292,14 +294,24 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
             "$thread",
             {"tags": {"wip": True}},
         )
-        seen.append((ctx.payload["item_id"], ctx.source_plugin, ctx.state_root, query_result, put_result))
+        assert ctx.matrix_admin is not None
+        alias_room_id = await ctx.matrix_admin.resolve_alias("#todo-room:localhost")
+        seen.append(
+            (ctx.payload["item_id"], ctx.source_plugin, ctx.state_root, query_result, put_result, alias_room_id),
+        )
 
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     registry = HookRegistry.from_plugins([_plugin("todo-plugin", [audit_hook])])
     client = AsyncMock()
+    client.homeserver = "http://localhost:8008"
     client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
     client.room_put_state.return_value = object()
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#todo-room:localhost",
+        room_id="!todo-room:localhost",
+        servers=["localhost"],
+    )
     tool_context = ToolRuntimeContext(
         agent_name="code",
         room_id="!room:localhost",
@@ -313,13 +325,14 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         conversation_cache=make_conversation_cache_mock(),
         hook_registry=registry,
         correlation_id="corr-tool",
+        matrix_admin=build_hook_matrix_admin(client, runtime_paths),
     )
 
     with tool_runtime_context(tool_context):
         await emit_custom_event("todo", "todo:item_added", {"item_id": "123"})
 
     expected_root = get_plugin_state_root("todo-plugin", runtime_paths=runtime_paths)
-    assert seen == [("123", "todo", expected_root, {"name": "Lobby"}, True)]
+    assert seen == [("123", "todo", expected_root, {"name": "Lobby"}, True, "!todo-room:localhost")]
     assert expected_root.is_dir()
     client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     client.room_put_state.assert_awaited_once_with(
@@ -328,3 +341,4 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         {"tags": {"wip": True}},
         state_key="$thread",
     )
+    client.room_resolve_alias.assert_awaited_once_with("#todo-room:localhost")

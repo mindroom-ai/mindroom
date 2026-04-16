@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
+    from mindroom.hooks.types import HookMatrixAdmin
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
@@ -62,6 +63,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         room=room,
         conversation_cache=context.conversation_cache,
         event_cache=context.event_cache,
+        matrix_admin=context.matrix_admin,
     )
 
 
@@ -105,6 +107,7 @@ class CommandHandlerContext:
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
     run_skill_command_tool: Callable[..., Awaitable[str]]
+    matrix_admin: HookMatrixAdmin | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:

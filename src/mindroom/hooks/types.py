@@ -90,6 +90,32 @@ class HookMessageSender(Protocol):
         """Send one hook-originated Matrix message."""
 
 
+class HookMatrixAdmin(Protocol):
+    """Async Matrix admin protocol exposed to hook contexts."""
+
+    async def resolve_alias(self, alias: str) -> str | None:
+        """Resolve one room alias into a room ID when it exists."""
+
+    async def create_room(
+        self,
+        *,
+        name: str,
+        alias_localpart: str | None = None,
+        topic: str | None = None,
+        power_user_ids: list[str] | None = None,
+    ) -> str | None:
+        """Create one room and return the room ID on success."""
+
+    async def invite_user(self, room_id: str, user_id: str) -> bool:
+        """Invite one user into one room."""
+
+    async def get_room_members(self, room_id: str) -> set[str]:
+        """Return joined members for one room."""
+
+    async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
+        """Link one room into one Space."""
+
+
 type HookRoomStateQuerier = Callable[
     [str, str, str | None],
     Awaitable[dict[str, Any] | None],

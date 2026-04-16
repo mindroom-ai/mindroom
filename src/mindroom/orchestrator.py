@@ -19,6 +19,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
     ConfigReloadedContext,
     HookRegistry,
+    build_hook_matrix_admin,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
@@ -110,7 +111,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import FrameType
 
-    from mindroom.hooks import HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.hooks.sender import HookMessageSender
 
     from .constants import RuntimePaths
@@ -853,6 +854,13 @@ class MultiAgentOrchestrator:
             return None
         return build_hook_room_state_putter(router_bot.client)
 
+    def _hook_matrix_admin(self) -> HookMatrixAdmin | None:
+        """Return a router-backed Matrix admin helper for hook contexts when available."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None or router_bot.client is None:
+            return None
+        return build_hook_matrix_admin(router_bot.client, self.runtime_paths)
+
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
         if failed_agents:
@@ -1031,6 +1039,7 @@ class MultiAgentOrchestrator:
             logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
             message_sender=self._hook_message_sender(),
+            matrix_admin=self._hook_matrix_admin(),
             room_state_querier=self._hook_room_state_querier(),
             room_state_putter=self._hook_room_state_putter(),
             changed_entities=tuple(sorted(changed_entities)),

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks.registry import HookRegistry
-    from mindroom.hooks.types import HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks.types import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
@@ -77,6 +77,7 @@ class _ResolvedToolContext:
     runtime_paths: RuntimePaths | None
     correlation_id: str
     message_sender: HookMessageSender | None
+    matrix_admin: HookMatrixAdmin | None
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
@@ -93,6 +94,7 @@ class _ResolvedToolContext:
             "runtime_paths": self.runtime_paths,
             "correlation_id": self.correlation_id,
             "message_sender": self.message_sender,
+            "matrix_admin": self.matrix_admin,
             "room_state_querier": self.room_state_querier,
             "room_state_putter": self.room_state_putter,
             "message_received_depth": self.message_received_depth,
@@ -161,6 +163,7 @@ def _resolve_tool_context(
             runtime_paths=runtime_context.runtime_paths,
             correlation_id=_correlation_id_for_runtime_context(runtime_context),
             message_sender=bindings.message_sender,
+            matrix_admin=bindings.matrix_admin,
             room_state_querier=bindings.room_state_querier,
             room_state_putter=bindings.room_state_putter,
             message_received_depth=bindings.message_received_depth,
@@ -179,6 +182,7 @@ def _resolve_tool_context(
             runtime_paths=bridge_context.runtime_paths,
             correlation_id=_correlation_id_for_runtime_context(None),
             message_sender=None,
+            matrix_admin=None,
             room_state_querier=None,
             room_state_putter=None,
             message_received_depth=0,
@@ -195,6 +199,7 @@ def _resolve_tool_context(
         runtime_paths=bridge_context.runtime_paths,
         correlation_id=_correlation_id_for_runtime_context(None),
         message_sender=None,
+        matrix_admin=None,
         room_state_querier=None,
         room_state_putter=None,
         message_received_depth=0,

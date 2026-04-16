@@ -495,7 +495,7 @@ Every hook context includes these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `state_root` | `Path` | Plugin state directory (property) |
 
-Every hook context also exposes the following async helpers:
+Every hook context also exposes the following helpers:
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
@@ -523,6 +523,12 @@ Writes a single Matrix room state event and returns `True` on success, `False` o
 Returns `False` when no room state putter is available.
 When both the current bot and the router can write room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
 Transport exceptions from the underlying Matrix client propagate to the hook.
+
+**`ctx.matrix_admin`**
+Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
+This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
+It is `None` when no admin-capable client is bound.
+The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `get_room_members(room_id)`, and `add_room_to_space(space_room_id, room_id)`.
 
 ### Transport objects
 

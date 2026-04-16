@@ -81,6 +81,7 @@ from mindroom.hooks import (
     EVENT_COMPACTION_BEFORE,
     CompactionHookContext,
     HookRegistry,
+    build_hook_matrix_admin,
     hook,
 )
 from mindroom.hooks.execution import reset_hook_execution_state
@@ -1021,19 +1022,22 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         context_window=64_000,
     )
     observed: list[str] = []
+    saw_matrix_admin: list[bool] = []
 
     @hook(EVENT_COMPACTION_BEFORE, agents=["team_general"], rooms=["!room:localhost"])
     async def matching(ctx: CompactionHookContext) -> None:
+        saw_matrix_admin.append(ctx.matrix_admin is not None)
         observed.append(f"{ctx.scope.key}:{ctx.agent_name}:{ctx.room_id}:{ctx.thread_id}")
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching])])
+    client = AsyncMock()
     runtime_context = ToolRuntimeContext(
         agent_name="router",
         room_id="!room:localhost",
         thread_id="$thread",
         resolved_thread_id="$thread",
         requester_id="@user:localhost",
-        client=AsyncMock(),
+        client=client,
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
@@ -1041,6 +1045,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         session_id="session-1",
         hook_registry=registry,
         correlation_id="corr-compaction",
+        matrix_admin=build_hook_matrix_admin(client, runtime_paths),
     )
 
     with tool_runtime_context(runtime_context):
@@ -1055,6 +1060,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         )
 
     assert observed == ["team:team_general:team_general:!room:localhost:$thread"]
+    assert saw_matrix_admin == [True]
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks.sender import HookMessageSender
-    from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks.types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.scheduling import SchedulingRuntime
@@ -85,6 +85,7 @@ class ToolRuntimeContext:
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
     correlation_id: str | None = None
     hook_message_sender: HookMessageSender | None = None
+    matrix_admin: HookMatrixAdmin | None = None
     room_state_querier: HookRoomStateQuerier | None = None
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
@@ -146,6 +147,7 @@ class ToolRuntimeHookBindings:
     """Resolved hook-facing bindings derived from one tool runtime context."""
 
     message_sender: HookMessageSender | None
+    matrix_admin: HookMatrixAdmin | None
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
@@ -207,6 +209,7 @@ class ToolRuntimeSupport:
             hook_registry=self.hook_context.registry,
             correlation_id=correlation_id,
             hook_message_sender=self.hook_context.message_sender(),
+            matrix_admin=self.hook_context.matrix_admin(),
             room_state_querier=self.hook_context.room_state_querier(),
             room_state_putter=self.hook_context.room_state_putter(),
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
@@ -371,6 +374,7 @@ def resolve_tool_runtime_hook_bindings(context: ToolRuntimeContext) -> ToolRunti
     """Return the canonical hook-facing bindings for one tool runtime context."""
     return ToolRuntimeHookBindings(
         message_sender=context.hook_message_sender,
+        matrix_admin=context.matrix_admin,
         room_state_querier=context.room_state_querier or build_hook_room_state_querier(context.client),
         room_state_putter=context.room_state_putter or build_hook_room_state_putter(context.client),
         message_received_depth=context.message_received_depth,
@@ -449,6 +453,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         room=context.room,
         conversation_cache=context.conversation_cache,
         event_cache=context.event_cache,
+        matrix_admin=context.matrix_admin,
     )
 
 
@@ -534,6 +539,7 @@ async def emit_custom_event(
         logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
         correlation_id=correlation_id,
         message_sender=bindings.message_sender,
+        matrix_admin=bindings.matrix_admin,
         room_state_querier=bindings.room_state_querier,
         room_state_putter=bindings.room_state_putter,
         payload=payload,

@@ -204,9 +204,11 @@ def _make_bot(
 
 
 def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+    matrix_admin = object()
     return SimpleNamespace(
         config=config,
         runtime_paths=runtime_paths,
+        _hook_matrix_admin=lambda: matrix_admin,
         _hook_room_state_querier=lambda: None,
         _hook_room_state_putter=lambda: None,
     )
@@ -395,9 +397,11 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
 
     storage = _SessionStorage()
     sequence: list[tuple[str, str | None, str | None, str | None]] = []
+    saw_matrix_admin: list[bool] = []
 
     @hook(EVENT_SESSION_STARTED, priority=10)
     async def first(ctx: SessionHookContext) -> None:
+        saw_matrix_admin.append(ctx.matrix_admin is not None)
         sequence.append(("first", ctx.scope.key, ctx.session_id, ctx.thread_id))
 
     @hook(EVENT_SESSION_STARTED, priority=20)
@@ -420,6 +424,11 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
             hook_registry=registry,
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=SimpleNamespace(
+                _hook_matrix_admin=MagicMock(return_value=object()),
+                _hook_room_state_querier=MagicMock(return_value=None),
+                _hook_room_state_putter=MagicMock(return_value=None),
+            ),
         )
 
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
@@ -459,6 +468,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
         ("ai", "!test:localhost:$thread-root", None, None),
         ("deliver", None, None, None),
     ]
+    assert saw_matrix_admin == [True]
 
 
 @pytest.mark.asyncio
@@ -1311,12 +1321,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             hook_registry=registry,
             team_history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=SimpleNamespace(
-                config=config,
-                runtime_paths=runtime_paths,
-                _hook_room_state_querier=lambda: None,
-                _hook_room_state_putter=lambda: None,
-            ),
+            orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
@@ -1420,12 +1425,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             hook_registry=registry,
             team_history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=SimpleNamespace(
-                config=config,
-                runtime_paths=runtime_paths,
-                _hook_room_state_querier=lambda: None,
-                _hook_room_state_putter=lambda: None,
-            ),
+            orchestrator=_team_orchestrator(config, runtime_paths),
         )
         coordinator.deps.delivery_gateway.edit_text = AsyncMock()
 
@@ -1509,12 +1509,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             hook_registry=registry,
             team_history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=SimpleNamespace(
-                config=config,
-                runtime_paths=runtime_paths,
-                _hook_room_state_querier=lambda: None,
-                _hook_room_state_putter=lambda: None,
-            ),
+            orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_cancel(request: object) -> tuple[str, str]:
