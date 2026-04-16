@@ -405,6 +405,31 @@ def _is_allowed_execution_runtime_env_file_name(
     return True
 
 
+def _execution_runtime_env_layers(
+    runtime_paths: RuntimePaths,
+    *,
+    allowed_credential_services: Collection[str] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    allowed_credential_env_names = _worker_credential_env_names(allowed_credential_services)
+    env_file_values = {
+        key: value
+        for key, value in runtime_paths.env_file_values.items()
+        if _is_allowed_execution_runtime_env_file_name(
+            key,
+            allowed_credential_env_names=allowed_credential_env_names,
+        )
+    }
+    process_env = {
+        key: value
+        for key, value in runtime_paths.process_env.items()
+        if _is_execution_runtime_process_env_name(
+            key,
+            allowed_credential_env_names=allowed_credential_env_names,
+        )
+    }
+    return process_env, env_file_values
+
+
 def _shell_extra_env_patterns(extra_env_passthrough: str | None) -> tuple[str, ...]:
     if extra_env_passthrough is None:
         return ()
@@ -447,28 +472,35 @@ def execution_runtime_env_values(
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
     """
-    allowed_credential_env_names = _worker_credential_env_names(allowed_credential_services)
-    merged_env = {
-        key: value
-        for key, value in runtime_paths.env_file_values.items()
-        if _is_allowed_execution_runtime_env_file_name(
-            key,
-            allowed_credential_env_names=allowed_credential_env_names,
-        )
-    }
-    merged_env.update(
-        {
-            key: value
-            for key, value in runtime_paths.process_env.items()
-            if _is_execution_runtime_process_env_name(
-                key,
-                allowed_credential_env_names=allowed_credential_env_names,
-            )
-        },
+    process_env, env_file_values = _execution_runtime_env_layers(
+        runtime_paths,
+        allowed_credential_services=allowed_credential_services,
     )
+    merged_env = dict(env_file_values)
+    merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def isolated_runtime_paths(
+    runtime_paths: RuntimePaths,
+    *,
+    allowed_credential_services: Collection[str] | None = None,
+) -> RuntimePaths:
+    """Return one runtime view filtered for isolated worker execution."""
+    process_env, env_file_values = _execution_runtime_env_layers(
+        runtime_paths,
+        allowed_credential_services=allowed_credential_services,
+    )
+    return RuntimePaths(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=runtime_paths.storage_root,
+        process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
+        env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
+    )
 
 
 def shell_execution_runtime_env_values(

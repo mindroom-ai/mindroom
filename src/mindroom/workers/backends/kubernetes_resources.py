@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
+from mindroom.constants import RuntimePaths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
@@ -237,6 +237,7 @@ class KubernetesResourceManager:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
+        worker_grantable_credentials: frozenset[str],
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
         self.runtime_paths = runtime_paths
@@ -244,6 +245,7 @@ class KubernetesResourceManager:
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
         self.tool_validation_snapshot = tool_validation_snapshot
+        self.worker_grantable_credentials = worker_grantable_credentials
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -600,7 +602,7 @@ class KubernetesResourceManager:
             {
                 "name": _STARTUP_RUNTIME_PATHS_ENV,
                 "value": json.dumps(
-                    serialize_public_runtime_paths(startup_runtime_paths),
+                    constants.serialize_runtime_paths(startup_runtime_paths),
                     separators=(",", ":"),
                     sort_keys=True,
                 ),
@@ -689,9 +691,11 @@ class KubernetesResourceManager:
         process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         env_file_values = dict(self.runtime_paths.env_file_values)
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        if google_application_credentials := self._worker_google_application_credentials_path(
-            dedicated_root,
-            local_dedicated_root=local_dedicated_root,
+        if "google_vertex_adc" in self.worker_grantable_credentials and (
+            google_application_credentials := self._worker_google_application_credentials_path(
+                dedicated_root,
+                local_dedicated_root=local_dedicated_root,
+            )
         ):
             process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
         process_env.update(
@@ -708,13 +712,16 @@ class KubernetesResourceManager:
             },
         )
         process_env.update(self.config.extra_env)
-        return RuntimePaths(
-            config_path=config_path,
-            config_dir=config_path.parent,
-            env_path=config_path.parent / ".env",
-            storage_root=dedicated_root.resolve(),
-            process_env=MappingProxyType(process_env),
-            env_file_values=MappingProxyType(env_file_values),
+        return constants.isolated_runtime_paths(
+            RuntimePaths(
+                config_path=config_path,
+                config_dir=config_path.parent,
+                env_path=config_path.parent / ".env",
+                storage_root=dedicated_root.resolve(),
+                process_env=MappingProxyType(process_env),
+                env_file_values=MappingProxyType(env_file_values),
+            ),
+            allowed_credential_services=self.worker_grantable_credentials,
         )
 
     def _volume_mounts(

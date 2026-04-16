@@ -346,7 +346,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # 
 
 
 def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_path: Path) -> None:
-    """Dedicated worker startup payloads should preserve non-secret runtime settings only."""
+    """Dedicated worker startup payloads should deny ADC by default while preserving public runtime settings."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -389,20 +389,18 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
     state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
-    expected_worker_root = Path(env_values["MINDROOM_STORAGE_PATH"])
-    expected_credentials_path = expected_worker_root / ".runtime" / credentials_path.name
     local_credentials_path = runtime_paths.storage_root / state_subpath / ".runtime" / credentials_path.name
 
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
-    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == str(expected_credentials_path)
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
     assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
     assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
-    assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+    assert not local_credentials_path.exists()
 
 
 def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
@@ -445,6 +443,7 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path=str(tmp_path / "not-mounted-storage"),
+        worker_grantable_credentials=frozenset({"google_vertex_adc"}),
     )
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
@@ -478,6 +477,7 @@ def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_
     backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path="/app/worker",
+        worker_grantable_credentials=frozenset({"google_vertex_adc"}),
     )
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)

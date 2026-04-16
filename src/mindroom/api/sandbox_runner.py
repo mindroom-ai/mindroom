@@ -83,6 +83,16 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     process_env.update(
         {key: value for key, value in os.environ.items() if key not in {_RUNNER_TOKEN_ENV, _STARTUP_RUNTIME_PATHS_ENV}},
     )
+    merged_startup_runtime_paths = constants.RuntimePaths(
+        config_path=startup_runtime_paths.config_path,
+        config_dir=startup_runtime_paths.config_dir,
+        env_path=startup_runtime_paths.env_path,
+        storage_root=startup_runtime_paths.storage_root,
+        process_env=MappingProxyType(process_env),
+        env_file_values=startup_runtime_paths.env_file_values,
+    )
+    if sandbox_exec.runner_uses_dedicated_worker(merged_startup_runtime_paths):
+        return merged_startup_runtime_paths
     resolved_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=startup_runtime_paths.config_path,
         storage_path=startup_runtime_paths.storage_root,

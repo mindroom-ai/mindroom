@@ -53,6 +53,7 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=self.storage_root,
             tool_validation_snapshot=tool_validation_snapshot,
+            worker_grantable_credentials=worker_grantable_credentials,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()

@@ -337,6 +337,41 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
 
 
+def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should trust the committed startup payload instead of reloading dotenv secrets."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=dotenv-secret\n", encoding="utf-8")
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+        },
+    )
+    payload = serialize_runtime_paths(payload_runtime)
+    payload["env_file_values"] = {"MINDROOM_NAMESPACE": "alpha1234"}
+    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(payload))
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
+    monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
+
+    assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
+    assert startup_runtime.env_value("OPENAI_API_KEY") is None
+    assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
+    assert "OPENAI_API_KEY" not in execution_env
+
+
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:
     """Public startup runtime payloads should not serialize the runner auth token."""
     config_path = tmp_path / "config.yaml"
