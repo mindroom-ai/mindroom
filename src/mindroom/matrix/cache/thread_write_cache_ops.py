@@ -47,6 +47,23 @@ class ThreadMutationCacheOps:
         coordinator = self.runtime.event_cache_write_coordinator
         return coordinator.queue_room_update(room_id, update_coro_factory, name=name)
 
+    def queue_thread_cache_update(
+        self,
+        room_id: str,
+        thread_id: str,
+        update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
+        *,
+        name: str,
+    ) -> asyncio.Task[object]:
+        """Run one thread-specific cache mutation under the same-thread write barrier."""
+        coordinator = self.runtime.event_cache_write_coordinator
+        return coordinator.queue_thread_update(
+            room_id,
+            thread_id,
+            update_coro_factory,
+            name=name,
+        )
+
     async def store_events_batch(
         self,
         room_id: str,

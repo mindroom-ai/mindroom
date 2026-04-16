@@ -4732,8 +4732,8 @@ class TestThreadingBehavior:
             await access.get_thread_history("!test:localhost", "$thread:localhost")
 
     @pytest.mark.asyncio
-    async def test_get_thread_history_refresh_runs_under_room_write_barrier(self) -> None:
-        """Thread refreshes should occupy the same room-scoped barrier used by mutations."""
+    async def test_get_thread_history_refresh_runs_under_same_thread_write_barrier(self) -> None:
+        """Thread refreshes should serialize with same-thread mutations without blocking other threads."""
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(),
@@ -4763,8 +4763,9 @@ class TestThreadingBehavior:
         refresh_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$thread:localhost"))
         await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
 
-        access.runtime.event_cache_write_coordinator.queue_room_update(
+        access.runtime.event_cache_write_coordinator.queue_thread_update(
             "!test:localhost",
+            "$thread:localhost",
             lambda: queued_update(),
             name="matrix_cache_follow_up_update",
         )
@@ -4778,8 +4779,8 @@ class TestThreadingBehavior:
         assert queued_update_started.is_set()
 
     @pytest.mark.asyncio
-    async def test_get_thread_snapshot_refresh_runs_under_room_write_barrier(self) -> None:
-        """Snapshot refreshes should occupy the same room-scoped barrier used by mutations."""
+    async def test_get_thread_snapshot_refresh_runs_under_same_thread_write_barrier(self) -> None:
+        """Snapshot refreshes should serialize with same-thread mutations without blocking other threads."""
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(),
@@ -4807,8 +4808,9 @@ class TestThreadingBehavior:
         refresh_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$thread:localhost"))
         await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
 
-        access.runtime.event_cache_write_coordinator.queue_room_update(
+        access.runtime.event_cache_write_coordinator.queue_thread_update(
             "!test:localhost",
+            "$thread:localhost",
             lambda: queued_update(),
             name="matrix_cache_follow_up_update",
         )
@@ -4846,7 +4848,7 @@ class TestThreadingBehavior:
         allow_reader_continue = asyncio.Event()
         raw_append_committed = asyncio.Event()
 
-        async def pause_reader(_room_id: str) -> None:
+        async def pause_reader(_room_id: str, _thread_id: str) -> None:
             reader_ready.set()
             await allow_reader_continue.wait()
 
@@ -4894,7 +4896,7 @@ class TestThreadingBehavior:
         event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread:localhost")
         event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
         event_cache.append_event = AsyncMock(side_effect=append_event)
-        access._reads._wait_for_pending_room_cache_updates = AsyncMock(side_effect=pause_reader)
+        access._reads._wait_for_pending_thread_cache_updates = AsyncMock(side_effect=pause_reader)
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=fetch_fresh_history)
         new_event_source = {
             "event_id": "$reply-new:localhost",
@@ -5174,6 +5176,91 @@ class TestThreadingBehavior:
         await wait_for_background_tasks(timeout=1.0, owner=owner)
 
         assert second_update_started.is_set()
+
+    @pytest.mark.asyncio
+    async def test_shared_event_cache_write_coordinator_allows_other_thread_updates_while_one_thread_runs(
+        self,
+    ) -> None:
+        """Same-room thread updates should not serialize across unrelated threads."""
+        first_update_started = asyncio.Event()
+        release_first_update = asyncio.Event()
+        second_update_started = asyncio.Event()
+        owner = object()
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+
+        async def first_update() -> None:
+            first_update_started.set()
+            await release_first_update.wait()
+
+        async def second_update() -> None:
+            second_update_started.set()
+
+        coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-a:localhost",
+            lambda: first_update(),
+            name="matrix_cache_first_thread_update",
+        )
+        await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
+
+        coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-b:localhost",
+            lambda: second_update(),
+            name="matrix_cache_second_thread_update",
+        )
+        await asyncio.sleep(0)
+        assert second_update_started.is_set()
+
+        release_first_update.set()
+        await wait_for_background_tasks(timeout=1.0, owner=owner)
+
+    @pytest.mark.asyncio
+    async def test_get_thread_history_does_not_wait_for_other_thread_update(self) -> None:
+        """Thread reads should not stall behind unrelated thread updates in the same room."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+        other_thread_update_started = asyncio.Event()
+        release_other_thread_update = asyncio.Event()
+        fetch_started = asyncio.Event()
+
+        async def blocking_other_thread_update() -> None:
+            other_thread_update_started.set()
+            await release_other_thread_update.wait()
+
+        async def fetch_history(
+            _room_id: str,
+            _thread_id: str,
+        ) -> ThreadHistoryResult:
+            fetch_started.set()
+            return thread_history_result(
+                [_message(event_id="$thread-a:localhost", body="Root")],
+                is_full_history=True,
+            )
+
+        access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=fetch_history)
+        access.runtime.event_cache_write_coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-b:localhost",
+            lambda: blocking_other_thread_update(),
+            name="matrix_cache_blocking_other_thread_update",
+        )
+        await asyncio.wait_for(other_thread_update_started.wait(), timeout=1.0)
+
+        history = await asyncio.wait_for(
+            access.get_thread_history("!test:localhost", "$thread-a:localhost"),
+            timeout=1.0,
+        )
+
+        assert fetch_started.is_set()
+        assert [message.body for message in history] == ["Root"]
+        release_other_thread_update.set()
+        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
 
     @pytest.mark.asyncio
     async def test_cancelled_room_cache_update_does_not_start_queued_coro(self) -> None:
