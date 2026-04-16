@@ -685,7 +685,6 @@ class KubernetesResourceManager:
                 process_env=MappingProxyType(process_env),
                 env_file_values=MappingProxyType(env_file_values),
             ),
-            allowed_credential_services=self.worker_grantable_credentials,
         )
 
     def _volume_mounts(

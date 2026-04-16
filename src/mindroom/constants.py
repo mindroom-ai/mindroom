@@ -419,17 +419,6 @@ def _execution_runtime_env_layers(
     *,
     allowed_credential_services: Collection[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    if allowed_credential_services is not None:
-        env_file_values = {
-            key: value
-            for key, value in runtime_paths.env_file_values.items()
-            if _is_isolated_runtime_public_env_name(key)
-        }
-        process_env = {
-            key: value for key, value in runtime_paths.process_env.items() if _is_isolated_runtime_public_env_name(key)
-        }
-        return process_env, env_file_values
-
     allowed_credential_env_names = _worker_credential_env_names(allowed_credential_services)
     env_file_values = {
         key: value
@@ -446,6 +435,18 @@ def _execution_runtime_env_layers(
             key,
             allowed_credential_env_names=allowed_credential_env_names,
         )
+    }
+    return process_env, env_file_values
+
+
+def _sandbox_execution_runtime_env_layers(
+    runtime_paths: RuntimePaths,
+) -> tuple[dict[str, str], dict[str, str]]:
+    env_file_values = {
+        key: value for key, value in runtime_paths.env_file_values.items() if _is_isolated_runtime_public_env_name(key)
+    }
+    process_env = {
+        key: value for key, value in runtime_paths.process_env.items() if _is_isolated_runtime_public_env_name(key)
     }
     return process_env, env_file_values
 
@@ -491,7 +492,6 @@ def execution_runtime_env_values(
     - config-adjacent ``.env`` values remain visible to execution tools
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
-    - isolated worker execution denies ambient provider env even when credentials are mirrored
     """
     process_env, env_file_values = _execution_runtime_env_layers(
         runtime_paths,
@@ -504,16 +504,19 @@ def execution_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def isolated_runtime_paths(
-    runtime_paths: RuntimePaths,
-    *,
-    allowed_credential_services: Collection[str] | None = None,
-) -> RuntimePaths:
+def sandbox_execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+    """Return the stricter env visible to sandbox-proxied python execution."""
+    process_env, env_file_values = _sandbox_execution_runtime_env_layers(runtime_paths)
+    merged_env = dict(env_file_values)
+    merged_env.update(process_env)
+    merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
+    merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
+    return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return one runtime view filtered for isolated worker execution."""
-    process_env, env_file_values = _execution_runtime_env_layers(
-        runtime_paths,
-        allowed_credential_services=allowed_credential_services,
-    )
+    process_env, env_file_values = _sandbox_execution_runtime_env_layers(runtime_paths)
     return RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
@@ -544,6 +547,23 @@ def shell_execution_runtime_env_values(
             allowed_credential_services=allowed_credential_services,
         ),
     )
+    return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def sandbox_shell_execution_runtime_env_values(
+    runtime_paths: RuntimePaths,
+    *,
+    extra_env_passthrough: str | None = None,
+    process_env: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Return the stricter env visible to sandbox-proxied shell execution."""
+    merged_env = dict(
+        shell_extra_env_values(
+            extra_env_passthrough=extra_env_passthrough,
+            process_env=process_env,
+        ),
+    )
+    merged_env.update(sandbox_execution_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 

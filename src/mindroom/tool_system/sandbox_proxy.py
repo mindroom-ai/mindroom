@@ -14,9 +14,8 @@ from typing import TYPE_CHECKING
 import httpx
 
 from mindroom.constants import (
-    DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-    execution_runtime_env_values,
-    shell_execution_runtime_env_values,
+    sandbox_execution_runtime_env_values,
+    sandbox_shell_execution_runtime_env_values,
 )
 from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -392,27 +391,15 @@ def _execution_env_payload(
     """Return explicit execution env only for tools that intentionally support it."""
     if tool_name not in _EXECUTION_ENV_TOOL_NAMES:
         return None
-    context = get_tool_runtime_context()
-    allowed_credential_services = (
-        context.config.get_worker_grantable_credentials()
-        if context is not None
-        else DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-    )
     if tool_name == "shell":
         return dict(
-            shell_execution_runtime_env_values(
+            sandbox_shell_execution_runtime_env_values(
                 runtime_paths,
                 extra_env_passthrough=extra_env_passthrough,
                 process_env=runtime_paths.process_env,
-                allowed_credential_services=allowed_credential_services,
             ),
         )
-    return dict(
-        execution_runtime_env_values(
-            runtime_paths,
-            allowed_credential_services=allowed_credential_services,
-        ),
-    )
+    return dict(sandbox_execution_runtime_env_values(runtime_paths))
 
 
 def _request_headers_for_handle(
