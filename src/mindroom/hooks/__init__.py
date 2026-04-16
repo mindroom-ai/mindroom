@@ -1,5 +1,9 @@
 """Public hook system exports."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from .context import (
     AfterResponseContext,
     AgentLifecycleContext,
@@ -54,11 +58,17 @@ from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EnrichmentItem,
+    HookMatrixAdmin,
     HookMessageSender,
     HookRoomStatePutter,
     HookRoomStateQuerier,
     RegisteredHook,
 )
+
+if TYPE_CHECKING:
+    import nio
+
+    from mindroom.constants import RuntimePaths
 
 __all__ = [
     "BUILTIN_EVENT_NAMES",
@@ -90,6 +100,7 @@ __all__ = [
     "EnrichmentItem",
     "HookContext",
     "HookContextSupport",
+    "HookMatrixAdmin",
     "HookMessageSender",
     "HookRegistry",
     "HookRoomStatePutter",
@@ -106,6 +117,7 @@ __all__ = [
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
+    "build_hook_matrix_admin",
     "build_hook_room_state_putter",
     "build_hook_room_state_querier",
     "emit",
@@ -119,3 +131,13 @@ __all__ = [
     "strip_enrichment_from_session_storage",
     "strip_system_enrichment_block",
 ]
+
+
+def build_hook_matrix_admin(
+    client: nio.AsyncClient,
+    runtime_paths: RuntimePaths,
+) -> HookMatrixAdmin:
+    """Lazily import the concrete matrix admin builder to avoid package cycles."""
+    from .matrix_admin import build_hook_matrix_admin as _build_hook_matrix_admin  # noqa: PLC0415
+
+    return _build_hook_matrix_admin(client, runtime_paths)

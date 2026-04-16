@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
     from .registry import HookRegistry, HookRegistryState
     from .sender import HookMessageSender
-    from .types import HookRoomStatePutter, HookRoomStateQuerier
+    from .types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
 
 
 def _resolve_plugin_state_root(
@@ -169,6 +169,17 @@ class HookContextSupport:
             fallback = orchestrator._hook_room_state_putter()
         return chain_hook_room_state_putters(primary, fallback)
 
+    def matrix_admin(self) -> HookMatrixAdmin | None:
+        """Return the router-backed Matrix admin helper bound into hook contexts."""
+        if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
+            from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
+
+            return build_hook_matrix_admin(self.runtime.client, self.runtime_paths)
+        orchestrator = self.runtime.orchestrator
+        if orchestrator is not None:
+            return orchestrator._hook_matrix_admin()
+        return None
+
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
         """Return shared base fields for hook context construction."""
         return {
@@ -180,6 +191,7 @@ class HookContextSupport:
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
             "message_sender": self.message_sender(),
+            "matrix_admin": self.matrix_admin(),
             "room_state_querier": self.room_state_querier(),
             "room_state_putter": self.room_state_putter(),
         }
@@ -238,6 +250,7 @@ class HookContext:
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
 
