@@ -6967,6 +6967,7 @@ class TestAgentBot:
             room.room_id,
             "$thread_root",
             event_cache=bot.event_cache,
+            runtime_started_at=bot._runtime_view.runtime_started_at,
         )
 
     @pytest.mark.asyncio

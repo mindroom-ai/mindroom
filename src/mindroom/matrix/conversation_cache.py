@@ -17,6 +17,7 @@ from mindroom.matrix.cache import (
     ThreadReadPolicy,
     ThreadWritePolicy,
     normalize_nio_event_for_cache,
+    thread_history_result,
 )
 from mindroom.matrix.client import (
     fetch_dispatch_thread_history,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
+type ThreadReadCacheKey = tuple[str, str, bool, bool]
 
 logger = get_logger(__name__)
 
@@ -98,14 +100,14 @@ class ConversationCacheProtocol(Protocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadReadResult:
-        """Resolve strict dispatch thread context without durable-cache reuse or stale fallback."""
+        """Resolve strict dispatch thread context using only fresh cache data or a homeserver refill."""
 
     async def get_dispatch_thread_history(
         self,
         room_id: str,
         thread_id: str,
     ) -> ThreadReadResult:
-        """Resolve strict full thread history for dispatch without durable-cache reuse or stale fallback."""
+        """Resolve strict full dispatch thread history using only fresh cache data or a homeserver refill."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
@@ -269,6 +271,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _turn_event_cache: ContextVar[dict[tuple[str, str], _TurnEventLookup] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
+    _turn_thread_read_cache: ContextVar[dict[ThreadReadCacheKey, ThreadReadResult] | None] = field(
+        default_factory=lambda: ContextVar("mindroom_turn_thread_read_cache", default=None),
+    )
     _reads: ThreadReadPolicy = field(init=False, repr=False)
     _writes: ThreadWritePolicy = field(init=False, repr=False)
 
@@ -298,17 +303,54 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
-        """Memoize event lookups for the lifetime of one inbound turn."""
+        """Memoize event lookups and thread reads for the lifetime of one inbound turn."""
         turn_lookup_cache = self._turn_event_cache.get()
-        if turn_lookup_cache is not None:
+        turn_thread_cache = self._turn_thread_read_cache.get()
+        if turn_lookup_cache is not None and turn_thread_cache is not None:
             yield
             return
 
         event_token = self._turn_event_cache.set({})
+        thread_token = self._turn_thread_read_cache.set({})
         try:
             yield
         finally:
+            self._turn_thread_read_cache.reset(thread_token)
             self._turn_event_cache.reset(event_token)
+
+    @staticmethod
+    def _copy_thread_read_result(result: ThreadReadResult) -> ThreadReadResult:
+        """Return a detached copy suitable for per-turn memoization."""
+        return thread_history_result(
+            list(result),
+            is_full_history=result.is_full_history,
+            diagnostics=result.diagnostics,
+        )
+
+    async def _read_thread_memoized(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        full_history: bool,
+        dispatch_safe: bool,
+    ) -> ThreadReadResult:
+        """Resolve one thread read through per-turn memoization."""
+        cache_key: ThreadReadCacheKey = (room_id, thread_id, full_history, dispatch_safe)
+        turn_cache = self._turn_thread_read_cache.get()
+        if turn_cache is not None and cache_key in turn_cache:
+            return self._copy_thread_read_result(turn_cache[cache_key])
+
+        result = await self._reads.read_thread(
+            room_id,
+            thread_id,
+            full_history=full_history,
+            dispatch_safe=dispatch_safe,
+        )
+        if turn_cache is not None:
+            turn_cache[cache_key] = self._copy_thread_read_result(result)
+            return self._copy_thread_read_result(turn_cache[cache_key])
+        return result
 
     async def get_event(
         self,
@@ -439,6 +481,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
+            runtime_started_at=self.runtime.runtime_started_at,
         )
 
     async def _fetch_dispatch_thread_snapshot_from_client(
@@ -451,6 +494,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
+            runtime_started_at=self.runtime.runtime_started_at,
         )
 
     async def get_thread_snapshot(
@@ -459,7 +503,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
     ) -> ThreadReadResult:
         """Resolve advisory thread context for non-dispatch callers."""
-        return await self._reads.read_thread(
+        return await self._read_thread_memoized(
             room_id,
             thread_id,
             full_history=False,
@@ -472,7 +516,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
     ) -> ThreadReadResult:
         """Resolve advisory full thread history for one conversation root."""
-        return await self._reads.read_thread(
+        return await self._read_thread_memoized(
             room_id,
             thread_id,
             full_history=True,
@@ -501,8 +545,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadReadResult:
-        """Resolve strict dispatch thread context without durable-cache reuse or stale fallback."""
-        return await self._reads.read_thread(
+        """Resolve strict dispatch thread context using only fresh cache data or a homeserver refill."""
+        return await self._read_thread_memoized(
             room_id,
             thread_id,
             full_history=False,
@@ -514,8 +558,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadReadResult:
-        """Resolve strict full thread history for dispatch without durable-cache reuse or stale fallback."""
-        return await self._reads.read_thread(
+        """Resolve strict full dispatch thread history using only fresh cache data or a homeserver refill."""
+        return await self._read_thread_memoized(
             room_id,
             thread_id,
             full_history=True,

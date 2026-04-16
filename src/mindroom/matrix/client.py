@@ -2111,8 +2111,29 @@ async def fetch_dispatch_thread_history(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
+    *,
+    runtime_started_at: float | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch authoritative full thread history for dispatch without durable-cache reuse or stale fallback."""
+    """Fetch strict full thread history for dispatch using only fresh cache data or a homeserver refill."""
+    try:
+        cached_history = await _load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=True,
+            runtime_started_at=runtime_started_at,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Durable dispatch thread cache read failed; refetching from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+    else:
+        if cached_history is not None:
+            return cached_history
     return await refresh_thread_history_from_source(
         client,
         room_id,
@@ -2128,8 +2149,29 @@ async def fetch_dispatch_thread_snapshot(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
+    *,
+    runtime_started_at: float | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch authoritative lightweight thread context for dispatch without durable-cache reuse or stale fallback."""
+    """Fetch strict lightweight dispatch context using only fresh cache data or a homeserver refill."""
+    try:
+        cached_history = await _load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=False,
+            runtime_started_at=runtime_started_at,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Durable dispatch thread cache read failed; refetching snapshot from homeserver",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+    else:
+        if cached_history is not None:
+            return cached_history
     return await refresh_thread_history_from_source(
         client,
         room_id,
