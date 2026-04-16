@@ -373,6 +373,7 @@ class TestBotTaskRestoration:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+            install_runtime_cache_support(bot)
 
             # Mock the necessary methods
             with (
@@ -424,6 +425,7 @@ class TestBotTaskRestoration:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
+            install_runtime_cache_support(bot)
 
             with (
                 patch("mindroom.matrix.users.login") as mock_login,

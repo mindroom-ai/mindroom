@@ -18,6 +18,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -40,7 +41,7 @@ def _config(tmp_path: Path) -> Config:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    return AgentBot(
+    bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             password=TEST_PASSWORD,
@@ -52,6 +53,8 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
+    install_runtime_cache_support(bot)
+    return bot
 
 
 def _token_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
