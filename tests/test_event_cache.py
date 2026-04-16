@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from contextlib import closing
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,7 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.event_cache as event_cache_module
+from mindroom.matrix.cache import event_cache_events, event_cache_threads
 from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.client import fetch_thread_history
 from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
@@ -138,6 +140,76 @@ async def _seed_thread_cache(
 ) -> None:
     """Seed one authoritative cached thread snapshot for tests."""
     await cache.replace_thread(room_id, thread_id, events)
+
+
+def test_event_lookup_normalization_lives_with_event_storage() -> None:
+    """Event lookup ownership should normalize stored payloads without runtime-only keys."""
+    normalized_event = event_cache_events.normalize_event_source_for_cache(
+        {
+            "type": "m.room.message",
+            "content": {"body": "hello"},
+            "com.mindroom.dispatch_pipeline_timing": {"resolution_ms": 12},
+        },
+        event_id="$event",
+        sender="@user:localhost",
+        origin_server_ts=1234,
+    )
+
+    assert normalized_event == {
+        "type": "m.room.message",
+        "content": {"body": "hello"},
+        "event_id": "$event",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1234,
+    }
+
+
+@pytest.mark.asyncio
+async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path: Path) -> None:
+    """Thread snapshot ownership should expose joined thread and room cache state."""
+    db = await event_cache_module.initialize_event_cache_db(tmp_path / "event_cache.db")
+
+    try:
+        await event_cache_threads.replace_thread_locked(
+            db,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[
+                {
+                    "event_id": "$thread_root",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"body": "Root message", "msgtype": "m.text"},
+                },
+            ],
+            validated_at=100.0,
+        )
+        await event_cache_threads.mark_thread_stale_locked(
+            db,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            reason="thread_stale",
+        )
+        await event_cache_threads.mark_room_stale_locked(
+            db,
+            room_id="!room:localhost",
+            reason="room_stale",
+        )
+        await db.commit()
+
+        state = await event_cache_threads.load_thread_cache_state(
+            db,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+        )
+    finally:
+        await db.close()
+
+    assert state is not None
+    assert state.validated_at == 100.0
+    assert state.invalidation_reason == "thread_stale"
+    assert state.room_invalidation_reason == "room_stale"
 
 
 @pytest.mark.asyncio
@@ -273,19 +345,19 @@ async def test_individual_event_cache_store_and_retrieve(tmp_path: Path) -> None
 
 def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     """Idle per-room locks should be evicted instead of growing without bound."""
-    cache = _EventCache(tmp_path / "event_cache.db")
+    runtime = event_cache_module.EventCacheRuntime(tmp_path / "event_cache.db")
 
     for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-        _ = cache._room_lock_entry(f"!room-{index}:localhost").lock
+        _ = runtime.room_lock_entry(f"!room-{index}:localhost").lock
 
-    assert len(cache._room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
-    assert "!room-0:localhost" not in cache._room_locks
+    assert len(runtime.room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
+    assert "!room-0:localhost" not in runtime.room_locks
 
 
 @pytest.mark.asyncio
 async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path: Path) -> None:
     """Queued waiters must keep a room lock alive across pruning churn."""
-    cache = _EventCache(tmp_path / "event_cache.db")
+    runtime = event_cache_module.EventCacheRuntime(tmp_path / "event_cache.db")
     room_id = "!busy:localhost"
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
@@ -295,19 +367,19 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
     post_release_snapshot: dict[str, object] = {}
 
     async def first_holder() -> None:
-        async with cache._acquire_room_lock(room_id, operation="first_holder"):
+        async with runtime.acquire_room_lock(room_id, operation="first_holder"):
             holder_entered.set()
             await release_holder.wait()
         for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-            _ = cache._room_lock_entry(f"!churn-{index}:localhost").lock
-        entry = cache._room_locks.get(room_id)
+            _ = runtime.room_lock_entry(f"!churn-{index}:localhost").lock
+        entry = runtime.room_locks.get(room_id)
         post_release_snapshot["room_present"] = entry is not None
         post_release_snapshot["active_users"] = entry.active_users if entry is not None else None
         post_release_snapshot["lock_locked"] = entry.lock.locked() if entry is not None else None
         pruned_after_release.set()
 
     async def queued_waiter() -> None:
-        async with cache._acquire_room_lock(room_id, operation="queued_waiter"):
+        async with runtime.acquire_room_lock(room_id, operation="queued_waiter"):
             waiter_acquired.set()
             await allow_waiter_exit.wait()
 
@@ -316,7 +388,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
         waiter_registered = loop.create_future()
 
         def check_waiter_registration() -> None:
-            if cache._room_locks[room_id].active_users >= 2:
+            if runtime.room_locks[room_id].active_users >= 2:
                 waiter_registered.set_result(None)
                 return
             loop.call_soon(check_waiter_registration)
@@ -330,7 +402,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
     await asyncio.wait_for(holder_entered.wait(), timeout=1.0)
     await wait_for_waiter_registration()
 
-    busy_lock = cache._room_lock_entry(room_id).lock
+    busy_lock = runtime.room_lock_entry(room_id).lock
     release_holder.set()
     await asyncio.wait_for(pruned_after_release.wait(), timeout=1.0)
 
@@ -339,7 +411,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
         "active_users": 1,
         "lock_locked": False,
     }
-    assert cache._room_lock_entry(room_id).lock is busy_lock
+    assert runtime.room_lock_entry(room_id).lock is busy_lock
 
     await asyncio.wait_for(waiter_acquired.wait(), timeout=1.0)
     allow_waiter_exit.set()
@@ -349,7 +421,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
 @pytest.mark.asyncio
 async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp_path: Path) -> None:
     """A newly acquired room lock must survive pruning when the cache is already full of active rooms."""
-    cache = _EventCache(tmp_path / "event_cache.db")
+    runtime = event_cache_module.EventCacheRuntime(tmp_path / "event_cache.db")
     release_active_rooms = asyncio.Event()
     active_rooms_registered = asyncio.Event()
     release_new_room_holder = asyncio.Event()
@@ -360,19 +432,19 @@ async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp
 
     async def hold_active_room(room_id: str) -> None:
         nonlocal active_room_count
-        async with cache._acquire_room_lock(room_id, operation="hold_active_room"):
+        async with runtime.acquire_room_lock(room_id, operation="hold_active_room"):
             active_room_count += 1
             if active_room_count == event_cache_module._MAX_CACHED_ROOM_LOCKS:
                 active_rooms_registered.set()
             await release_active_rooms.wait()
 
     async def hold_new_room() -> None:
-        async with cache._acquire_room_lock(new_room_id, operation="hold_new_room"):
+        async with runtime.acquire_room_lock(new_room_id, operation="hold_new_room"):
             new_room_holder_entered.set()
             await release_new_room_holder.wait()
 
     async def wait_for_new_room() -> None:
-        async with cache._acquire_room_lock(new_room_id, operation="wait_for_new_room"):
+        async with runtime.acquire_room_lock(new_room_id, operation="wait_for_new_room"):
             new_room_waiter_acquired.set()
 
     active_room_tasks = [
@@ -420,37 +492,41 @@ async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -
             "content": {"body": "Cached reply", "msgtype": "m.text"},
         },
     )
-    assert cache._db is not None
-
     operation_started = asyncio.Event()
     allow_operation_finish = asyncio.Event()
-    original_execute = cache._db.execute
+    original_load_event = event_cache_events.load_event
 
-    async def blocking_execute(*args: object, **kwargs: object) -> object:
+    async def blocking_load_event(
+        db: object,
+        *,
+        event_id: str,
+    ) -> dict[str, object] | None:
         operation_started.set()
         await allow_operation_finish.wait()
-        return await original_execute(*args, **kwargs)
-
-    cache._db.execute = blocking_execute
+        return await original_load_event(db, event_id=event_id)
 
     try:
-        get_task = asyncio.create_task(cache.get_event("!room:localhost", "$reply"))
-        await asyncio.wait_for(operation_started.wait(), timeout=1.0)
+        with patch(
+            "mindroom.matrix.cache.event_cache_events.load_event",
+            new=blocking_load_event,
+        ):
+            get_task = asyncio.create_task(cache.get_event("!room:localhost", "$reply"))
+            await asyncio.wait_for(operation_started.wait(), timeout=1.0)
 
-        close_task = asyncio.create_task(cache.close())
-        await asyncio.sleep(0)
-        assert close_task.done() is False
+            close_task = asyncio.create_task(cache.close())
+            await asyncio.sleep(0)
+            assert close_task.done() is False
 
-        allow_operation_finish.set()
-        cached_event = await get_task
-        await close_task
+            allow_operation_finish.set()
+            cached_event = await get_task
+            await close_task
     finally:
-        if cache._db is not None:
+        if cache.is_initialized:
             await cache.close()
 
     assert cached_event is not None
     assert cached_event["event_id"] == "$reply"
-    assert cache._db is None
+    assert cache.is_initialized is False
 
 
 @pytest.mark.asyncio
@@ -463,7 +539,7 @@ async def test_event_cache_initialize_clears_half_initialized_connection_on_fail
 
     with (
         patch(
-            "mindroom.matrix.cache.event_cache_lifecycle.aiosqlite.connect",
+            "mindroom.matrix.cache.event_cache.aiosqlite.connect",
             AsyncMock(return_value=broken_connection),
         ),
         pytest.raises(RuntimeError, match="pragma boom"),
@@ -471,7 +547,7 @@ async def test_event_cache_initialize_clears_half_initialized_connection_on_fail
         await cache.initialize()
 
     broken_connection.close.assert_awaited_once()
-    assert cache._db is None
+    assert cache.is_initialized is False
 
 
 @pytest.mark.asyncio
@@ -1154,7 +1230,7 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
         ),
     )
 
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.execute(
             """
             CREATE TABLE events (
@@ -1185,7 +1261,7 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
     finally:
         await cache.close()
 
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         schema_version = db.execute("PRAGMA user_version").fetchone()[0]
 
     assert latest_edit is None
@@ -1288,7 +1364,7 @@ async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -
 
 def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
     """Event cache should keep independent locks per room."""
-    cache = _EventCache(tmp_path / "event_cache.db")
+    runtime = event_cache_module.EventCacheRuntime(tmp_path / "event_cache.db")
 
-    assert cache._room_lock_entry("!room:localhost").lock is cache._room_lock_entry("!room:localhost").lock
-    assert cache._room_lock_entry("!room:localhost").lock is not cache._room_lock_entry("!other:localhost").lock
+    assert runtime.room_lock_entry("!room:localhost").lock is runtime.room_lock_entry("!room:localhost").lock
+    assert runtime.room_lock_entry("!room:localhost").lock is not runtime.room_lock_entry("!other:localhost").lock

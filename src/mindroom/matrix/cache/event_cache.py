@@ -1,41 +1,348 @@
-"""Cache boundary and public API for Matrix event cache lookups."""
+"""Public boundary plus runtime and lifecycle ownership for the Matrix event cache."""
 
 from __future__ import annotations
 
+import asyncio
 import time
-from dataclasses import dataclass
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
-from . import (
-    event_cache_codec,
-    event_cache_events,
-    event_cache_lifecycle,
-    event_cache_runtime,
-    event_cache_threads,
-)
-from .event_cache_codec import normalize_event_source_for_cache
+import aiosqlite
+
+from mindroom.logging_config import get_logger
+
+from . import event_cache_events, event_cache_threads
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
-    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
-    import aiosqlite
-
-_EVENT_CACHE_SCHEMA_VERSION = event_cache_lifecycle.EVENT_CACHE_SCHEMA_VERSION
-_MAX_CACHED_ROOM_LOCKS = event_cache_runtime._MAX_CACHED_ROOM_LOCKS
+EVENT_CACHE_SCHEMA_VERSION = 7
+_EVENT_CACHE_TABLES = (
+    "thread_events",
+    "events",
+    "event_edits",
+    "event_threads",
+    "redacted_events",
+    "thread_cache_state",
+    "room_cache_state",
+)
+_EVENT_CACHE_RESET_TABLES = _EVENT_CACHE_TABLES
+_REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
+_LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
+_MAX_CACHED_ROOM_LOCKS = 256
+_EVENT_CACHE_SCHEMA_VERSION = EVENT_CACHE_SCHEMA_VERSION
 T = TypeVar("T")
 
+logger = get_logger(__name__)
+ThreadCacheState = event_cache_threads.ThreadCacheState
 
-@dataclass(frozen=True, slots=True)
-class ThreadCacheState:
-    """Durable freshness and invalidation metadata for one cached thread."""
 
-    validated_at: float | None
-    invalidated_at: float | None
-    invalidation_reason: str | None
-    room_invalidated_at: float | None
-    room_invalidation_reason: str | None
+async def initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
+    """Open the SQLite database and ensure the event-cache schema exists."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db = await aiosqlite.connect(db_path)
+    try:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+        await reset_stale_cache_if_needed(db, db_path=db_path)
+        await create_event_cache_schema(db)
+        await db.commit()
+    except Exception:
+        await db.close()
+        raise
+    return db
+
+
+async def create_event_cache_schema(db: aiosqlite.Connection) -> None:
+    """Create the current cache schema in one SQLite connection."""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS thread_events (
+            room_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            origin_server_ts INTEGER NOT NULL,
+            event_json TEXT NOT NULL,
+            PRIMARY KEY (room_id, event_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_thread_events_room_thread_ts
+        ON thread_events(room_id, thread_id, origin_server_ts)
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            event_id TEXT PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            event_json TEXT NOT NULL,
+            cached_at REAL NOT NULL
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS event_edits (
+            edit_event_id TEXT PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            original_event_id TEXT NOT NULL,
+            origin_server_ts INTEGER NOT NULL
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_event_edits_room_original_ts
+        ON event_edits(room_id, original_event_id, origin_server_ts DESC, edit_event_id DESC)
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS event_threads (
+            room_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            PRIMARY KEY (room_id, event_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_event_threads_room_thread
+        ON event_threads(room_id, thread_id, event_id)
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS redacted_events (
+            room_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            PRIMARY KEY (room_id, event_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS thread_cache_state (
+            room_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            validated_at REAL,
+            invalidated_at REAL,
+            invalidation_reason TEXT,
+            PRIMARY KEY (room_id, thread_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS room_cache_state (
+            room_id TEXT PRIMARY KEY,
+            invalidated_at REAL,
+            invalidation_reason TEXT
+        )
+        """,
+    )
+    await db.execute(f"PRAGMA user_version = {EVENT_CACHE_SCHEMA_VERSION}")
+
+
+async def schema_version(db: aiosqlite.Connection) -> int:
+    """Return the current SQLite schema version for this cache."""
+    cursor = await db.execute("PRAGMA user_version")
+    row = await cursor.fetchone()
+    await cursor.close()
+    return 0 if row is None else int(row[0])
+
+
+async def existing_table_names(db: aiosqlite.Connection) -> set[str]:
+    """Return the user-defined tables that currently exist in this SQLite DB."""
+    cursor = await db.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        """,
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return {str(row[0]) for row in rows}
+
+
+async def reset_stale_cache_if_needed(
+    db: aiosqlite.Connection,
+    *,
+    db_path: Path,
+) -> None:
+    """Drop stale cache contents instead of migrating old cache schemas forward."""
+    current_schema_version = await schema_version(db)
+    current_table_names = await existing_table_names(db)
+    if not current_table_names:
+        return
+    if current_schema_version == EVENT_CACHE_SCHEMA_VERSION and _REQUIRED_EVENT_CACHE_TABLES.issubset(
+        current_table_names,
+    ):
+        return
+
+    logger.info(
+        "Resetting stale Matrix event cache instead of migrating it",
+        db_path=str(db_path),
+        schema_version=current_schema_version,
+        existing_tables=sorted(current_table_names),
+    )
+    await db.executescript(
+        "\n".join(f"DROP TABLE IF EXISTS {table_name};" for table_name in _EVENT_CACHE_RESET_TABLES),
+    )
+    await db.execute("PRAGMA user_version = 0")
+    await db.commit()
+
+
+@dataclass
+class _RoomLockEntry:
+    """Track one room lock plus queued users that still rely on it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    active_users: int = 0
+
+
+class _EventCacheRuntime:
+    """Own runtime-only lifecycle, locking, and disable state for one cache instance."""
+
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
+        self._db: aiosqlite.Connection | None = None
+        self._disabled_reason: str | None = None
+        self._db_lock = asyncio.Lock()
+        self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
+
+    @property
+    def db_path(self) -> Path:
+        """Return the SQLite database path for this cache instance."""
+        return self._db_path
+
+    @property
+    def db(self) -> aiosqlite.Connection | None:
+        """Return the active SQLite connection, if initialized."""
+        return self._db
+
+    @property
+    def room_locks(self) -> dict[str, _RoomLockEntry]:
+        """Return the cached room-lock table for observability and tests."""
+        return self._room_locks
+
+    @property
+    def is_initialized(self) -> bool:
+        """Return whether the SQLite connection is currently open."""
+        return self._db is not None
+
+    @property
+    def is_disabled(self) -> bool:
+        """Return whether the advisory cache is disabled for this runtime."""
+        return self._disabled_reason is not None
+
+    def disable(self, reason: str) -> None:
+        """Disable the advisory cache for the rest of the runtime."""
+        if self._disabled_reason is not None:
+            return
+        self._disabled_reason = reason
+        logger.warning(
+            "Disabling advisory Matrix event cache",
+            db_path=str(self._db_path),
+            reason=reason,
+        )
+
+    async def initialize(self) -> None:
+        """Open the SQLite database and create the cache schema."""
+        async with self._db_lock:
+            if self._disabled_reason is not None or self._db is not None:
+                return
+            self._db = await initialize_event_cache_db(self._db_path)
+
+    async def close(self) -> None:
+        """Close the SQLite connection when the cache is no longer needed."""
+        async with self._db_lock:
+            if self._db is None:
+                return
+            await self._db.close()
+            self._db = None
+            self._room_locks.clear()
+
+    def room_lock_entry(self, room_id: str, *, active_user_increment: int = 0) -> _RoomLockEntry:
+        """Return the cached room lock entry, creating it on demand."""
+        entry = self._room_locks.get(room_id)
+        if entry is None:
+            entry = _RoomLockEntry(active_users=active_user_increment)
+        else:
+            entry.active_users += active_user_increment
+        self._room_locks[room_id] = entry
+        self._room_locks.move_to_end(room_id)
+        self._prune_room_locks()
+        return entry
+
+    @asynccontextmanager
+    async def acquire_room_lock(self, room_id: str, *, operation: str) -> AsyncIterator[None]:
+        """Serialize runtime-visible work for one room."""
+        entry = self.room_lock_entry(room_id, active_user_increment=1)
+        wait_started = time.perf_counter()
+        acquired = False
+        try:
+            await entry.lock.acquire()
+            acquired = True
+            wait_time = time.perf_counter() - wait_started
+            if wait_time > _LOCK_WAIT_LOG_THRESHOLD_SECONDS:
+                logger.debug(
+                    "Waited for _EventCache room lock",
+                    room_id=room_id,
+                    operation=operation,
+                    wait_time_ms=round(wait_time * 1000, 2),
+                )
+            yield
+        finally:
+            if acquired:
+                entry.lock.release()
+            entry.active_users -= 1
+            if entry.active_users == 0:
+                self._prune_room_locks()
+
+    @asynccontextmanager
+    async def acquire_db_operation(
+        self,
+        room_id: str,
+        *,
+        operation: str,
+    ) -> AsyncIterator[aiosqlite.Connection]:
+        """Serialize one DB operation with lifecycle changes and room ordering."""
+        if self._db is None:
+            await self.initialize()
+        async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
+            yield self.require_db()
+
+    def require_db(self) -> aiosqlite.Connection:
+        """Return the active SQLite connection or raise if uninitialized."""
+        if self._db is None:
+            msg = "_EventCache has not been initialized"
+            raise RuntimeError(msg)
+        return self._db
+
+    def _prune_room_locks(self) -> None:
+        while len(self._room_locks) > _MAX_CACHED_ROOM_LOCKS:
+            evicted_room_id: str | None = None
+            for cached_room_id, cached_entry in self._room_locks.items():
+                if cached_entry.active_users > 0:
+                    continue
+                evicted_room_id = cached_room_id
+                break
+            if evicted_room_id is None:
+                return
+            self._room_locks.pop(evicted_room_id, None)
+
+
+RoomLockEntry = _RoomLockEntry
+EventCacheRuntime = _EventCacheRuntime
 
 
 class ConversationEventCache(Protocol):
@@ -108,7 +415,7 @@ class _EventCache:
     """SQLite-backed ConversationEventCache implementation."""
 
     def __init__(self, db_path: Path) -> None:
-        self._runtime = event_cache_runtime._EventCacheRuntime(db_path)
+        self._runtime = _EventCacheRuntime(db_path)
 
     @property
     def db_path(self) -> Path:
@@ -116,41 +423,9 @@ class _EventCache:
         return self._runtime.db_path
 
     @property
-    def _db(self) -> aiosqlite.Connection | None:
-        return self._runtime.db
-
-    @property
     def is_initialized(self) -> bool:
         """Return whether the SQLite connection is currently open."""
         return self._runtime.is_initialized
-
-    @property
-    def _room_locks(self) -> dict[str, event_cache_runtime._RoomLockEntry]:
-        return self._runtime._room_locks
-
-    def _room_lock_entry(
-        self,
-        room_id: str,
-        *,
-        active_user_increment: int = 0,
-    ) -> event_cache_runtime._RoomLockEntry:
-        return self._runtime.room_lock_entry(room_id, active_user_increment=active_user_increment)
-
-    def _acquire_room_lock(
-        self,
-        room_id: str,
-        *,
-        operation: str,
-    ) -> AbstractAsyncContextManager[None]:
-        return self._runtime.acquire_room_lock(room_id, operation=operation)
-
-    def _acquire_db_operation(
-        self,
-        room_id: str,
-        *,
-        operation: str,
-    ) -> AbstractAsyncContextManager[aiosqlite.Connection]:
-        return self._runtime.acquire_db_operation(room_id, operation=operation)
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
@@ -174,7 +449,7 @@ class _EventCache:
     ) -> T:
         if self._runtime.is_disabled:
             return disabled_result
-        async with self._acquire_db_operation(room_id, operation=operation) as db:
+        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
             return await reader(db)
 
     async def _write_operation(
@@ -187,7 +462,7 @@ class _EventCache:
     ) -> T:
         if self._runtime.is_disabled:
             return disabled_result
-        async with self._acquire_db_operation(room_id, operation=operation) as db:
+        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
             try:
                 result = await writer(db)
                 await db.commit()
@@ -211,28 +486,15 @@ class _EventCache:
 
     async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
         """Return durable freshness metadata for one cached thread."""
-
-        async def read_cache_state(db: aiosqlite.Connection) -> ThreadCacheState | None:
-            row = await event_cache_threads.load_thread_cache_state_row(
-                db,
-                room_id=room_id,
-                thread_id=thread_id,
-            )
-            if row is None or all(value is None for value in row):
-                return None
-            return ThreadCacheState(
-                validated_at=row[0],
-                invalidated_at=row[1],
-                invalidation_reason=row[2],
-                room_invalidated_at=row[3],
-                room_invalidation_reason=row[4],
-            )
-
         return await self._read_operation(
             room_id,
             operation="get_thread_cache_state",
             disabled_result=None,
-            reader=read_cache_state,
+            reader=lambda db: event_cache_threads.load_thread_cache_state(
+                db,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
         )
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
@@ -263,15 +525,13 @@ class _EventCache:
 
     async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
         """Insert or replace one batch of individually cached Matrix events."""
-        if self._runtime.is_disabled:
-            return
-        if not events:
+        if self._runtime.is_disabled or not events:
             return
 
         cached_at = time.time()
         events_by_room: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         for event_id, room_id, event_data in events:
-            normalized_event = normalize_event_source_for_cache(event_data, event_id=event_id)
+            normalized_event = event_cache_events.normalize_event_source_for_cache(event_data, event_id=event_id)
             events_by_room.setdefault(room_id, []).append((event_id, normalized_event))
 
         for room_id, room_events in events_by_room.items():
@@ -366,7 +626,7 @@ class _EventCache:
 
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""
-        normalized_event = normalize_event_source_for_cache(event)
+        normalized_event = event_cache_events.normalize_event_source_for_cache(event)
         return bool(
             await self._write_operation(
                 room_id,
@@ -412,6 +672,3 @@ class _EventCache:
                 ),
             ),
         )
-
-
-normalize_nio_event_for_cache = event_cache_codec.normalize_nio_event_for_cache

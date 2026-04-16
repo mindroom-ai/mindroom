@@ -310,7 +310,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._writes.notify_outbound_message = Mock(side_effect=error)
+        access._writes.outbound.notify_outbound_message = Mock(side_effect=error)
 
         access.notify_outbound_message(
             "!room:localhost",
@@ -331,7 +331,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._writes.notify_outbound_redaction = Mock(side_effect=error)
+        access._writes.outbound.notify_outbound_redaction = Mock(side_effect=error)
 
         access.notify_outbound_redaction(
             "!room:localhost",
@@ -678,7 +678,7 @@ class TestMatrixConversationCacheThreadReads:
             runtime=_conversation_runtime(event_cache=event_cache),
         )
 
-        await access._writes._cache_ops.invalidate_known_thread(
+        await access._writes.cache_ops.invalidate_known_thread(
             "!room:localhost",
             "$thread:localhost",
             reason="test_failure",
@@ -696,7 +696,7 @@ class TestMatrixConversationCacheThreadReads:
             runtime=_conversation_runtime(event_cache=event_cache),
         )
 
-        await access._writes._cache_ops.invalidate_room_threads(
+        await access._writes.cache_ops.invalidate_room_threads(
             "!room:localhost",
             reason="test_failure",
         )
@@ -3566,7 +3566,7 @@ class TestThreadingBehavior:
         read_task = asyncio.create_task(access.get_thread_history("!room:localhost", "$thread:localhost"))
         await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
         write_task = asyncio.create_task(
-            access._writes._outbound._apply_outbound_message_notification(
+            access._writes.outbound._apply_outbound_message_notification(
                 "!room:localhost",
                 "$reply-new:localhost",
                 new_event_source,

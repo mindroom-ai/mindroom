@@ -14,8 +14,8 @@ from nio.responses import RoomGetEventError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.event_cache import (
     ConversationEventCache,
-    normalize_nio_event_for_cache,
 )
+from mindroom.matrix.cache.event_cache_events import normalize_nio_event_for_cache
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
 from mindroom.matrix.cache.thread_writes import ThreadWritePolicy
@@ -559,7 +559,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> None:
         """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
         self._run_fail_open_outbound_write(
-            lambda: self._writes.notify_outbound_message(room_id, event_id, content),
+            lambda: self._writes.outbound.notify_outbound_message(room_id, event_id, content),
             cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
             failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
             room_id=room_id,
@@ -569,7 +569,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
         self._run_fail_open_outbound_write(
-            lambda: self._writes.notify_outbound_redaction(room_id, redacted_event_id),
+            lambda: self._writes.outbound.notify_outbound_redaction(room_id, redacted_event_id),
             cancelled_message="Ignoring cancelled outbound threaded message cache redaction bookkeeping after successful redact",
             failure_message="Ignoring outbound threaded message cache redaction bookkeeping failure after successful redact",
             room_id=room_id,
@@ -610,12 +610,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_info: EventInfo,
     ) -> None:
         """Append one live threaded event into the advisory cache when the thread is known."""
-        await self._writes.append_live_event(room_id, event, event_info=event_info)
+        await self._writes.live.append_live_event(room_id, event, event_info=event_info)
 
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
-        await self._writes.apply_redaction(room_id, event)
+        await self._writes.live.apply_redaction(room_id, event)
 
     def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
-        self._writes.cache_sync_timeline(response)
+        self._writes.sync.cache_sync_timeline(response)
