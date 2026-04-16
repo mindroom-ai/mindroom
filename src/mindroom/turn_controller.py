@@ -399,6 +399,23 @@ class TurnController:
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_cache_append_ready")
 
+    async def _resolve_text_event_with_ingress_timing(
+        self,
+        event: nio.RoomMessageText,
+        *,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> PreparedTextEvent:
+        """Normalize one inbound text event while recording ingress timing boundaries."""
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_start")
+        prepared_event = await self.deps.normalizer.resolve_text_event(
+            TextNormalizationRequest(event=event),
+        )
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
+        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
+        return prepared_event
+
     async def _enqueue_for_dispatch(
         self,
         event: _DispatchEvent,
@@ -1199,14 +1216,10 @@ class TurnController:
             )
             return
 
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_start")
-        prepared_event = await self.deps.normalizer.resolve_text_event(
-            TextNormalizationRequest(event=prechecked_event.event),
+        prepared_event = await self._resolve_text_event_with_ingress_timing(
+            prechecked_event.event,
+            dispatch_timing=dispatch_timing,
         )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_ready")
-        attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         envelope = self.deps.resolver.build_ingress_envelope(
             room_id=room.room_id,
             event=prepared_event,

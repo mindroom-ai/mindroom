@@ -3957,9 +3957,7 @@ class TestThreadingBehavior:
         await wait_for_background_tasks(timeout=1.0, owner=owner)
 
         timing_calls = [
-            call_args
-            for call_args in logger.info.call_args_list
-            if call_args.args == ("Room cache idle wait timing",)
+            call_args for call_args in logger.info.call_args_list if call_args.args == ("Room cache idle wait timing",)
         ]
         assert len(timing_calls) == 1
         timing_log = timing_calls[0].kwargs
