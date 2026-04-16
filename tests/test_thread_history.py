@@ -30,7 +30,6 @@ from mindroom.matrix.client import (
     ThreadHistoryResult,
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
-    _ordered_event_ids_from_scanned_event_sources,
     _resolve_scanned_thread_message_sources,
     _resolve_thread_history_from_event_sources_timed,
     get_room_threads_page,
@@ -38,6 +37,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.client import (
     build_threaded_edit_content as _build_threaded_edit_content_impl,
 )
+from mindroom.matrix.thread_membership import ordered_event_ids_from_scanned_event_sources
 from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:
@@ -1316,7 +1316,7 @@ class TestThreadHistory:
 
     def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
         """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""
-        ordered_event_ids = _ordered_event_ids_from_scanned_event_sources(
+        ordered_event_ids = ordered_event_ids_from_scanned_event_sources(
             [
                 {"event_id": "$zzz_parent", "origin_server_ts": 2000},
                 {"event_id": "$aaa_child", "origin_server_ts": 2000},

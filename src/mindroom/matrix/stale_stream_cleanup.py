@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from nio.api import RelationshipType
@@ -23,8 +23,6 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
-    _ordered_event_ids_from_scanned_event_sources,
-    _sort_thread_history_root_first,
     edit_message_result,
     get_joined_rooms,
     resolve_latest_visible_messages,
@@ -35,7 +33,12 @@ from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
-from mindroom.matrix.thread_membership import resolve_thread_ids_for_event_infos
+from mindroom.matrix.thread_membership import (
+    SupportsVisibleThreadMessage,
+    latest_visible_thread_event_id_by_thread,
+    ordered_event_ids_from_scanned_event_sources,
+    resolve_thread_ids_for_event_infos,
+)
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -509,8 +512,13 @@ def _assign_latest_thread_event_ids(
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> None:
     """Record the latest visible event ID seen for each explicit thread."""
-    all_messages = [*resolved_messages.values(), *scanned_message_data_by_event_id.values()]
-    latest_event_id_by_thread = _latest_thread_event_id_by_thread(all_messages)
+    all_messages: list[ResolvedVisibleMessage] = [
+        *resolved_messages.values(),
+        *scanned_message_data_by_event_id.values(),
+    ]
+    latest_event_id_by_thread = latest_visible_thread_event_id_by_thread(
+        cast("list[SupportsVisibleThreadMessage]", all_messages),
+    )
 
     for state in message_states.values():
         if state.thread_id is None:
@@ -518,95 +526,6 @@ def _assign_latest_thread_event_ids(
         latest_event = latest_event_id_by_thread.get(state.thread_id)
         if latest_event is not None:
             state.latest_thread_event_id = latest_event
-
-
-def _latest_thread_event_id_by_thread(
-    messages: list[ResolvedVisibleMessage],
-) -> dict[str, str]:
-    """Return the latest visible event ID for each thread in one cleanup scan."""
-    return {
-        thread_key: _ordered_cleanup_thread_messages(thread_key, thread_messages)[-1].visible_event_id
-        for thread_key, thread_messages in _messages_by_thread_for_cleanup(messages).items()
-    }
-
-
-def _messages_by_thread_for_cleanup(
-    messages: list[ResolvedVisibleMessage],
-) -> dict[str, list[ResolvedVisibleMessage]]:
-    """Group visible messages by thread while preferring the strongest copy per visible event."""
-    thread_root_ids = {message.thread_id for message in messages if message.thread_id is not None}
-    messages_by_thread: dict[str, list[ResolvedVisibleMessage]] = {}
-    best_message_by_visible_event_id: dict[str, ResolvedVisibleMessage] = {}
-
-    for message in messages:
-        existing_message = best_message_by_visible_event_id.get(message.visible_event_id)
-        if existing_message is not None and not _cleanup_message_is_better_candidate(message, existing_message):
-            continue
-        best_message_by_visible_event_id[message.visible_event_id] = message
-
-    for message in best_message_by_visible_event_id.values():
-        thread_key = _cleanup_thread_key(message, thread_root_ids)
-        if thread_key is None:
-            continue
-        messages_by_thread.setdefault(thread_key, []).append(message)
-    return messages_by_thread
-
-
-def _cleanup_message_is_better_candidate(
-    candidate: ResolvedVisibleMessage,
-    current: ResolvedVisibleMessage,
-) -> bool:
-    """Return whether one cleanup message copy should replace the current visible-event winner."""
-    return (
-        candidate.thread_id is not None,
-        candidate.timestamp,
-        candidate.latest_event_id,
-    ) > (
-        current.thread_id is not None,
-        current.timestamp,
-        current.latest_event_id,
-    )
-
-
-def _cleanup_thread_key(
-    message: ResolvedVisibleMessage,
-    thread_root_ids: set[str],
-) -> str | None:
-    """Return the cleanup thread bucket for one visible message."""
-    if message.thread_id is not None:
-        return message.thread_id
-    if message.event_id in thread_root_ids:
-        return message.event_id
-    return None
-
-
-def _ordered_cleanup_thread_messages(
-    thread_id: str,
-    messages: list[ResolvedVisibleMessage],
-) -> list[ResolvedVisibleMessage]:
-    """Return one ancestry-aware thread order for cleanup fallback targeting."""
-    ordered_messages = list(messages)
-    _sort_thread_history_root_first(
-        ordered_messages,
-        thread_id=thread_id,
-        input_order_by_event_id={message.visible_event_id: index for index, message in enumerate(messages)},
-        related_event_id_by_event_id=_cleanup_related_event_id_by_event_id(messages),
-    )
-    return ordered_messages
-
-
-def _cleanup_related_event_id_by_event_id(
-    messages: list[ResolvedVisibleMessage],
-) -> dict[str, str]:
-    """Return same-thread relation edges used for cleanup ordering ties."""
-    related_event_id_by_event_id: dict[str, str] = {}
-    for message in messages:
-        related_event_id = EventInfo.from_event({"content": message.content}).next_related_event_id(
-            message.visible_event_id,
-        )
-        if isinstance(related_event_id, str):
-            related_event_id_by_event_id[message.visible_event_id] = related_event_id
-    return related_event_id_by_event_id
 
 
 async def _collect_room_history_events(
@@ -719,7 +638,7 @@ async def _scanned_message_data_by_event_id(
         for event in message_events
         if isinstance(event.event_id, str)
     }
-    ordered_event_ids = _ordered_event_ids_from_scanned_event_sources(
+    ordered_event_ids = ordered_event_ids_from_scanned_event_sources(
         [event.source for event in message_events],
     )
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
