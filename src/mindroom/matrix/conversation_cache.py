@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -15,13 +14,15 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
     ThreadHistoryResult,
-    _ThreadLiveWritePolicy,
-    _ThreadMutationCacheOps,
-    _ThreadOutboundWritePolicy,
-    _ThreadReadPolicy,
-    _ThreadSyncWritePolicy,
     normalize_nio_event_for_cache,
     thread_history_result,
+)
+from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
+from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
+from mindroom.matrix.cache.thread_writes import (
+    ThreadLiveWritePolicy,
+    ThreadOutboundWritePolicy,
+    ThreadSyncWritePolicy,
 )
 from mindroom.matrix.client import (
     fetch_dispatch_thread_history,
@@ -34,7 +35,7 @@ from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -279,15 +280,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _turn_thread_read_cache: ContextVar[dict[ThreadReadCacheKey, ThreadReadResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_thread_read_cache", default=None),
     )
-    _reads: _ThreadReadPolicy = field(init=False, repr=False)
-    _write_cache_ops: _ThreadMutationCacheOps = field(init=False, repr=False)
-    _outbound: _ThreadOutboundWritePolicy = field(init=False, repr=False)
-    _live: _ThreadLiveWritePolicy = field(init=False, repr=False)
-    _sync: _ThreadSyncWritePolicy = field(init=False, repr=False)
+    _reads: ThreadReadPolicy = field(init=False, repr=False)
+    _write_cache_ops: ThreadMutationCacheOps = field(init=False, repr=False)
+    _outbound: ThreadOutboundWritePolicy = field(init=False, repr=False)
+    _live: ThreadLiveWritePolicy = field(init=False, repr=False)
+    _sync: ThreadSyncWritePolicy = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Bind extracted read/write collaborators to this facade."""
-        self._reads = _ThreadReadPolicy(
+        self._reads = ThreadReadPolicy(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
@@ -300,49 +301,23 @@ class MatrixConversationCache(ConversationCacheProtocol):
             runtime=self.runtime,
             fetch_event_info_for_thread_resolution=self._event_info_for_thread_resolution,
         )
-        self._write_cache_ops = _ThreadMutationCacheOps(
+        self._write_cache_ops = ThreadMutationCacheOps(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
         )
-        self._outbound = _ThreadOutboundWritePolicy(
+        self._outbound = ThreadOutboundWritePolicy(
             resolver=resolver,
             cache_ops=self._write_cache_ops,
             require_client=self._require_client,
         )
-        self._live = _ThreadLiveWritePolicy(
+        self._live = ThreadLiveWritePolicy(
             resolver=resolver,
             cache_ops=self._write_cache_ops,
         )
-        self._sync = _ThreadSyncWritePolicy(
+        self._sync = ThreadSyncWritePolicy(
             resolver=resolver,
             cache_ops=self._write_cache_ops,
         )
-
-    def _run_fail_open_outbound_write(
-        self,
-        callback: Callable[[], None],
-        *,
-        cancelled_message: str,
-        failure_message: str,
-        room_id: str,
-        **log_context: object,
-    ) -> None:
-        try:
-            callback()
-        except asyncio.CancelledError as exc:
-            self.logger.warning(
-                cancelled_message,
-                room_id=room_id,
-                error=str(exc),
-                **log_context,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                failure_message,
-                room_id=room_id,
-                error=str(exc),
-                **log_context,
-            )
 
     def _require_client(self) -> nio.AsyncClient:
         client = self.runtime.client
@@ -651,23 +626,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         content: dict[str, Any],
     ) -> None:
         """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
-        self._run_fail_open_outbound_write(
-            lambda: self._outbound.notify_outbound_message(room_id, event_id, content),
-            cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
-            failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
-            room_id=room_id,
-            event_id=event_id,
-        )
+        self._outbound.notify_outbound_message(room_id, event_id, content)
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
-        self._run_fail_open_outbound_write(
-            lambda: self._outbound.notify_outbound_redaction(room_id, redacted_event_id),
-            cancelled_message="Ignoring cancelled outbound threaded message cache redaction bookkeeping after successful redact",
-            failure_message="Ignoring outbound threaded message cache redaction bookkeeping failure after successful redact",
-            room_id=room_id,
-            redacted_event_id=redacted_event_id,
-        )
+        self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
 
     async def append_live_event(
         self,

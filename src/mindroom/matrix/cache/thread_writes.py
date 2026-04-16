@@ -143,39 +143,54 @@ class ThreadOutboundWritePolicy:
         content: dict[str, Any],
     ) -> None:
         """Schedule advisory bookkeeping for one locally sent threaded message or edit."""
-        if not self._cache_ops.cache_runtime_available():
-            return
-        if not isinstance(event_id, str) or not event_id:
-            return
+        try:
+            if not self._cache_ops.cache_runtime_available():
+                return
+            if not isinstance(event_id, str) or not event_id:
+                return
 
-        client = self._require_client()
-        sender = client.user_id if isinstance(client.user_id, str) else None
-        origin_server_ts = int(time.time() * 1000)
-        event_source = normalize_event_source_for_cache(
-            {
-                "type": "m.room.message",
-                "room_id": room_id,
-                "event_id": event_id,
-                "sender": sender,
-                "origin_server_ts": origin_server_ts,
-                "content": dict(content),
-            },
-            event_id=event_id,
-            sender=sender,
-            origin_server_ts=origin_server_ts,
-        )
-        event_info = EventInfo.from_event(event_source)
-        if not is_thread_affecting_relation(event_info):
-            return
+            client = self._require_client()
+            sender = client.user_id if isinstance(client.user_id, str) else None
+            origin_server_ts = int(time.time() * 1000)
+            event_source = normalize_event_source_for_cache(
+                {
+                    "type": "m.room.message",
+                    "room_id": room_id,
+                    "event_id": event_id,
+                    "sender": sender,
+                    "origin_server_ts": origin_server_ts,
+                    "content": dict(content),
+                },
+                event_id=event_id,
+                sender=sender,
+                origin_server_ts=origin_server_ts,
+            )
+            event_info = EventInfo.from_event(event_source)
+            if not is_thread_affecting_relation(event_info):
+                return
 
-        self._schedule_fail_open_room_update(
-            room_id,
-            lambda: self._apply_outbound_message_notification(room_id, event_id, event_source, event_info),
-            name="matrix_cache_notify_outbound_message",
-            cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
-            failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
-            log_context={"event_id": event_id},
-        )
+            self._schedule_fail_open_room_update(
+                room_id,
+                lambda: self._apply_outbound_message_notification(room_id, event_id, event_source, event_info),
+                name="matrix_cache_notify_outbound_message",
+                cancelled_message="Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+                failure_message="Ignoring outbound threaded message cache bookkeeping failure after successful send",
+                log_context={"event_id": event_id},
+            )
+        except asyncio.CancelledError as exc:
+            self._cache_ops.logger.warning(
+                "Ignoring cancelled outbound threaded message cache bookkeeping after successful send",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
+        except Exception as exc:
+            self._cache_ops.logger.warning(
+                "Ignoring outbound threaded message cache bookkeeping failure after successful send",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
 
     async def _apply_outbound_redaction_notification(
         self,
@@ -216,19 +231,34 @@ class ThreadOutboundWritePolicy:
         redacted_event_id: str,
     ) -> None:
         """Schedule advisory bookkeeping for one locally redacted threaded message."""
-        if not self._cache_ops.cache_runtime_available():
-            return
-        if not redacted_event_id:
-            return
+        try:
+            if not self._cache_ops.cache_runtime_available():
+                return
+            if not redacted_event_id:
+                return
 
-        self._schedule_fail_open_room_update(
-            room_id,
-            lambda: self._apply_outbound_redaction_notification(room_id, redacted_event_id),
-            name="matrix_cache_notify_outbound_redaction",
-            cancelled_message="Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",
-            failure_message="Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
-            log_context={"redacted_event_id": redacted_event_id},
-        )
+            self._schedule_fail_open_room_update(
+                room_id,
+                lambda: self._apply_outbound_redaction_notification(room_id, redacted_event_id),
+                name="matrix_cache_notify_outbound_redaction",
+                cancelled_message="Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",
+                failure_message="Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
+                log_context={"redacted_event_id": redacted_event_id},
+            )
+        except asyncio.CancelledError as exc:
+            self._cache_ops.logger.warning(
+                "Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+                error=str(exc),
+            )
+        except Exception as exc:
+            self._cache_ops.logger.warning(
+                "Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+                error=str(exc),
+            )
 
     def _schedule_fail_open_room_update(
         self,

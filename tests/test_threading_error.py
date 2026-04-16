@@ -301,6 +301,11 @@ def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
     assert "ThreadWritePolicy" not in matrix_cache.__all__
     assert not hasattr(matrix_cache, "ThreadReadPolicy")
     assert not hasattr(matrix_cache, "ThreadWritePolicy")
+    assert not hasattr(matrix_cache, "_ThreadReadPolicy")
+    assert not hasattr(matrix_cache, "_ThreadMutationCacheOps")
+    assert not hasattr(matrix_cache, "_ThreadOutboundWritePolicy")
+    assert not hasattr(matrix_cache, "_ThreadLiveWritePolicy")
+    assert not hasattr(matrix_cache, "_ThreadSyncWritePolicy")
 
 
 class TestMatrixConversationCacheThreadReads:
@@ -314,6 +319,7 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         assert not hasattr(access, "_writes")
+        assert not hasattr(access, "_run_fail_open_outbound_write")
 
     @pytest.mark.parametrize(
         "error",
@@ -328,7 +334,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._outbound.notify_outbound_message = Mock(side_effect=error)
+        access._outbound._require_client = Mock(side_effect=error)
 
         access.notify_outbound_message(
             "!room:localhost",
@@ -349,7 +355,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._outbound.notify_outbound_redaction = Mock(side_effect=error)
+        access._outbound._schedule_fail_open_room_update = Mock(side_effect=error)
 
         access.notify_outbound_redaction(
             "!room:localhost",

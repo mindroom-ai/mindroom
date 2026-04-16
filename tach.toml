@@ -3,11 +3,52 @@ source_roots = ["src"]
 
 [[modules]]
 path = "mindroom.matrix.cache"
+depends_on = [
+    "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.cache.thread_cache_helpers",
+    "mindroom.matrix.cache.thread_history_result",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.thread_reads"
+depends_on = [
+    "mindroom.matrix.cache.thread_cache_helpers",
+    "mindroom.matrix.cache.thread_history_result",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.thread_cache_helpers"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.cache.thread_history_result"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.cache.thread_write_cache_ops"
+depends_on = ["mindroom.matrix.cache"]
+
+[[modules]]
+path = "mindroom.matrix.cache.event_cache_events"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.cache.thread_writes"
+depends_on = [
+    "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.cache.thread_write_cache_ops",
+]
+
+[[modules]]
 path = "mindroom.matrix.conversation_cache"
-depends_on = ["mindroom.matrix.cache", "mindroom.matrix.client"]
+depends_on = [
+    "mindroom.matrix.cache",
+    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.cache.thread_reads",
+    "mindroom.matrix.cache.thread_write_cache_ops",
+    "mindroom.matrix.cache.thread_writes",
+    "mindroom.matrix.client",
+]
 
 [[modules]]
 path = "mindroom.runtime_support"
@@ -19,7 +60,11 @@ depends_on = ["mindroom.matrix.cache"]
 
 [[modules]]
 path = "mindroom.matrix.client"
-depends_on = ["mindroom.matrix.cache", "mindroom.matrix.conversation_cache"]
+depends_on = [
+    "mindroom.matrix.cache",
+    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.conversation_cache",
+]
 
 [[modules]]
 path = "mindroom.conversation_resolver"
@@ -91,15 +136,32 @@ from = ["mindroom.matrix.cache"]
 expose = [
     "ConversationEventCache",
     "ThreadHistoryResult",
-    "_ThreadReadPolicy",
-    "_ThreadMutationCacheOps",
-    "_ThreadOutboundWritePolicy",
-    "_ThreadLiveWritePolicy",
-    "_ThreadSyncWritePolicy",
     "normalize_nio_event_for_cache",
     "thread_history_result",
 ]
 from = ["mindroom.matrix.cache"]
+visibility = ["mindroom.matrix.conversation_cache"]
+exclusive = true
+
+[[interfaces]]
+expose = ["ThreadReadPolicy"]
+from = ["mindroom.matrix.cache.thread_reads"]
+visibility = ["mindroom.matrix.conversation_cache"]
+exclusive = true
+
+[[interfaces]]
+expose = ["ThreadMutationCacheOps"]
+from = ["mindroom.matrix.cache.thread_write_cache_ops"]
+visibility = ["mindroom.matrix.conversation_cache"]
+exclusive = true
+
+[[interfaces]]
+expose = [
+    "ThreadOutboundWritePolicy",
+    "ThreadLiveWritePolicy",
+    "ThreadSyncWritePolicy",
+]
+from = ["mindroom.matrix.cache.thread_writes"]
 visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
