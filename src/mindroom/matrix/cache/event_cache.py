@@ -19,13 +19,14 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-EVENT_CACHE_SCHEMA_VERSION = 7
+EVENT_CACHE_SCHEMA_VERSION = 8
 _EVENT_CACHE_TABLES = (
     "thread_events",
     "events",
     "event_edits",
     "event_threads",
     "redacted_events",
+    "mxc_text_cache",
     "thread_cache_state",
     "room_cache_state",
 )
@@ -124,6 +125,15 @@ async def create_event_cache_schema(db: aiosqlite.Connection) -> None:
             room_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             PRIMARY KEY (room_id, event_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mxc_text_cache (
+            mxc_url TEXT PRIMARY KEY,
+            text_content TEXT NOT NULL,
+            cached_at REAL NOT NULL
         )
         """,
     )
@@ -366,11 +376,17 @@ class ConversationEventCache(Protocol):
     async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
 
+    async def get_mxc_text(self, room_id: str, mxc_url: str) -> str | None:
+        """Return one durably cached MXC text payload when present."""
+
     async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
         """Insert or replace one individually cached Matrix event."""
 
     async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
         """Insert or replace a batch of individually cached Matrix events."""
+
+    async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
+        """Insert or replace one durably cached MXC text payload."""
 
     async def replace_thread(
         self,
@@ -519,6 +535,18 @@ class _EventCache:
             ),
         )
 
+    async def get_mxc_text(self, room_id: str, mxc_url: str) -> str | None:
+        """Return one durably cached MXC text payload when present."""
+        return await self._read_operation(
+            room_id,
+            operation="get_mxc_text",
+            disabled_result=None,
+            reader=lambda db: event_cache_events.load_mxc_text(
+                db,
+                mxc_url=mxc_url,
+            ),
+        )
+
     async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
         """Insert or replace one individually cached Matrix event."""
         await self.store_events_batch([(event_id, room_id, event_data)])
@@ -549,6 +577,20 @@ class _EventCache:
                     cached_at=cached_at,
                 ),
             )
+
+    async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
+        """Insert or replace one durably cached MXC text payload."""
+        await self._write_operation(
+            room_id,
+            operation="store_mxc_text",
+            disabled_result=None,
+            writer=lambda db: event_cache_events.persist_mxc_text(
+                db,
+                mxc_url=mxc_url,
+                text=text,
+                cached_at=time.time(),
+            ),
+        )
 
     async def replace_thread(
         self,

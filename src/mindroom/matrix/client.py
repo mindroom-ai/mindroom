@@ -1342,9 +1342,11 @@ def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, An
 async def _resolve_thread_history_from_event_sources_timed(
     client: nio.AsyncClient,
     *,
+    room_id: str,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
+    event_cache: ConversationEventCache,
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Resolve visible thread history and return approximate sidecar hydration time."""
     input_order_by_event_id: dict[str, int] = {}
@@ -1384,7 +1386,14 @@ async def _resolve_thread_history_from_event_sources_timed(
         if event_info.is_edit or event.event_id in messages_by_event_id:
             continue
         messages_by_event_id[event.event_id] = (
-            await _resolve_thread_history_message(event, client) if hydrate_sidecars else _snapshot_message_dict(event)
+            await _resolve_thread_history_message(
+                event,
+                client,
+                event_cache=event_cache,
+                room_id=room_id,
+            )
+            if hydrate_sidecars
+            else _snapshot_message_dict(event)
         )
 
     await _apply_latest_edits_to_messages(
@@ -1392,6 +1401,8 @@ async def _resolve_thread_history_from_event_sources_timed(
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
         required_thread_id=thread_id,
+        event_cache=event_cache,
+        room_id=room_id,
     )
     messages = list(messages_by_event_id.values())
     sort_thread_messages_root_first(
@@ -1473,9 +1484,11 @@ async def _resolve_cached_thread_history(
     try:
         return await _resolve_thread_history_from_event_sources_timed(
             client,
+            room_id=room_id,
             thread_id=thread_id,
             event_sources=cached_event_sources,
             hydrate_sidecars=hydrate_sidecars,
+            event_cache=event_cache,
         )
     except Exception as exc:
         logger.warning(
@@ -1557,6 +1570,7 @@ async def _fetch_thread_history_with_events(
     thread_id: str,
     *,
     hydrate_sidecars: bool,
+    event_cache: ConversationEventCache,
 ) -> _ThreadHistoryFetchResult:
     """Fetch thread history and raw event sources from the homeserver."""
     return await _fetch_thread_history_via_room_messages_with_events(
@@ -1564,6 +1578,7 @@ async def _fetch_thread_history_with_events(
         room_id,
         thread_id,
         hydrate_sidecars=hydrate_sidecars,
+        event_cache=event_cache,
     )
 
 
@@ -1583,6 +1598,7 @@ async def refresh_thread_history_from_source(
             room_id,
             thread_id,
             hydrate_sidecars=hydrate_sidecars,
+            event_cache=event_cache,
         )
     except Exception as exc:
         if allow_stale_fallback:
@@ -1653,10 +1669,18 @@ def _thread_history_fetch_is_cacheable(
 async def _resolve_thread_history_message(
     event: nio.Event,
     client: nio.AsyncClient,
+    *,
+    event_cache: ConversationEventCache,
+    room_id: str,
 ) -> ResolvedVisibleMessage:
     """Resolve one room-message event into the normalized thread-history shape."""
     if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-        message_data = await extract_and_resolve_message(event, client)
+        message_data = await extract_and_resolve_message(
+            event,
+            client,
+            event_cache=event_cache,
+            room_id=room_id,
+        )
         return ResolvedVisibleMessage.from_message_data(
             message_data,
             thread_id=EventInfo.from_event(event.source).thread_id,
@@ -1666,6 +1690,8 @@ async def _resolve_thread_history_message(
     resolved_event_source = await resolve_event_source_content(
         event.source if isinstance(event.source, dict) else {},
         client,
+        event_cache=event_cache,
+        room_id=room_id,
     )
     content = resolved_event_source.get("content", {})
     normalized_content = content if isinstance(content, dict) else {}
@@ -1717,6 +1743,8 @@ async def _apply_latest_edits_to_messages(
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
     required_thread_id: str | None = None,
+    event_cache: ConversationEventCache | None = None,
+    room_id: str | None = None,
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
     for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
@@ -1727,7 +1755,12 @@ async def _apply_latest_edits_to_messages(
         if existing_message is None and required_thread_id is not None and edit_thread_id != required_thread_id:
             continue
 
-        edited_body, edited_content = await extract_edit_body(edit_event.source, client)
+        edited_body, edited_content = await extract_edit_body(
+            edit_event.source,
+            client,
+            event_cache=event_cache,
+            room_id=room_id,
+        )
         if edited_body is None:
             continue
 
@@ -1951,15 +1984,18 @@ async def _fetch_thread_history_via_room_messages_with_events(
     thread_id: str,
     *,
     hydrate_sidecars: bool,
+    event_cache: ConversationEventCache,
 ) -> _ThreadHistoryFetchResult:
     """Fetch all thread messages by scanning room history pages."""
     event_sources, _root_message_found = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
     resolution_started = time.perf_counter()
     history, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
         client,
+        room_id=room_id,
         thread_id=thread_id,
         event_sources=event_sources,
         hydrate_sidecars=hydrate_sidecars,
+        event_cache=event_cache,
     )
     return _ThreadHistoryFetchResult(
         history=history,

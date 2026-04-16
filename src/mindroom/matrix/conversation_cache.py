@@ -175,7 +175,12 @@ async def _apply_cached_latest_edit(
     if latest_edit_source is None:
         return event_source
 
-    edited_body, edited_content = await extract_edit_body(latest_edit_source, client)
+    edited_body, edited_content = await extract_edit_body(
+        latest_edit_source,
+        client,
+        event_cache=event_cache,
+        room_id=room_id,
+    )
     if edited_body is None or edited_content is None:
         return event_source
 

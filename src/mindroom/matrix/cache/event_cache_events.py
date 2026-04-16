@@ -145,6 +145,42 @@ async def load_latest_edit(
     return None if row is None else json.loads(row[0])
 
 
+async def load_mxc_text(
+    db: aiosqlite.Connection,
+    *,
+    mxc_url: str,
+) -> str | None:
+    """Return one durably cached MXC text payload when present."""
+    cursor = await db.execute(
+        """
+        SELECT text_content
+        FROM mxc_text_cache
+        WHERE mxc_url = ?
+        """,
+        (mxc_url,),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return None if row is None else str(row[0])
+
+
+async def persist_mxc_text(
+    db: aiosqlite.Connection,
+    *,
+    mxc_url: str,
+    text: str,
+    cached_at: float,
+) -> None:
+    """Insert or replace one durably cached MXC text payload."""
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO mxc_text_cache(mxc_url, text_content, cached_at)
+        VALUES (?, ?, ?)
+        """,
+        (mxc_url, text, cached_at),
+    )
+
+
 async def persist_lookup_events(
     db: aiosqlite.Connection,
     *,
