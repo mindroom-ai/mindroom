@@ -20,6 +20,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import validate_event_name
 from mindroom.logging_config import get_logger
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
     from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
-    from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
@@ -160,6 +160,34 @@ class ToolRuntimeSupport:
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
         )
 
+    def build_required_context(
+        self,
+        target: MessageTarget,
+        *,
+        user_id: str | None,
+        session_id: str | None = None,
+        agent_name: str | None = None,
+        active_model_name: str | None = None,
+        attachment_ids: list[str] | tuple[str, ...] | None = None,
+        correlation_id: str | None = None,
+        source_envelope: MessageEnvelope | None = None,
+    ) -> ToolRuntimeContext:
+        """Build one live Matrix tool runtime context or fail fast if runtime support is unavailable."""
+        context = self.build_context(
+            target,
+            user_id=user_id,
+            session_id=session_id,
+            agent_name=agent_name,
+            active_model_name=active_model_name,
+            attachment_ids=attachment_ids,
+            correlation_id=correlation_id,
+            source_envelope=source_envelope,
+        )
+        if context is None:
+            msg = "Live Matrix tool dispatch requires initialized tool runtime support"
+            raise RuntimeError(msg)
+        return context
+
     def build_execution_identity(
         self,
         *,
@@ -253,6 +281,21 @@ def resolve_current_session_id(
         return resolved_runtime_context.session_id
 
     return None
+
+
+def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
+    """Build the canonical execution identity represented by one live runtime context."""
+    target = MessageTarget.from_runtime_context(context)
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=context.agent_name,
+        runtime_paths=context.runtime_paths,
+        requester_id=context.requester_id,
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        resolved_thread_id=target.resolved_thread_id,
+        session_id=target.session_id,
+    )
 
 
 def attachment_id_available_in_tool_runtime_context(

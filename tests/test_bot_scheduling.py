@@ -161,13 +161,14 @@ class TestBotScheduleCommands:
             # Verify schedule_task was called correctly
             mock_schedule.assert_called_once()
             call_kwargs = mock_schedule.call_args.kwargs
-            assert call_kwargs["client"] is mock_agent_bot.client
+            runtime = call_kwargs["runtime"]
+            assert runtime.client is mock_agent_bot.client
+            assert runtime.config is mock_agent_bot.config
+            assert runtime.room is room
             assert call_kwargs["room_id"] == "!test:server"
             assert call_kwargs["thread_id"] == "$thread123"
             assert call_kwargs["scheduled_by"] == "@user:server"
             assert call_kwargs["full_text"] == "in 5 minutes Check deployment"
-            assert call_kwargs["config"] is mock_agent_bot.config
-            assert call_kwargs["room"] is room
             assert call_kwargs["mentioned_agents"] == []
 
             # Verify response was sent
@@ -303,6 +304,10 @@ class TestBotScheduleCommands:
 
             mock_edit.assert_called_once()
             edit_kwargs = mock_edit.call_args.kwargs
+            runtime = edit_kwargs["runtime"]
+            assert runtime.client is mock_agent_bot.client
+            assert runtime.config is mock_agent_bot.config
+            assert runtime.room is room
             assert edit_kwargs["room_id"] == "!test:server"
             assert edit_kwargs["task_id"] == "task123"
             assert edit_kwargs["full_text"] == "in 30 minutes Check deployment"

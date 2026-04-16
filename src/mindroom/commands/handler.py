@@ -15,8 +15,8 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
-from mindroom.message_target import MessageTarget
 from mindroom.scheduling import (
+    SchedulingRuntime,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     edit_scheduled_task,
@@ -24,7 +24,7 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -45,9 +45,22 @@ if TYPE_CHECKING:
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
+
+
+def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
+    """Collapse active scheduling collaborators into one explicit live runtime object."""
+    return SchedulingRuntime(
+        client=context.client,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        room=room,
+        conversation_cache=context.conversation_cache,
+        event_cache=context.event_cache,
+    )
 
 
 class CommandEvent(Protocol):
@@ -331,13 +344,10 @@ class _ToolCallArguments:
 
 
 @dataclass(frozen=True)
-class _SkillToolDispatchTarget:
-    """One valid runtime shape for tool-dispatched skill execution."""
+class SkillToolDispatchContext:
+    """One explicit runtime shape for tool-dispatched skill execution."""
 
-    requester_user_id: str | None
-    room_id: str | None
-    resolved_thread_id: str | None
-    session_id: str | None
+    execution_identity: ToolExecutionIdentity
     runtime_context: ToolRuntimeContext | None
 
 
@@ -403,46 +413,36 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
-def _resolve_skill_tool_dispatch_target(
+def skill_tool_dispatch_context_from_target(
     *,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
     requester_user_id: str | None,
-    room_id: str | None,
-    thread_id: str | None,
-    runtime_context: ToolRuntimeContext | None,
-) -> _SkillToolDispatchTarget:
-    if runtime_context is not None:
-        if requester_user_id is not None or room_id is not None or thread_id is not None:
-            msg = "Skill tool dispatch accepts either runtime_context or raw Matrix coordinates."
-            raise ValueError(msg)
-
-        target = MessageTarget.from_runtime_context(runtime_context)
-        return _SkillToolDispatchTarget(
-            requester_user_id=runtime_context.requester_id,
-            room_id=target.room_id,
-            resolved_thread_id=target.resolved_thread_id,
-            session_id=target.session_id,
-            runtime_context=runtime_context,
-        )
-
-    if thread_id is not None and room_id is None:
-        msg = "Skill tool dispatch thread_id requires room_id."
-        raise ValueError(msg)
-
-    target = (
-        MessageTarget.resolve(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=None,
-        )
-        if room_id is not None
-        else None
-    )
-    return _SkillToolDispatchTarget(
-        requester_user_id=requester_user_id,
-        room_id=target.room_id if target is not None else None,
-        resolved_thread_id=target.resolved_thread_id if target is not None else None,
-        session_id=target.session_id if target is not None else None,
+    target: MessageTarget | None,
+) -> SkillToolDispatchContext:
+    """Build the non-live dispatch shape from an explicit Matrix target."""
+    return SkillToolDispatchContext(
+        execution_identity=build_tool_execution_identity(
+            channel="matrix",
+            agent_name=agent_name,
+            runtime_paths=runtime_paths,
+            requester_id=requester_user_id,
+            room_id=target.room_id if target is not None else None,
+            thread_id=target.resolved_thread_id if target is not None else None,
+            resolved_thread_id=target.resolved_thread_id if target is not None else None,
+            session_id=target.session_id if target is not None else None,
+        ),
         runtime_context=None,
+    )
+
+
+def skill_tool_dispatch_context_from_runtime_context(
+    runtime_context: ToolRuntimeContext,
+) -> SkillToolDispatchContext:
+    """Build the live dispatch shape from one bound runtime context."""
+    return SkillToolDispatchContext(
+        execution_identity=build_execution_identity_from_runtime_context(runtime_context),
+        runtime_context=runtime_context,
     )
 
 
@@ -455,28 +455,9 @@ async def _run_skill_command_tool(
     command_tool: str,
     skill_name: str,
     args_text: str,
+    dispatch_context: SkillToolDispatchContext,
     command_name: str = "skill",
-    requester_user_id: str | None = None,
-    room_id: str | None = None,
-    thread_id: str | None = None,
-    runtime_context: ToolRuntimeContext | None = None,
 ) -> str:
-    dispatch_target = _resolve_skill_tool_dispatch_target(
-        requester_user_id=requester_user_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        runtime_context=runtime_context,
-    )
-    execution_identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=dispatch_target.requester_user_id,
-        room_id=dispatch_target.room_id,
-        thread_id=dispatch_target.resolved_thread_id,
-        resolved_thread_id=dispatch_target.resolved_thread_id,
-        session_id=dispatch_target.session_id,
-    )
     effective_runtime_paths = (
         runtime_paths
         if storage_path is None or storage_path == runtime_paths.storage_root
@@ -484,12 +465,17 @@ async def _run_skill_command_tool(
     )
 
     try:
-        with tool_runtime_context(dispatch_target.runtime_context), tool_execution_identity(execution_identity):
+        with (
+            tool_runtime_context(dispatch_context.runtime_context),
+            tool_execution_identity(
+                dispatch_context.execution_identity,
+            ),
+        ):
             toolkits = _collect_agent_toolkits(
                 config,
                 agent_name,
                 effective_runtime_paths,
-                execution_identity=execution_identity,
+                execution_identity=dispatch_context.execution_identity,
             )
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:
@@ -573,16 +559,11 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
 
         _, response_text = await schedule_task(
-            client=context.client,
+            runtime=_scheduling_runtime(context, room),
             room_id=room.room_id,
             thread_id=effective_thread_id,
             scheduled_by=requester_user_id,
             full_text=full_text,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room=room,
-            conversation_cache=context.conversation_cache,
-            event_cache=context.event_cache,
             mentioned_agents=mentioned_agents,
         )
 
@@ -616,16 +597,11 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         task_id = command.args["task_id"]
         full_text = command.args["full_text"]
         response_text = await edit_scheduled_task(
-            client=context.client,
+            runtime=_scheduling_runtime(context, room),
             room_id=room.room_id,
             task_id=task_id,
             full_text=full_text,
             scheduled_by=requester_user_id,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room=room,
-            conversation_cache=context.conversation_cache,
-            event_cache=context.event_cache,
             thread_id=effective_thread_id,
         )
 

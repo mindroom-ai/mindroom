@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.matrix.identity import MatrixID
-from mindroom.scheduling import _extract_mentioned_agents_from_text
+from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -87,30 +87,30 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     assert result == "✅ Scheduled"
     assert new_thread_result == "✅ Scheduled"
     assert mock_schedule.await_count == 2
-    assert mock_schedule.await_args_list[0].kwargs == {
-        "client": context.client,
+    first_call = mock_schedule.await_args_list[0].kwargs
+    second_call = mock_schedule.await_args_list[1].kwargs
+    expected_runtime = SchedulingRuntime(
+        client=context.client,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        room=context.room,
+        conversation_cache=context.conversation_cache,
+        event_cache=context.event_cache,
+    )
+    assert first_call == {
+        "runtime": expected_runtime,
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 3pm check deployment",
-        "config": context.config,
-        "runtime_paths": context.runtime_paths,
-        "room": context.room,
-        "conversation_cache": context.conversation_cache,
-        "event_cache": context.event_cache,
         "new_thread": False,
     }
-    assert mock_schedule.await_args_list[1].kwargs == {
-        "client": context.client,
+    assert second_call == {
+        "runtime": expected_runtime,
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 4pm check deployment",
-        "config": context.config,
-        "runtime_paths": context.runtime_paths,
-        "room": context.room,
-        "conversation_cache": context.conversation_cache,
-        "event_cache": context.event_cache,
         "new_thread": True,
     }
 
@@ -141,16 +141,18 @@ async def test_edit_schedule_tool_calls_backend() -> None:
 
     assert "Updated" in result
     mock_edit.assert_awaited_once_with(
-        client=context.client,
+        runtime=SchedulingRuntime(
+            client=context.client,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            room=context.room,
+            conversation_cache=context.conversation_cache,
+            event_cache=context.event_cache,
+        ),
         room_id=context.room_id,
         task_id="task123",
         full_text="tomorrow at 9am check deployment",
         scheduled_by=context.requester_id,
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        room=context.room,
-        conversation_cache=context.conversation_cache,
-        event_cache=context.event_cache,
         thread_id=context.resolved_thread_id,
     )
 

@@ -22,6 +22,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
+    SchedulingRuntime,
     _execute_scheduled_workflow,
     _parse_workflow_schedule,
     _validate_conditional_workflow,
@@ -733,16 +734,18 @@ class TestIntegrationWithScheduling:
 
         with patch("mindroom.scheduling._run_cron_task", new=AsyncMock()):
             task_id, message = await schedule_task(
-                client=client,
+                runtime=SchedulingRuntime(
+                    client=client,
+                    config=config,
+                    runtime_paths=runtime_paths_for(config),
+                    room=room,
+                    conversation_cache=_conversation_cache(),
+                    event_cache=_event_cache(),
+                ),
                 room_id="!room:server",
                 thread_id="$thread123",
                 scheduled_by="@user:server",
                 full_text="Daily at 9am, research AI news",
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                event_cache=_event_cache(),
-                room=room,
-                conversation_cache=_conversation_cache(),
             )
 
             assert task_id is not None
