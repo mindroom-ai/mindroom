@@ -121,6 +121,11 @@ def _primary_worker_backend_config_signature(
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "kubernetes":
+        backend_signature = kubernetes_backend_config_signature(
+            runtime_paths,
+            auth_token=proxy_token,
+            storage_root=storage_root,
+        )
         kubernetes_tool_validation_snapshot = _require_kubernetes_tool_validation_snapshot(
             kubernetes_tool_validation_snapshot,
         )
@@ -132,11 +137,7 @@ def _primary_worker_backend_config_signature(
             *sorted(resolved_worker_grantable_credentials),
         )
         return (
-            *kubernetes_backend_config_signature(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_root=storage_root,
-            ),
+            *backend_signature,
             json.dumps(kubernetes_tool_validation_snapshot, separators=(",", ":"), sort_keys=True),
             *allowlist_signature,
         )
