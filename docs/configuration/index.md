@@ -266,7 +266,9 @@ defaults:
 `defaults.worker_grantable_credentials` accepts credential service names, not a closed provider enum.
 Common built-in env-synced examples include `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`.
 Custom credential service names stored through the credentials API or UI are also valid and will be mirrored into the worker shared credential layer.
-This setting does not inject provider env into isolated workers, and some credential types may still require worker-specific tool support beyond mirroring.
+This setting does not inject provider env into sandbox-proxied `python` or `shell` execution.
+Sandbox-proxied execution uses a narrower env contract than direct local execution: ordinary runtime `.env` values and provider env stay deny-by-default unless they are explicitly passed through by the tool/runtime.
+Some credential types may still require worker-specific tool support beyond mirroring.
 
 # Auto-compaction is destructive inside the active session.
 # It rewrites the stored session summary and removes compacted raw runs from
