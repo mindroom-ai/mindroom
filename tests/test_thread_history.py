@@ -243,7 +243,6 @@ class TestThreadHistory:
             "!room:localhost",
             "$thread_root",
             hydrate_sidecars=True,
-            event_cache=event_cache,
         )
         mock_store.assert_awaited_once_with(
             event_cache,
@@ -253,8 +252,8 @@ class TestThreadHistory:
         )
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_prefers_relations_before_room_scan(self) -> None:
-        """Thread history should prefer the relations fetch path before falling back to room scans."""
+    async def test_fetch_thread_history_uses_room_scan_instead_of_relations_fast_path(self) -> None:
+        """Thread history should use the room-scan path so promoted descendants stay in the thread."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
@@ -263,7 +262,7 @@ class TestThreadHistory:
             source_content={"body": "Root message"},
         )
         thread_event = self._make_text_event(
-            event_id="$reply",
+            event_id="$thread_reply",
             sender="@agent:localhost",
             body="Reply in thread",
             server_timestamp=2000,
@@ -272,36 +271,40 @@ class TestThreadHistory:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        unrelated_relation = self._make_text_event(
-            event_id="$other_thread_reply",
-            sender="@agent:localhost",
-            body="Should be ignored",
-            server_timestamp=2500,
+        plain_reply = self._make_text_event(
+            event_id="$plain_reply",
+            sender="@bridge:localhost",
+            body="Bridged reply",
+            server_timestamp=3000,
             source_content={
-                "body": "Should be ignored",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$other_root"},
+                "body": "Bridged reply",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_reply"}},
             },
         )
         client = self._make_relations_client(
             root_event=root_event,
             relations={
                 self._relation_key("$thread_root", RelationshipType.thread): [
-                    unrelated_relation,
                     thread_event,
                 ],
             },
         )
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [plain_reply, thread_event, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert [message.event_id for message in history] == ["$thread_root", "$thread_reply", "$plain_reply"]
         assert history[0].body == "Root message"
         assert history[1].body == "Reply in thread"
-        client.room_messages.assert_not_awaited()
+        assert history[2].body == "Bridged reply"
+        client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_uses_bundled_root_edit_without_replacement_lookup(self) -> None:
-        """Bundled replacement data should update the root without another relations request."""
+        """Bundled replacement data should update the root without extra fetches."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
@@ -349,14 +352,8 @@ class TestThreadHistory:
 
         assert history[0].event_id == "$thread_root"
         assert history[0].body == "Updated root"
-        client.room_get_event_relations.assert_called_once_with(
-            "!room:localhost",
-            "$thread_root",
-            RelationshipType.thread,
-            "m.room.message",
-            direction=nio.MessageDirection.back,
-            limit=100,
-        )
+        client.room_messages.assert_awaited_once()
+        client.room_get_event_relations.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_uses_nested_bundled_root_edit_without_validation_noise(
@@ -417,8 +414,8 @@ class TestThreadHistory:
         assert not any("Error validating event" in record.getMessage() for record in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_relations_path_applies_reply_edits_and_stream_status(self) -> None:
-        """Relations-first fetch should apply reply edits and preserve stream metadata."""
+    async def test_fetch_thread_history_applies_reply_edits_and_stream_status_without_cached_latest_edit(self) -> None:
+        """Thread history should keep latest edits from the homeserver even with a cold latest-edit cache."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
@@ -458,10 +455,12 @@ class TestThreadHistory:
                 self._relation_key("$thread_root", RelationshipType.thread): [thread_event],
             },
         )
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [newer_edit, thread_event, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
         event_cache = make_event_cache_mock()
-        event_cache.get_latest_edit.side_effect = lambda _room_id, event_id: {
-            "$reply": _event_source_for_cache(newer_edit),
-        }.get(event_id)
+        event_cache.get_latest_edit.return_value = None
 
         history = await fetch_thread_history(
             client,
@@ -474,10 +473,11 @@ class TestThreadHistory:
         assert history[1].body == "Final answer"
         assert history[1].content["body"] == "Final answer"
         assert history[1].stream_status == "completed"
+        client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_relations_path_includes_notice_reply(self) -> None:
-        """Relations-first fetch should keep notice messages in thread history."""
+    async def test_fetch_thread_history_includes_notice_reply(self) -> None:
+        """Thread history should keep notice messages in thread history."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@user:localhost",
@@ -507,6 +507,7 @@ class TestThreadHistory:
 
         assert [message.event_id for message in history] == ["$thread_root", "$notice_reply"]
         assert "msgtype" not in history[0].to_dict()
+        client.room_messages.assert_awaited_once()
         assert history[1].body == "Compacted 12 messages"
         assert history[1].to_dict()["msgtype"] == "m.notice"
 
@@ -543,46 +544,6 @@ class TestThreadHistory:
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         assert history[0].to_dict()["msgtype"] == "m.notice"
         assert history[0].body == "Compacted summary"
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_history_falls_back_when_relations_lookup_fails(self) -> None:
-        """Room-scan fetch results should be returned and cached through the shared path."""
-        client = AsyncMock()
-        fallback_history = [{"event_id": "$thread_root", "body": "fallback"}]
-
-        with (
-            patch(
-                "mindroom.matrix.client._fetch_thread_history_via_relations_with_events",
-                new=AsyncMock(side_effect=RuntimeError("relations failed")),
-            ),
-            patch(
-                "mindroom.matrix.client._fetch_thread_history_via_room_messages_with_events",
-                new=AsyncMock(
-                    return_value=MagicMock(
-                        history=fallback_history,
-                        event_sources=[{"event_id": "$thread_root"}],
-                        resolution_ms=0.0,
-                        sidecar_hydration_ms=0.0,
-                    ),
-                ),
-            ) as mock_room_scan,
-            patch("mindroom.matrix.client._store_thread_history_cache", new=AsyncMock()) as mock_store,
-        ):
-            history = await fetch_thread_history(
-                client,
-                "!room:localhost",
-                "$thread_root",
-                event_cache=make_event_cache_mock(),
-            )
-
-        assert history == fallback_history
-        mock_room_scan.assert_awaited_once_with(
-            client,
-            "!room:localhost",
-            "$thread_root",
-            hydrate_sidecars=True,
-        )
-        mock_store.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_skips_cache_store_for_degraded_room_scan_result(self) -> None:
