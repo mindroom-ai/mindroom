@@ -25,6 +25,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
     HookRegistry,
     ScheduleFiredContext,
+    build_hook_matrix_admin,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
@@ -824,6 +825,7 @@ async def _execute_scheduled_workflow(
                         runtime_paths,
                         conversation_cache=conversation_cache,
                     ),
+                    matrix_admin=build_hook_matrix_admin(client, runtime_paths),
                     room_state_querier=build_hook_room_state_querier(client),
                     room_state_putter=build_hook_room_state_putter(client),
                     task_id=task_id,

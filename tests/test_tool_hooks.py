@@ -866,6 +866,48 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
 
 
 @pytest.mark.asyncio
+async def test_tool_hook_contexts_expose_matrix_admin(tmp_path: Path) -> None:
+    """tool:* hook contexts should expose the shared matrix admin helper."""
+    resolved_aliases: list[str | None] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        assert ctx.matrix_admin is not None
+        resolved_aliases.append(await ctx.matrix_admin.resolve_alias("#personal-user:localhost"))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        assert ctx.matrix_admin is not None
+        resolved_aliases.append(await ctx.matrix_admin.resolve_alias("#personal-user:localhost"))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    runtime_context = _tool_runtime_context(tmp_path, hook_registry=registry)
+    runtime_context.client.homeserver = "http://localhost:8008"
+    runtime_context.client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#personal-user:localhost",
+        room_id="!personal:localhost",
+        servers=["localhost"],
+    )
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    assert resolved_aliases == ["!personal:localhost", "!personal:localhost"]
+    runtime_context.client.room_resolve_alias.assert_awaited_with("#personal-user:localhost")
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path: Path) -> None:
     """Tool hook contexts should expose live room-state helpers from the active runtime client."""
     sent: list[tuple[str, str, str | None, str, dict[str, object] | None, bool]] = []

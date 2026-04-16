@@ -395,9 +395,11 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
 
     storage = _SessionStorage()
     sequence: list[tuple[str, str | None, str | None, str | None]] = []
+    saw_matrix_admin: list[bool] = []
 
     @hook(EVENT_SESSION_STARTED, priority=10)
     async def first(ctx: SessionHookContext) -> None:
+        saw_matrix_admin.append(ctx.matrix_admin is not None)
         sequence.append(("first", ctx.scope.key, ctx.session_id, ctx.thread_id))
 
     @hook(EVENT_SESSION_STARTED, priority=20)
@@ -459,6 +461,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
         ("ai", "!test:localhost:$thread-root", None, None),
         ("deliver", None, None, None),
     ]
+    assert saw_matrix_admin == [True]
 
 
 @pytest.mark.asyncio

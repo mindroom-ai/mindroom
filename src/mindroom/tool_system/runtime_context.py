@@ -14,6 +14,7 @@ from mindroom.hooks import (
     HookContextSupport,
     HookRegistry,
     MessageEnvelope,
+    build_hook_matrix_admin,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks.sender import HookMessageSender
-    from mindroom.hooks.types import HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks.types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.scheduling import SchedulingRuntime
@@ -146,6 +147,7 @@ class ToolRuntimeHookBindings:
     """Resolved hook-facing bindings derived from one tool runtime context."""
 
     message_sender: HookMessageSender | None
+    matrix_admin: HookMatrixAdmin | None
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
@@ -371,6 +373,7 @@ def resolve_tool_runtime_hook_bindings(context: ToolRuntimeContext) -> ToolRunti
     """Return the canonical hook-facing bindings for one tool runtime context."""
     return ToolRuntimeHookBindings(
         message_sender=context.hook_message_sender,
+        matrix_admin=build_hook_matrix_admin(context.client, context.runtime_paths),
         room_state_querier=context.room_state_querier or build_hook_room_state_querier(context.client),
         room_state_putter=context.room_state_putter or build_hook_room_state_putter(context.client),
         message_received_depth=context.message_received_depth,
@@ -534,6 +537,7 @@ async def emit_custom_event(
         logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
         correlation_id=correlation_id,
         message_sender=bindings.message_sender,
+        matrix_admin=bindings.matrix_admin,
         room_state_querier=bindings.room_state_querier,
         room_state_putter=bindings.room_state_putter,
         payload=payload,

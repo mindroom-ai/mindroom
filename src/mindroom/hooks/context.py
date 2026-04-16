@@ -539,6 +539,7 @@ class ToolBeforeCallContext:
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
     message_received_depth: int = 0
@@ -633,6 +634,7 @@ class ToolAfterCallContext:
     logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
     correlation_id: str = ""
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
     message_received_depth: int = 0

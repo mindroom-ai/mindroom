@@ -1039,6 +1039,7 @@ class MultiAgentOrchestrator:
             logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
             message_sender=self._hook_message_sender(),
+            matrix_admin=self._hook_matrix_admin(),
             room_state_querier=self._hook_room_state_querier(),
             room_state_putter=self._hook_room_state_putter(),
             changed_entities=tuple(sorted(changed_entities)),

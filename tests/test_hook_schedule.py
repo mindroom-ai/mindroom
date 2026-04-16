@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
+import nio
 import pytest
 
 from mindroom.config.main import Config
@@ -350,6 +351,40 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "room-level"
     assert "m.relates_to" not in content
+
+
+@pytest.mark.asyncio
+async def test_schedule_hook_exposes_matrix_admin(tmp_path: Path) -> None:
+    """schedule:fired hooks should expose the router-backed matrix admin helper."""
+    resolved_aliases: list[str | None] = []
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def inspect(ctx: ScheduleFiredContext) -> None:
+        assert ctx.matrix_admin is not None
+        resolved_aliases.append(await ctx.matrix_admin.resolve_alias("#personal-user:localhost"))
+        ctx.suppress = True
+
+    config = _config(tmp_path)
+    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [inspect])]))
+    client = AsyncMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.homeserver = "http://localhost:8008"
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#personal-user:localhost",
+        room_id="!personal:localhost",
+        servers=["localhost"],
+    )
+
+    await _execute_scheduled_workflow(
+        client,
+        _workflow("Resume work"),
+        config,
+        runtime_paths_for(config),
+        _conversation_cache(),
+    )
+
+    assert resolved_aliases == ["!personal:localhost"]
+    client.room_resolve_alias.assert_awaited_once_with("#personal-user:localhost")
 
 
 @pytest.mark.asyncio

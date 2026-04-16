@@ -1021,9 +1021,11 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         context_window=64_000,
     )
     observed: list[str] = []
+    saw_matrix_admin: list[bool] = []
 
     @hook(EVENT_COMPACTION_BEFORE, agents=["team_general"], rooms=["!room:localhost"])
     async def matching(ctx: CompactionHookContext) -> None:
+        saw_matrix_admin.append(ctx.matrix_admin is not None)
         observed.append(f"{ctx.scope.key}:{ctx.agent_name}:{ctx.room_id}:{ctx.thread_id}")
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching])])
@@ -1055,6 +1057,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         )
 
     assert observed == ["team:team_general:team_general:!room:localhost:$thread"]
+    assert saw_matrix_admin == [True]
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,13 @@ from mindroom.config.models import ModelConfig
 from mindroom.hooks import HookContext, HookContextSupport
 from mindroom.hooks.registry import HookRegistry, HookRegistryState
 from mindroom.logging_config import get_logger
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from mindroom.orchestrator import MultiAgentOrchestrator
+from tests.conftest import (
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -197,3 +203,35 @@ def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path:
 
     assert hasattr(support, "matrix_admin")
     assert support.matrix_admin() is None
+
+
+@pytest.mark.asyncio
+async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path) -> None:
+    """config:reloaded should expose the router-backed matrix admin helper."""
+    runtime_paths = orchestrator_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(models={"default": ModelConfig(provider="test", id="test-model")}),
+        runtime_paths,
+    )
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = config
+    orchestrator.hook_registry = MagicMock()
+    orchestrator.hook_registry.has_hooks.return_value = True
+    router_client = AsyncMock(spec=nio.AsyncClient)
+    router_client.homeserver = "http://localhost:8008"
+    orchestrator.agent_bots["router"] = SimpleNamespace(
+        client=router_client,
+        _hook_send_message=AsyncMock(),
+    )
+
+    with patch("mindroom.orchestrator.emit", new=AsyncMock()) as mock_emit:
+        await orchestrator._emit_config_reloaded(
+            new_config=config,
+            changed_entities={"router"},
+            added_entities=set(),
+            removed_entities=set(),
+            plugin_changes=(),
+        )
+
+    context = mock_emit.await_args.args[2]
+    assert context.matrix_admin is not None
