@@ -67,6 +67,8 @@ type SyncBridgeEvent = (
     | tuple[Literal["after"], str, bool, str]
 )
 
+_SESSION_ID = "!room:localhost:$resolved-thread"
+
 
 class NonDeepcopyableResult:
     """Mutable result object that deliberately breaks deepcopy()."""
@@ -152,7 +154,7 @@ def _before_context(
         room_id=room_id,
         thread_id="$thread",
         requester_id="@user:localhost",
-        session_id="session-1",
+        session_id=_SESSION_ID,
         config=config,
         runtime_paths=runtime_paths_for(config),
         correlation_id="corr-tool",
@@ -181,6 +183,7 @@ def _tool_runtime_context(
         runtime_paths=runtime_paths_for(config),
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
+        session_id=_SESSION_ID,
         correlation_id="corr-runtime",
         hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,
@@ -198,7 +201,7 @@ def _execution_identity() -> ToolExecutionIdentity:
         room_id="!room:localhost",
         thread_id="$thread",
         resolved_thread_id="$resolved-thread",
-        session_id="session-1",
+        session_id=_SESSION_ID,
     )
 
 
@@ -254,7 +257,7 @@ def test_tool_before_call_context_decline_helper() -> None:
         room_id="!room:localhost",
         thread_id="$thread",
         requester_id="@user:localhost",
-        session_id="session-1",
+        session_id=_SESSION_ID,
     )
 
     context.decline("blocked")
@@ -436,7 +439,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["room_id"] == "!room:localhost"
     assert records[0]["thread_id"] == "$resolved-thread"
     assert records[0]["requester_id"] == "@user:localhost"
-    assert records[0]["session_id"] == "session-1"
+    assert records[0]["session_id"] == _SESSION_ID
     assert records[0]["correlation_id"] == "corr-runtime"
     assert records[0]["error_type"] == "ValueError"
     assert records[0]["arguments"] == {
@@ -644,7 +647,7 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
             "!room:localhost",
             "$resolved-thread",
             "@user:localhost",
-            "session-1",
+            _SESSION_ID,
         ),
     ]
     assert after_seen == [
@@ -655,7 +658,7 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
             "!room:localhost",
             "$resolved-thread",
             "@user:localhost",
-            "session-1",
+            _SESSION_ID,
         ),
     ]
 
@@ -957,23 +960,26 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
         seen.append((query_result, put_result))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    target = MessageTarget.resolve("!room:localhost", "$thread", None)
+    execution_identity = bot._tool_runtime_support.build_execution_identity(
+        target=target,
+        user_id="@user:localhost",
+        session_id=target.session_id,
+    )
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
-        execution_identity=_execution_identity(),
+        execution_identity=execution_identity,
     )
     assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    runtime_context = bot._tool_runtime_support.build_context(
-        MessageTarget.resolve("!room:localhost", "$thread", None),
-        user_id="@user:localhost",
-    )
+    runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context), tool_execution_identity(execution_identity):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -1098,7 +1104,7 @@ async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_co
             room_id="!room:localhost",
             thread_id="$thread",
             resolved_thread_id="$resolved-thread",
-            session_id="session-1",
+            session_id=_SESSION_ID,
         ),
     )
     assert bridge is not None
@@ -1378,7 +1384,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity = bot._tool_runtime_support.build_execution_identity(
                 target=target,
                 user_id="@user:localhost",
-                session_id="session-1",
+                session_id=target.session_id,
             )
             toolkit = next(tool for tool in bot.agent.tools if tool.name == "tool-hooks-runtime-demo")
             function = _first_function(toolkit)
@@ -1389,7 +1395,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         assert result.status == "success"
         assert result.result == "HI"
         assert before_seen == [
-            ("!room:localhost", "$thread", "@user:localhost", "session-1"),
+            ("!room:localhost", "$thread", "@user:localhost", target.session_id),
         ]
         assert seen == [
             (

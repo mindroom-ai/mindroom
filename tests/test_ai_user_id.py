@@ -71,7 +71,12 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
 from mindroom.streaming import StreamingDeliveryError
-from mindroom.tool_system.runtime_context import ToolRuntimeSupport, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    LiveToolDispatchContext,
+    ToolRuntimeSupport,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     get_tool_execution_identity,
@@ -1918,8 +1923,7 @@ class TestUserIdPassthrough:
                 )
 
         stream = coordinator._stream_in_tool_context(
-            execution_identity=execution_identity,
-            tool_context=tool_context,
+            tool_dispatch=LiveToolDispatchContext.from_runtime_context(tool_context),
             stream_factory=source,
         )
 

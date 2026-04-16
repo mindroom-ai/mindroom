@@ -65,6 +65,15 @@ It no longer sends messages, runs AI, or writes persistence state.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
 Command handling now records terminal outcomes through `TurnStore` as well.
 
+## Tool Dispatch Contracts
+
+There are now four active runtime contracts for tool and scheduling dispatch.
+`ToolRuntimeContext` is the live Matrix runtime object with client, caches, hook bindings, and attachment scope.
+`LiveToolDispatchContext` is the strict live contract that pairs one `ToolRuntimeContext` with a matching `ToolExecutionIdentity`.
+`ToolDispatchContext` is the detached contract for cases that only have a serializable execution identity and no live Matrix runtime.
+`SchedulingRuntime` is the explicit live scheduling contract consumed by command and tool scheduling entrypoints.
+Hook bridges and response execution now consume these contracts directly instead of rebuilding identity from partial nullable fields.
+
 `AgentBot` is closer to a runtime shell again.
 It still needs more cleanup, but normal turn control, edit regeneration, and interactive selection execution no longer live in the bot class itself.
 

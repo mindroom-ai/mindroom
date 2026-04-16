@@ -58,7 +58,11 @@ from mindroom.streaming import (
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
+from mindroom.tool_system.runtime_context import (
+    ToolDispatchContext,
+    resolve_tool_runtime_hook_bindings,
+    runtime_context_from_dispatch_context,
+)
 from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
     stream_with_tool_execution_identity,
@@ -335,8 +339,7 @@ class _PreparedResponseRuntime:
     media_inputs: MediaInputs
     session_id: str
     model_prompt: str
-    tool_context: ToolRuntimeContext | None
-    execution_identity: ToolExecutionIdentity
+    tool_dispatch: ToolDispatchContext
     request_knowledge_managers: dict[str, Any]
     room_mode: bool = False
 
@@ -423,15 +426,14 @@ class ResponseRunner:
     async def _run_in_tool_context(
         self,
         *,
-        execution_identity: ToolExecutionIdentity | None,
-        tool_context: ToolRuntimeContext | None,
+        tool_dispatch: ToolDispatchContext,
         operation: Callable[[], Awaitable[_ToolContextResult]],
     ) -> _ToolContextResult:
         """Execute one operation inside the response-owned execution and tool context."""
         return await self.deps.tool_runtime.run_in_context(
-            tool_context=tool_context,
+            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             operation=lambda: run_with_tool_execution_identity(
-                execution_identity,
+                tool_dispatch.execution_identity,
                 operation=operation,
             ),
         )
@@ -439,15 +441,14 @@ class ResponseRunner:
     def _stream_in_tool_context(
         self,
         *,
-        execution_identity: ToolExecutionIdentity | None,
-        tool_context: ToolRuntimeContext | None,
+        tool_dispatch: ToolDispatchContext,
         stream_factory: Callable[[], AsyncIterator[_ToolStreamChunk]],
     ) -> AsyncIterator[_ToolStreamChunk]:
         """Wrap one stream inside the response-owned execution and tool context."""
         return self.deps.tool_runtime.stream_in_context(
-            tool_context=tool_context,
+            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             stream_factory=lambda: stream_with_tool_execution_identity(
-                execution_identity,
+                tool_dispatch.execution_identity,
                 stream_factory=stream_factory,
             ),
         )
@@ -975,7 +976,7 @@ class ResponseRunner:
         )
         delivery_request_base = replace(resolved_request, target=delivery_target)
         session_id = resolved_target.session_id
-        tool_context = self.deps.tool_runtime.build_context(
+        tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=requester_user_id,
             active_model_name=model_name,
@@ -984,19 +985,14 @@ class ResponseRunner:
             correlation_id=resolved_correlation_id,
             source_envelope=request.response_envelope,
         )
-        execution_identity = self.deps.tool_runtime.build_execution_identity(
-            target=resolved_target,
-            user_id=requester_user_id,
-            session_id=session_id,
-        )
         session_scope = self.deps.state_writer.team_history_scope(list(team_request.team_agents))
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def team_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
+            return self.deps.state_writer.create_storage(tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
-            tool_context=tool_context,
+            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             session_id=session_id,
             session_type=session_type,
             scope=session_scope,
@@ -1045,7 +1041,7 @@ class ResponseRunner:
                             agent_ids=list(team_request.team_agents),
                             message=model_message,
                             orchestrator=orchestrator,
-                            execution_identity=execution_identity,
+                            execution_identity=tool_dispatch.execution_identity,
                             mode=mode,
                             thread_history=model_thread_history,
                             model_name=model_name,
@@ -1068,8 +1064,7 @@ class ResponseRunner:
                         )
 
                     response_stream = self._stream_in_tool_context(
-                        execution_identity=execution_identity,
-                        tool_context=tool_context,
+                        tool_dispatch=tool_dispatch,
                         stream_factory=build_response_stream,
                     )
 
@@ -1133,7 +1128,7 @@ class ResponseRunner:
                                     mode=mode,
                                     message=model_message,
                                     orchestrator=orchestrator,
-                                    execution_identity=execution_identity,
+                                    execution_identity=tool_dispatch.execution_identity,
                                     thread_history=model_thread_history,
                                     model_name=model_name,
                                     media=resolved_request.media,
@@ -1154,8 +1149,7 @@ class ResponseRunner:
                                 )
 
                             response_text = await self._run_in_tool_context(
-                                execution_identity=execution_identity,
-                                tool_context=tool_context,
+                                tool_dispatch=tool_dispatch,
                                 operation=build_response_text,
                             )
                     finally:
@@ -1253,7 +1247,7 @@ class ResponseRunner:
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=SessionType.TEAM,
-                execution_identity=execution_identity,
+                execution_identity=tool_dispatch.execution_identity,
                 compaction_outcomes=tuple(compaction_outcomes),
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
@@ -1407,7 +1401,7 @@ class ResponseRunner:
             target=resolved_target,
             include_context=_agent_has_matrix_messaging_tool(self.deps.runtime.config, self.deps.agent_name),
         )
-        tool_context = self.deps.tool_runtime.build_context(
+        tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
             session_id=session_id,
@@ -1415,14 +1409,9 @@ class ResponseRunner:
             correlation_id=request.correlation_id,
             source_envelope=request.response_envelope,
         )
-        execution_identity = self.deps.tool_runtime.build_execution_identity(
-            target=resolved_target,
-            user_id=request.user_id,
-            session_id=session_id,
-        )
         request_knowledge_managers = await self._ensure_request_knowledge_managers(
             [self.deps.agent_name],
-            execution_identity,
+            tool_dispatch.execution_identity,
         )
         return _PreparedResponseRuntime(
             resolved_target=resolved_target,
@@ -1430,8 +1419,7 @@ class ResponseRunner:
             media_inputs=media_inputs,
             session_id=session_id,
             model_prompt=resolved_model_prompt,
-            tool_context=tool_context,
-            execution_identity=execution_identity,
+            tool_dispatch=tool_dispatch,
             request_knowledge_managers=request_knowledge_managers,
             room_mode=room_mode,
         )
@@ -1510,7 +1498,7 @@ class ResponseRunner:
                 show_tool_calls=self._show_tool_calls(),
                 tool_trace_collector=tool_trace,
                 run_metadata_collector=run_metadata_content,
-                execution_identity=runtime.execution_identity,
+                execution_identity=runtime.tool_dispatch.execution_identity,
                 compaction_outcomes_collector=compaction_outcomes,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=request.system_enrichment_items,
@@ -1519,8 +1507,7 @@ class ResponseRunner:
 
         async with typing_indicator(self._client(), request.room_id):
             return await self._run_in_tool_context(
-                execution_identity=runtime.execution_identity,
-                tool_context=runtime.tool_context,
+                tool_dispatch=runtime.tool_dispatch,
                 operation=build_response_text,
             )
 
@@ -1564,7 +1551,7 @@ class ResponseRunner:
             active_event_ids=active_event_ids,
             show_tool_calls=self._show_tool_calls(),
             run_metadata_collector=run_metadata_content,
-            execution_identity=runtime.execution_identity,
+            execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_outcomes_collector=compaction_outcomes,
             matrix_run_metadata=matrix_run_metadata,
             system_enrichment_items=request.system_enrichment_items,
@@ -1573,8 +1560,7 @@ class ResponseRunner:
 
         async with typing_indicator(self._client(), request.room_id):
             wrapped_response_stream = self._stream_in_tool_context(
-                execution_identity=runtime.execution_identity,
-                tool_context=runtime.tool_context,
+                tool_dispatch=runtime.tool_dispatch,
                 stream_factory=lambda: response_stream,
             )
             response_extra_content = _merge_response_extra_content(
@@ -1630,10 +1616,10 @@ class ResponseRunner:
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def history_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_storage(runtime.execution_identity, scope=session_scope)
+            return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
-            tool_context=runtime.tool_context,
+            tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
             session_type=session_type,
             scope=session_scope,
@@ -1748,10 +1734,10 @@ class ResponseRunner:
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
         def history_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_storage(runtime.execution_identity, scope=session_scope)
+            return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
-            tool_context=runtime.tool_context,
+            tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
             session_type=session_type,
             scope=session_scope,
@@ -1936,18 +1922,12 @@ class ResponseRunner:
             target=resolved_target,
             include_context=_agent_has_matrix_messaging_tool(self.deps.runtime.config, agent_name),
         )
-        tool_context = self.deps.tool_runtime.build_context(
+        tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=user_id,
             session_id=session_id,
             agent_name=agent_name,
             source_envelope=source_envelope,
-        )
-        execution_identity = self.deps.tool_runtime.build_execution_identity(
-            target=resolved_target,
-            user_id=user_id,
-            session_id=session_id,
-            agent_name=agent_name,
         )
         skill_request = ResponseRequest(
             room_id=room_id,
@@ -1968,10 +1948,10 @@ class ResponseRunner:
         session_scope = HistoryScope(kind="agent", scope_id=agent_name)
 
         def history_storage_factory() -> SqliteDb:
-            return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
+            return self.deps.state_writer.create_storage(tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
-            tool_context=tool_context,
+            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(session_scope),
             scope=session_scope,
@@ -1979,14 +1959,17 @@ class ResponseRunner:
             thread_id=resolved_target.resolved_thread_id,
             create_storage=history_storage_factory,
         )
-        request_knowledge_managers = await self._ensure_request_knowledge_managers([agent_name], execution_identity)
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [agent_name],
+            tool_dispatch.execution_identity,
+        )
         reprioritize_auto_flush_sessions(
             self.deps.storage_path,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             agent_name=agent_name,
             active_session_id=session_id,
-            execution_identity=execution_identity,
+            execution_identity=tool_dispatch.execution_identity,
         )
         show_tool_calls = self._show_tool_calls(agent_name)
         tool_trace: list[Any] = []
@@ -2013,13 +1996,12 @@ class ResponseRunner:
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
                     run_metadata_collector=run_metadata_content,
-                    execution_identity=execution_identity,
+                    execution_identity=tool_dispatch.execution_identity,
                 )
 
             try:
                 response_text = await self._run_in_tool_context(
-                    execution_identity=execution_identity,
-                    tool_context=tool_context,
+                    tool_dispatch=tool_dispatch,
                     operation=build_response_text,
                 )
             finally:
@@ -2044,7 +2026,7 @@ class ResponseRunner:
                     self.deps.runtime_paths,
                     agent_name=agent_name,
                     session_id=session_id,
-                    execution_identity=execution_identity,
+                    execution_identity=tool_dispatch.execution_identity,
                 )
                 if self.deps.runtime.config.get_agent_memory_backend(agent_name) == "mem0":
                     create_background_task(
@@ -2057,7 +2039,7 @@ class ResponseRunner:
                             self.deps.runtime_paths,
                             memory_thread_history,
                             user_id,
-                            execution_identity=execution_identity,
+                            execution_identity=tool_dispatch.execution_identity,
                         ),
                         name=f"memory_save_{agent_name}_{session_id}",
                         owner=self.deps.runtime,
@@ -2078,7 +2060,7 @@ class ResponseRunner:
                 ),
                 session_id=session_id,
                 session_type=SessionType.AGENT,
-                execution_identity=execution_identity,
+                execution_identity=tool_dispatch.execution_identity,
                 interactive_target=resolved_target,
                 memory_prompt=memory_prompt,
                 memory_thread_history=memory_thread_history,
