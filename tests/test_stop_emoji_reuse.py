@@ -224,6 +224,59 @@ async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellabl
 
 
 @pytest.mark.asyncio
+async def test_stop_manager_add_and_remove_button_notifies_cache_bookkeeping() -> None:
+    """Stop-button add/remove should preserve cache bookkeeping for the synthetic reaction."""
+    stop_manager = StopManager()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@agent:example.com"
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(room_id="!test:example.com", event_id="$reaction:example.com"),
+    )
+    client.room_redact = AsyncMock(return_value=MagicMock())
+    notify_outbound_event = MagicMock()
+    notify_outbound_redaction = MagicMock()
+    task = MagicMock()
+    task.done = MagicMock(return_value=False)
+    stop_manager.set_current(
+        message_id="$message:example.com",
+        target=MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com"),
+        task=task,
+    )
+
+    added_event_id = await stop_manager.add_stop_button(
+        client,
+        "$message:example.com",
+        notify_outbound_event=notify_outbound_event,
+    )
+
+    assert added_event_id == "$reaction:example.com"
+    notify_outbound_event.assert_called_once_with(
+        "!test:example.com",
+        {
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+            "event_id": "$reaction:example.com",
+            "sender": "@agent:example.com",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$message:example.com",
+                    "key": "🛑",
+                },
+            },
+        },
+    )
+
+    await stop_manager.remove_stop_button(
+        client,
+        "$message:example.com",
+        notify_outbound_redaction=notify_outbound_redaction,
+    )
+
+    notify_outbound_redaction.assert_called_once_with("!test:example.com", "$reaction:example.com")
+
+
+@pytest.mark.asyncio
 async def test_stop_manager_force_cancels_task_when_graceful_cancel_errors() -> None:
     """Cancellation-manager failures must not disable the hard-cancel fallback."""
     stop_manager = StopManager(graceful_cancel_fallback_seconds=0.01)

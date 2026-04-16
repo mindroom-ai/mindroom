@@ -2631,3 +2631,102 @@ class TestThreadHistoryCache:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         broken_cache.replace_thread.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_incremental_thread_revalidation_does_not_bypass_runtime_or_room_staleness(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Incremental append refresh must not bless pre-runtime or room-invalidated cache."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        cached_reply = self._make_text_event(
+            event_id="$reply1",
+            sender="@agent:localhost",
+            body="Cached reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Cached reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        appended_reply = self._make_text_event(
+            event_id="$reply2",
+            sender="@agent:localhost",
+            body="Incremental reply",
+            server_timestamp=3000,
+            source_content={
+                "body": "Incremental reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        runtime_started_at = time.time() - 1
+
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(cached_reply)],
+            validated_at=runtime_started_at - 100,
+        )
+        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
+        pre_runtime_appended = await cache.append_event(
+            "!room:localhost",
+            "$thread_root",
+            self._cache_source(appended_reply),
+        )
+        pre_runtime_revalidated = await cache.revalidate_thread_after_incremental_update(
+            "!room:localhost",
+            "$thread_root",
+            runtime_started_at=runtime_started_at,
+        )
+
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(cached_reply)],
+            validated_at=time.time(),
+        )
+        await cache.mark_room_threads_stale("!room:localhost", reason="sync_redaction_lookup_unavailable")
+        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
+        room_stale_appended = await cache.append_event(
+            "!room:localhost",
+            "$thread_root",
+            self._cache_source(appended_reply),
+        )
+        room_stale_revalidated = await cache.revalidate_thread_after_incremental_update(
+            "!room:localhost",
+            "$thread_root",
+            runtime_started_at=runtime_started_at,
+        )
+
+        client = MagicMock()
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [appended_reply, cached_reply, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            history = await matrix_client_module.fetch_dispatch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+                runtime_started_at=runtime_started_at,
+            )
+        finally:
+            await cache.close()
+
+        assert pre_runtime_appended is True
+        assert pre_runtime_revalidated is False
+        assert room_stale_appended is True
+        assert room_stale_revalidated is False
+        assert [message.event_id for message in history] == ["$thread_root", "$reply1", "$reply2"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER

@@ -35,6 +35,15 @@ class ThreadCacheState:
     room_invalidation_reason: str | None
 
 
+_INCREMENTAL_THREAD_REVALIDATION_REASONS = frozenset(
+    {
+        "live_thread_mutation",
+        "sync_thread_mutation",
+        "outbound_thread_mutation",
+    },
+)
+
+
 async def load_thread_events(
     db: aiosqlite.Connection,
     *,
@@ -340,6 +349,41 @@ async def mark_thread_stale_locked(
         """,
         (room_id, thread_id, time.time(), reason),
     )
+
+
+async def revalidate_thread_after_incremental_update_locked(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    thread_id: str,
+    runtime_started_at: float,
+) -> bool:
+    """Mark one thread cache fresh after a safe incremental update in the current runtime."""
+    row = await load_thread_cache_state_row(
+        db,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    if row is None:
+        return False
+    validated_at, invalidated_at, invalidation_reason, room_invalidated_at, _room_invalidation_reason = row
+    if validated_at is None or validated_at < runtime_started_at:
+        return False
+    if invalidated_at is None or invalidation_reason not in _INCREMENTAL_THREAD_REVALIDATION_REASONS:
+        return False
+    if invalidated_at < runtime_started_at:
+        return False
+    if room_invalidated_at is not None and room_invalidated_at >= validated_at:
+        return False
+    await db.execute(
+        """
+        UPDATE thread_cache_state
+        SET validated_at = ?, invalidated_at = NULL, invalidation_reason = NULL
+        WHERE room_id = ? AND thread_id = ?
+        """,
+        (time.time(), room_id, thread_id),
+    )
+    return True
 
 
 async def mark_room_stale_locked(

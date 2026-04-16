@@ -139,6 +139,9 @@ class ConversationCacheProtocol(Protocol):
         Callers should treat Matrix delivery as complete before this local cache work runs.
         """
 
+    def notify_outbound_event(self, room_id: str, event_source: dict[str, Any]) -> None:
+        """Schedule one locally sent outbound event for advisory cache bookkeeping."""
+
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted threaded message for advisory cache bookkeeping.
 
@@ -632,6 +635,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> None:
         """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
         self._outbound.notify_outbound_message(room_id, event_id, content)
+
+    def notify_outbound_event(
+        self,
+        room_id: str,
+        event_source: dict[str, Any],
+    ) -> None:
+        """Schedule one locally sent outbound event for advisory cache bookkeeping."""
+        self._outbound.notify_outbound_event(room_id, event_source)
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
