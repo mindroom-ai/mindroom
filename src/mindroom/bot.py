@@ -81,6 +81,7 @@ from .constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_avatar_path,
+    safe_replace,
 )
 from .conversation_resolver import (
     ConversationResolver,
@@ -813,12 +814,12 @@ class AgentBot:
             return True
         agent_config = self.config.agents.get(self.agent_name)
         if agent_config is None:
-            return False
+            return True
         return agent_config.accept_invites
 
     def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
-        if self.agent_name == ROUTER_AGENT_NAME or self.agent_name in self.config.teams:
+        if self.agent_name == ROUTER_AGENT_NAME:
             return False
         agent_config = self.config.agents.get(self.agent_name)
         if agent_config is None:
@@ -858,7 +859,7 @@ class AgentBot:
                 f"{json.dumps(sorted(self._invited_rooms), ensure_ascii=True, indent=2)}\n",
                 encoding="utf-8",
             )
-            temp_path.replace(path)
+            safe_replace(temp_path, path)
         except OSError:
             self.logger.exception("failed_to_save_invited_rooms", path=str(path))
         finally:

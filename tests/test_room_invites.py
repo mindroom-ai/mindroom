@@ -18,6 +18,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.identity import agent_username_localpart
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -469,3 +470,31 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
     assert bot._invited_rooms == {"!invited-room:localhost"}
     assert left_room_ids == ["!old-room:localhost"]
+
+
+def test_get_configured_bots_for_room_includes_persisted_invited_rooms(tmp_path: Path) -> None:
+    """Persisted invited rooms should count as configured for cleanup and reinvites."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["!configured-room:localhost"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    invited_rooms_path = _invited_rooms_path(runtime_paths.storage_root, "agent1")
+    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_rooms_path.write_text('[\n  "!invited-room:localhost"\n]\n', encoding="utf-8")
+
+    configured_bots = config.get_configured_bots_for_room("!invited-room:localhost", runtime_paths)
+
+    assert configured_bots == {
+        agent_username_localpart("agent1", runtime_paths),
+        agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths),
+    }
