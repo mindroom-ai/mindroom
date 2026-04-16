@@ -77,6 +77,7 @@ class ThreadReadPolicy:
         fetcher: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
         name: str,
         full_history: bool,
+        dispatch_safe: bool,
     ) -> ThreadHistoryResult:
         async def load() -> ThreadHistoryResult:
             thread_history = await fetcher(room_id, thread_id)
@@ -93,6 +94,12 @@ class ThreadReadPolicy:
                 room_id,
                 load,
                 name=name,
+                log_context={
+                    "thread_id": thread_id,
+                    "full_history": full_history,
+                    "dispatch_safe": dispatch_safe,
+                    "cache_operation_kind": "thread_read",
+                },
             ),
         )
 
@@ -113,6 +120,7 @@ class ThreadReadPolicy:
                 fetcher=self.fetch_dispatch_thread_history_from_client,
                 name="matrix_cache_refresh_dispatch_thread_history",
                 full_history=True,
+                dispatch_safe=True,
             )
         if full_history:
             return await self._run_thread_read(
@@ -121,6 +129,7 @@ class ThreadReadPolicy:
                 fetcher=self.fetch_thread_history_from_client,
                 name="matrix_cache_refresh_thread_history",
                 full_history=True,
+                dispatch_safe=False,
             )
         if dispatch_safe:
             return await self._run_thread_read(
@@ -129,6 +138,7 @@ class ThreadReadPolicy:
                 fetcher=self.fetch_dispatch_thread_snapshot_from_client,
                 name="matrix_cache_refresh_dispatch_thread_snapshot",
                 full_history=False,
+                dispatch_safe=True,
             )
         return await self._run_thread_read(
             room_id,
@@ -136,6 +146,7 @@ class ThreadReadPolicy:
             fetcher=self.fetch_thread_snapshot_from_client,
             name="matrix_cache_refresh_thread_snapshot",
             full_history=False,
+            dispatch_safe=False,
         )
 
     async def get_thread_snapshot(

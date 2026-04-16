@@ -267,6 +267,7 @@ class ThreadOutboundWritePolicy:
                 room_id,
                 safe_update,
                 name=name,
+                log_context=log_context,
             )
         except asyncio.CancelledError as exc:
             self._cache_ops.logger.warning(
@@ -355,6 +356,11 @@ class ThreadLiveWritePolicy:
             room_id,
             append_and_invalidate,
             name="matrix_cache_append_live_event",
+            log_context={
+                "event_id": event.event_id,
+                "thread_id": thread_id,
+                "mutation_context": "live",
+            },
         )
 
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
@@ -390,6 +396,12 @@ class ThreadLiveWritePolicy:
             room_id,
             redact_and_invalidate,
             name="matrix_cache_apply_redaction",
+            log_context={
+                "event_id": event.event_id,
+                "redacted_event_id": event.redacts,
+                "thread_id": thread_id,
+                "mutation_context": "redaction",
+            },
         )
 
 
@@ -589,6 +601,12 @@ class ThreadSyncWritePolicy:
                     redacted_event_ids,
                 ),
                 name="matrix_cache_sync_timeline",
+                log_context={
+                    "plain_event_count": len(plain_events),
+                    "threaded_event_count": len(threaded_events),
+                    "redaction_count": len(redacted_event_ids),
+                    "mutation_context": "sync_timeline",
+                },
             )
 
 
