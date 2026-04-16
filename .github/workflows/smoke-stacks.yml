@@ -61,6 +61,8 @@ jobs:
 
       - name: Set up kind
         uses: engineerd/setup-kind@v0.6.2
+        with:
+          skipClusterCreation: true
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
