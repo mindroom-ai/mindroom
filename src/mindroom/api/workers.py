@@ -94,6 +94,7 @@ def _worker_manager(request: Request) -> WorkerManager:
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
     )
 
 

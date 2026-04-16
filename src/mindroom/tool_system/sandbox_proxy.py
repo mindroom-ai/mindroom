@@ -373,6 +373,9 @@ def _get_worker_manager(
         proxy_token=proxy_config.proxy_token,
         storage_root=storage_root,
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        worker_grantable_credentials=(
+            context.config.get_worker_grantable_credentials() if context is not None else None
+        ),
     )
 
 

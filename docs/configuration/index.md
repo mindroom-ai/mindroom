@@ -253,6 +253,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  worker_grantable_credentials: null  # Default: null (shared credential services workers may inherit; null = built-in allowlist, which excludes github_private)
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_first_threshold: 5  # Default: 5 (first automatic thread summary)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)

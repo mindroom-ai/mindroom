@@ -374,21 +374,36 @@ def sync_shared_credentials_to_worker(
     worker_key: str,
     *,
     include_ui_credentials: bool = False,
+    allowed_services: frozenset[str],
     credentials_manager: CredentialsManager,
 ) -> None:
     """Sync shared credentials into one worker's dedicated shared-credential mirror.
 
     The worker's override store remains separate. Env-backed shared credentials are always
     copied; UI-backed shared credentials and legacy untagged shared credentials are copied
-    only when explicitly requested.
+    only when explicitly requested. Only ``allowed_services`` may be mirrored into the
+    worker's shared credential layer.
     """
     manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
     source_manager = shared_credentials_manager(manager)
     mirrored_services = set(worker_shared_manager.list_services())
-    allowed_services: set[str] = set()
+    copied_services: set[str] = set()
+    logger.debug(
+        "Starting worker shared credential sync",
+        worker_key=worker_key,
+        include_ui_credentials=include_ui_credentials,
+        allowed_services=sorted(allowed_services),
+    )
 
     for service in source_manager.list_services():
+        if service not in allowed_services:
+            logger.info(
+                "Skipping non-grantable shared credentials during worker sync",
+                worker_key=worker_key,
+                service=service,
+            )
+            continue
         shared_credentials = source_manager.load_credentials(service)
         if not isinstance(shared_credentials, Mapping):
             continue
@@ -398,10 +413,10 @@ def sync_shared_credentials_to_worker(
         if source not in {"env", "ui", None}:
             continue
 
-        allowed_services.add(service)
+        copied_services.add(service)
         worker_shared_manager.save_credentials(service, dict(shared_credentials))
 
-    for service in mirrored_services - allowed_services:
+    for service in mirrored_services - copied_services:
         worker_shared_manager.delete_credentials(service)
 
 

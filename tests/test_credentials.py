@@ -310,6 +310,7 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             worker_key,
             include_ui_credentials=False,
+            allowed_services=frozenset({"openweather"}),
             credentials_manager=base_manager,
         )
         worker_manager.save_credentials("openweather", {"api_key": "worker-key", "_source": "ui"})
@@ -357,6 +358,7 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             worker_key,
             include_ui_credentials=True,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=base_manager,
         )
 
@@ -403,6 +405,7 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             worker_key,
             include_ui_credentials=True,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=base_manager,
         )
         save_scoped_credentials(
@@ -415,6 +418,7 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             worker_key,
             include_ui_credentials=True,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=base_manager,
         )
 
@@ -441,11 +445,130 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             "worker-a",
             include_ui_credentials=False,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=manager,
         )
 
         worker_credentials = manager.for_worker("worker-a").shared_manager().load_credentials("google")
         assert worker_credentials == {"api_key": "env-key", "_source": "env"}
+
+    def test_sync_shared_credentials_to_worker_empty_allowlist_mirrors_nothing(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """An explicit empty worker allowlist should deny all shared credential mirroring."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
+        worker_shared_manager = manager.for_worker("worker-a").shared_manager()
+        worker_shared_manager.save_credentials("google", {"api_key": "stale-key", "_source": "env"})
+
+        sync_shared_credentials_to_worker(
+            "worker-a",
+            include_ui_credentials=True,
+            allowed_services=frozenset(),
+            credentials_manager=manager,
+        )
+
+        assert worker_shared_manager.load_credentials("google") is None
+
+    def test_sync_shared_credentials_to_worker_only_copies_allowed_services_and_deletes_stale_skips(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Worker credential mirroring should enforce the allowlist and drop stale skipped services."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "openai-key", "_source": "env"})
+        manager.save_credentials("google_oauth_client", {"client_id": "client-id", "_source": "env"})
+        manager.save_credentials("github_private", {"token": "github-pat", "_source": "env"})
+        worker_shared_manager = manager.for_worker("worker-a").shared_manager()
+        worker_shared_manager.save_credentials("github_private", {"token": "stale-pat", "_source": "env"})
+
+        sync_shared_credentials_to_worker(
+            "worker-a",
+            include_ui_credentials=False,
+            allowed_services=frozenset({"openai", "google_oauth_client"}),
+            credentials_manager=manager,
+        )
+
+        assert worker_shared_manager.load_credentials("openai") == {
+            "api_key": "openai-key",
+            "_source": "env",
+        }
+        assert worker_shared_manager.load_credentials("google_oauth_client") == {
+            "client_id": "client-id",
+            "_source": "env",
+        }
+        assert worker_shared_manager.load_credentials("github_private") is None
+
+    def test_sync_shared_credentials_to_worker_disallows_ui_credentials_for_non_grantable_services(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """UI-backed shared credentials should still respect the worker allowlist."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-ui-key", "_source": "ui"})
+        manager.save_credentials("spotify", {"access_token": "spotify-ui-token", "_source": "ui"})
+        worker_shared_manager = manager.for_worker("worker-a").shared_manager()
+
+        sync_shared_credentials_to_worker(
+            "worker-a",
+            include_ui_credentials=True,
+            allowed_services=frozenset({"openai"}),
+            credentials_manager=manager,
+        )
+
+        assert worker_shared_manager.load_credentials("openai") == {
+            "api_key": "shared-ui-key",
+            "_source": "ui",
+        }
+        assert worker_shared_manager.load_credentials("spotify") is None
+
+    def test_sync_shared_credentials_to_worker_default_allowlist_excludes_github_private(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """The built-in worker allowlist must not mirror github_private into workers."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "openai-key", "_source": "env"})
+        manager.save_credentials("github_private", {"token": "github-pat", "_source": "env"})
+
+        sync_shared_credentials_to_worker(
+            "worker-a",
+            include_ui_credentials=False,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+            credentials_manager=manager,
+        )
+
+        worker_shared_manager = manager.for_worker("worker-a").shared_manager()
+        assert "github_private" not in constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+        assert worker_shared_manager.load_credentials("openai") == {
+            "api_key": "openai-key",
+            "_source": "env",
+        }
+        assert worker_shared_manager.load_credentials("github_private") is None
+
+    def test_sync_shared_credentials_to_worker_default_allowlist_excludes_github_private_for_unscoped_workers(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """The built-in worker allowlist must not mirror github_private into unscoped workers."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-ui-key", "_source": "ui"})
+        manager.save_credentials("github_private", {"token": "github-ui-pat", "_source": "ui"})
+
+        sync_shared_credentials_to_worker(
+            "v1:tenant-123:unscoped:general",
+            include_ui_credentials=True,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+            credentials_manager=manager,
+        )
+
+        worker_shared_manager = manager.for_worker("v1:tenant-123:unscoped:general").shared_manager()
+        assert worker_shared_manager.load_credentials("openai") == {
+            "api_key": "shared-ui-key",
+            "_source": "ui",
+        }
+        assert worker_shared_manager.load_credentials("github_private") is None
 
     def test_sync_shared_credentials_to_worker_preserves_worker_local_credentials(
         self,
@@ -460,6 +583,7 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             "worker-a",
             include_ui_credentials=False,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=manager,
         )
 
@@ -480,6 +604,7 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             "v1:tenant-123:unscoped:general",
             include_ui_credentials=True,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=manager,
         )
 
@@ -503,6 +628,7 @@ class TestCredentialsManager:
         sync_shared_credentials_to_worker(
             "v1:tenant-123:unscoped:general",
             include_ui_credentials=True,
+            allowed_services=frozenset({"spotify"}),
             credentials_manager=manager,
         )
 
@@ -681,7 +807,11 @@ class TestGlobalCredentialsManager:
         )
         worker_key = "v1:tenant-123:shared:general"
         base_manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
-        sync_shared_credentials_to_worker(worker_key, credentials_manager=base_manager)
+        sync_shared_credentials_to_worker(
+            worker_key,
+            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+            credentials_manager=base_manager,
+        )
         worker_root = base_manager.for_worker(worker_key).storage_root
 
         mindroom.credentials._credentials_manager = None

@@ -7,6 +7,7 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
+from mindroom.credentials import validate_service_name
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
@@ -340,6 +341,10 @@ class DefaultsConfig(BaseModel):
         default=None,
         description="Default worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
     )
+    worker_grantable_credentials: list[str] | None = Field(
+        default=None,
+        description="Shared credential service names allowed to be mirrored into worker runtimes (None = use the built-in default allowlist)",
+    )
     allow_self_config: bool = Field(
         default=False,
         description="Default setting for allowing agents to modify their own configuration",
@@ -401,6 +406,17 @@ class DefaultsConfig(BaseModel):
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each default tool appears at most once."""
         return validate_unique_tool_entries(tools, scope_name="default")
+
+    @field_validator("worker_grantable_credentials")
+    @classmethod
+    def validate_worker_grantable_credentials(
+        cls,
+        services: list[str] | None,
+    ) -> list[str] | None:
+        """Normalize configured worker-grantable credential service names."""
+        if services is None:
+            return None
+        return [validate_service_name(service) for service in services]
 
 
 class EmbedderConfig(BaseModel):

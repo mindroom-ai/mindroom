@@ -745,7 +745,18 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
     cleanup_paths: list[Path] = []
 
-    def _fake_cleanup(runtime_paths: constants.RuntimePaths) -> int:
+    class _FakeRuntimeConfig:
+        def get_worker_grantable_credentials(self) -> frozenset[str]:
+            return constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+
+    def _fake_cleanup(
+        runtime_paths: constants.RuntimePaths,
+        *,
+        runtime_config: object | None = None,
+        worker_grantable_credentials: frozenset[str] | None = None,
+    ) -> int:
+        del runtime_config
+        assert worker_grantable_credentials == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
@@ -753,13 +764,23 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
             stop_event.set()
         return 0
 
-    async def _fake_to_thread(func: Callable[..., int], *args: object) -> int:
-        return func(*args)
+    async def _fake_to_thread(func: Callable[..., int], *args: object, **kwargs: object) -> int:
+        return func(*args, **kwargs)
+
+    def _read_current_runtime_config(
+        api_app: FastAPI,
+    ) -> tuple[_FakeRuntimeConfig, constants.RuntimePaths]:
+        return _FakeRuntimeConfig(), main._app_runtime_paths(api_app)
 
     main.initialize_api_app(main.app, first_runtime)
     monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
     monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
     monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
+    monkeypatch.setattr(
+        main.config_lifecycle,
+        "read_app_committed_runtime_config",
+        _read_current_runtime_config,
+    )
 
     await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
 
@@ -951,7 +972,13 @@ def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.
     """Background worker cleanup should no-op when no backend is configured."""
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: False)
 
-    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
+    assert (
+        main._cleanup_workers_once(
+            main._app_runtime_paths(main.app),
+            worker_grantable_credentials=constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+        )
+        == 0
+    )
 
 
 def test_worker_cleanup_once_skips_kubernetes_without_committed_runtime_config(
@@ -1005,8 +1032,16 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
 
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
+    assert (
+        main._cleanup_workers_once(
+            runtime_paths,
+            runtime_config=runtime_config,
+            worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
+        )
+        == 1
+    )
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
 
 
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1052,6 +1087,7 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.json()["workers"][0]["worker_key"] == "worker-key"
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["worker_grantable_credentials"] == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 
 
 def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -654,6 +654,15 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "ollama": "OLLAMA_HOST",
 }
+# Only provider/bootstrap services needed for worker execution are grantable by default.
+# Sensitive shared credentials such as github_private must stay excluded unless explicitly authored.
+DEFAULT_WORKER_GRANTABLE_CREDENTIALS = frozenset(
+    (
+        *PROVIDER_ENV_KEYS.keys(),
+        "google_vertex_adc",
+        "google_oauth_client",
+    ),
+)
 VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 _CHROMADB_PY314_PATCHED = False

@@ -944,11 +944,14 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_token: str | None,
         storage_root: Path | None = None,
         kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        worker_grantable_credentials: frozenset[str] | None = None,
     ) -> str:
         captured["runtime_paths"] = runtime_paths_arg
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
+        captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
+        captured["worker_grantable_credentials"] = worker_grantable_credentials
         captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
         return "manager"
 
@@ -972,6 +975,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert manager == "manager"
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
+    assert captured["worker_grantable_credentials"] is None
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1426,8 +1430,9 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            worker_grantable_credentials: frozenset[str],
         ) -> Self:
-            del runtime_paths, auth_token, storage_root
+            del runtime_paths, auth_token, storage_root, worker_grantable_credentials
             captured_snapshots.append(tool_validation_snapshot)
             return cls()
 
@@ -1546,8 +1551,9 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            worker_grantable_credentials: frozenset[str],
         ) -> Self:
-            del runtime_paths, auth_token, storage_root, tool_validation_snapshot
+            del runtime_paths, auth_token, storage_root, tool_validation_snapshot, worker_grantable_credentials
             return cls()
 
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:

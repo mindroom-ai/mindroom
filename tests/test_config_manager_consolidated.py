@@ -15,7 +15,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.tool_system.metadata import AUTHORED_OVERRIDE_INHERIT
 
@@ -1114,3 +1114,38 @@ class TestGetAgentWorkerTools:
             },
         )
         assert config.get_agent_execution_scope("code") == "user"
+
+
+class TestWorkerGrantableCredentials:
+    """Tests for the worker credential mirror allowlist defaults helper."""
+
+    def test_worker_grantable_credentials_none_uses_builtin_default(self) -> None:
+        """An explicit or implicit None should preserve the built-in worker allowlist."""
+        config = Config(defaults=DefaultsConfig(worker_grantable_credentials=None))
+
+        assert config.get_worker_grantable_credentials() == DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+        assert "github_private" not in config.get_worker_grantable_credentials()
+
+    def test_worker_grantable_credentials_roundtrip_and_helper(self, tmp_path: Path) -> None:
+        """Authored worker_grantable_credentials should survive YAML roundtrips and helper resolution."""
+        config_path = tmp_path / "config.yaml"
+        Config(
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            defaults=DefaultsConfig(worker_grantable_credentials=["openai", "google_oauth_client"]),
+        ).save_to_yaml(config_path)
+
+        reloaded = Config.from_yaml(config_path)
+
+        assert reloaded.defaults.worker_grantable_credentials == ["openai", "google_oauth_client"]
+        assert reloaded.get_worker_grantable_credentials() == frozenset({"openai", "google_oauth_client"})
+
+    def test_worker_grantable_credentials_empty_list_denies_all(self) -> None:
+        """An explicit empty worker_grantable_credentials list should deny all worker credential mirroring."""
+        config = Config(defaults=DefaultsConfig(worker_grantable_credentials=[]))
+
+        assert config.get_worker_grantable_credentials() == frozenset()
+
+    def test_worker_grantable_credentials_reject_invalid_service_names(self) -> None:
+        """worker_grantable_credentials should validate credential service names."""
+        with pytest.raises(ValidationError, match="Service name"):
+            DefaultsConfig(worker_grantable_credentials=["bad name"])

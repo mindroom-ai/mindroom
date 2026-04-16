@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.constants import deserialize_runtime_paths, resolve_primary_runtime_paths
+from mindroom.constants import (
+    DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+    deserialize_runtime_paths,
+    resolve_primary_runtime_paths,
+)
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -190,6 +194,7 @@ def _backend(
     owner_deployment_name: str | None = None,
     runtime_paths: RuntimePaths | None = None,
     tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = _KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -224,6 +229,7 @@ def _backend(
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=resolved_runtime_paths.storage_root,
         tool_validation_snapshot=tool_validation_snapshot or deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT),
+        worker_grantable_credentials=worker_grantable_credentials,
     )
     apps_api = _FakeAppsApi()
     core_api = _FakeCoreApi()
@@ -800,21 +806,20 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers()
     assert "/app/worker/.shared_credentials" not in mount_paths
 
 
-def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unscoped dedicated workers should mirror shared UI credentials into their shared layer."""
     backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, bool]] = []
+    sync_calls: list[tuple[str, bool, frozenset[str] | None]] = []
 
     def _record_sync(
         worker_key: str,
         *,
         include_ui_credentials: bool,
+        allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
         del credentials_manager
-        sync_calls.append((worker_key, include_ui_credentials))
+        sync_calls.append((worker_key, include_ui_credentials, allowed_services))
 
     monkeypatch.setattr(
         "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
@@ -823,7 +828,7 @@ def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:unscoped:general"), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:unscoped:general", True)]
+    assert sync_calls == [("v1:tenant-123:unscoped:general", True, DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
 
 
 def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
@@ -831,16 +836,17 @@ def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
 ) -> None:
     """Scoped dedicated workers should mirror only env-backed shared credentials."""
     backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, bool]] = []
+    sync_calls: list[tuple[str, bool, frozenset[str] | None]] = []
 
     def _record_sync(
         worker_key: str,
         *,
         include_ui_credentials: bool,
+        allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
         del credentials_manager
-        sync_calls.append((worker_key, include_ui_credentials))
+        sync_calls.append((worker_key, include_ui_credentials, allowed_services))
 
     monkeypatch.setattr(
         "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
@@ -849,7 +855,63 @@ def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", False)]
+    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", False, DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
+
+
+def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated workers should use the config-authored worker credential allowlist."""
+    backend, _apps_api, _core_api = _backend(
+        worker_grantable_credentials=frozenset({"openai", "google_oauth_client"}),
+    )
+    sync_calls: list[frozenset[str] | None] = []
+
+    def _record_sync(
+        worker_key: str,
+        *,
+        include_ui_credentials: bool,
+        allowed_services: frozenset[str] | None = None,
+        credentials_manager: object | None = None,
+    ) -> None:
+        del worker_key, include_ui_credentials, credentials_manager
+        sync_calls.append(allowed_services)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+        _record_sync,
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+
+    assert sync_calls == [frozenset({"openai", "google_oauth_client"})]
+
+
+def test_kubernetes_backend_uses_empty_worker_grantable_credentials_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated workers should pass through an explicit deny-all worker credential allowlist."""
+    backend, _apps_api, _core_api = _backend(worker_grantable_credentials=frozenset())
+    sync_calls: list[frozenset[str] | None] = []
+
+    def _record_sync(
+        worker_key: str,
+        *,
+        include_ui_credentials: bool,
+        allowed_services: frozenset[str] | None = None,
+        credentials_manager: object | None = None,
+    ) -> None:
+        del worker_key, include_ui_credentials, credentials_manager
+        sync_calls.append(allowed_services)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+        _record_sync,
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+
+    assert sync_calls == [frozenset()]
 
 
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
