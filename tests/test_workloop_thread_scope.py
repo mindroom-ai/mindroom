@@ -118,20 +118,23 @@ def _copy_plugin_root(tmp_path: Path) -> Path:
         )
         module_text = module_text.replace("from .formatting import ", f"from {package_prefix}.formatting import ")
         module_text = module_text.replace("from .poke import ", f"from {package_prefix}.poke import ")
+        module_text = module_text.replace("from .runtime import ", f"from {package_prefix}.runtime import ")
         module_text = module_text.replace("from .state import ", f"from {package_prefix}.state import ")
         module_text = module_text.replace("from .todos import ", f"from {package_prefix}.todos import ")
         module_text = module_text.replace("from .types import ", f"from {package_prefix}.types import ")
         module_path.write_text(module_text, encoding="utf-8")
-    types_path = copied_root / "types.py"
-    types_text = types_path.read_text(encoding="utf-8")
-    if "ROUTER_AGENT_NAME" not in types_text:
-        types_text = types_text.replace(
+    shared_types_path = copied_root / "runtime.py"
+    if not shared_types_path.exists():
+        shared_types_path = copied_root / "types.py"
+    shared_types_text = shared_types_path.read_text(encoding="utf-8")
+    if "ROUTER_AGENT_NAME" not in shared_types_text:
+        shared_types_text = shared_types_text.replace(
             "    from mindroom.hooks import HookMessageSender, HookRoomStateQuerier\n",
             "    from mindroom.constants import ROUTER_AGENT_NAME\n"
             "    from mindroom.hooks import HookMessageSender, HookRoomStateQuerier\n",
             1,
         )
-        types_path.write_text(types_text, encoding="utf-8")
+        shared_types_path.write_text(shared_types_text, encoding="utf-8")
     hooks_path = copied_root / "hooks.py"
     hooks_text = hooks_path.read_text(encoding="utf-8")
     if 'name="workloop-command"' not in hooks_text:
