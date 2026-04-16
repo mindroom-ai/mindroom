@@ -174,7 +174,7 @@ agents:
 - **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 - **thread_mode**: Conversation threading mode: `thread` (default) creates Matrix threads per conversation, `room` uses a single continuous conversation per room (ideal for bridges/mobile)
 - **room_thread_modes**: Per-room thread mode overrides keyed by room alias/name or Matrix room ID
-- **startup_thread_prewarm**: When enabled, this bot participates in room-level startup prewarm for rooms it joins by claiming each room once and warming up to 20 most recently active thread snapshots in the background after the first sync completes
+- **startup_thread_prewarm**: When enabled, this bot may prewarm recent thread snapshots for rooms it has joined after first sync, which can reduce cold-cache latency for early thread replies after startup
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override)
@@ -221,11 +221,10 @@ teams:
 
 - **coordinate**: A lead agent orchestrates the others
 - **collaborate**: All members respond in parallel with a consensus summary
-- **startup_thread_prewarm**: Optional room-level background prewarm for up to 20 most recently active thread snapshots in rooms this bot joins after startup
+- **startup_thread_prewarm**: Optional background prewarm for recent thread snapshots in rooms this bot has joined after first sync, which can reduce cold-cache latency for early thread replies after startup
 
-MindRoom runs startup thread prewarm once per room, not once per bot.
-After the first sync completes, any joined bot with `startup_thread_prewarm: true` may claim a room for advisory prewarm.
-The first claimant wins, so shared rooms warm once while ad hoc invited rooms can still be warmed by the non-router bot that joined them.
+Startup thread prewarm is a background, best-effort cache warmup.
+It may run again after later bot starts or restarts when fresh thread snapshots are needed for that runtime.
 - **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
 - **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
 - **compaction**: Optional team-owned auto-compaction overrides for the shared team scope

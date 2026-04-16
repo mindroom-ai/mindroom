@@ -15,12 +15,12 @@ router:
 
 The router has two configuration options:
 
-| Option                   | Type   | Default     | Description                                                                                                                                                                                                                                                              |
-| ------------------------ | ------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `model`                  | string | `"default"` | Model to use for routing decisions                                                                                                                                                                                                                                       |
-| `startup_thread_prewarm` | bool   | `true`      | When enabled, the router participates in background startup prewarm for rooms it joins by claiming each room once and warming up to 20 most recently active thread snapshots after the first sync completes so first replies in those threads avoid a cold cache rebuild |
+| Option                   | Type   | Default     | Description                                                                                                                                                                       |
+| ------------------------ | ------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                  | string | `"default"` | Model to use for routing decisions                                                                                                                                                |
+| `startup_thread_prewarm` | bool   | `true`      | When enabled, the router may prewarm recent thread snapshots for rooms it has joined after first sync, which can reduce cold-cache latency for early thread replies after startup |
 
-MindRoom runs startup thread prewarm once per room, not once per bot. After the first sync completes, any joined bot with `startup_thread_prewarm: true` may claim a room for advisory prewarm. The first claimant wins, so shared rooms warm once while ad hoc invited rooms can still be warmed by the non-router bot that joined them.
+Startup thread prewarm is a background, best-effort cache warmup. It may run again after later bot starts or restarts when fresh thread snapshots are needed for that runtime.
 
 ## How Routing Works
 

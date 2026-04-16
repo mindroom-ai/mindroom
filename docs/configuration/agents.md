@@ -148,7 +148,7 @@ agents:
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
-| `startup_thread_prewarm` | bool | `true` | When enabled, this bot participates in background startup prewarm for rooms it joins by claiming each room once and warming up to 20 most recently active thread snapshots after the first sync completes so first replies in those threads avoid a cold cache rebuild |
+| `startup_thread_prewarm` | bool | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms it has joined after first sync, which can reduce cold-cache latency for early thread replies after startup |
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`) |
@@ -168,9 +168,8 @@ Per-agent values override them.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
-MindRoom runs startup thread prewarm once per room, not once per bot.
-After the first sync completes, any joined bot with `startup_thread_prewarm: true` may claim a room for advisory prewarm.
-The first claimant wins, so shared rooms warm once while ad hoc invited rooms can still be warmed by the non-router bot that joined them.
+Startup thread prewarm is a background, best-effort cache warmup.
+It may run again after later bot starts or restarts when fresh thread snapshots are needed for that runtime.
 
 MindRoom prepares persisted history in two phases.
 It may first compact older durable history into `session.summary`.
