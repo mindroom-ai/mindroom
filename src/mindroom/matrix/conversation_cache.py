@@ -642,14 +642,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_source: dict[str, Any],
     ) -> None:
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
-        event_id = event_source.get("event_id")
-        self._run_fail_open_outbound_write(
-            lambda: self._outbound.notify_outbound_event(room_id, event_source),
-            cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
-            failure_message="Ignoring outbound cache bookkeeping failure after successful send",
-            room_id=room_id,
-            event_id=event_id if isinstance(event_id, str) else None,
-        )
+        self._outbound.notify_outbound_event(room_id, event_source)
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted threaded message for advisory cache bookkeeping."""

@@ -47,7 +47,6 @@ from mindroom.orchestration.runtime import is_sync_restart_cancel
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
     ResponseOutcome,
-    clear_tracked_response_message,
 )
 from mindroom.streaming import (
     ReplacementStreamingResponse,
@@ -1366,12 +1365,15 @@ class ResponseRunner:
                     self.deps.logger.exception("Error during response generation", error=str(error))
                     raise
                 finally:
-                    clear_tracked_response_message(
-                        self.deps.stop_manager,
-                        self._client(),
+                    tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
+                    button_already_removed = tracked is None or tracked.reaction_event_id is None
+                    self.deps.stop_manager.clear_message(
                         tracked_message_id,
-                        show_stop_button=show_stop_button,
-                        notify_outbound_redaction=self.deps.post_response_effects.conversation_cache.notify_outbound_redaction,
+                        client=self._client(),
+                        remove_button=show_stop_button and not button_already_removed,
+                        notify_outbound_redaction=(
+                            self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
+                        ),
                     )
 
                 return message_id

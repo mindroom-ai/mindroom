@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
-    from mindroom.stop import StopManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -247,25 +246,6 @@ class PostResponseEffectsSupport:
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
         )
-
-
-def clear_tracked_response_message(
-    stop_manager: StopManager,
-    client: nio.AsyncClient,
-    tracked_message_id: str,
-    *,
-    show_stop_button: bool,
-    notify_outbound_redaction: Callable[[str, str], None] | None = None,
-) -> None:
-    """Clear one tracked response and redact the stop button when still present."""
-    tracked = stop_manager.tracked_messages.get(tracked_message_id)
-    button_already_removed = tracked is None or tracked.reaction_event_id is None
-    stop_manager.clear_message(
-        tracked_message_id,
-        client=client,
-        remove_button=show_stop_button and not button_already_removed,
-        notify_outbound_redaction=notify_outbound_redaction,
-    )
 
 
 async def apply_post_response_effects(  # noqa: C901

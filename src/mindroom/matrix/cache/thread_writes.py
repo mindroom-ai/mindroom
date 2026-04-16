@@ -155,15 +155,21 @@ class ThreadOutboundWritePolicy:
             normalized_event_source = self._normalize_outbound_event_source(room_id, event_source)
             if normalized_event_source is None:
                 return
-            event_id = normalized_event_source["event_id"]
+            event_id_value = normalized_event_source.get("event_id")
+            if not isinstance(event_id_value, str) or not event_id_value:
+                return
+            event_id = typing.cast("str", event_id_value)
 
             event_info = EventInfo.from_event(normalized_event_source)
             if event_info.is_reaction:
+                persisted_batch: list[tuple[str, str, dict[str, object]]] = [
+                    (event_id, room_id, normalized_event_source),
+                ]
                 self._schedule_fail_open_room_update(
                     room_id,
                     lambda: self._cache_ops.store_events_batch(
                         room_id,
-                        [(event_id, room_id, normalized_event_source)],
+                        persisted_batch,
                         failure_message="Failed to persist outbound reaction lookup to cache",
                     ),
                     name="matrix_cache_notify_outbound_event",
@@ -188,19 +194,19 @@ class ThreadOutboundWritePolicy:
                 log_context={"event_id": event_id},
             )
         except asyncio.CancelledError as exc:
-            event_id = event_source.get("event_id")
+            raw_event_id = event_source.get("event_id")
             self._cache_ops.logger.warning(
                 "Ignoring cancelled outbound cache bookkeeping after successful send",
                 room_id=room_id,
-                event_id=event_id if isinstance(event_id, str) else None,
+                event_id=raw_event_id if isinstance(raw_event_id, str) else None,
                 error=str(exc),
             )
         except Exception as exc:
-            event_id = event_source.get("event_id")
+            raw_event_id = event_source.get("event_id")
             self._cache_ops.logger.warning(
                 "Ignoring outbound cache bookkeeping failure after successful send",
                 room_id=room_id,
-                event_id=event_id if isinstance(event_id, str) else None,
+                event_id=raw_event_id if isinstance(raw_event_id, str) else None,
                 error=str(exc),
             )
 
@@ -230,21 +236,24 @@ class ThreadOutboundWritePolicy:
         self,
         room_id: str,
         event_source: dict[str, Any],
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, object] | None:
         """Return one outbound event payload normalized for durable cache storage."""
         event_id = event_source.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             return None
         client = self._require_client()
         sender = client.user_id if isinstance(client.user_id, str) else None
-        return normalize_event_source_for_cache(
-            {
-                **event_source,
-                "room_id": room_id,
-            },
-            event_id=event_id,
-            sender=sender,
-            origin_server_ts=int(time.time() * 1000),
+        return typing.cast(
+            "dict[str, object]",
+            normalize_event_source_for_cache(
+                {
+                    **event_source,
+                    "room_id": room_id,
+                },
+                event_id=event_id,
+                sender=sender,
+                origin_server_ts=int(time.time() * 1000),
+            ),
         )
 
     async def _apply_outbound_redaction_notification(
