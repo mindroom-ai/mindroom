@@ -75,6 +75,7 @@ from mindroom.matrix.client import (
     DeliveredMatrixEvent,
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
+    RoomInviteResult,
     ThreadHistoryResult,
 )
 from mindroom.matrix.state import MatrixState
@@ -500,6 +501,11 @@ def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> Comp
         compacted_at="2026-03-22T20:15:00Z",
         notify=notify,
     )
+
+
+def _invite_result(outcome: str = "invited") -> RoomInviteResult:
+    """Build one structured invite result for orchestrator tests."""
+    return RoomInviteResult(outcome=outcome)
 
 
 class TestAgentBot:
@@ -934,8 +940,8 @@ class TestAgentBot:
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert (
-            mock_client.add_event_callback.call_count == 13
-        )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event callbacks
+            mock_client.add_event_callback.call_count == 14
+        )  # invite, message, redaction, reaction, room-member, audio, image/file/video, unknown-event callbacks
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -949,7 +955,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """AgentBot should enter sync directly because orchestrator owns stale cleanup."""
-        config = self._config_for_storage(tmp_path)
+        config = TestAgentBot._config_for_storage(tmp_path)
         call_order: list[str] = []
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
@@ -976,7 +982,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Permanent startup failures should stop retrying immediately."""
-        config = self._config_for_storage(tmp_path)
+        config = TestAgentBot._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
         with (
@@ -1100,7 +1106,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
-        config = self._config_for_storage(tmp_path)
+        config = TestAgentBot._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -1115,11 +1121,14 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test handling room invitations."""
-        config = self._config_for_storage(tmp_path)
+        config = TestAgentBot._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
+        bot._post_join_room_setup = AsyncMock()
+        orchestrator = AsyncMock()
+        bot.orchestrator = orchestrator
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -1127,14 +1136,52 @@ class TestAgentBot:
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
 
-        await bot._on_invite(mock_room, mock_event)
+        with patch("mindroom.bot.join_room", new=AsyncMock(return_value=True)):
+            await bot._on_invite(mock_room, mock_event)
 
-        bot.client.join.assert_called_once_with("!test:localhost")
+        bot._post_join_room_setup.assert_awaited_once_with("!test:localhost")
+        orchestrator.handle_bot_joined_invite_room.assert_awaited_once_with(
+            bot,
+            "!test:localhost",
+            actor_id="@user:localhost",
+            invite_is_direct=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_on_invite_persists_pending_ad_hoc_actor_before_post_join_setup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Pending ad-hoc state should be persisted before post-join setup so restart recovery can resume."""
+        config = TestAgentBot._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = AsyncMock()
+        bot.rooms = []
+        bot._post_join_room_setup = AsyncMock(side_effect=RuntimeError("boom during setup"))
+
+        room = MagicMock()
+        room.room_id = "!adhoc:localhost"
+
+        event = MagicMock()
+        event.sender = "@owner:localhost"
+        event.source = {"content": {}}
+
+        state = MatrixState()
+        with (
+            patch("mindroom.bot.MatrixState.load", return_value=state),
+            patch("mindroom.bot.join_room", new=AsyncMock(return_value=True)),
+            pytest.raises(RuntimeError, match="boom during setup"),
+        ):
+            await bot._on_invite(room, event)
+
+        assert state.router_ad_hoc_inviter_ids == {"!adhoc:localhost": "@owner:localhost"}
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test that agent ignores its own messages."""
-        config = self._config_for_storage(tmp_path)
+        config = TestAgentBot._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _install_runtime_cache_support(bot)
@@ -8837,7 +8884,7 @@ class TestMultiAgentOrchestrator:
         async def mock_get_room_members(_client: AsyncMock, room_id: str) -> set[str]:
             return room_members[room_id]
 
-        mock_invite = AsyncMock(return_value=True)
+        mock_invite = AsyncMock(return_value=_invite_result())
 
         with (
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
@@ -8884,7 +8931,7 @@ class TestMultiAgentOrchestrator:
         async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
             return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
 
-        mock_invite = AsyncMock(return_value=True)
+        mock_invite = AsyncMock(return_value=_invite_result())
 
         with (
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
@@ -8927,7 +8974,7 @@ class TestMultiAgentOrchestrator:
         async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
             return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
 
-        mock_invite = AsyncMock(return_value=True)
+        mock_invite = AsyncMock(return_value=_invite_result())
 
         with (
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
@@ -8939,6 +8986,662 @@ class TestMultiAgentOrchestrator:
             await orchestrator._ensure_room_invitations()
 
         mock_invite.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ensure_room_invitations_continues_after_member_lookup_failure(self, tmp_path: Path) -> None:
+        """Member lookup failures should not block invitation work for later rooms."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost", "!room2:localhost"],
+                    ),
+                },
+                authorization={
+                    "global_users": ["@alice:localhost"],
+                    "default_room_access": False,
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+        member_lookup_error = "boom members"
+
+        async def mock_get_room_members(_client: AsyncMock, room_id: str) -> set[str]:
+            if room_id == "!room1:localhost":
+                raise RuntimeError(member_lookup_error)
+            return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
+
+        mock_invite = AsyncMock(return_value=_invite_result())
+
+        with (
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
+            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch(
+                "mindroom.orchestrator.get_joined_rooms",
+                new=AsyncMock(return_value=["!room1:localhost", "!room2:localhost"]),
+            ),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.MatrixState.load", return_value=MatrixState()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
+        assert invited_users_by_room == {
+            ("!room2:localhost", "@alice:localhost"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_auto_invites_router_for_ad_hoc_room(self, tmp_path: Path) -> None:
+        """A non-router bot joining an invited ad-hoc room should invite the router."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        router_user_id = config.get_ids(runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id
+        state = MatrixState()
+        mock_is_dm_room = AsyncMock(return_value=False)
+
+        with (
+            patch(
+                "mindroom.orchestrator.get_room_members",
+                new=AsyncMock(
+                    return_value={
+                        "@mindroom_general:localhost",
+                        "@owner:localhost",
+                        "@observer:localhost",
+                    },
+                ),
+            ),
+            patch("mindroom.orchestrator.is_dm_room", new=mock_is_dm_room),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=_invite_result())) as mock_invite,
+            patch("mindroom.orchestrator.MatrixState.load", return_value=state),
+        ):
+            await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        mock_invite.assert_awaited_once_with(joining_bot.client, "!adhoc:localhost", router_user_id)
+        mock_is_dm_room.assert_awaited_once_with(
+            joining_bot.client,
+            "!adhoc:localhost",
+            include_two_member_group_heuristic=False,
+        )
+        assert state.router_ad_hoc_room_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_persists_manual_router_invite(self, tmp_path: Path) -> None:
+        """Manual router invites to ad-hoc rooms should be persisted across restarts."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.rooms = ["!managed:localhost"]
+        router_bot.client = AsyncMock()
+        state = MatrixState()
+        mock_is_dm_room = AsyncMock(return_value=False)
+
+        with (
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.is_sender_allowed_for_agent_reply", return_value=True),
+            patch("mindroom.orchestrator.is_dm_room", new=mock_is_dm_room),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite,
+            patch("mindroom.orchestrator.MatrixState.load", return_value=state),
+        ):
+            result = await orchestrator.handle_bot_joined_invite_room(
+                router_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        assert result == "reconciled"
+        mock_invite.assert_not_awaited()
+        mock_is_dm_room.assert_awaited_once_with(
+            router_bot.client,
+            "!adhoc:localhost",
+            include_two_member_group_heuristic=False,
+        )
+        assert state.router_ad_hoc_room_ids == {"!adhoc:localhost"}
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_skips_unauthorized_inviter(self, tmp_path: Path) -> None:
+        """Unauthorized inviters must not be able to transitively summon the router."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                authorization={"default_room_access": False},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with (
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=False),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite,
+        ):
+            result = await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@stranger:localhost",
+            )
+
+        assert result == "retry"
+        mock_invite.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_skips_inviter_blocked_from_router_replies(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router auto-invites should honor router-specific reply permissions."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                authorization=AuthorizationConfig(
+                    default_room_access=True,
+                    agent_reply_permissions={"router": ["@owner:localhost"]},
+                ),
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with (
+            patch(
+                "mindroom.orchestrator.get_room_members",
+                new=AsyncMock(return_value={"@mindroom_general:localhost"}),
+            ),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite,
+        ):
+            result = await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@stranger:localhost",
+            )
+
+        assert result == "retry"
+        mock_invite.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_router_message_reconciliation_uses_current_sender_not_stored_original_inviter(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Later authorized senders should drive ad-hoc reconciliation instead of a stale original inviter."""
+        config = TestAgentBot._config_for_storage(tmp_path)
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = AsyncMock()
+        bot.rooms = []
+        bot._maybe_handle_tool_approval_reply = AsyncMock(return_value=True)
+
+        orchestrator = AsyncMock()
+        orchestrator.handle_bot_joined_invite_room = AsyncMock(return_value="reconciled")
+        bot.orchestrator = orchestrator
+
+        state = MatrixState(router_ad_hoc_inviter_ids={"!adhoc:localhost": "@stranger:localhost"})
+        room = MagicMock(room_id="!adhoc:localhost")
+        event = MagicMock(sender="@owner:localhost")
+
+        with patch("mindroom.bot.MatrixState.load", return_value=state):
+            await bot._on_message(room, event)
+
+        orchestrator.handle_bot_joined_invite_room.assert_awaited_once_with(
+            bot,
+            "!adhoc:localhost",
+            actor_id="@owner:localhost",
+            invite_is_direct=False,
+        )
+        assert state.router_ad_hoc_inviter_ids == {}
+
+    @pytest.mark.asyncio
+    async def test_reconcile_ad_hoc_invited_room_keeps_retry_state_when_router_not_joined_yet(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Invite-pending outcomes should keep the room on the retry path instead of marking it reconciled."""
+        config = TestAgentBot._config_for_storage(tmp_path)
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = AsyncMock()
+        bot.rooms = []
+
+        orchestrator = AsyncMock()
+        orchestrator.handle_bot_joined_invite_room = AsyncMock(return_value="invited_pending_join")
+        bot.orchestrator = orchestrator
+
+        state = MatrixState()
+        with patch("mindroom.bot.MatrixState.load", return_value=state):
+            await bot._reconcile_ad_hoc_invited_room("!adhoc:localhost", actor_id="@owner:localhost")
+
+        assert state.router_ad_hoc_inviter_ids == {"!adhoc:localhost": "@owner:localhost"}
+        assert "!adhoc:localhost" not in bot._reconciled_ad_hoc_invite_room_ids
+
+    @pytest.mark.asyncio
+    async def test_prune_stale_router_ad_hoc_room_removes_bot_only_rooms(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router startup prune should drop ad-hoc rooms that only contain MindRoom service accounts."""
+        config = TestAgentBot._config_for_storage(tmp_path)
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+        )
+        router_bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(router_bot)
+        router_bot.client = AsyncMock()
+        router_bot.rooms = []
+
+        state = MatrixState(router_ad_hoc_room_ids={"!adhoc:localhost"})
+        with (
+            patch("mindroom.bot.MatrixState.load", return_value=state),
+            patch(
+                "mindroom.bot.get_room_members",
+                new=AsyncMock(
+                    return_value={
+                        router_bot.agent_user.user_id,
+                        "@mindroom_general:localhost",
+                    },
+                ),
+            ),
+        ):
+            await router_bot._prune_stale_router_ad_hoc_rooms({"!adhoc:localhost"})
+
+        assert state.router_ad_hoc_room_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_keeps_retry_path_for_already_invited_router(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Already-invited router outcomes should keep reconciliation pending until membership is confirmed."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+        state = MatrixState()
+
+        with (
+            patch(
+                "mindroom.orchestrator.get_room_members",
+                new=AsyncMock(
+                    return_value={
+                        "@mindroom_general:localhost",
+                        "@owner:localhost",
+                        "@observer:localhost",
+                    },
+                ),
+            ),
+            patch("mindroom.orchestrator.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch(
+                "mindroom.orchestrator.invite_to_room",
+                new=AsyncMock(return_value=_invite_result("already_invited")),
+            ) as mock_invite,
+            patch("mindroom.orchestrator.MatrixState.load", return_value=state),
+        ):
+            result = await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        assert result == "invited_pending_join"
+        mock_invite.assert_awaited_once()
+        assert state.router_ad_hoc_room_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_logs_membership_fetch_failure(self, tmp_path: Path) -> None:
+        """Membership lookup failures should not crash the auto-invite flow."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with (
+            patch("mindroom.orchestrator.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.orchestrator.get_room_members", new=AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite,
+            patch("mindroom.orchestrator.logger.exception") as mock_logger_exception,
+        ):
+            await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        mock_invite.assert_not_awaited()
+        mock_logger_exception.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_treats_empty_member_snapshot_as_retryable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Empty member snapshots should be treated as transient failures, not empty rooms."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with (
+            patch("mindroom.orchestrator.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value=set())),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite,
+            patch("mindroom.orchestrator.logger.warning") as mock_logger_warning,
+        ):
+            result = await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        assert result == "retry"
+        mock_invite.assert_not_awaited()
+        mock_logger_warning.assert_called_once()
+        assert mock_logger_warning.call_args.args == (
+            "Skipping router auto-invite because room members are unavailable",
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_logs_invite_transport_failure(self, tmp_path: Path) -> None:
+        """Invite transport failures should degrade into a logged warning, not a crash."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with (
+            patch(
+                "mindroom.orchestrator.get_room_members",
+                new=AsyncMock(
+                    return_value={
+                        "@mindroom_general:localhost",
+                        "@owner:localhost",
+                        "@observer:localhost",
+                    },
+                ),
+            ),
+            patch("mindroom.orchestrator.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(side_effect=RuntimeError("invite transport"))),
+            patch("mindroom.orchestrator.logger.warning") as mock_logger_warning,
+        ):
+            await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        mock_logger_warning.assert_called_once()
+        assert mock_logger_warning.call_args.args == ("Failed to auto-invite router to ad-hoc room",)
+        assert mock_logger_warning.call_args.kwargs["error"] == "invite transport"
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_does_not_treat_two_member_room_as_dm(self, tmp_path: Path) -> None:
+        """Two-member rooms without explicit DM markers should still invite the router."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+        router_user_id = config.get_ids(runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id
+
+        with (
+            patch(
+                "mindroom.orchestrator.get_room_members",
+                new=AsyncMock(return_value={"@mindroom_general:localhost", "@owner:localhost"}),
+            ),
+            patch("mindroom.orchestrator.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=_invite_result())) as mock_invite,
+        ):
+            await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        mock_invite.assert_awaited_once_with(joining_bot.client, "!adhoc:localhost", router_user_id)
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_skips_is_direct_room(self, tmp_path: Path) -> None:
+        """Explicit DM markers should suppress router auto-invites."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with (
+            patch(
+                "mindroom.orchestrator.get_room_members",
+                new=AsyncMock(
+                    return_value={
+                        "@mindroom_general:localhost",
+                        "@owner:localhost",
+                        "@observer:localhost",
+                    },
+                ),
+            ),
+            patch("mindroom.orchestrator.is_dm_room", new=AsyncMock(return_value=True)),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite,
+        ):
+            await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        mock_invite.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_logs_dm_probe_failure(self, tmp_path: Path) -> None:
+        """DM probe failures should not escape the invite callback."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with (
+            patch("mindroom.orchestrator.is_dm_room", new=AsyncMock(side_effect=RuntimeError("dm probe"))),
+            patch("mindroom.orchestrator.is_authorized_sender", return_value=True),
+            patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite,
+            patch("mindroom.orchestrator.logger.warning") as mock_logger_warning,
+        ):
+            result = await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!adhoc:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        assert result == "retry"
+        mock_invite.assert_not_awaited()
+        mock_logger_warning.assert_called_once()
+        assert mock_logger_warning.call_args.args == (
+            "Failed to probe DM markers for router ad-hoc room reconciliation",
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_joined_invite_room_skips_configured_room(self, tmp_path: Path) -> None:
+        """Configured rooms should not trigger router auto-invites from the invite path."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!managed:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+
+        joining_bot = MagicMock()
+        joining_bot.agent_name = "general"
+        joining_bot.rooms = ["!managed:localhost"]
+        joining_bot.client = AsyncMock()
+
+        with patch("mindroom.orchestrator.invite_to_room", new=AsyncMock()) as mock_invite:
+            await orchestrator.handle_bot_joined_invite_room(
+                joining_bot,
+                "!managed:localhost",
+                actor_id="@owner:localhost",
+            )
+
+        mock_invite.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_setup_rooms_and_memberships_skips_internal_user_join_when_unconfigured(self, tmp_path: Path) -> None:

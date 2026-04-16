@@ -110,7 +110,9 @@ from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
+    ensure_scheduled_task_power_level_removed,
     get_joined_rooms,
+    get_room_members,
     join_room,
 )
 from .media_inputs import MediaInputs
@@ -316,6 +318,7 @@ class AgentBot:
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
+    _reconciled_ad_hoc_invite_room_ids: set[str]
     _turn_controller: TurnController
 
     def __init__(
@@ -353,6 +356,7 @@ class AgentBot:
         )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
+        self._reconciled_ad_hoc_invite_room_ids = set()
         self._init_runtime_components()
 
     def _init_runtime_components(self) -> None:
@@ -556,6 +560,11 @@ class AgentBot:
     def orchestrator(self, value: MultiAgentOrchestrator | None) -> None:
         """Update the current orchestrator."""
         self._runtime_view.orchestrator = value
+
+    @property
+    def conversation_cache(self) -> MatrixConversationCache:
+        """Return the bot-owned Matrix conversation cache."""
+        return self._conversation_cache
 
     @property
     def event_cache(self) -> ConversationEventCache:
@@ -810,6 +819,9 @@ class AgentBot:
         current_rooms = set(joined_rooms or [])
         current_rooms.update(self.client.rooms)
 
+        if self.agent_name == ROUTER_AGENT_NAME:
+            await self._prune_stale_router_ad_hoc_rooms(current_rooms)
+
         for room_id in self.rooms:
             if room_id in current_rooms:
                 self.logger.debug("Already joined room", room_id=room_id)
@@ -823,12 +835,21 @@ class AgentBot:
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+        await self._restore_router_startup_ad_hoc_rooms(current_rooms)
+
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
         assert self.client is not None
+        if not await ensure_scheduled_task_power_level_removed(self.client, room_id):
+            self.logger.warning(
+                "Failed to reconcile scheduled-task room power levels before restore",
+                room_id=room_id,
+            )
 
         restored_tasks = await restore_scheduled_tasks(
             self.client,
@@ -837,6 +858,7 @@ class AgentBot:
             self.runtime_paths,
             self.event_cache,
             self._conversation_cache,
+            additional_writer_clients=self._additional_scheduled_task_writer_clients(),
         )
         if restored_tasks > 0:
             self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
@@ -871,9 +893,192 @@ class AgentBot:
             root_space_id = MatrixState.load(runtime_paths=self.runtime_paths).space_room_id
             if root_space_id is not None:
                 configured_rooms.add(root_space_id)
+            configured_rooms.update(self._router_ad_hoc_room_ids())
 
         # Leave rooms we're no longer configured for (preserving DM rooms)
-        await leave_non_dm_rooms(self.client, list(current_rooms - configured_rooms))
+        rooms_to_leave = list(current_rooms - configured_rooms)
+        if self.agent_name == ROUTER_AGENT_NAME:
+            self._forget_router_ad_hoc_rooms(rooms_to_leave)
+        await leave_non_dm_rooms(self.client, rooms_to_leave)
+
+    def _router_ad_hoc_room_ids(self) -> set[str]:
+        """Return persisted router-managed ad-hoc rooms."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return set()
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        return set(state.router_ad_hoc_room_ids)
+
+    def _remember_pending_ad_hoc_inviter(self, room_id: str, inviter_id: str) -> None:
+        """Persist the latest actor for one pending ad-hoc room reconciliation."""
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        if not state.remember_router_ad_hoc_inviter(room_id, inviter_id):
+            return
+        state.save(runtime_paths=self.runtime_paths)
+
+    def _pending_ad_hoc_inviter(self, room_id: str) -> str | None:
+        """Return the latest persisted actor for one pending ad-hoc room reconciliation."""
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        return state.get_router_ad_hoc_inviter(room_id)
+
+    def _clear_pending_ad_hoc_inviter(self, room_id: str) -> None:
+        """Forget the pending ad-hoc inviter once reconciliation is complete."""
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        if not state.clear_router_ad_hoc_inviter(room_id):
+            return
+        state.save(runtime_paths=self.runtime_paths)
+
+    def _mark_ad_hoc_room_reconciled(self, room_id: str) -> None:
+        """Skip repeated reconciliation for rooms already handled in this runtime."""
+        self._reconciled_ad_hoc_invite_room_ids.add(room_id)
+
+    def _clear_ad_hoc_room_reconciliation(self, room_id: str) -> None:
+        """Allow one room to be reconciled again after it leaves ad-hoc state."""
+        self._reconciled_ad_hoc_invite_room_ids.discard(room_id)
+
+    def _forget_router_ad_hoc_rooms(self, room_ids: list[str]) -> None:
+        """Remove router ad-hoc room state for rooms we no longer manage."""
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        changed = False
+        for room_id in room_ids:
+            if state.remove_router_ad_hoc_room(room_id):
+                changed = True
+            self._clear_ad_hoc_room_reconciliation(room_id)
+        if changed:
+            state.save(runtime_paths=self.runtime_paths)
+
+    def _additional_scheduled_task_writer_clients(self) -> tuple[nio.AsyncClient, ...]:
+        """Return other live bot clients that may own scheduled-task state writes."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            return ()
+        current_client = self.client
+        clients: list[nio.AsyncClient] = []
+        for bot in orchestrator.agent_bots.values():
+            bot_client = bot.client
+            if bot_client is None or bot_client is current_client:
+                continue
+            clients.append(bot_client)
+        return tuple(clients)
+
+    async def _restore_router_startup_ad_hoc_rooms(self, current_rooms: set[str]) -> None:
+        """Restore router startup state for persisted and pending ad-hoc rooms."""
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        persisted_ad_hoc_room_ids = set(state.router_ad_hoc_room_ids) - set(self.rooms)
+        for room_id in persisted_ad_hoc_room_ids:
+            if room_id not in current_rooms:
+                continue
+            self.logger.debug("Restoring router startup state for persisted ad-hoc room", room_id=room_id)
+            await self._post_join_room_setup(room_id)
+
+        pending_ad_hoc_room_ids = set(state.router_ad_hoc_inviter_ids) - persisted_ad_hoc_room_ids - set(self.rooms)
+        for room_id in pending_ad_hoc_room_ids:
+            if room_id not in current_rooms:
+                continue
+            self.logger.debug("Restoring router startup state for pending ad-hoc room", room_id=room_id)
+            await self._post_join_room_setup(room_id)
+            pending_actor = state.get_router_ad_hoc_inviter(room_id)
+            if pending_actor is None:
+                continue
+            await self._reconcile_ad_hoc_invited_room(room_id, actor_id=pending_actor)
+
+    def _is_human_room_participant(
+        self,
+        member_id: str,
+    ) -> bool:
+        """Return whether one room member looks like a non-service human participant."""
+        if member_id == self.agent_user.user_id:
+            return False
+        mindroom_user_id = self.config.get_mindroom_user_id(self.runtime_paths)
+        if mindroom_user_id is not None and member_id == mindroom_user_id:
+            return False
+        try:
+            matrix_id = MatrixID.parse(member_id)
+        except ValueError:
+            return True
+        return not matrix_id.username.startswith(MatrixID.AGENT_PREFIX)
+
+    async def _reconcile_ad_hoc_invited_room(
+        self,
+        room_id: str,
+        *,
+        actor_id: str,
+        invite_is_direct: bool = False,
+    ) -> None:
+        """Run one shared ad-hoc reconciliation attempt and persist the resulting state."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            return
+
+        self._remember_pending_ad_hoc_inviter(room_id, actor_id)
+        outcome = await orchestrator.handle_bot_joined_invite_room(
+            self,
+            room_id,
+            actor_id=actor_id,
+            invite_is_direct=invite_is_direct,
+        )
+        if outcome in {"reconciled", "skipped"}:
+            self._clear_pending_ad_hoc_inviter(room_id)
+            self._mark_ad_hoc_room_reconciled(room_id)
+            if outcome == "skipped" and self.agent_name == ROUTER_AGENT_NAME and room_id not in self.rooms:
+                self._forget_router_ad_hoc_rooms([room_id])
+
+    async def _prune_stale_router_ad_hoc_rooms(self, current_rooms: set[str]) -> None:
+        """Forget persisted ad-hoc rooms that the router no longer shares with anyone else."""
+        assert self.client is not None
+
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        configured_room_ids = set(self.rooms)
+        router_user_id = self.agent_user.user_id
+
+        changed = False
+        for room_id in sorted(state.router_ad_hoc_room_ids - configured_room_ids):
+            if room_id not in current_rooms:
+                if state.remove_router_ad_hoc_room(room_id):
+                    changed = True
+                self._clear_ad_hoc_room_reconciliation(room_id)
+                self.logger.info(
+                    "Pruned stale router ad-hoc room from startup state",
+                    room_id=room_id,
+                    reason="router_not_joined",
+                )
+                continue
+
+            try:
+                current_members = await get_room_members(self.client, room_id)
+            except Exception:
+                self.logger.warning(
+                    "Failed to verify persisted router ad-hoc room during startup prune",
+                    room_id=room_id,
+                    exc_info=True,
+                )
+                continue
+
+            if not current_members:
+                self.logger.warning(
+                    "Skipping router ad-hoc room prune because room members are unavailable",
+                    room_id=room_id,
+                )
+                continue
+
+            human_members = {
+                member_id
+                for member_id in current_members - {router_user_id}
+                if self._is_human_room_participant(member_id)
+            }
+            if human_members:
+                continue
+
+            if state.remove_router_ad_hoc_room(room_id):
+                changed = True
+            self._clear_ad_hoc_room_reconciliation(room_id)
+            self.logger.info(
+                "Pruned stale router ad-hoc room from startup state",
+                room_id=room_id,
+                reason="router_only_room",
+            )
+
+        if changed:
+            state.save(runtime_paths=self.runtime_paths)
 
     async def ensure_user_account(self) -> None:
         """Ensure this agent has a Matrix user account.
@@ -1065,6 +1270,10 @@ class AgentBot:
                 _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
                 nio.ReactionEvent,
             )
+            client.add_event_callback(
+                _create_task_wrapper(self._on_room_member, owner=self._runtime_view),
+                nio.RoomMemberEvent,
+            )
 
             # Register media callbacks on all agents (each agent handles its own routing)
             media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
@@ -1148,6 +1357,8 @@ class AgentBot:
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
+                if self.agent_name == ROUTER_AGENT_NAME:
+                    self._forget_router_ad_hoc_rooms(joined_rooms)
                 await leave_non_dm_rooms(self.client, joined_rooms)
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
@@ -1258,6 +1469,7 @@ class AgentBot:
                 self.runtime_paths,
                 self.event_cache,
                 self._conversation_cache,
+                additional_writer_clients=self._additional_scheduled_task_writer_clients(),
             )
             if drained_count > 0:
                 self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
@@ -1311,9 +1523,16 @@ class AgentBot:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
-            # If this is the router agent and the room is empty, send a welcome message
-            if self.agent_name == ROUTER_AGENT_NAME:
-                await self._send_welcome_message_if_empty(room.room_id)
+            if room.room_id not in self.rooms:
+                self._remember_pending_ad_hoc_inviter(room.room_id, event.sender)
+            await self._post_join_room_setup(room.room_id)
+            if self.orchestrator is not None:
+                content = event.source.get("content")
+                await self._reconcile_ad_hoc_invited_room(
+                    room.room_id,
+                    actor_id=event.sender,
+                    invite_is_direct=isinstance(content, dict) and content.get("is_direct") is True,
+                )
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
@@ -1323,9 +1542,36 @@ class AgentBot:
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
+        if (
+            self.agent_name != ROUTER_AGENT_NAME
+            and room.room_id not in self.rooms
+            and room.room_id not in self._reconciled_ad_hoc_invite_room_ids
+            and room.room_id not in self._router_ad_hoc_room_ids()
+        ):
+            await self._reconcile_ad_hoc_invited_room(
+                room.room_id,
+                actor_id=event.sender,
+            )
         if await self._maybe_handle_tool_approval_reply(room, event):
             return
         await self._turn_controller.handle_text_event(room, event)
+
+    async def _on_room_member(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+        """Drop persisted router ad-hoc state when the router leaves one room."""
+        if self.agent_name != ROUTER_AGENT_NAME or event.state_key != self.agent_user.user_id:
+            return
+        if event.membership not in {"leave", "ban"}:
+            return
+        if room.room_id not in self._router_ad_hoc_room_ids():
+            return
+
+        self._forget_router_ad_hoc_rooms([room.room_id])
+        self.logger.info(
+            "Removed router ad-hoc room after router membership change",
+            room_id=room.room_id,
+            membership=event.membership,
+            sender=event.sender,
+        )
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""

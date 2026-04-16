@@ -16,7 +16,9 @@ from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWork
 async def test_cancel_mid_wait_cron_task() -> None:
     """Test that cancellation during wait periods propagates correctly."""
     client = AsyncMock()
-    config = AsyncMock()
+    config = MagicMock()
+    config.get_ids.return_value = {}
+    config.get_domain.return_value = "server"
     runtime_paths = resolve_runtime_paths()
 
     workflow = ScheduledWorkflow(
@@ -42,7 +44,10 @@ async def test_cancel_mid_wait_cron_task() -> None:
 
     with (
         patch("mindroom.scheduling.croniter", return_value=DummyCron()),
-        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
+        patch(
+            "mindroom.scheduling._get_pending_task_record_with_retry",
+            new=AsyncMock(return_value=pending_record),
+        ),
     ):
         task = asyncio.create_task(
             _run_cron_task(

@@ -8,11 +8,11 @@ import json
 import mimetypes
 import ssl as ssl_module
 import time
-from collections.abc import AsyncGenerator, Mapping, MutableMapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, MutableMapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import nio
@@ -21,7 +21,13 @@ from nio import crypto
 from nio.api import Api
 from nio.responses import RoomThreadsResponse
 
-from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
+from mindroom.constants import (
+    SCHEDULED_TASK_EVENT_TYPE,
+    STREAM_STATUS_KEY,
+    RuntimePaths,
+    encryption_keys_dir,
+    runtime_matrix_ssl_verify,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -45,6 +51,12 @@ from mindroom.matrix.message_content import (
     extract_edit_body,
     resolve_event_source_content,
     visible_body_from_event_source,
+)
+from mindroom.matrix.power_levels import (
+    DEFAULT_STATE_EVENT_POWER_LEVEL,
+    POWER_LEVELS_EVENT_TYPE,
+    with_state_event_power_level,
+    without_state_event_power_level,
 )
 from mindroom.matrix.thread_membership import (
     ordered_event_ids_from_scanned_event_sources,
@@ -71,9 +83,24 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
         "M_INVALID_USERNAME",
     },
 )
-_POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _THREAD_TAGS_POWER_LEVEL = 0
-_DEFAULT_STATE_EVENT_POWER_LEVEL = 50
+
+_INVITE_ALREADY_JOINED_ERROR_CODES = frozenset({"M_ALREADY_JOINED"})
+_INVITE_ALREADY_INVITED_ERROR_CODES = frozenset({"M_ALREADY_INVITED"})
+
+
+@dataclass(frozen=True, slots=True)
+class RoomInviteResult:
+    """Structured outcome for one Matrix room invite attempt."""
+
+    outcome: Literal["invited", "already_joined", "already_invited", "failed"]
+    error_message: str | None = None
+    error_code: str | None = None
+
+    @property
+    def is_success(self) -> bool:
+        """Return whether the invite attempt reached the desired room state."""
+        return self.outcome != "failed"
 
 
 @dataclass(slots=True)
@@ -461,7 +488,7 @@ async def invite_to_room(
     client: nio.AsyncClient,
     room_id: str,
     user_id: str,
-) -> bool:
+) -> RoomInviteResult:
     """Invite a user to a room.
 
     Args:
@@ -469,16 +496,63 @@ async def invite_to_room(
         room_id: The room to invite to
         user_id: The user to invite
 
-    Returns:
-        True if successful, False otherwise
-
     """
     response = await client.room_invite(room_id, user_id)
     if isinstance(response, nio.RoomInviteResponse):
         logger.info("matrix_room_invited", room_id=room_id, user_id=user_id)
-        return True
+        return RoomInviteResult(outcome="invited")
+
+    if isinstance(response, nio.ErrorResponse):
+        if response.status_code in _INVITE_ALREADY_JOINED_ERROR_CODES:
+            logger.info("matrix_room_invite_already_joined", room_id=room_id, user_id=user_id)
+            return RoomInviteResult(
+                outcome="already_joined",
+                error_message=response.message,
+                error_code=response.status_code,
+            )
+        if response.status_code in _INVITE_ALREADY_INVITED_ERROR_CODES:
+            logger.info("matrix_room_invite_already_invited", room_id=room_id, user_id=user_id)
+            return RoomInviteResult(
+                outcome="already_invited",
+                error_message=response.message,
+                error_code=response.status_code,
+            )
+        try:
+            member_state_response = await client.room_get_state_event(room_id, "m.room.member", user_id)
+        except Exception as error:
+            logger.warning(
+                "matrix_room_invite_membership_probe_failed",
+                room_id=room_id,
+                user_id=user_id,
+                error=str(error),
+            )
+            member_state_response = None
+        if isinstance(member_state_response, nio.RoomGetStateEventResponse) and isinstance(
+            member_state_response.content,
+            dict,
+        ):
+            membership = member_state_response.content.get("membership")
+            if membership == "join":
+                logger.info("matrix_room_invite_already_joined", room_id=room_id, user_id=user_id)
+                return RoomInviteResult(
+                    outcome="already_joined",
+                    error_message=response.message,
+                    error_code=response.status_code,
+                )
+            if membership == "invite":
+                logger.info("matrix_room_invite_already_invited", room_id=room_id, user_id=user_id)
+                return RoomInviteResult(
+                    outcome="already_invited",
+                    error_message=response.message,
+                    error_code=response.status_code,
+                )
+
     logger.error("matrix_room_invite_failed", room_id=room_id, user_id=user_id, error=str(response))
-    return False
+    return RoomInviteResult(
+        outcome="failed",
+        error_message=_describe_matrix_response_error(response),
+        error_code=response.status_code if isinstance(response, nio.ErrorResponse) else None,
+    )
 
 
 async def create_room(
@@ -508,7 +582,7 @@ async def create_room(
         room_config["topic"] = topic
 
     power_level_content: dict[str, Any] = {
-        "state_default": _DEFAULT_STATE_EVENT_POWER_LEVEL,
+        "state_default": DEFAULT_STATE_EVENT_POWER_LEVEL,
         "events": {
             THREAD_TAGS_EVENT_TYPE: _THREAD_TAGS_POWER_LEVEL,
         },
@@ -520,7 +594,7 @@ async def create_room(
         users[client.user_id] = 100
     if users:
         power_level_content["users"] = users
-    room_config["initial_state"] = [{"type": _POWER_LEVELS_EVENT_TYPE, "content": power_level_content}]
+    room_config["initial_state"] = [{"type": POWER_LEVELS_EVENT_TYPE, "content": power_level_content}]
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
@@ -539,29 +613,70 @@ async def create_room(
     return None
 
 
+def _with_state_event_power_level(
+    power_levels_content: dict[str, Any],
+    *,
+    event_type: str,
+    power_level: int,
+) -> dict[str, Any]:
+    """Return power-level content with one state-event override applied."""
+    return with_state_event_power_level(
+        power_levels_content,
+        event_type=event_type,
+        power_level=power_level,
+    )
+
+
 def _with_thread_tags_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
     """Return power-level content with the thread-tags override applied."""
-    next_content = dict(power_levels_content)
+    return _with_state_event_power_level(
+        power_levels_content,
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        power_level=_THREAD_TAGS_POWER_LEVEL,
+    )
+
+
+def _without_scheduled_task_power_level(power_levels_content: dict[str, Any]) -> dict[str, Any]:
+    """Return power-level content with the stale scheduled-task override removed."""
     existing_events = power_levels_content.get("events")
-    next_events = dict(existing_events) if isinstance(existing_events, dict) else {}
-    next_events[THREAD_TAGS_EVENT_TYPE] = _THREAD_TAGS_POWER_LEVEL
-    next_content["events"] = next_events
-    return next_content
+    if not isinstance(existing_events, Mapping):
+        return dict(power_levels_content)
+
+    scheduled_task_power_level = existing_events.get(SCHEDULED_TASK_EVENT_TYPE)
+    if type(scheduled_task_power_level) is not int or scheduled_task_power_level != 0:
+        return dict(power_levels_content)
+
+    return without_state_event_power_level(
+        power_levels_content,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+    )
 
 
-async def ensure_thread_tags_power_level(
+async def _ensure_state_event_power_level(
     client: nio.AsyncClient,
     room_id: str,
+    *,
+    event_type: str,
+    power_level: int,
+    context_label: str,
+    desired_content_builder: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> bool:
-    """Ensure managed rooms allow PL0 users to send the thread-tags state event."""
+    """Ensure managed rooms allow one state event to be sent at the desired PL."""
     # Always fetch fresh power levels from the homeserver because the content is
     # used as the base for a write-back. nio's cached PowerLevels can retain
     # stale user/event overrides that were already removed server-side, and
     # writing those back would silently restore revoked permissions.
-    current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
+    try:
+        current_response = await client.room_get_state_event(room_id, POWER_LEVELS_EVENT_TYPE)
+    except Exception:
+        logger.exception(
+            f"Failed to read room power levels for {context_label} reconciliation",
+            room_id=room_id,
+        )
+        return False
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
         logger.error(
-            "Failed to read room power levels for thread tags reconciliation",
+            f"Failed to read room power levels for {context_label} reconciliation",
             room_id=room_id,
             error=_describe_matrix_response_error(current_response),
         )
@@ -575,37 +690,73 @@ async def ensure_thread_tags_power_level(
         return False
     current_content = current_response.content
 
-    desired_content = _with_thread_tags_power_level(current_content)
+    desired_content = desired_content_builder(current_content)
     if desired_content == current_content:
         logger.debug(
-            "Thread tags power level already configured",
+            f"{context_label.capitalize()} power level already configured",
             room_id=room_id,
-            event_type=THREAD_TAGS_EVENT_TYPE,
-            power_level=_THREAD_TAGS_POWER_LEVEL,
+            event_type=event_type,
+            power_level=power_level,
         )
-        return True
-
-    response = await client.room_put_state(
-        room_id=room_id,
-        event_type=_POWER_LEVELS_EVENT_TYPE,
-        content=desired_content,
-    )
-    if isinstance(response, nio.RoomPutStateResponse):
+    else:
+        try:
+            response = await client.room_put_state(
+                room_id=room_id,
+                event_type=POWER_LEVELS_EVENT_TYPE,
+                content=desired_content,
+            )
+        except Exception:
+            logger.exception(
+                f"Failed to update room power levels for {context_label}",
+                room_id=room_id,
+                hint="Ensure the service account is joined and can update m.room.power_levels.",
+            )
+            return False
+        if not isinstance(response, nio.RoomPutStateResponse):
+            logger.error(
+                f"Failed to update room power levels for {context_label}",
+                room_id=room_id,
+                error=_describe_matrix_response_error(response),
+                hint="Ensure the service account is joined and can update m.room.power_levels.",
+            )
+            return False
         logger.info(
-            "Updated room power levels for thread tags",
+            f"Updated room power levels for {context_label}",
             room_id=room_id,
-            event_type=THREAD_TAGS_EVENT_TYPE,
-            power_level=_THREAD_TAGS_POWER_LEVEL,
+            event_type=event_type,
+            power_level=power_level,
         )
-        return True
+    return True
 
-    logger.error(
-        "Failed to update room power levels for thread tags",
-        room_id=room_id,
-        error=_describe_matrix_response_error(response),
-        hint="Ensure the service account is joined and can update m.room.power_levels.",
+
+async def ensure_thread_tags_power_level(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> bool:
+    """Ensure managed rooms allow PL0 users to send the thread-tags state event."""
+    return await _ensure_state_event_power_level(
+        client,
+        room_id,
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        power_level=_THREAD_TAGS_POWER_LEVEL,
+        context_label="thread tags",
+        desired_content_builder=_with_thread_tags_power_level,
     )
-    return False
+
+
+async def ensure_scheduled_task_power_level_removed(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> bool:
+    """Ensure stale scheduled-task PL overrides are removed from managed rooms."""
+    return await _ensure_state_event_power_level(
+        client,
+        room_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        power_level=0,
+        context_label="scheduled tasks",
+        desired_content_builder=_without_scheduled_task_power_level,
+    )
 
 
 async def create_space(
@@ -644,6 +795,11 @@ def _describe_matrix_response_error(response: object) -> str:
         if response.message:
             return str(response.message)
     return str(response)
+
+
+def describe_matrix_response_error(response: object) -> str:
+    """Public wrapper for Matrix response error formatting."""
+    return _describe_matrix_response_error(response)
 
 
 def _room_threads_page_error_from_response(response: object) -> RoomThreadsPageError:
@@ -905,12 +1061,16 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
     Returns:
         Set of user IDs in the room
 
+    Raises:
+        RuntimeError: If the homeserver does not return a joined-member snapshot
+
     """
     response = await client.joined_members(room_id)
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
-    logger.warning("matrix_room_members_fetch_failed", room_id=room_id)
-    return set()
+    logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(response))
+    msg = f"Failed to fetch joined members for room `{room_id}`: {response}"
+    raise RuntimeError(msg)
 
 
 async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:

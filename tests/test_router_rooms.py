@@ -172,6 +172,7 @@ async def test_router_joins_rooms_on_start(
         _runtime_paths: object,
         _event_cache: object,
         _conversation_cache: object,
+        **_kwargs: object,
     ) -> int:
         return 0
 

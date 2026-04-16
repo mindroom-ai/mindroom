@@ -7,7 +7,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import nio
@@ -15,7 +15,7 @@ import uvicorn
 
 from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
-from mindroom.authorization import is_authorized_sender
+from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
     ConfigReloadedContext,
@@ -33,6 +33,7 @@ from mindroom.knowledge.manager import (
 )
 from mindroom.matrix.client import (
     PermanentMatrixStartupError,
+    RoomInviteResult,
     get_joined_rooms,
     get_room_members,
     invite_to_room,
@@ -43,6 +44,7 @@ from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
     ensure_user_in_rooms,
+    is_dm_room,
     load_rooms,
     resolve_room_aliases,
 )
@@ -1435,15 +1437,29 @@ class MultiAgentOrchestrator:
         if not invite_user_ids:
             return
 
-        current_members = await get_room_members(router_bot.client, root_space_id)
+        try:
+            current_members = await get_room_members(router_bot.client, root_space_id)
+        except Exception:
+            logger.warning(
+                "Failed to fetch root space members before inviting users",
+                room_id=root_space_id,
+                exc_info=True,
+            )
+            return
         for user_id in sorted(invite_user_ids):
             if user_id in current_members:
                 continue
-            success = await invite_to_room(router_bot.client, root_space_id, user_id)
-            if success:
+            invite_result = await invite_to_room(router_bot.client, root_space_id, user_id)
+            if invite_result.is_success:
                 logger.info("invited_user_to_root_space", user_id=user_id, room_id=root_space_id)
             else:
-                logger.warning("invite_user_to_root_space_failed", user_id=user_id, room_id=root_space_id)
+                logger.warning(
+                    "invite_user_to_root_space_failed",
+                    user_id=user_id,
+                    room_id=root_space_id,
+                    error=invite_result.error_message,
+                    error_code=invite_result.error_code,
+                )
 
     async def _invite_user_if_missing(
         self,
@@ -1461,12 +1477,12 @@ class MultiAgentOrchestrator:
         assert router_bot.client is not None
         if user_id in current_members:
             return
-        success = await invite_to_room(router_bot.client, room_id, user_id)
-        if success:
+        invite_result = await invite_to_room(router_bot.client, room_id, user_id)
+        if invite_result.is_success:
             logger.info(success_message)
             current_members.add(user_id)
         else:
-            logger.warning(failure_message)
+            logger.warning(failure_message, error=invite_result.error_message, error_code=invite_result.error_code)
 
     async def _invite_internal_user_to_rooms(
         self,
@@ -1492,7 +1508,16 @@ class MultiAgentOrchestrator:
         user_id = MatrixID.from_username(user_account.username, server_name).full_id
         authorized_user_ids.discard(user_id)
         for room_id in joined_rooms:
-            room_members = await get_room_members(router_bot.client, room_id)
+            try:
+                room_members = await get_room_members(router_bot.client, room_id)
+            except Exception:
+                logger.warning(
+                    "Failed to fetch room members before inviting the internal user",
+                    room_id=room_id,
+                    user_id=user_id,
+                    exc_info=True,
+                )
+                continue
             await self._invite_user_if_missing(
                 room_id,
                 user_id,
@@ -1539,6 +1564,220 @@ class MultiAgentOrchestrator:
                 failure_message=f"Failed to invite {bot_username} to room {room_id}",
             )
 
+    async def handle_bot_joined_invite_room(
+        self,
+        bot: AgentBot | TeamBot,
+        room_id: str,
+        *,
+        actor_id: str,
+        invite_is_direct: bool = False,
+    ) -> Literal["reconciled", "skipped", "retry", "invited_pending_join"]:
+        """Reconcile one ad-hoc invited room after a bot joins it."""
+        if room_id in bot.rooms:
+            return "reconciled"
+
+        config = self.config
+        client = bot.client
+        if config is None or client is None:
+            if config is None:
+                logger.warning(
+                    "Skipping router auto-invite because configuration is unavailable",
+                    room_id=room_id,
+                    agent_name=bot.agent_name,
+                    actor_id=actor_id,
+                )
+            else:
+                logger.warning(
+                    "Skipping router auto-invite because the joining bot has no Matrix client",
+                    room_id=room_id,
+                    agent_name=bot.agent_name,
+                    actor_id=actor_id,
+                )
+            return "retry"
+
+        skip_reason = self._router_auto_invite_skip_reason(room_id, actor_id)
+        explicit_dm_room = (
+            True
+            if invite_is_direct
+            else await self._is_explicit_dm_room(
+                client,
+                room_id,
+                agent_name=bot.agent_name,
+                actor_id=actor_id,
+            )
+        )
+        outcome: Literal["skipped", "retry"] | None = None
+        if explicit_dm_room is None:
+            outcome = "retry"
+        elif explicit_dm_room:
+            logger.debug(
+                "Skipping router ad-hoc reconciliation for DM room",
+                room_id=room_id,
+                agent_name=bot.agent_name,
+                actor_id=actor_id,
+            )
+            outcome = "skipped"
+        elif skip_reason is not None:
+            logger.warning(
+                f"Skipping router auto-invite because {skip_reason}",
+                room_id=room_id,
+                agent_name=bot.agent_name,
+                actor_id=actor_id,
+            )
+            outcome = "retry"
+        if outcome is not None:
+            return outcome
+
+        if bot.agent_name == ROUTER_AGENT_NAME:
+            self._remember_router_ad_hoc_room(room_id)
+            logger.info(
+                "Persisted manually invited router ad-hoc room",
+                room_id=room_id,
+                agent_name=bot.agent_name,
+                actor_id=actor_id,
+            )
+            return "reconciled"
+
+        return await self._auto_invite_router_for_ad_hoc_room(
+            client,
+            room_id,
+            agent_name=bot.agent_name,
+            actor_id=actor_id,
+            router_user_id=config.get_ids(self.runtime_paths)[ROUTER_AGENT_NAME].full_id,
+        )
+
+    async def _auto_invite_router_for_ad_hoc_room(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        *,
+        agent_name: str,
+        actor_id: str,
+        router_user_id: str,
+    ) -> Literal["reconciled", "retry", "invited_pending_join"]:
+        """Invite the router into one non-DM ad-hoc room and report the next reconciliation step."""
+        try:
+            current_members = await get_room_members(client, room_id)
+        except Exception:
+            logger.exception(
+                "Failed to fetch room members for router auto-invite",
+                room_id=room_id,
+                agent_name=agent_name,
+                actor_id=actor_id,
+            )
+            return "retry"
+
+        if not current_members:
+            logger.warning(
+                "Skipping router auto-invite because room members are unavailable",
+                room_id=room_id,
+                agent_name=agent_name,
+                actor_id=actor_id,
+            )
+            return "retry"
+        if router_user_id in current_members:
+            self._remember_router_ad_hoc_room(room_id)
+            logger.debug(
+                "Router already joined invited room",
+                room_id=room_id,
+                agent_name=agent_name,
+                router_user_id=router_user_id,
+            )
+            return "reconciled"
+
+        invite_result = await self._invite_router_to_joined_room(client, room_id, router_user_id)
+        if invite_result.outcome == "already_joined":
+            self._remember_router_ad_hoc_room(room_id)
+            logger.info(
+                "Router already joined ad-hoc room after invite attempt",
+                room_id=room_id,
+                agent_name=agent_name,
+                router_user_id=router_user_id,
+            )
+            return "reconciled"
+        if invite_result.is_success:
+            logger.info(
+                "Auto-invited router to ad-hoc room",
+                room_id=room_id,
+                agent_name=agent_name,
+                router_user_id=router_user_id,
+                invite_outcome=invite_result.outcome,
+                persisted_when="router_joins",
+            )
+            return "invited_pending_join"
+
+        logger.warning(
+            "Failed to auto-invite router to ad-hoc room",
+            room_id=room_id,
+            agent_name=agent_name,
+            router_user_id=router_user_id,
+            error=invite_result.error_message,
+            error_code=invite_result.error_code,
+            hint=(
+                "The first invited bot may not have permission to invite additional users. "
+                "Invite the router manually or grant invite permission in the room."
+            ),
+        )
+        return "retry"
+
+    async def _is_explicit_dm_room(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        *,
+        agent_name: str,
+        actor_id: str,
+    ) -> bool | None:
+        """Return whether one room is explicitly marked as DM, or None when unavailable."""
+        try:
+            return await is_dm_room(client, room_id, include_two_member_group_heuristic=False)
+        except Exception:
+            logger.warning(
+                "Failed to probe DM markers for router ad-hoc room reconciliation",
+                room_id=room_id,
+                agent_name=agent_name,
+                actor_id=actor_id,
+                exc_info=True,
+            )
+            return None
+
+    def _remember_router_ad_hoc_room(self, room_id: str) -> None:
+        """Persist one router-managed ad-hoc room id."""
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        room_added = state.add_router_ad_hoc_room(room_id)
+        inviter_cleared = state.clear_router_ad_hoc_inviter(room_id)
+        if not room_added and not inviter_cleared:
+            return
+        state.save(runtime_paths=self.runtime_paths)
+
+    def _router_auto_invite_skip_reason(
+        self,
+        room_id: str,
+        actor_id: str,
+    ) -> str | None:
+        """Return why router auto-invite should be skipped for one joined ad-hoc room."""
+        config = self._require_config()
+        if not is_authorized_sender(actor_id, config, room_id, self.runtime_paths):
+            return "current actor is unauthorized"
+        if not is_sender_allowed_for_agent_reply(actor_id, ROUTER_AGENT_NAME, config, self.runtime_paths):
+            return "current actor lacks router reply permission"
+        return None
+
+    async def _invite_router_to_joined_room(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        router_user_id: str,
+    ) -> RoomInviteResult:
+        """Invite the router to one joined room and normalize transport exceptions."""
+        try:
+            return await invite_to_room(client, room_id, router_user_id)
+        except Exception as error:
+            return RoomInviteResult(
+                outcome="failed",
+                error_message=str(error),
+            )
+
     async def _ensure_room_invitations(self) -> None:
         """Ensure all agents and the internal user are invited to their configured rooms.
 
@@ -1575,7 +1814,15 @@ class MultiAgentOrchestrator:
             if not configured_bots:
                 continue
 
-            current_members = await get_room_members(router_bot.client, room_id)
+            try:
+                current_members = await get_room_members(router_bot.client, room_id)
+            except Exception:
+                logger.warning(
+                    "Failed to fetch room members before ensuring room invitations",
+                    room_id=room_id,
+                    exc_info=True,
+                )
+                continue
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
             await self._invite_configured_bots_to_room(room_id, current_members, configured_bots, server_name)
 

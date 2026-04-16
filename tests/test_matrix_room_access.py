@@ -10,7 +10,7 @@ import pytest
 
 from mindroom import topic_generator
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE, resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.presence import is_user_online
@@ -175,10 +175,16 @@ async def test_existing_room_reconciliation_respects_flag(
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     ensure_thread_tags_power_level = AsyncMock(return_value=True)
+    ensure_scheduled_task_power_level_removed = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
         "ensure_thread_tags_power_level",
         ensure_thread_tags_power_level,
+    )
+    monkeypatch.setattr(
+        matrix_rooms,
+        "ensure_scheduled_task_power_level_removed",
+        ensure_scheduled_task_power_level_removed,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -194,6 +200,10 @@ async def test_existing_room_reconciliation_respects_flag(
 
     assert room_id == "!lobby:example.com"
     ensure_thread_tags_power_level.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+    )
+    ensure_scheduled_task_power_level_removed.assert_awaited_once_with(
         mock_client,
         "!lobby:example.com",
     )
@@ -250,11 +260,11 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
 async def test_create_room_seeds_thread_tags_power_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Managed room creation should seed the custom state-event override."""
+    """Managed room creation should seed only the thread-tag state-event override."""
     mock_client = AsyncMock()
     mock_client.user_id = "@router:example.com"
     mock_client.room_create.return_value = nio.RoomCreateResponse(room_id="!lobby:example.com")
-    invite_to_room = AsyncMock(return_value=True)
+    invite_to_room = AsyncMock(return_value=matrix_client.RoomInviteResult(outcome="invited"))
     monkeypatch.setattr(matrix_client, "invite_to_room", invite_to_room)
 
     room_id = await matrix_client.create_room(
@@ -273,6 +283,7 @@ async def test_create_room_seeds_thread_tags_power_level(
     power_levels = initial_state[0]["content"]
     assert power_levels["state_default"] == 50
     assert power_levels["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    assert "com.mindroom.scheduled.task" not in power_levels["events"]
     assert power_levels["users"]["@agent:example.com"] == 50
     assert power_levels["users"]["@router:example.com"] == 100
     invite_to_room.assert_awaited_once_with(mock_client, "!lobby:example.com", "@agent:example.com")
@@ -372,6 +383,63 @@ async def test_ensure_thread_tags_power_level_does_not_restore_removed_overrides
 
 
 @pytest.mark.asyncio
+async def test_ensure_scheduled_task_power_level_removed_drops_stale_override() -> None:
+    """Reconciliation should remove the stale scheduled-task override from existing rooms."""
+    mock_client = AsyncMock()
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "events": {
+                THREAD_TAGS_EVENT_TYPE: 0,
+                SCHEDULED_TASK_EVENT_TYPE: 0,
+                "m.room.name": 50,
+            },
+            "state_default": 50,
+            "users": {"@router:example.com": 100},
+        },
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_scheduled_task_power_level_removed(mock_client, "!room:example.com")
+
+    assert result is True
+    _, kwargs = mock_client.room_put_state.await_args
+    assert kwargs["content"]["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    assert kwargs["content"]["events"]["m.room.name"] == 50
+    assert SCHEDULED_TASK_EVENT_TYPE not in kwargs["content"]["events"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_scheduled_task_power_level_removed_preserves_admin_override() -> None:
+    """Reconciliation should preserve intentional non-zero scheduled-task overrides."""
+    mock_client = AsyncMock()
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "events": {
+                THREAD_TAGS_EVENT_TYPE: 0,
+                SCHEDULED_TASK_EVENT_TYPE: 100,
+                "m.room.name": 50,
+            },
+            "state_default": 50,
+            "users": {"@router:example.com": 100},
+        },
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_scheduled_task_power_level_removed(mock_client, "!room:example.com")
+
+    assert result is True
+    mock_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ensure_thread_tags_power_level_idempotent() -> None:
     """Reconciliation should skip writes when the override already exists."""
     mock_client = AsyncMock()
@@ -390,6 +458,39 @@ async def test_ensure_thread_tags_power_level_idempotent() -> None:
 
     assert result is True
     mock_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_thread_tags_power_level_returns_false_on_state_read_exception() -> None:
+    """Power-level reconciliation should treat transport read failures as soft failures."""
+    mock_client = AsyncMock()
+    mock_client.room_get_state_event.side_effect = RuntimeError("boom transport")
+
+    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+
+    assert result is False
+    mock_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_thread_tags_power_level_returns_false_on_state_write_exception() -> None:
+    """Power-level reconciliation should treat transport write failures as soft failures."""
+    mock_client = AsyncMock()
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "events": {},
+            "state_default": 50,
+            "users": {"@router:example.com": 100},
+        },
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.side_effect = RuntimeError("boom transport")
+
+    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+
+    assert result is False
 
 
 @pytest.mark.asyncio
@@ -739,10 +840,16 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=[]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     ensure_thread_tags_power_level = AsyncMock(return_value=True)
+    ensure_scheduled_task_power_level_removed = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
         "ensure_thread_tags_power_level",
         ensure_thread_tags_power_level,
+    )
+    monkeypatch.setattr(
+        matrix_rooms,
+        "ensure_scheduled_task_power_level_removed",
+        ensure_scheduled_task_power_level_removed,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -758,6 +865,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
 
     assert room_id == "!lobby:example.com"
     ensure_thread_tags_power_level.assert_not_awaited()
+    ensure_scheduled_task_power_level_removed.assert_not_awaited()
     configure_access.assert_not_awaited()
 
 
@@ -844,10 +952,16 @@ async def test_existing_room_reconciliation_runs_after_later_join(
     ensure_room_has_topic = AsyncMock()
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", ensure_room_has_topic)
     ensure_thread_tags_power_level = AsyncMock(return_value=True)
+    ensure_scheduled_task_power_level_removed = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
         "ensure_thread_tags_power_level",
         ensure_thread_tags_power_level,
+    )
+    monkeypatch.setattr(
+        matrix_rooms,
+        "ensure_scheduled_task_power_level_removed",
+        ensure_scheduled_task_power_level_removed,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -864,6 +978,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(
     assert first_room_id == "!lobby:example.com"
     ensure_room_has_topic.assert_not_awaited()
     ensure_thread_tags_power_level.assert_not_awaited()
+    ensure_scheduled_task_power_level_removed.assert_not_awaited()
     configure_access.assert_not_awaited()
 
     mock_client.rooms = {"!lobby:example.com": object()}
@@ -890,6 +1005,10 @@ async def test_existing_room_reconciliation_runs_after_later_join(
         mock_client,
         "!lobby:example.com",
     )
+    ensure_scheduled_task_power_level_removed.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+    )
     configure_access.assert_awaited_once_with(
         client=mock_client,
         room_key="lobby",
@@ -899,6 +1018,49 @@ async def test_existing_room_reconciliation_runs_after_later_join(
         room_alias="#lobby:example.com",
         context="existing_room_reconciliation",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("membership", "expected_outcome"),
+    [("join", "already_joined"), ("invite", "already_invited")],
+)
+async def test_invite_to_room_classifies_existing_membership_without_parsing_error_text(
+    membership: str,
+    expected_outcome: str,
+) -> None:
+    """Invite classification should use membership state instead of English error text."""
+    mock_client = AsyncMock()
+    mock_client.room_invite.return_value = nio.RoomInviteError("homeserver wording changed", "M_FORBIDDEN")
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"membership": membership},
+        event_type="m.room.member",
+        state_key="@agent:example.com",
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.invite_to_room(mock_client, "!room:example.com", "@agent:example.com")
+
+    assert result.outcome == expected_outcome
+    assert result.error_code == "M_FORBIDDEN"
+    mock_client.room_get_state_event.assert_awaited_once_with(
+        "!room:example.com",
+        "m.room.member",
+        "@agent:example.com",
+    )
+
+
+@pytest.mark.asyncio
+async def test_invite_to_room_handles_membership_probe_exception() -> None:
+    """Invite fallback probes should not raise when the membership lookup itself fails."""
+    mock_client = AsyncMock()
+    mock_client.room_invite.return_value = nio.RoomInviteError("homeserver wording changed", "M_FORBIDDEN")
+    mock_client.room_get_state_event.side_effect = RuntimeError("boom membership probe")
+
+    result = await matrix_client.invite_to_room(mock_client, "!room:example.com", "@agent:example.com")
+
+    assert result.outcome == "failed"
+    assert result.error_code == "M_FORBIDDEN"
 
 
 @pytest.mark.asyncio

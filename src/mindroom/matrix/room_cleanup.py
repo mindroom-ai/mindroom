@@ -79,8 +79,9 @@ async def _cleanup_orphaned_bots_in_room(
         return []
 
     # Get room members
-    member_ids = await get_room_members(client, room_id)
-    if not member_ids:
+    try:
+        member_ids = await get_room_members(client, room_id)
+    except Exception:
         logger.warning("orphaned_bot_cleanup_members_unavailable", room_id=room_id)
         return []
 

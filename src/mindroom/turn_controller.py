@@ -67,6 +67,7 @@ from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
+from mindroom.router_helpers import get_live_router_client, get_live_router_runtime
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import get_configured_agents_for_room
 from mindroom.timing import (
@@ -173,6 +174,10 @@ class TurnController:
             msg = "Matrix client is not ready for turn execution"
             raise RuntimeError(msg)
         return client
+
+    def _router_client(self) -> nio.AsyncClient | None:
+        """Return the live router client when the orchestrator has one ready."""
+        return get_live_router_client(self.deps.runtime.orchestrator)
 
     def _requester_user_id(
         self,
@@ -646,6 +651,8 @@ class TurnController:
             send_response=send_response,
             send_skill_command_response=send_skill_command_response,
             run_skill_command_tool=run_skill_command_tool,
+            router_client=self._router_client(),
+            router_runtime=get_live_router_runtime(self.deps.runtime.orchestrator),
         )
         await handle_command(
             context=context,

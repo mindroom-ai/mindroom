@@ -99,6 +99,7 @@ class TestTeamRoomMembership:
             _config: Config,
             _runtime_paths: object,
             _event_cache: object,
+            **_kwargs: object,
         ) -> int:
             return 0
 

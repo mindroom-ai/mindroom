@@ -38,6 +38,8 @@ class MatrixState(BaseModel):
     accounts: dict[str, _MatrixAccount] = Field(default_factory=dict)
     rooms: dict[str, MatrixRoom] = Field(default_factory=dict)
     space_room_id: str | None = None
+    router_ad_hoc_room_ids: set[str] = Field(default_factory=set)
+    router_ad_hoc_inviter_ids: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
     def load(cls, runtime_paths: constants.RuntimePaths) -> Self:
@@ -97,3 +99,39 @@ class MatrixState(BaseModel):
     def set_space_room_id(self, room_id: str | None) -> None:
         """Persist the root Matrix Space room ID."""
         self.space_room_id = room_id
+
+    def add_router_ad_hoc_room(self, room_id: str) -> bool:
+        """Persist one router-managed ad-hoc room id."""
+        if room_id in self.router_ad_hoc_room_ids:
+            return False
+        self.router_ad_hoc_room_ids.add(room_id)
+        return True
+
+    def remove_router_ad_hoc_room(self, room_id: str) -> bool:
+        """Remove one persisted router-managed ad-hoc room id."""
+        changed = False
+        if room_id in self.router_ad_hoc_room_ids:
+            self.router_ad_hoc_room_ids.remove(room_id)
+            changed = True
+        if room_id in self.router_ad_hoc_inviter_ids:
+            del self.router_ad_hoc_inviter_ids[room_id]
+            changed = True
+        return changed
+
+    def remember_router_ad_hoc_inviter(self, room_id: str, inviter_id: str) -> bool:
+        """Persist or refresh the latest actor for one pending ad-hoc room reconciliation."""
+        if self.router_ad_hoc_inviter_ids.get(room_id) == inviter_id:
+            return False
+        self.router_ad_hoc_inviter_ids[room_id] = inviter_id
+        return True
+
+    def get_router_ad_hoc_inviter(self, room_id: str) -> str | None:
+        """Return the persisted inviter for one pending ad-hoc room reconciliation."""
+        return self.router_ad_hoc_inviter_ids.get(room_id)
+
+    def clear_router_ad_hoc_inviter(self, room_id: str) -> bool:
+        """Forget the persisted inviter for one ad-hoc room reconciliation."""
+        if room_id not in self.router_ad_hoc_inviter_ids:
+            return False
+        del self.router_ad_hoc_inviter_ids[room_id]
+        return True

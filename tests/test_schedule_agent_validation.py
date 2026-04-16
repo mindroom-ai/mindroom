@@ -61,6 +61,31 @@ def _scheduling_runtime(
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_scheduled_task_writer_resolution() -> object:
+    async def _return_current_client(
+        *,
+        room_id: str,
+        current_client: AsyncMock,
+        router_client: AsyncMock | None = None,  # noqa: ARG001
+        additional_clients: tuple[AsyncMock, ...] = (),  # noqa: ARG001
+    ) -> tuple[AsyncMock, object]:
+        current_client.room_put_state = AsyncMock(
+            return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$scheduled"}, room_id=room_id),
+        )
+
+        async def _re_resolve_writer() -> AsyncMock:
+            return current_client
+
+        return (current_client, _re_resolve_writer)
+
+    with patch(
+        "mindroom.scheduling._resolve_scheduled_task_writer_with_retry",
+        new=AsyncMock(side_effect=_return_current_client),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_schedule_validates_agents_in_room() -> None:
     """Test that schedule command validates agents are configured for the room."""
@@ -205,7 +230,9 @@ async def test_schedule_allows_agents_in_room() -> None:
 
     # Mock client
     client = AsyncMock()
-    client.room_put_state = AsyncMock()
+    client.room_put_state = AsyncMock(
+        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$scheduled"}, room_id="test_room"),
+    )
 
     # Create a mock room with both agents - use the actual domain from config
     room = create_mock_room(
@@ -341,7 +368,9 @@ async def test_schedule_with_no_agent_mentions() -> None:
     )
 
     client = AsyncMock()
-    client.room_put_state = AsyncMock()
+    client.room_put_state = AsyncMock(
+        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$scheduled"}, room_id="test_room"),
+    )
 
     # Create a mock room - use the actual domain from config
     room = create_mock_room(

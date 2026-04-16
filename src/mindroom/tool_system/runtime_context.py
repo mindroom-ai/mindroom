@@ -21,6 +21,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import validate_event_name
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.router_helpers import get_live_router_client, get_live_router_runtime
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.hooks.types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.router_helpers import LiveRouterRuntime
     from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -89,6 +91,8 @@ class ToolRuntimeContext:
     room_state_querier: HookRoomStateQuerier | None = None
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
+    router_client: nio.AsyncClient | None = None
+    router_runtime: LiveRouterRuntime | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,10 @@ class ToolRuntimeSupport:
     resolver: ConversationResolver
     hook_context: HookContextSupport
 
+    def _router_client(self) -> nio.AsyncClient | None:
+        """Return the live router client when the orchestrator has one ready."""
+        return get_live_router_client(self.runtime.orchestrator)
+
     def build_context(
         self,
         target: MessageTarget,
@@ -213,6 +221,8 @@ class ToolRuntimeSupport:
             room_state_querier=self.hook_context.room_state_querier(),
             room_state_putter=self.hook_context.room_state_putter(),
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
+            router_client=self._router_client(),
+            router_runtime=get_live_router_runtime(self.runtime.orchestrator),
         )
 
     def build_required_context(
@@ -454,6 +464,8 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         conversation_cache=context.conversation_cache,
         event_cache=context.event_cache,
         matrix_admin=context.matrix_admin,
+        router_client=context.router_client,
+        router_runtime=context.router_runtime,
     )
 
 

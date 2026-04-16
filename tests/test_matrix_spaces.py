@@ -428,7 +428,10 @@ async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_us
     with (
         patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")) as mock_space,
         patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={"@mindroom_router:localhost"})),
-        patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+        patch(
+            "mindroom.orchestrator.invite_to_room",
+            new=AsyncMock(return_value=matrix_client.RoomInviteResult(outcome="invited")),
+        ) as mock_invite,
     ):
         await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
 
@@ -461,7 +464,10 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
     with (
         patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
         patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={"@mindroom_router:localhost"})),
-        patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+        patch(
+            "mindroom.orchestrator.invite_to_room",
+            new=AsyncMock(return_value=matrix_client.RoomInviteResult(outcome="invited")),
+        ) as mock_invite,
     ):
         await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
 

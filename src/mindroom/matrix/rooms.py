@@ -17,6 +17,7 @@ from mindroom.matrix.client import (
     ensure_room_directory_visibility,
     ensure_room_join_rule,
     ensure_room_name,
+    ensure_scheduled_task_power_level_removed,
     ensure_thread_tags_power_level,
     get_joined_rooms,
     join_room,
@@ -298,6 +299,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 room_name = _room_key_to_name(room_key)
             await ensure_room_has_topic(client, room_id, room_key, room_name, config, runtime_paths)
             await ensure_thread_tags_power_level(client, room_id)
+            await ensure_scheduled_task_power_level_removed(client, room_id)
 
             if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
                 await _configure_managed_room_access(
@@ -577,19 +579,24 @@ async def ensure_user_in_rooms(
                 )
 
 
-_DM_ROOM_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
+_DM_ROOM_CACHE: dict[tuple[str, str, bool], tuple[float, bool]] = {}
 _DIRECT_ROOMS_CACHE: dict[str, tuple[float, set[str]]] = {}
 _DM_ROOM_TTL: float = 300  # seconds
 _DIRECT_ROOMS_TTL: float = 300  # seconds
 
 
-def _dm_cache_key(client: nio.AsyncClient, room_id: str) -> tuple[str, str]:
+def _dm_cache_key(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    include_two_member_group_heuristic: bool,
+) -> tuple[str, str, bool]:
     """Build a cache key that is scoped per user.
 
     DM membership via ``m.direct`` is account-specific, so room-only cache keys
     can leak incorrect results between different bot users.
     """
-    return (str(client.user_id or ""), room_id)
+    return (str(client.user_id or ""), room_id, include_two_member_group_heuristic)
 
 
 async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
@@ -649,23 +656,34 @@ def _has_is_direct_marker(state_events: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
+async def is_dm_room(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    include_two_member_group_heuristic: bool = True,
+) -> bool:
     """Check if a room is a Direct Message (DM) room.
 
     Detection uses multiple signals in this order:
     1. ``m.direct`` account data (via ``/account_data/m.direct``)
-    2. Nio's in-memory room model for 2-member ad-hoc rooms
+    2. Nio's in-memory room model for 2-member ad-hoc rooms, when enabled
     3. Room state events with ``is_direct=true``
 
     Args:
         client: The Matrix client
         room_id: The room ID to check
+        include_two_member_group_heuristic: Whether to preserve unnamed two-member rooms
+            as DM-like when explicit DM markers are absent.
 
     Returns:
         True if the room is a DM room, False otherwise
 
     """
-    cache_key = _dm_cache_key(client, room_id)
+    cache_key = _dm_cache_key(
+        client,
+        room_id,
+        include_two_member_group_heuristic=include_two_member_group_heuristic,
+    )
     cached = _DM_ROOM_CACHE.get(cache_key)
     if cached is not None:
         ts, is_dm = cached
@@ -678,7 +696,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         return True
 
     # Preserve DM-like rooms even when servers don't expose `is_direct` in state.
-    if _is_two_member_group_room(client, room_id):
+    if include_two_member_group_heuristic and _is_two_member_group_room(client, room_id):
         _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
         return True
 

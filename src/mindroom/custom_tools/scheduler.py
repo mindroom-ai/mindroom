@@ -5,6 +5,7 @@ from __future__ import annotations
 from agno.tools import Toolkit
 
 from mindroom.scheduling import (
+    ScheduledTaskOperationError,
     cancel_scheduled_task,
     edit_scheduled_task,
     list_scheduled_tasks,
@@ -114,8 +115,26 @@ class SchedulerTools(Toolkit):
         if context is None:
             return "❌ Scheduler tool is unavailable in this context."
 
-        return await cancel_scheduled_task(
-            client=context.client,
-            room_id=context.room_id,
-            task_id=task_id,
-        )
+        try:
+            if context.router_client is None:
+                return await cancel_scheduled_task(
+                    client=context.client,
+                    room_id=context.room_id,
+                    task_id=task_id,
+                    config=context.config,
+                    runtime_paths=context.runtime_paths,
+                    requester_id=context.requester_id,
+                    requester_thread_id=context.resolved_thread_id,
+                )
+            return await cancel_scheduled_task(
+                client=context.client,
+                room_id=context.room_id,
+                task_id=task_id,
+                router_client=context.router_client,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                requester_id=context.requester_id,
+                requester_thread_id=context.resolved_thread_id,
+            )
+        except ScheduledTaskOperationError as error:
+            return f"❌ {error.public_message}"

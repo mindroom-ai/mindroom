@@ -136,6 +136,7 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+
 def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
     """Set the upstream-authored validation snapshot visible to one worker runtime."""
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))

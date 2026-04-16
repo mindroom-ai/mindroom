@@ -33,11 +33,18 @@ def _make_state_event(state_key: str, workflow: ScheduledWorkflow, status: str =
     }
 
 
+def _restore_config() -> MagicMock:
+    config = MagicMock()
+    config.get_ids.return_value = {"router": MagicMock(full_id="@s:server")}
+    config.get_domain.return_value = "server"
+    return config
+
+
 @pytest.mark.asyncio
 async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkeypatch: pytest.MonkeyPatch) -> None:
     """Past once-tasks within the grace period should be restored; invalid cron skipped."""
     client = AsyncMock()
-    config = AsyncMock()
+    config = _restore_config()
 
     recent_past_once = ScheduledWorkflow(
         schedule_type="once",
@@ -94,7 +101,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
 async def test_restore_marks_ancient_missed_task_as_failed() -> None:
     """One-time task older than the grace period should be marked as failed."""
     client = AsyncMock()
-    config = AsyncMock()
+    config = _restore_config()
 
     ancient_once = ScheduledWorkflow(
         schedule_type="once",
@@ -132,7 +139,7 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
 async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
     """Future one-time tasks should be restored normally."""
     client = AsyncMock()
-    config = AsyncMock()
+    config = _restore_config()
 
     future_once = ScheduledWorkflow(
         schedule_type="once",
@@ -168,7 +175,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) 
 async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Restoration should not create duplicate asyncio tasks for the same task id."""
     client = AsyncMock()
-    config = AsyncMock()
+    config = _restore_config()
     workflow = ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=10),

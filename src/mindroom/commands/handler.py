@@ -16,6 +16,7 @@ from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.scheduling import (
+    ScheduledTaskOperationError,
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.router_helpers import LiveRouterRuntime
 
 logger = get_logger(__name__)
 
@@ -64,6 +66,8 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         conversation_cache=context.conversation_cache,
         event_cache=context.event_cache,
         matrix_admin=context.matrix_admin,
+        router_client=context.router_client,
+        router_runtime=context.router_runtime,
     )
 
 
@@ -108,6 +112,8 @@ class CommandHandlerContext:
     send_skill_command_response: Callable[..., Awaitable[str | None]]
     run_skill_command_tool: Callable[..., Awaitable[str]]
     matrix_admin: HookMatrixAdmin | None = None
+    router_client: nio.AsyncClient | None = None
+    router_runtime: LiveRouterRuntime | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -543,19 +549,54 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         cancel_all = command.args.get("cancel_all", False)
 
         if cancel_all:
-            # Cancel all scheduled tasks
-            response_text = await cancel_all_scheduled_tasks(
-                client=context.client,
-                room_id=room.room_id,
-            )
+            try:
+                if context.router_client is None:
+                    response_text = await cancel_all_scheduled_tasks(
+                        client=context.client,
+                        room_id=room.room_id,
+                        config=context.config,
+                        runtime_paths=context.runtime_paths,
+                        requester_id=requester_user_id,
+                        requester_thread_id=effective_thread_id,
+                    )
+                else:
+                    response_text = await cancel_all_scheduled_tasks(
+                        client=context.client,
+                        room_id=room.room_id,
+                        router_client=context.router_client,
+                        config=context.config,
+                        runtime_paths=context.runtime_paths,
+                        requester_id=requester_user_id,
+                        requester_thread_id=effective_thread_id,
+                    )
+            except ScheduledTaskOperationError as error:
+                response_text = f"❌ {error.public_message}"
         else:
-            # Cancel specific task
             task_id = command.args["task_id"]
-            response_text = await cancel_scheduled_task(
-                client=context.client,
-                room_id=room.room_id,
-                task_id=task_id,
-            )
+            try:
+                if context.router_client is None:
+                    response_text = await cancel_scheduled_task(
+                        client=context.client,
+                        room_id=room.room_id,
+                        task_id=task_id,
+                        config=context.config,
+                        runtime_paths=context.runtime_paths,
+                        requester_id=requester_user_id,
+                        requester_thread_id=effective_thread_id,
+                    )
+                else:
+                    response_text = await cancel_scheduled_task(
+                        client=context.client,
+                        room_id=room.room_id,
+                        task_id=task_id,
+                        router_client=context.router_client,
+                        config=context.config,
+                        runtime_paths=context.runtime_paths,
+                        requester_id=requester_user_id,
+                        requester_thread_id=effective_thread_id,
+                    )
+            except ScheduledTaskOperationError as error:
+                response_text = f"❌ {error.public_message}"
 
     elif command.type == CommandType.EDIT_SCHEDULE:
         task_id = command.args["task_id"]

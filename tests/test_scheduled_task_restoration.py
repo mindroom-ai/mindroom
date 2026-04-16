@@ -12,6 +12,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     bind_runtime_paths,
@@ -106,6 +107,7 @@ class TestScheduledTaskRestoration:
                 runtime_paths_for(config),
                 router_bot.event_cache,
                 router_bot._conversation_cache,
+                additional_writer_clients=(),
             )
 
     @pytest.mark.asyncio
@@ -203,9 +205,81 @@ class TestScheduledTaskRestoration:
             runtime_paths_for(config),
             router_bot.event_cache,
             router_bot._conversation_cache,
+            additional_writer_clients=(),
         )
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
         mock_welcome.assert_awaited_once_with("lobby")
+
+    @pytest.mark.asyncio
+    async def test_router_restores_persisted_ad_hoc_room_state_on_restart(self, tmp_path: Path) -> None:
+        """Persisted router ad-hoc rooms should rerun startup restore without a rejoin."""
+        config = self._bind_runtime(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": [],
+                    },
+                },
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
+        )
+
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
+            password="test",  # noqa: S106
+            display_name="RouterAgent",
+        )
+        router_bot = AgentBot(
+            agent_user=router_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["lobby"],
+        )
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        router_bot.client.rooms = {"lobby": object(), "!adhoc:mindroom.com": object()}
+        self._install_runtime_support(router_bot)
+        general_user_id = config.get_ids(runtime_paths_for(config))["general"].full_id
+
+        with (
+            patch(
+                "mindroom.bot.get_joined_rooms",
+                new_callable=AsyncMock,
+                return_value=["lobby", "!adhoc:mindroom.com"],
+            ),
+            patch(
+                "mindroom.bot.get_room_members",
+                new_callable=AsyncMock,
+                return_value={
+                    "@mindroom_router:mindroom.com",
+                    general_user_id,
+                    "@owner:mindroom.com",
+                },
+            ),
+            patch("mindroom.bot.join_room", new_callable=AsyncMock) as mock_join,
+            patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=0) as mock_restore,
+            patch(
+                "mindroom.bot.config_confirmation.restore_pending_changes",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock),
+            patch(
+                "mindroom.bot.MatrixState.load",
+                return_value=MatrixState(router_ad_hoc_room_ids={"!adhoc:mindroom.com"}),
+            ),
+        ):
+            await router_bot.join_configured_rooms()
+
+        mock_join.assert_not_awaited()
+        assert mock_restore.await_count == 2
+        restored_room_ids = {call.args[1] for call in mock_restore.await_args_list}
+        assert restored_room_ids == {"lobby", "!adhoc:mindroom.com"}
 
     @pytest.mark.asyncio
     async def test_router_drains_deferred_overdue_tasks_on_first_sync_response(self, tmp_path: Path) -> None:
@@ -247,6 +321,7 @@ class TestScheduledTaskRestoration:
                 runtime_paths_for(config),
                 router_bot.event_cache,
                 router_bot._conversation_cache,
+                additional_writer_clients=(),
             )
 
             await router_bot._on_sync_response(MagicMock())

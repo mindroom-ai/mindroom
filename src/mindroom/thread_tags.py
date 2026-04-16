@@ -12,10 +12,13 @@ from typing import Any, cast
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from mindroom.matrix.power_levels import (
+    POWER_LEVELS_EVENT_TYPE,
+    required_state_event_power_level,
+    user_power_level,
+)
+
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
-POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
-DEFAULT_STATE_EVENT_POWER_LEVEL = 50
-DEFAULT_USER_POWER_LEVEL = 0
 MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
@@ -111,13 +114,6 @@ def _parse_timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
-
-
-def _parse_power_level(value: object) -> int | None:
-    """Return one Matrix power level value when it is a real integer."""
-    if type(value) is not int:
-        return None
-    return value
 
 
 def _normalize_non_empty_string(value: object) -> str | None:
@@ -506,44 +502,6 @@ async def _put_thread_tag_state(
     raise ThreadTagsError(msg)
 
 
-def _required_state_event_power_level(
-    power_levels_content: Mapping[str, object],
-    *,
-    event_type: str,
-) -> int:
-    """Return the power level required to send one state event type."""
-    events = power_levels_content.get("events")
-    if isinstance(events, Mapping):
-        typed_events = cast("Mapping[str, object]", events)
-        event_level = _parse_power_level(typed_events.get(event_type))
-        if event_level is not None:
-            return event_level
-
-    state_default = _parse_power_level(power_levels_content.get("state_default"))
-    if state_default is not None:
-        return state_default
-    return DEFAULT_STATE_EVENT_POWER_LEVEL
-
-
-def _user_power_level(
-    power_levels_content: Mapping[str, object],
-    *,
-    user_id: str,
-) -> int:
-    """Return the current user's effective Matrix power level for one room."""
-    users = power_levels_content.get("users")
-    if isinstance(users, Mapping):
-        typed_users = cast("Mapping[str, object]", users)
-        user_level = _parse_power_level(typed_users.get(user_id))
-        if user_level is not None:
-            return user_level
-
-    users_default = _parse_power_level(power_levels_content.get("users_default"))
-    if users_default is not None:
-        return users_default
-    return DEFAULT_USER_POWER_LEVEL
-
-
 def _raise_insufficient_power_level(
     room_id: str,
     *,
@@ -588,21 +546,21 @@ def _assert_user_can_write_thread_tags(
     user_id: str,
 ) -> None:
     """Assert one Matrix user can send the thread-tags state event."""
-    required_power_level = _required_state_event_power_level(
+    required_power_level = required_state_event_power_level(
         power_levels_content,
         event_type=THREAD_TAGS_EVENT_TYPE,
     )
-    user_power_level = _user_power_level(
+    current_user_power_level = user_power_level(
         power_levels_content,
         user_id=user_id,
     )
-    if user_power_level >= required_power_level:
+    if current_user_power_level >= required_power_level:
         return
     _raise_insufficient_power_level(
         room_id,
         subject_label=subject_label,
         user_id=user_id,
-        user_power_level=user_power_level,
+        user_power_level=current_user_power_level,
         required_power_level=required_power_level,
     )
 

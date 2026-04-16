@@ -212,15 +212,20 @@ def _make_bot(
     return bot
 
 
-def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+def _orchestrator_stub(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
     matrix_admin = object()
     return SimpleNamespace(
         config=config,
         runtime_paths=runtime_paths,
+        agent_bots={},
         _hook_matrix_admin=lambda: matrix_admin,
         _hook_room_state_querier=lambda: None,
         _hook_room_state_putter=lambda: None,
     )
+
+
+def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+    return _orchestrator_stub(config, runtime_paths)
 
 
 def _build_response_runner(

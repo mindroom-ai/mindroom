@@ -732,7 +732,29 @@ class TestIntegrationWithScheduling:
             avatar_url=None,
         )
 
-        with patch("mindroom.scheduling._run_cron_task", new=AsyncMock()):
+        async def _return_current_client(
+            *,
+            room_id: str,
+            current_client: AsyncMock,
+            router_client: AsyncMock | None = None,  # noqa: ARG001
+            additional_clients: tuple[AsyncMock, ...] = (),  # noqa: ARG001
+        ) -> tuple[AsyncMock, object]:
+            current_client.room_put_state = AsyncMock(
+                return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$scheduled"}, room_id=room_id),
+            )
+
+            async def _re_resolve_writer() -> AsyncMock:
+                return current_client
+
+            return (current_client, _re_resolve_writer)
+
+        with (
+            patch("mindroom.scheduling._run_cron_task", new=AsyncMock()),
+            patch(
+                "mindroom.scheduling._resolve_scheduled_task_writer_with_retry",
+                new=AsyncMock(side_effect=_return_current_client),
+            ),
+        ):
             task_id, message = await schedule_task(
                 runtime=SchedulingRuntime(
                     client=client,

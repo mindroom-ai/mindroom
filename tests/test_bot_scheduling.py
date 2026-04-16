@@ -247,7 +247,15 @@ class TestBotScheduleCommands:
 
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
 
-            mock_cancel.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server", task_id="task123")
+            mock_cancel.assert_called_once_with(
+                client=mock_agent_bot.client,
+                room_id="!test:server",
+                task_id="task123",
+                config=mock_agent_bot.config,
+                runtime_paths=mock_agent_bot.runtime_paths,
+                requester_id="@user:server",
+                requester_thread_id="$thread123",
+            )
 
     @pytest.mark.asyncio
     async def test_handle_cancel_all_scheduled_tasks(self, mock_agent_bot: AgentBot) -> None:
@@ -272,7 +280,14 @@ class TestBotScheduleCommands:
 
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
 
-            mock_cancel_all.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server")
+            mock_cancel_all.assert_called_once_with(
+                client=mock_agent_bot.client,
+                room_id="!test:server",
+                config=mock_agent_bot.config,
+                runtime_paths=mock_agent_bot.runtime_paths,
+                requester_id="@user:server",
+                requester_thread_id="$event123",
+            )
 
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, NoReturn
 
 from croniter import CroniterError, croniter
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -14,15 +14,17 @@ from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import create_agent_user, login_agent_user
 from mindroom.scheduling import (
     SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR,
     CronSchedule,
+    ScheduledTaskOperationError,
     ScheduledTaskRecord,
     ScheduledWorkflow,
     cancel_scheduled_task,
-    get_scheduled_task,
     get_scheduled_tasks_for_room,
+    resolve_existing_scheduled_task_mutation,
     save_edited_scheduled_task,
 )
 
@@ -80,6 +82,29 @@ class CancelScheduleResponse(BaseModel):
     message: str
 
 
+def _scheduled_task_http_status(reason: str) -> int:
+    """Map one scheduling error reason to an API status code."""
+    if reason == "not_found":
+        return 404
+    if reason == "permission_denied":
+        return 403
+    if reason in {
+        "state_unavailable",
+        "persist_failed",
+        "cancel_failed",
+        "runtime_unavailable",
+        "writer_unavailable",
+        "writer_state_unavailable",
+    }:
+        return 503
+    return 400
+
+
+def _raise_scheduled_task_http_error(error: ScheduledTaskOperationError) -> NoReturn:
+    """Raise one HTTP exception for a structured scheduling error."""
+    raise HTTPException(status_code=_scheduled_task_http_status(error.reason), detail=error.public_message) from error
+
+
 RoomFilter = Annotated[str | None, Query(description="Optional room ID or alias filter")]
 IncludeCancelled = Annotated[bool, Query(description="Include cancelled schedules in the result")]
 CancelRoomId = Annotated[str, Query(description="Room ID or alias containing the task")]
@@ -97,6 +122,14 @@ def _configured_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) ->
     resolved_rooms = resolve_room_aliases(configured_rooms, runtime_paths=runtime_paths)
     # Keep order while de-duplicating
     return list(dict.fromkeys(resolved_rooms))
+
+
+def _configured_and_ad_hoc_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) -> list[str]:
+    """Return configured rooms plus persisted router ad-hoc rooms."""
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    room_ids = _configured_room_ids(runtime_config, runtime_paths=runtime_paths)
+    room_ids.extend(sorted(state.router_ad_hoc_room_ids))
+    return list(dict.fromkeys(room_ids))
 
 
 def _cron_schedule_from_expression(cron_expression: str) -> CronSchedule:
@@ -243,6 +276,17 @@ async def _get_router_client(runtime_paths: RuntimePaths) -> AsyncClient:
     return await login_agent_user(homeserver, router_user, runtime_paths)
 
 
+async def _close_schedule_clients(clients: list[AsyncClient]) -> None:
+    """Close each distinct API schedule client exactly once."""
+    seen_client_ids: set[int] = set()
+    for client in clients:
+        client_id = id(client)
+        if client_id in seen_client_ids:
+            continue
+        seen_client_ids.add(client_id)
+        await client.close()
+
+
 @router.get("", response_model=ListSchedulesResponse)
 async def list_schedules(
     request: Request,
@@ -251,10 +295,12 @@ async def list_schedules(
 ) -> ListSchedulesResponse:
     """List scheduled tasks from one room or all configured rooms."""
     runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    ad_hoc_room_ids = set(state.router_ad_hoc_room_ids)
     room_ids = (
         [_resolve_room_id(room_id, runtime_paths=runtime_paths)]
         if room_id
-        else _configured_room_ids(runtime_config, runtime_paths=runtime_paths)
+        else _configured_and_ad_hoc_room_ids(runtime_config, runtime_paths=runtime_paths)
     )
 
     if not room_ids:
@@ -264,11 +310,22 @@ async def list_schedules(
     try:
         tasks: list[ScheduledTaskResponse] = []
         for resolved_room_id in room_ids:
-            room_tasks = await get_scheduled_tasks_for_room(
-                client=client,
-                room_id=resolved_room_id,
-                include_non_pending=include_cancelled,
-            )
+            try:
+                room_tasks = await get_scheduled_tasks_for_room(
+                    client=client,
+                    room_id=resolved_room_id,
+                    include_non_pending=include_cancelled,
+                )
+            except ScheduledTaskOperationError as error:
+                if room_id is None and resolved_room_id in ad_hoc_room_ids:
+                    logger.warning(
+                        "Skipping unreadable router ad-hoc room during schedule listing",
+                        room_id=resolved_room_id,
+                        reason=error.reason,
+                        error=error.diagnostic_message,
+                    )
+                    continue
+                _raise_scheduled_task_http_error(error)
             tasks.extend(_to_response_task(task, runtime_paths) for task in room_tasks)
     finally:
         await client.close()
@@ -287,27 +344,41 @@ async def update_schedule(
     runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
     resolved_room_id = _resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
-    client = await _get_router_client(runtime_paths)
+    reader_client = await _get_router_client(runtime_paths)
+    mutation_context = None
     try:
-        existing_task = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
-        if not existing_task:
-            raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
+        try:
+            mutation_context = await resolve_existing_scheduled_task_mutation(
+                reader_client=reader_client,
+                room_id=resolved_room_id,
+                task_id=task_id,
+                config=runtime_config,
+                runtime_paths=runtime_paths,
+                router_client=reader_client,
+                requester_id=None,
+                requester_thread_id=None,
+            )
+        except ScheduledTaskOperationError as error:
+            _raise_scheduled_task_http_error(error)
 
-        updated_workflow = _build_updated_workflow(request, existing_task.workflow, resolved_room_id)
+        updated_workflow = _build_updated_workflow(request, mutation_context.task.workflow, resolved_room_id)
         try:
             updated_task = await save_edited_scheduled_task(
-                client=client,
+                client=mutation_context.writer_client,
                 room_id=resolved_room_id,
                 task_id=task_id,
                 workflow=updated_workflow,
-                existing_task=existing_task,
+                existing_task=mutation_context.task,
+                re_resolve_writer=mutation_context.re_resolve_writer,
             )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"{e!s}") from e
+        except ScheduledTaskOperationError as error:
+            _raise_scheduled_task_http_error(error)
 
         return _to_response_task(updated_task, runtime_paths)
     finally:
-        await client.close()
+        await _close_schedule_clients([reader_client])
+        if mutation_context is not None:
+            await mutation_context.close()
 
 
 @router.delete("/{task_id}", response_model=CancelScheduleResponse)
@@ -317,24 +388,26 @@ async def cancel_schedule(
     room_id: CancelRoomId,
 ) -> CancelScheduleResponse:
     """Cancel a scheduled task by ID."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    runtime_paths = api_runtime_paths(request)
+    runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     resolved_room_id = _resolve_room_id(room_id, runtime_paths=runtime_paths)
 
-    client = await _get_router_client(runtime_paths)
+    reader_client = await _get_router_client(runtime_paths)
     try:
-        existing = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
-
-        await cancel_scheduled_task(
-            client=client,
-            room_id=resolved_room_id,
-            task_id=task_id,
-            cancel_in_memory=False,
-        )
+        try:
+            await cancel_scheduled_task(
+                client=reader_client,
+                room_id=resolved_room_id,
+                task_id=task_id,
+                cancel_in_memory=False,
+                router_client=reader_client,
+                config=runtime_config,
+                runtime_paths=runtime_paths,
+                requester_id=None,
+                requester_thread_id=None,
+            )
+        except ScheduledTaskOperationError as error:
+            _raise_scheduled_task_http_error(error)
     finally:
-        await client.close()
+        await _close_schedule_clients([reader_client])
 
     return CancelScheduleResponse(success=True, message=f"Cancelled task `{task_id}`")

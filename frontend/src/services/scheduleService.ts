@@ -18,7 +18,8 @@ export async function listSchedules(roomId?: string): Promise<ScheduleListRespon
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to load schedules (Error ${response.status})`);
+    const errorMessage = await extractErrorMessage(response);
+    throw new Error(errorMessage);
   }
 
   return response.json();
