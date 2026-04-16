@@ -94,6 +94,7 @@ from mindroom.orchestrator import (
 )
 from mindroom.response_runner import ResponseRequest, ResponseRunner, _merge_response_extra_content
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
+from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -9026,6 +9027,7 @@ class TestMultiAgentOrchestrator:
         synced_support = SimpleNamespace(
             event_cache=make_event_cache_mock(),
             event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
+            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         )
 
         with patch(

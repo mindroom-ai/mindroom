@@ -9,18 +9,18 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
-  # Own shared-runtime startup prewarm of up to 20 most recently active thread snapshots per joined room (default: true)
+  # Participate in room-level startup prewarm for rooms the router joins (default: true)
   startup_thread_prewarm: true
 ```
 
 The router has two configuration options:
 
-| Option                   | Type   | Default     | Description                                                                                                                                                                                                                             |
-| ------------------------ | ------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                  | string | `"default"` | Model to use for routing decisions                                                                                                                                                                                                      |
-| `startup_thread_prewarm` | bool   | `true`      | When the router is present, it owns one shared-runtime background prewarm of up to 20 most recently active thread snapshots per joined room after the first sync completes so first replies in those threads avoid a cold cache rebuild |
+| Option                   | Type   | Default     | Description                                                                                                                                                                                                                                                              |
+| ------------------------ | ------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model`                  | string | `"default"` | Model to use for routing decisions                                                                                                                                                                                                                                       |
+| `startup_thread_prewarm` | bool   | `true`      | When enabled, the router participates in background startup prewarm for rooms it joins by claiming each room once and warming up to 20 most recently active thread snapshots after the first sync completes so first replies in those threads avoid a cold cache rebuild |
 
-MindRoom runs startup thread prewarm once per runtime, not once per bot. When a router exists, it is always the owner. If no router is managed, ownership falls back to the first managed bot.
+MindRoom runs startup thread prewarm once per room, not once per bot. After the first sync completes, any joined bot with `startup_thread_prewarm: true` may claim a room for advisory prewarm. The first claimant wins, so shared rooms warm once while ad hoc invited rooms can still be warmed by the non-router bot that joined them.
 
 ## How Routing Works
 

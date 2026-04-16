@@ -65,7 +65,7 @@ teams:
     # Model for team coordination (default: "default")
     model: sonnet
 
-    # Own shared-runtime startup prewarm when this team is the selected owner (default: true)
+    # Participate in room-level startup prewarm for joined rooms (default: true)
     startup_thread_prewarm: true
 
     # Team-scoped replay controls (optional; inherit from defaults when omitted)
@@ -91,7 +91,7 @@ teams:
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
 | `model` | No | `default` | Model used for team coordination and synthesis |
-| `startup_thread_prewarm` | No | `true` | When this team is the shared-runtime prewarm owner, run one background prewarm of up to 20 most recently active thread snapshots per joined room after the first sync completes so first replies in those threads avoid a cold cache rebuild |
+| `startup_thread_prewarm` | No | `true` | When enabled, this bot participates in background startup prewarm for rooms it joins by claiming each room once and warming up to 20 most recently active thread snapshots after the first sync completes so first replies in those threads avoid a cold cache rebuild |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
@@ -102,10 +102,9 @@ Team YAML keys follow the same naming rules as agents: alphanumeric characters a
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
 
-MindRoom runs startup thread prewarm once per runtime, not once per bot.
-When a router exists, the router owns it.
-If no router is managed, ownership falls back to the first managed bot.
-A team-level `startup_thread_prewarm` flag only matters when that team is the selected owner.
+MindRoom runs startup thread prewarm once per room, not once per bot.
+After the first sync completes, any joined bot with `startup_thread_prewarm: true` may claim a room for advisory prewarm.
+The first claimant wins, so shared rooms warm once while ad hoc invited rooms can still be warmed by the non-router bot that joined them.
 
 ## When to Use Each Mode
 

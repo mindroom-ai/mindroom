@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.runtime_support import StartupThreadPrewarmRegistry
 
 
 class BotRuntimeView(Protocol):
@@ -36,6 +37,9 @@ class BotRuntimeView(Protocol):
     def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator: ...  # noqa: D102
 
     @property
+    def startup_thread_prewarm_registry(self) -> StartupThreadPrewarmRegistry: ...  # noqa: D102
+
+    @property
     def runtime_started_at(self) -> float: ...  # noqa: D102
 
 
@@ -49,6 +53,7 @@ class BotRuntimeState:
     orchestrator: MultiAgentOrchestrator | None
     event_cache: ConversationEventCache | None
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
+    startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
     runtime_started_at: float = field(default_factory=time.time)
 
     def mark_runtime_started(self) -> None:

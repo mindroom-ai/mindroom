@@ -62,6 +62,7 @@ from mindroom.matrix.thread_membership import (
     snapshot_thread_membership_access,
 )
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1100,6 +1101,7 @@ class TestThreadingBehavior:
         synced_support = SimpleNamespace(
             event_cache=make_event_cache_mock(),
             event_cache_write_coordinator=make_event_cache_write_coordinator_mock(owner=bot._runtime_view),
+            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         )
 
         with patch(

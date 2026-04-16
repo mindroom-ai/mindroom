@@ -271,6 +271,7 @@ class MultiAgentOrchestrator:
         """Bind the current runtime support services to one managed bot."""
         bot.event_cache = self._runtime_support.event_cache
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
+        bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
 
     def _rebind_runtime_support_services(self) -> None:
         """Rebind the current runtime support services to every managed bot."""
@@ -1251,13 +1252,6 @@ class MultiAgentOrchestrator:
             logger.warning("Router client not available")
             return None
         return router_bot
-
-    def startup_thread_prewarm_owner(self) -> AgentBot | TeamBot | None:
-        """Return the single bot that owns startup thread prewarm for this runtime."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is not None:
-            return router_bot
-        return next(iter(self.agent_bots.values()), None)
 
     async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.

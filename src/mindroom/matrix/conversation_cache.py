@@ -31,7 +31,6 @@ from mindroom.matrix.client import (
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
     fetch_thread_snapshot,
-    get_joined_rooms,
     get_room_threads_page,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -534,34 +533,21 @@ class MatrixConversationCache(ConversationCacheProtocol):
             runtime_started_at=self.runtime.runtime_started_at,
         )
 
-    async def prewarm_recent_threads_for_joined_rooms(
+    async def _refresh_dispatch_thread_snapshot_for_startup_prewarm(
         self,
-        *,
-        is_shutting_down: Callable[[], bool],
-    ) -> None:
-        """Warm recent joined-room thread snapshots in the background after startup."""
-        try:
-            joined_rooms = await get_joined_rooms(self._require_client())
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_joined_rooms_failed",
-                error=str(exc),
-            )
-            return
-        if not joined_rooms:
-            return
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult:
+        """Refresh one strict thread snapshot for advisory startup prewarm without the live read barrier."""
+        return await fetch_dispatch_thread_snapshot(
+            self._require_client(),
+            room_id,
+            thread_id,
+            event_cache=self.runtime.event_cache,
+            runtime_started_at=self.runtime.runtime_started_at,
+        )
 
-        for room_id in joined_rooms:
-            if is_shutting_down():
-                return
-            await self._prewarm_recent_room_threads(
-                room_id,
-                is_shutting_down=is_shutting_down,
-            )
-
-    async def _prewarm_recent_room_threads(
+    async def prewarm_recent_room_threads(
         self,
         room_id: str,
         *,
@@ -605,7 +591,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 continue
 
             try:
-                await self.get_dispatch_thread_snapshot(
+                await self._refresh_dispatch_thread_snapshot_for_startup_prewarm(
                     room_id,
                     thread_id,
                 )

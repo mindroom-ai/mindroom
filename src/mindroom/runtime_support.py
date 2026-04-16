@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache import _EventCache, _EventCacheWriteCoordinator
@@ -14,11 +15,40 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
+class StartupThreadPrewarmRegistry:
+    """Track startup thread-prewarm claims and completion per room."""
+
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _states: dict[str, str] = field(default_factory=dict)
+
+    async def try_claim(self, room_id: str) -> bool:
+        """Claim one room for startup prewarm unless it is already running or done."""
+        async with self._lock:
+            if room_id in self._states:
+                return False
+            self._states[room_id] = "running"
+            return True
+
+    async def mark_done(self, room_id: str) -> None:
+        """Mark one room's startup prewarm as finished."""
+        async with self._lock:
+            if self._states.get(room_id) == "running":
+                self._states[room_id] = "done"
+
+    async def release(self, room_id: str) -> None:
+        """Release an in-flight room claim so another bot may retry later."""
+        async with self._lock:
+            if self._states.get(room_id) == "running":
+                self._states.pop(room_id, None)
+
+
+@dataclass(slots=True)
 class OwnedRuntimeSupport:
     """Concrete event-cache services owned by one runtime lifecycle."""
 
     event_cache: _EventCache
     event_cache_write_coordinator: _EventCacheWriteCoordinator
+    startup_thread_prewarm_registry: StartupThreadPrewarmRegistry
 
 
 def build_owned_runtime_support(
@@ -34,6 +64,7 @@ def build_owned_runtime_support(
             logger=logger,
             background_task_owner=background_task_owner,
         ),
+        startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
     )
 
 
