@@ -57,9 +57,9 @@ from mindroom.tool_system.dependencies import auto_install_enabled, auto_install
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
+    maybe_serialized_kubernetes_worker_validation_snapshot,
     primary_worker_backend_available,
     primary_worker_backend_name,
-    serialized_kubernetes_worker_validation_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -156,6 +156,7 @@ def _cleanup_workers_once(
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
     proxy_config = sandbox_proxy_config(runtime_paths)
+    backend_name = primary_worker_backend_name(runtime_paths)
     if not primary_worker_backend_available(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
@@ -163,21 +164,18 @@ def _cleanup_workers_once(
     ):
         return 0
 
-    if runtime_config is None and primary_worker_backend_name(runtime_paths) == "kubernetes":
+    if runtime_config is None and backend_name == "kubernetes":
         return 0
 
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
-    if runtime_config is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
-            runtime_paths,
-            runtime_config=runtime_config,
-        )
     worker_manager = get_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        kubernetes_tool_validation_snapshot=maybe_serialized_kubernetes_worker_validation_snapshot(
+            runtime_paths,
+            runtime_config=runtime_config,
+        ),
     )
     cleaned_workers = worker_manager.cleanup_idle_workers()
     if cleaned_workers:

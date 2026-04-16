@@ -995,6 +995,11 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    monkeypatch.setattr(
+        main,
+        "maybe_serialized_kubernetes_worker_validation_snapshot",
+        lambda *_args, **_kwargs: {"calculator": {"runtime_loadable": True}},
+    )
     captured_kwargs: dict[str, object] = {}
 
     def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
@@ -1033,7 +1038,11 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    monkeypatch.setattr(
+        workers_api,
+        "maybe_serialized_kubernetes_worker_validation_snapshot",
+        lambda *_args, **_kwargs: {"calculator": {"runtime_loadable": True}},
+    )
     captured_kwargs: dict[str, object] = {}
 
     def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:

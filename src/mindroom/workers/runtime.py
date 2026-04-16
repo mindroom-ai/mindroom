@@ -26,19 +26,15 @@ _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 def serialized_kubernetes_worker_validation_snapshot(
     runtime_paths: RuntimePaths,
     *,
-    runtime_config: Config | None = None,
+    runtime_config: Config,
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot in the primary runtime."""
-    from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.tool_system.metadata import (  # noqa: PLC0415
         resolved_tool_validation_snapshot_for_runtime,
         serialize_tool_validation_snapshot,
     )
 
-    snapshot = resolved_tool_validation_snapshot_for_runtime(
-        runtime_paths,
-        runtime_config or load_config(runtime_paths),
-    )
+    snapshot = resolved_tool_validation_snapshot_for_runtime(runtime_paths, runtime_config)
     return serialize_tool_validation_snapshot(snapshot)
 
 
@@ -76,6 +72,20 @@ def primary_worker_backend_available(
             return False
         return True
     return False
+
+
+def maybe_serialized_kubernetes_worker_validation_snapshot(
+    runtime_paths: RuntimePaths,
+    *,
+    runtime_config: Config | None,
+) -> dict[str, dict[str, object]] | None:
+    """Return the committed Kubernetes validation snapshot when one is available."""
+    if runtime_config is None or primary_worker_backend_name(runtime_paths) != "kubernetes":
+        return None
+    return serialized_kubernetes_worker_validation_snapshot(
+        runtime_paths,
+        runtime_config=runtime_config,
+    )
 
 
 def _require_kubernetes_tool_validation_snapshot(

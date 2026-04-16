@@ -1480,6 +1480,27 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
     workers_runtime_module._reset_primary_worker_manager()
 
 
+def test_maybe_serialized_kubernetes_worker_validation_snapshot_skips_without_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional snapshot helper should no-op until the caller has a committed runtime config."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    assert (
+        workers_runtime_module.maybe_serialized_kubernetes_worker_validation_snapshot(
+            runtime_paths,
+            runtime_config=None,
+        )
+        is None
+    )
+
+
 def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
