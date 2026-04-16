@@ -94,8 +94,8 @@ Important behavior and constraints:
 - Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
 - Credentials are mirrored into the worker's scratch space rather than mounting the shared credentials directory into agent-isolated pods.
-- Only services listed in `defaults.worker_grantable_credentials` are mirrored into dedicated workers.
-- The built-in allowlist excludes `github_private` unless you explicitly add it.
+- No shared credentials are mirrored into dedicated workers by default.
+- Only services listed in `defaults.worker_grantable_credentials` may be mirrored or exposed as provider env inside isolated worker execution.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements

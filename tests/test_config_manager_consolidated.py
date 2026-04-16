@@ -1120,11 +1120,10 @@ class TestWorkerGrantableCredentials:
     """Tests for the worker credential mirror allowlist defaults helper."""
 
     def test_worker_grantable_credentials_none_uses_builtin_default(self) -> None:
-        """An explicit or implicit None should preserve the built-in worker allowlist."""
+        """An explicit or implicit None should preserve the built-in deny-all default."""
         config = Config(defaults=DefaultsConfig(worker_grantable_credentials=None))
 
-        assert config.get_worker_grantable_credentials() == DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-        assert "github_private" not in config.get_worker_grantable_credentials()
+        assert config.get_worker_grantable_credentials() == DEFAULT_WORKER_GRANTABLE_CREDENTIALS == frozenset()
 
     def test_worker_grantable_credentials_roundtrip_and_helper(self, tmp_path: Path) -> None:
         """Authored worker_grantable_credentials should survive YAML roundtrips and helper resolution."""

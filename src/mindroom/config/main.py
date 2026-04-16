@@ -1108,7 +1108,7 @@ class Config(BaseModel):
         return self.expand_tool_names(list(configured))
 
     def get_worker_grantable_credentials(self) -> frozenset[str]:
-        """Return shared credential service names that may be mirrored into workers."""
+        """Return shared credential service names allowed inside isolated workers."""
         configured = self.defaults.worker_grantable_credentials
         if configured is None:
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS

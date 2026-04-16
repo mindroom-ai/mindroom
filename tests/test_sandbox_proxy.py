@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 
 import pytest
@@ -545,6 +546,74 @@ def test_shell_subprocess_env_path_passthrough_without_prepend(
 
     runtime_env = dict(shell_execution_runtime_env_values(runtime_paths))
     assert shell_tool_module._shell_subprocess_env(runtime_env)["PATH"] == "/usr/local/bin:/usr/bin"
+
+
+def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Isolated execution should not inherit provider env unless explicitly granted."""
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    class _FakeConfig:
+        def get_worker_grantable_credentials(self) -> frozenset[str]:
+            return frozenset()
+
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "get_tool_runtime_context",
+        lambda: SimpleNamespace(config=_FakeConfig()),
+    )
+
+    execution_env = sandbox_proxy_module._execution_env_payload("python", runtime_paths=runtime_paths)
+
+    assert execution_env is not None
+    assert execution_env["TEST_EXECUTION_ENV"] == "visible-in-shell"
+    assert "OPENAI_API_KEY" not in execution_env
+
+
+def test_execution_env_payload_includes_explicitly_granted_provider_env_in_isolated_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Isolated execution should inherit provider env only for explicitly granted services."""
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    class _FakeConfig:
+        def get_worker_grantable_credentials(self) -> frozenset[str]:
+            return frozenset({"openai"})
+
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "get_tool_runtime_context",
+        lambda: SimpleNamespace(config=_FakeConfig()),
+    )
+
+    execution_env = sandbox_proxy_module._execution_env_payload("python", runtime_paths=runtime_paths)
+
+    assert execution_env is not None
+    assert execution_env["OPENAI_API_KEY"] == "env-openai-key"
 
 
 @pytest.mark.asyncio

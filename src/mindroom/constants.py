@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -351,14 +351,58 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def _is_execution_runtime_process_env_name(name: str) -> bool:
+def _worker_credential_env_names(
+    allowed_services: Collection[str] | None,
+) -> frozenset[str] | None:
+    if allowed_services is None:
+        return None
+    env_names = {PROVIDER_ENV_KEYS[service] for service in allowed_services if service in PROVIDER_ENV_KEYS}
+    if "google_vertex_adc" in allowed_services:
+        env_names.update({"GOOGLE_APPLICATION_CREDENTIALS", *VERTEXAI_CLAUDE_ENV_KEYS})
+    if "google_oauth_client" in allowed_services:
+        env_names.update({"GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"})
+    if "github_private" in allowed_services:
+        env_names.add("GITHUB_TOKEN")
+    return frozenset(env_names)
+
+
+def _is_known_worker_credential_env_name(name: str) -> bool:
+    return name in {
+        *PROVIDER_ENV_KEYS.values(),
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GITHUB_TOKEN",
+        *VERTEXAI_CLAUDE_ENV_KEYS,
+    }
+
+
+def _is_execution_runtime_process_env_name(
+    name: str,
+    *,
+    allowed_credential_env_names: frozenset[str] | None = None,
+) -> bool:
     if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
         return False
-    return (
-        _is_public_runtime_startup_env_name(name)
-        or name in PROVIDER_ENV_KEYS.values()
-        or name in VERTEXAI_CLAUDE_ENV_KEYS
-    )
+    if _is_public_runtime_startup_env_name(name):
+        if allowed_credential_env_names is not None and _is_known_worker_credential_env_name(name):
+            return name in allowed_credential_env_names
+        return True
+    if allowed_credential_env_names is None:
+        return _is_known_worker_credential_env_name(name)
+    return name in allowed_credential_env_names
+
+
+def _is_allowed_execution_runtime_env_file_name(
+    name: str,
+    *,
+    allowed_credential_env_names: frozenset[str] | None = None,
+) -> bool:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    if allowed_credential_env_names is not None and _is_known_worker_credential_env_name(name):
+        return name in allowed_credential_env_names
+    return True
 
 
 def _shell_extra_env_patterns(extra_env_passthrough: str | None) -> tuple[str, ...]:
@@ -391,7 +435,11 @@ def shell_extra_env_values(
     return cast("Mapping[str, str]", MappingProxyType(selected_env))
 
 
-def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+def execution_runtime_env_values(
+    runtime_paths: RuntimePaths,
+    *,
+    allowed_credential_services: Collection[str] | None = None,
+) -> Mapping[str, str]:
     """Return the runtime env that execution tools may observe.
 
     This intentionally differs from ``runtime_env_values()``:
@@ -399,13 +447,24 @@ def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, st
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
     """
+    allowed_credential_env_names = _worker_credential_env_names(allowed_credential_services)
     merged_env = {
         key: value
         for key, value in runtime_paths.env_file_values.items()
-        if key not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
+        if _is_allowed_execution_runtime_env_file_name(
+            key,
+            allowed_credential_env_names=allowed_credential_env_names,
+        )
     }
     merged_env.update(
-        {key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)},
+        {
+            key: value
+            for key, value in runtime_paths.process_env.items()
+            if _is_execution_runtime_process_env_name(
+                key,
+                allowed_credential_env_names=allowed_credential_env_names,
+            )
+        },
     )
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
@@ -417,6 +476,7 @@ def shell_execution_runtime_env_values(
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
+    allowed_credential_services: Collection[str] | None = None,
 ) -> Mapping[str, str]:
     """Return the env visible to shell execution after explicit passthrough is applied."""
     merged_env = dict(
@@ -425,7 +485,12 @@ def shell_execution_runtime_env_values(
             process_env=process_env,
         ),
     )
-    merged_env.update(execution_runtime_env_values(runtime_paths))
+    merged_env.update(
+        execution_runtime_env_values(
+            runtime_paths,
+            allowed_credential_services=allowed_credential_services,
+        ),
+    )
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
@@ -654,15 +719,9 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "ollama": "OLLAMA_HOST",
 }
-# Only provider/bootstrap services needed for worker execution are grantable by default.
-# Sensitive shared credentials such as github_private must stay excluded unless explicitly authored.
-DEFAULT_WORKER_GRANTABLE_CREDENTIALS = frozenset(
-    (
-        *PROVIDER_ENV_KEYS.keys(),
-        "google_vertex_adc",
-        "google_oauth_client",
-    ),
-)
+# Dedicated workers start with no mirrored/shared credentials by default.
+# Any service exposure into an isolated worker runtime must be explicitly authored.
+DEFAULT_WORKER_GRANTABLE_CREDENTIALS = frozenset()
 VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 _CHROMADB_PY314_PATCHED = False

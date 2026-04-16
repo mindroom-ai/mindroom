@@ -343,7 +343,7 @@ class DefaultsConfig(BaseModel):
     )
     worker_grantable_credentials: list[str] | None = Field(
         default=None,
-        description="Shared credential service names allowed to be mirrored into worker runtimes (None = use the built-in default allowlist)",
+        description="Shared credential service names allowed inside isolated worker runtimes (None = deny by default; explicitly listed services may be mirrored and exposed to worker execution env)",
     )
     allow_self_config: bool = Field(
         default=False,
