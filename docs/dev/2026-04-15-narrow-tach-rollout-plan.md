@@ -6,6 +6,12 @@
 
 **Architecture:** Keep the architecture doc broad and living, but make the first enforcement slice deliberately small. Encode only the Matrix cache boundary cluster in Tach, use the real public seams that already exist, and leave the rest of the repo effectively unchecked for now.
 
+**Expanded pilot scope:** Once the first cache boundary is green, widen the same PR only to direct production consumers that already import through the public cache or conversation seams.
+That second ring currently includes `mindroom.bot_runtime_view`, `mindroom.matrix.client`, `mindroom.conversation_resolver`, `mindroom.commands.handler`, `mindroom.scheduling`, `mindroom.tool_system.runtime_context`, `mindroom.thread_summary`, `mindroom.streaming`, `mindroom.post_response_effects`, `mindroom.hooks.sender`, and `mindroom.turn_controller`.
+
+**Explicitly out of scope for this pilot:** Do not try to enforce the `thread_membership` / `thread_bookkeeping` / `stale_stream_cleanup` cluster yet.
+That area still carries cyclic structure around cache and client behavior and should stay advisory until a later cleanup pass makes the ownership calmer.
+
 **Tech Stack:** Python, uv, Tach, GitHub Actions, existing MindRoom Matrix cache/conversation modules.
 
 ---
@@ -103,6 +109,7 @@ Expected:
 Encode these rules in `tach.toml`:
 - `mindroom.matrix.conversation_cache` may depend on `mindroom.matrix.cache`
 - `mindroom.runtime_support` may depend on `mindroom.matrix.cache`
+- direct production consumers may be added only when they already import through the package-level cache boundary or `mindroom.matrix.conversation_cache`
 - nothing in the first slice should require broad repo-wide rules
 
 Do not overfit the config to tests yet.
