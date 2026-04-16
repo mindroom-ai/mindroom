@@ -45,6 +45,7 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import SendTextRequest, SuppressedPlaceholderCleanupError
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
+from mindroom.hooks import build_hook_matrix_admin
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
     is_automation_source_kind,
@@ -622,6 +623,13 @@ class TurnController:
                 dispatch_context=dispatch_context,
             )
 
+        orchestrator = self.deps.runtime.orchestrator
+        matrix_admin = None
+        if orchestrator is not None:
+            matrix_admin = orchestrator._hook_matrix_admin()
+        elif self.deps.agent_name == ROUTER_AGENT_NAME:
+            matrix_admin = build_hook_matrix_admin(self._client(), self.deps.runtime_paths)
+
         context = CommandHandlerContext(
             client=self._client(),
             config=self.deps.runtime.config,
@@ -631,6 +639,7 @@ class TurnController:
             derive_conversation_context=self.deps.resolver.derive_conversation_context,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
             event_cache=self.deps.runtime.event_cache,
+            matrix_admin=matrix_admin,
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
             record_handled_turn=self.deps.turn_store.record_turn,

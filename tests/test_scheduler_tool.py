@@ -23,7 +23,7 @@ def _bind_runtime_paths(config: Config) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
-def _make_context(config: Config) -> ToolRuntimeContext:
+def _make_context(config: Config, *, matrix_admin: object | None = None) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="general",
         room_id="!room:localhost",
@@ -38,6 +38,7 @@ def _make_context(config: Config) -> ToolRuntimeContext:
         room=MagicMock(),
         reply_to_event_id=None,
         storage_path=None,
+        matrix_admin=matrix_admin,
     )
 
 
@@ -72,7 +73,8 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     """Tool should call the same scheduling backend path as !schedule."""
     tools = SchedulerTools()
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
+    matrix_admin = object()
+    context = _make_context(config, matrix_admin=matrix_admin)
 
     with (
         patch(
@@ -96,6 +98,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         room=context.room,
         conversation_cache=context.conversation_cache,
         event_cache=context.event_cache,
+        matrix_admin=matrix_admin,
     )
     assert first_call == {
         "runtime": expected_runtime,

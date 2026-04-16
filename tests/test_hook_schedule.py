@@ -14,7 +14,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
+from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, build_hook_matrix_admin, hook
 from mindroom.logging_config import setup_logging
 from mindroom.scheduling import (
     CronSchedule,
@@ -381,10 +381,38 @@ async def test_schedule_hook_exposes_matrix_admin(tmp_path: Path) -> None:
         config,
         runtime_paths_for(config),
         _conversation_cache(),
+        matrix_admin=build_hook_matrix_admin(client, runtime_paths_for(config)),
     )
 
     assert resolved_aliases == ["!personal:localhost"]
     client.room_resolve_alias.assert_awaited_once_with("#personal-user:localhost")
+
+
+@pytest.mark.asyncio
+async def test_schedule_hook_matrix_admin_is_unavailable_without_router_binding(tmp_path: Path) -> None:
+    """schedule:fired hooks should not fabricate admin access from a non-router client."""
+    saw_matrix_admin: list[bool] = []
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def inspect(ctx: ScheduleFiredContext) -> None:
+        saw_matrix_admin.append(ctx.matrix_admin is not None)
+        ctx.suppress = True
+
+    config = _config(tmp_path)
+    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [inspect])]))
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    client.homeserver = "http://agent.local:8008"
+
+    await _execute_scheduled_workflow(
+        client,
+        _workflow("Resume work"),
+        config,
+        runtime_paths_for(config),
+        _conversation_cache(),
+    )
+
+    assert saw_matrix_admin == [False]
 
 
 @pytest.mark.asyncio
