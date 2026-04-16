@@ -223,7 +223,10 @@ class AgentConfig(BaseModel):
     )
     startup_thread_prewarm: bool = Field(
         default=True,
-        description="Whether to prewarm recent thread snapshots in joined rooms after the first sync completes",
+        description=(
+            "Whether this entity should own startup prewarming of recent thread snapshots when it is the "
+            "shared-runtime prewarm owner; routerless runtimes fall back to the first managed bot"
+        ),
     )
     room_thread_modes: dict[str, Literal["thread", "room"]] = Field(
         default_factory=dict,
@@ -391,7 +394,10 @@ class TeamConfig(BaseModel):
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
     startup_thread_prewarm: bool = Field(
         default=True,
-        description="Whether to prewarm recent thread snapshots in joined rooms after the first sync completes",
+        description=(
+            "Whether this entity should own startup prewarming of recent thread snapshots when it is the "
+            "shared-runtime prewarm owner; routerless runtimes fall back to the first managed bot"
+        ),
     )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,

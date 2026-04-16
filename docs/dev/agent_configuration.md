@@ -111,7 +111,7 @@ The router determines which agent should handle a user's request:
 ```yaml
 router:
   model: "default"  # Which model to use for routing decisions (references models section)
-  startup_thread_prewarm: true  # Optional: prewarm recent active thread snapshots after startup
+  startup_thread_prewarm: true  # Optional: router-owned shared-runtime prewarm after startup
 ```
 
 ## Agent Configuration Structure
@@ -150,7 +150,7 @@ agents:
       - USER.md
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
     thread_mode: "thread"  # Optional: "thread" or "room"
-    startup_thread_prewarm: true  # Optional: prewarm recent active thread snapshots after startup
+    startup_thread_prewarm: true  # Optional: prewarm recent active thread snapshots after startup when this agent owns runtime prewarm
     delegate_to: [other_agent]  # Optional: agents this one can delegate to
 ```
 
@@ -174,7 +174,7 @@ agents:
 - **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 - **thread_mode**: Conversation threading mode: `thread` (default) creates Matrix threads per conversation, `room` uses a single continuous conversation per room (ideal for bridges/mobile)
 - **room_thread_modes**: Per-room thread mode overrides keyed by room alias/name or Matrix room ID
-- **startup_thread_prewarm**: Prewarm up to 20 most recently active thread snapshots per joined room in the background after the first sync completes
+- **startup_thread_prewarm**: When this agent is the shared-runtime prewarm owner, prewarm up to 20 most recently active thread snapshots per joined room in the background after the first sync completes
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override)
@@ -206,7 +206,7 @@ teams:
     agents: [research, code]
     mode: coordinate  # "coordinate" or "collaborate"
     model: "default"  # Optional model override
-    startup_thread_prewarm: true  # Optional: prewarm recent active thread snapshots after startup
+    startup_thread_prewarm: true  # Optional: prewarm recent active thread snapshots after startup when this team owns runtime prewarm
     num_history_runs: 8  # Optional team-scoped replay policy
     num_history_messages: null  # Optional; mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6  # Optional replay trimming for tool calls
@@ -221,7 +221,11 @@ teams:
 
 - **coordinate**: A lead agent orchestrates the others
 - **collaborate**: All members respond in parallel with a consensus summary
-- **startup_thread_prewarm**: Optional background prewarm for up to 20 most recently active thread snapshots per joined room after startup
+- **startup_thread_prewarm**: Optional background prewarm for up to 20 most recently active thread snapshots per joined room after startup when this team is the shared-runtime prewarm owner
+
+MindRoom runs startup thread prewarm once per runtime, not once per bot.
+When a router exists, the router owns it.
+If no router is managed, ownership falls back to the first managed bot.
 - **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
 - **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
 - **compaction**: Optional team-owned auto-compaction overrides for the shared team scope

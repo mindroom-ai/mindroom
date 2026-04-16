@@ -634,9 +634,22 @@ class AgentBot:
             return self.config.teams[self.agent_name].startup_thread_prewarm
         return self.config.agents[self.agent_name].startup_thread_prewarm
 
+    def _owns_startup_thread_prewarm(self) -> bool:
+        """Return whether this bot is the single startup prewarm owner for the runtime."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            return True
+        owner_bot = orchestrator.startup_thread_prewarm_owner()
+        return owner_bot is None or owner_bot is self
+
     def _maybe_start_startup_thread_prewarm(self) -> None:
         """Start startup thread prewarm once the first sync is ready."""
-        if self.client is None or self._sync_shutting_down or not self._startup_thread_prewarm_enabled():
+        if (
+            self.client is None
+            or self._sync_shutting_down
+            or not self._startup_thread_prewarm_enabled()
+            or not self._owns_startup_thread_prewarm()
+        ):
             return
 
         existing_task = self._startup_thread_prewarm_task

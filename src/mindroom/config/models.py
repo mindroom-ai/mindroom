@@ -442,5 +442,5 @@ class RouterConfig(BaseModel):
     model: str = Field(default="default", description="Model to use for routing decisions")
     startup_thread_prewarm: bool = Field(
         default=True,
-        description="Whether to prewarm recent thread snapshots in joined rooms after the first sync completes",
+        description="Whether the router owns startup prewarming of recent thread snapshots for the shared runtime",
     )

@@ -1252,6 +1252,13 @@ class MultiAgentOrchestrator:
             return None
         return router_bot
 
+    def startup_thread_prewarm_owner(self) -> AgentBot | TeamBot | None:
+        """Return the single bot that owns startup thread prewarm for this runtime."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is not None:
+            return router_bot
+        return next(iter(self.agent_bots.values()), None)
+
     async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.
 
