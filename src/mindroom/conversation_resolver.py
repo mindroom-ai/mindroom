@@ -465,13 +465,17 @@ class ConversationResolver:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
 
         event_info = EventInfo.from_event(resolved_event_source)
-        resolved_target = self.build_message_target(
-            room_id=room.room_id,
-            thread_id=event_info.thread_id or event_info.thread_id_from_edit,
-            reply_to_event_id=event.event_id,
-            event_source=resolved_event_source,
-        )
-        resolved_thread_id = resolved_target.resolved_thread_id
+        if (
+            config.get_entity_thread_mode(
+                self.deps.agent_name,
+                self.deps.runtime_paths,
+                room_id=room.room_id,
+            )
+            == "room"
+        ):
+            resolved_thread_id = None
+        else:
+            resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=resolved_thread_id is not None,

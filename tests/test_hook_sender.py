@@ -730,6 +730,32 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
 
 
 @pytest.mark.asyncio
+async def test_extract_trusted_router_context_does_not_invent_thread_for_room_level_relay(tmp_path: Path) -> None:
+    """Room-level router relays should stay room-level until an explicit thread root is present."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$router-relay-room",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "@mindroom_code:localhost please help",
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+            },
+        },
+    )
+
+    context = await bot._conversation_resolver.extract_trusted_router_relay_context(room, event)
+
+    assert context.is_thread is False
+    assert context.thread_id is None
+    assert list(context.thread_history) == []
+    assert context.requires_full_thread_history is False
+
+
+@pytest.mark.asyncio
 async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_relays(tmp_path: Path) -> None:
     """Non-router internal relays should keep using the standard dispatch context path."""
     bot = _agent_bot(tmp_path)
