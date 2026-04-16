@@ -14,13 +14,10 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
-from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
-    _last_summary_counts,
-    _thread_locks,
-    thread_summary_cache_key,
-    update_last_summary_count,
+    ThreadSummaryWriteError,
+    ThreadSummaryWriteResult,
 )
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -55,40 +52,17 @@ def _make_context(
     )
 
 
-@pytest.fixture(autouse=True)
-def _clear_summary_counts() -> None:
-    """Reset cached summary counts between tests."""
-    _last_summary_counts.clear()
-    _thread_locks.clear()
-
-
-def _thread_history(
-    count: int,
+def _write_result(
     *,
-    summary_count: int = 0,
-) -> list[ResolvedVisibleMessage]:
-    """Build a fake thread history with a fixed number of messages."""
-    messages = [
-        ResolvedVisibleMessage.synthetic(
-            sender=f"@user{i}:localhost",
-            body=f"Message {i}",
-            event_id=f"$event{i}:localhost",
-        )
-        for i in range(count)
-    ]
-    messages.extend(
-        ResolvedVisibleMessage.synthetic(
-            sender="@mindroom:localhost",
-            body=f"Summary {i}",
-            event_id=f"$summary{i}:localhost",
-            content={
-                "body": f"Summary {i}",
-                "io.mindroom.thread_summary": {"version": 1},
-            },
-        )
-        for i in range(summary_count)
+    event_id: str = "$summary-event:localhost",
+    message_count: int = 3,
+    summary: str = "done",
+) -> ThreadSummaryWriteResult:
+    return ThreadSummaryWriteResult(
+        event_id=event_id,
+        message_count=message_count,
+        summary=summary,
     )
-    return messages
 
 
 def test_thread_summary_tool_registered_and_instantiates() -> None:
@@ -122,7 +96,6 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
     """The tool should default to the current room and resolved thread context."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
-    context.conversation_cache.get_thread_history.return_value = _thread_history(3)
 
     with (
         patch(
@@ -130,9 +103,13 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
-            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
-            new=AsyncMock(return_value="$summary-event:localhost"),
-        ) as mock_send,
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(
+                return_value=_write_result(
+                    summary="🧵 Ready for review",
+                ),
+            ),
+        ) as mock_set,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.set_thread_summary("  🧵 Ready\nfor\t review  "))
@@ -153,28 +130,20 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "$ctx-thread:localhost",
         conversation_cache=context.conversation_cache,
     )
-    context.conversation_cache.get_thread_history.assert_awaited_once_with(
-        context.room_id,
-        "$ctx-thread:localhost",
-    )
-    mock_send.assert_awaited_once_with(
+    mock_set.assert_awaited_once_with(
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        "🧵 Ready for review",
-        3,
-        "manual",
-        context.conversation_cache,
+        "  🧵 Ready\nfor\t review  ",
+        conversation_cache=context.conversation_cache,
     )
-    assert _last_summary_counts[thread_summary_cache_key(context.room_id, "$ctx-thread:localhost")] == 3
 
 
 @pytest.mark.asyncio
-async def test_set_thread_summary_strips_markdown_before_send() -> None:
-    """Manual summaries should remove markdown syntax before they are written."""
+async def test_set_thread_summary_returns_helper_summary() -> None:
+    """The tool should return the normalized summary produced by the shared write helper."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
-    context.conversation_cache.get_thread_history.return_value = _thread_history(3)
 
     with (
         patch(
@@ -182,23 +151,21 @@ async def test_set_thread_summary_strips_markdown_before_send() -> None:
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
-            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
-            new=AsyncMock(return_value="$summary-event:localhost"),
-        ) as mock_send,
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(return_value=_write_result(summary="Fix ISSUE-116")),
+        ) as mock_set,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.set_thread_summary("# **Fix** [ISSUE-116](http://example.com)"))
 
     assert payload["status"] == "ok"
     assert payload["summary"] == "Fix ISSUE-116"
-    mock_send.assert_awaited_once_with(
+    mock_set.assert_awaited_once_with(
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        "Fix ISSUE-116",
-        3,
-        "manual",
-        context.conversation_cache,
+        "# **Fix** [ISSUE-116](http://example.com)",
+        conversation_cache=context.conversation_cache,
     )
 
 
@@ -221,7 +188,6 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
     """Explicit event IDs should be normalized to the canonical thread root."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id=None)
-    context.conversation_cache.get_thread_history.return_value = _thread_history(4)
 
     with (
         patch(
@@ -229,9 +195,9 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
             new=AsyncMock(return_value="$thread-root:localhost"),
         ) as mock_normalize,
         patch(
-            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
-            new=AsyncMock(return_value="$summary-event:localhost"),
-        ),
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(return_value=_write_result(message_count=4)),
+        ) as mock_set,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.set_thread_summary("done", thread_id="$reply-event:localhost"))
@@ -242,6 +208,13 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
+        conversation_cache=context.conversation_cache,
+    )
+    mock_set.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$thread-root:localhost",
+        "done",
         conversation_cache=context.conversation_cache,
     )
 
@@ -329,11 +302,25 @@ async def test_set_thread_summary_rejects_non_string_summary() -> None:
 
 @pytest.mark.asyncio
 async def test_set_thread_summary_rejects_overlong_summary() -> None:
-    """Oversized summaries should fail before any Matrix work starts."""
+    """Oversized summaries should return the helper's validation error."""
     tool = ThreadSummaryTools()
     context = _make_context()
 
-    with tool_runtime_context(context):
+    with (
+        patch(
+            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(
+                side_effect=ThreadSummaryWriteError(
+                    f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization.",
+                ),
+            ),
+        ),
+        tool_runtime_context(context),
+    ):
         payload = json.loads(await tool.set_thread_summary("x" * (THREAD_SUMMARY_MAX_LENGTH + 1)))
 
     assert payload["status"] == "error"
@@ -345,12 +332,10 @@ async def test_set_thread_summary_rejects_overlong_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_thread_summary_send_failure_leaves_cache_unchanged() -> None:
-    """A failed send should not update the last-summary count cache."""
+async def test_set_thread_summary_returns_helper_error_for_send_failure() -> None:
+    """Tool errors should pass through shared manual-summary write failures."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
-    update_last_summary_count(context.room_id, "$ctx-thread:localhost", 2)
-    context.conversation_cache.get_thread_history.return_value = _thread_history(5)
 
     with (
         patch(
@@ -358,8 +343,8 @@ async def test_set_thread_summary_send_failure_leaves_cache_unchanged() -> None:
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
-            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
-            new=AsyncMock(return_value=None),
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(side_effect=ThreadSummaryWriteError("Failed to send thread summary event.")),
         ),
         tool_runtime_context(context),
     ):
@@ -367,40 +352,7 @@ async def test_set_thread_summary_send_failure_leaves_cache_unchanged() -> None:
 
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$ctx-thread:localhost"
-    assert _last_summary_counts[thread_summary_cache_key(context.room_id, "$ctx-thread:localhost")] == 2
-
-
-@pytest.mark.asyncio
-async def test_set_thread_summary_excludes_existing_summary_notices_from_message_count() -> None:
-    """Manual summaries should not count prior summary notices toward the baseline."""
-    tool = ThreadSummaryTools()
-    context = _make_context(thread_id="$ctx-thread:localhost")
-    context.conversation_cache.get_thread_history.return_value = _thread_history(3, summary_count=2)
-
-    with (
-        patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
-            new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
-            new=AsyncMock(return_value="$summary-event:localhost"),
-        ) as mock_send,
-        tool_runtime_context(context),
-    ):
-        payload = json.loads(await tool.set_thread_summary("done"))
-
-    assert payload["status"] == "ok"
-    assert payload["message_count"] == 3
-    mock_send.assert_awaited_once_with(
-        context.client,
-        context.room_id,
-        "$ctx-thread:localhost",
-        "done",
-        3,
-        "manual",
-        context.conversation_cache,
-    )
+    assert payload["message"] == "Failed to send thread summary event."
 
 
 @pytest.mark.asyncio
@@ -425,15 +377,18 @@ async def test_set_thread_summary_returns_error_when_normalize_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_set_thread_summary_returns_error_when_fetch_raises() -> None:
-    """History fetch exceptions should return the standard error payload."""
+    """History fetch exceptions should surface through the shared write helper."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
-    context.conversation_cache.get_thread_history.side_effect = TimeoutError("timed out")
 
     with (
         patch(
             "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(side_effect=ThreadSummaryWriteError("Failed to fetch thread history for the target thread.")),
         ),
         tool_runtime_context(context),
     ):
@@ -446,11 +401,9 @@ async def test_set_thread_summary_returns_error_when_fetch_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_set_thread_summary_returns_error_when_send_raises() -> None:
-    """Send exceptions should return the standard error payload."""
+    """Manual-send exceptions should surface through the shared write helper."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
-    update_last_summary_count(context.room_id, "$ctx-thread:localhost", 2)
-    context.conversation_cache.get_thread_history.return_value = _thread_history(5)
 
     with (
         patch(
@@ -458,8 +411,8 @@ async def test_set_thread_summary_returns_error_when_send_raises() -> None:
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
-            "mindroom.custom_tools.thread_summary.send_thread_summary_event",
-            new=AsyncMock(side_effect=TimeoutError("timed out")),
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(side_effect=ThreadSummaryWriteError("Failed to send thread summary event.")),
         ),
         tool_runtime_context(context),
     ):
@@ -468,4 +421,3 @@ async def test_set_thread_summary_returns_error_when_send_raises() -> None:
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$ctx-thread:localhost"
     assert payload["message"] == "Failed to send thread summary event."
-    assert _last_summary_counts[thread_summary_cache_key(context.room_id, "$ctx-thread:localhost")] == 2

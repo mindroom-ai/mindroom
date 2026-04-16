@@ -22,26 +22,10 @@ from mindroom.thread_tags import (
     remove_thread_tag,
     set_thread_tag,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-
-def _resolve_target_thread_reference(
-    context: ToolRuntimeContext,
-    *,
-    room_id: str,
-    thread_id: str | None,
-    allow_context_fallback: bool = True,
-) -> str | None:
-    """Resolve thread targeting in the order requested by the issue."""
-    return resolve_context_thread_id(
-        context,
-        room_id=room_id,
-        thread_id=thread_id,
-        allow_context_fallback=allow_context_fallback,
-    )
 
 
 def _serialized_tags(tags: Mapping[str, ThreadTagRecord]) -> dict[str, dict[str, object]]:
@@ -138,7 +122,7 @@ class ThreadTagsTools(Toolkit):
                 message=str(exc),
             )
 
-        effective_thread_id = _resolve_target_thread_reference(
+        effective_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
@@ -236,7 +220,7 @@ class ThreadTagsTools(Toolkit):
                 message=str(exc),
             )
 
-        effective_thread_id = _resolve_target_thread_reference(
+        effective_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
@@ -338,7 +322,7 @@ class ThreadTagsTools(Toolkit):
                 message=str(exc),
             )
 
-        effective_thread_id = _resolve_target_thread_reference(
+        effective_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,

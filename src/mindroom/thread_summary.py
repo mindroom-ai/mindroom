@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,19 @@ _PREQUEUE_CONCURRENCY_MARGIN = 2
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
 _last_summary_counts: dict[str, int] = {}
 _thread_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+class ThreadSummaryWriteError(RuntimeError):
+    """Raised when a manual thread summary cannot be written."""
+
+
+@dataclass(frozen=True)
+class ThreadSummaryWriteResult:
+    """Successful manual thread summary write details."""
+
+    event_id: str
+    message_count: int
+    summary: str
 
 
 class _ThreadSummary(BaseModel):
@@ -370,6 +384,67 @@ async def send_thread_summary_event(
         return delivered.event_id
     logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id)
     return None
+
+
+async def set_manual_thread_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    summary: str,
+    *,
+    conversation_cache: ConversationCacheProtocol,
+) -> ThreadSummaryWriteResult:
+    """Write one validated manual summary for a canonical thread root."""
+    if not isinstance(summary, str) or not summary.strip():
+        msg = "summary must be a non-empty string."
+        raise ThreadSummaryWriteError(msg)
+
+    normalized_summary = normalize_thread_summary_text(summary)
+    if not normalized_summary:
+        msg = "summary must be a non-empty string."
+        raise ThreadSummaryWriteError(msg)
+    if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
+        msg = (
+            f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer "
+            "after whitespace normalization."
+        )
+        raise ThreadSummaryWriteError(msg)
+
+    async with thread_summary_lock(room_id, thread_id):
+        try:
+            thread_history = await _load_thread_history(
+                conversation_cache,
+                room_id,
+                thread_id,
+            )
+        except Exception as exc:
+            msg = "Failed to fetch thread history for the target thread."
+            raise ThreadSummaryWriteError(msg) from exc
+
+        message_count = _count_non_summary_messages(thread_history)
+        try:
+            event_id = await send_thread_summary_event(
+                client,
+                room_id,
+                thread_id,
+                normalized_summary,
+                message_count,
+                "manual",
+                conversation_cache,
+            )
+        except Exception as exc:
+            msg = "Failed to send thread summary event."
+            raise ThreadSummaryWriteError(msg) from exc
+        if event_id is None:
+            msg = "Failed to send thread summary event."
+            raise ThreadSummaryWriteError(msg)
+
+        update_last_summary_count(room_id, thread_id, message_count)
+        return ThreadSummaryWriteResult(
+            event_id=event_id,
+            message_count=message_count,
+            summary=normalized_summary,
+        )
 
 
 async def maybe_generate_thread_summary(

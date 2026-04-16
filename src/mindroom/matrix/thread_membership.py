@@ -630,47 +630,6 @@ async def resolve_thread_root_event_id_for_client(
     )
 
 
-async def event_requires_thread_bookkeeping(
-    room_id: str,
-    *,
-    event_type: str,
-    content: Mapping[str, object],
-    access: ThreadMembershipAccess,
-) -> bool:
-    """Return whether one outbound event payload targets a thread."""
-    if event_type != "m.room.message":
-        return False
-    event_info = EventInfo.from_event({"type": event_type, "content": dict(content)})
-    return isinstance(
-        await resolve_event_thread_id(
-            room_id,
-            event_info,
-            access=access,
-        ),
-        str,
-    )
-
-
-async def redaction_requires_thread_bookkeeping(
-    room_id: str,
-    *,
-    event_id: str,
-    access: ThreadMembershipAccess,
-    target_event_info: EventInfo | None,
-) -> bool:
-    """Return whether one redaction target can affect thread-scoped cache state."""
-    if target_event_info is not None and target_event_info.is_reaction:
-        return False
-    return isinstance(
-        await resolve_related_event_thread_id(
-            room_id,
-            event_id,
-            access=access,
-        ),
-        str,
-    )
-
-
 async def resolve_thread_ids_for_event_infos(
     room_id: str,
     *,

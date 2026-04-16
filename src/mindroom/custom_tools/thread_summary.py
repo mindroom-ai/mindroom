@@ -6,19 +6,17 @@ import json
 
 from agno.tools import Toolkit
 
-from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id, room_access_allowed
+from mindroom.custom_tools.attachment_helpers import (
+    resolve_context_thread_id,
+    resolve_requested_room_id,
+    room_access_allowed,
+)
 from mindroom.matrix.thread_membership import resolve_thread_root_event_id_for_client
 from mindroom.thread_summary import (
-    THREAD_SUMMARY_MAX_LENGTH,
-    _count_non_summary_messages,
-    normalize_thread_summary_text,
-    send_thread_summary_event,
-    thread_summary_lock,
-    update_last_summary_count,
+    ThreadSummaryWriteError,
+    set_manual_thread_summary,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-
-_MAX_THREAD_SUMMARY_LENGTH = THREAD_SUMMARY_MAX_LENGTH
 
 
 class ThreadSummaryTools(Toolkit):
@@ -44,7 +42,7 @@ class ThreadSummaryTools(Toolkit):
             message="Thread summary tool context is unavailable in this runtime path.",
         )
 
-    async def set_thread_summary(  # noqa: C901, PLR0911, PLR0912
+    async def set_thread_summary(  # noqa: PLR0911
         self,
         summary: str,
         thread_id: str | None = None,
@@ -59,17 +57,15 @@ class ThreadSummaryTools(Toolkit):
             return self._context_error()
         conversation_cache = context.conversation_cache
 
-        if room_id is None:
-            resolved_room_id = context.room_id
-        elif not isinstance(room_id, str) or not room_id.strip():
+        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        if room_error is not None:
             return self._payload(
                 "error",
                 action="set",
                 room_id=room_id,
                 message="room_id must be a non-empty string when provided.",
             )
-        else:
-            resolved_room_id = room_id.strip()
+        assert resolved_room_id is not None
 
         if not room_access_allowed(context, resolved_room_id):
             return self._payload(
@@ -86,92 +82,62 @@ class ThreadSummaryTools(Toolkit):
                 room_id=resolved_room_id,
                 message="summary must be a non-empty string.",
             )
-        normalized_summary = normalize_thread_summary_text(summary)
-        if not normalized_summary:
-            return self._payload(
-                "error",
-                action="set",
-                room_id=resolved_room_id,
-                message="summary must be a non-empty string.",
-            )
-        if len(normalized_summary) > _MAX_THREAD_SUMMARY_LENGTH:
-            return self._payload(
-                "error",
-                action="set",
-                room_id=resolved_room_id,
-                message=f"summary must be {_MAX_THREAD_SUMMARY_LENGTH} characters or fewer after whitespace normalization.",
-            )
-
-        error_message: str | None = None
-        error_thread_id: str | None = None
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
         )
         if effective_thread_id is None:
-            error_message = "thread_id is required when no active thread context is available for the target room."
-        else:
-            try:
-                normalized_thread_id = await resolve_thread_root_event_id_for_client(
-                    context.client,
-                    resolved_room_id,
-                    effective_thread_id,
-                    conversation_cache=context.conversation_cache,
-                )
-            except Exception:
-                error_thread_id = effective_thread_id
-                error_message = "Failed to resolve a canonical thread root for the target event."
-            else:
-                if normalized_thread_id is None:
-                    error_thread_id = effective_thread_id
-                    error_message = "Failed to resolve a canonical thread root for the target event."
-                else:
-                    async with thread_summary_lock(resolved_room_id, normalized_thread_id):
-                        try:
-                            thread_history = await conversation_cache.get_thread_history(
-                                resolved_room_id,
-                                normalized_thread_id,
-                            )
-                        except Exception:
-                            error_thread_id = normalized_thread_id
-                            error_message = "Failed to fetch thread history for the target thread."
-                        else:
-                            message_count = _count_non_summary_messages(thread_history)
-                            try:
-                                event_id = await send_thread_summary_event(
-                                    context.client,
-                                    resolved_room_id,
-                                    normalized_thread_id,
-                                    normalized_summary,
-                                    message_count,
-                                    "manual",
-                                    conversation_cache,
-                                )
-                            except Exception:
-                                error_thread_id = normalized_thread_id
-                                error_message = "Failed to send thread summary event."
-                            else:
-                                if event_id is None:
-                                    error_thread_id = normalized_thread_id
-                                    error_message = "Failed to send thread summary event."
-                                else:
-                                    update_last_summary_count(resolved_room_id, normalized_thread_id, message_count)
-                                    return self._payload(
-                                        "ok",
-                                        action="set",
-                                        room_id=resolved_room_id,
-                                        thread_id=normalized_thread_id,
-                                        event_id=event_id,
-                                        message_count=message_count,
-                                        summary=normalized_summary,
-                                    )
+            return self._payload(
+                "error",
+                action="set",
+                room_id=resolved_room_id,
+                thread_id=None,
+                message="thread_id is required when no active thread context is available for the target room.",
+            )
 
-        assert error_message is not None
+        try:
+            normalized_thread_id = await resolve_thread_root_event_id_for_client(
+                context.client,
+                resolved_room_id,
+                effective_thread_id,
+                conversation_cache=context.conversation_cache,
+            )
+        except Exception:
+            normalized_thread_id = None
+
+        if normalized_thread_id is None:
+            return self._payload(
+                "error",
+                action="set",
+                room_id=resolved_room_id,
+                thread_id=effective_thread_id,
+                message="Failed to resolve a canonical thread root for the target event.",
+            )
+
+        try:
+            result = await set_manual_thread_summary(
+                context.client,
+                resolved_room_id,
+                normalized_thread_id,
+                summary,
+                conversation_cache=conversation_cache,
+            )
+        except ThreadSummaryWriteError as exc:
+            return self._payload(
+                "error",
+                action="set",
+                room_id=resolved_room_id,
+                thread_id=normalized_thread_id,
+                message=str(exc),
+            )
+
         return self._payload(
-            "error",
+            "ok",
             action="set",
             room_id=resolved_room_id,
-            thread_id=error_thread_id,
-            message=error_message,
+            thread_id=normalized_thread_id,
+            event_id=result.event_id,
+            message_count=result.message_count,
+            summary=result.summary,
         )
