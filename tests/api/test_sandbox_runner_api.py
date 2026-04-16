@@ -23,7 +23,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.config.main import ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
@@ -40,6 +40,8 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     ensure_tool_registry_loaded,
     get_tool_by_name,
+    resolved_tool_validation_snapshot_for_runtime,
+    serialize_tool_validation_snapshot,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -54,7 +56,6 @@ from mindroom.workers.models import WorkerSpec
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
@@ -107,6 +108,25 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _refresh_runner_app_from_env()
 
 
+def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
+    """Set the upstream-authored validation snapshot visible to one worker runtime."""
+    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    config = Config.validate_with_runtime({}, runtime_paths)
+    snapshot = serialize_tool_validation_snapshot(
+        resolved_tool_validation_snapshot_for_runtime(runtime_paths, config),
+    )
+    for tool_name in tool_names:
+        snapshot[tool_name] = {
+            "config_fields": [],
+            "agent_override_fields": [],
+            "authored_override_validator": "default",
+        }
+    monkeypatch.setenv(
+        "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON",
+        json.dumps(snapshot, separators=(",", ":"), sort_keys=True),
+    )
+
+
 def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
@@ -135,6 +155,95 @@ def _invalid_plugin_config_path(tmp_path: Path) -> Path:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\nplugins:\n  - ./plugins/bad-name\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _missing_plugin_path_config_path(tmp_path: Path) -> Path:
+    """Write one config that references a plugin unavailable in the worker runtime."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents:\n"
+        "  mind:\n"
+        "    display_name: Mind\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - shell\n"
+        "  saguaro:\n"
+        "    display_name: Saguaro\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - agentspace_slack_search\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/agentspace-slack-search\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _missing_plugin_path_with_invalid_tool_config_path(tmp_path: Path) -> Path:
+    """Write one config that mixes a missing worker plugin with an unknown tool."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents:\n"
+        "  broken:\n"
+        "    display_name: Broken\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - agentspace_slack_search\n"
+        "  invalid:\n"
+        "    display_name: Invalid\n"
+        "    model: default\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - definitely_not_a_tool\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/agentspace-slack-search\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _mcp_demo_config_path(tmp_path: Path) -> Path:
+    """Write one config that exposes a valid MCP-backed tool assignment."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "router:\n"
+        "  model: default\n"
+        "mcp_servers:\n"
+        "  demo:\n"
+        "    transport: stdio\n"
+        "    command: python\n"
+        "    args:\n"
+        "      - -c\n"
+        "      - print(0)\n"
+        "agents:\n"
+        "  code:\n"
+        "    display_name: Code\n"
+        "    role: test\n"
+        "    model: default\n"
+        "    tools:\n"
+        "      - mcp_demo\n",
         encoding="utf-8",
     )
     return config_path
@@ -665,6 +774,109 @@ def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(
         "Invalid plugin name: 'BadName'. Plugin names must use lowercase ASCII letters, digits, "
         "hyphens, or underscores. (" + str((tmp_path / "plugins" / "bad-name" / "mindroom.plugin.json").resolve()) + ")"
     )
+
+
+def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker startup should not fail on plugin paths missing from the worker filesystem."""
+    config_path = _missing_plugin_path_config_path(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    _set_sandbox_token(monkeypatch)
+
+    runtime_paths, config = _refresh_runner_app_from_env()
+
+    assert runtime_paths.config_path.exists()
+    assert config.plugins == []
+
+    with (
+        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create),
+        TestClient(sandbox_runner_app) as client,
+    ):
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "calculator",
+                "function_name": "add",
+                "args": [1, 2],
+                "kwargs": {},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert '"result": 3' in response.json()["result"]
+
+
+def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shared runner startup must keep canonical plugin validation semantics."""
+    config_path = _missing_plugin_path_config_path(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+
+    with pytest.raises(ConfigRuntimeValidationError, match="Configured plugin path does not exist"):
+        _refresh_runner_app_from_env()
+
+
+def test_sandbox_runner_still_rejects_invalid_tools_after_skipping_worker_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker plugin filtering must not weaken authored tool validation."""
+    config_path = _missing_plugin_path_with_invalid_tool_config_path(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        _refresh_runner_app_from_env()
+
+    assert str(exc_info.value) == (
+        "agents.invalid.tools[0].definitely_not_a_tool: Unknown tool 'definitely_not_a_tool'."
+    )
+
+
+def test_sandbox_runner_execute_rejects_invalid_mcp_tool_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execute requests should use the same MCP-specific override validation as config loading."""
+    config_path = _mcp_demo_config_path(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    _set_sandbox_token(monkeypatch)
+    _refresh_runner_app_from_env()
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "mcp_demo",
+                "function_name": "demo",
+                "args": [],
+                "kwargs": {},
+                "tool_config_overrides": {
+                    "include_tools": ["echo"],
+                    "exclude_tools": ["echo"],
+                },
+            },
+        )
+
+    assert response.status_code == 400
+    assert "include_tools and exclude_tools overlap" in response.json()["detail"]
 
 
 def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_refresh(

@@ -31,6 +31,14 @@ _TEST_TOKEN_SECRET_KEY = "sandbox_proxy_token"  # noqa: S105
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_SCOPED_WORKER_KEY_A = "v1:tenant-123:shared:code"
 _TEST_SCOPED_WORKER_KEY_B = "v1:tenant-123:shared:research"
+_TEST_TOOL_VALIDATION_SNAPSHOT = {
+    "calculator": {
+        "config_fields": [],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    },
+}
 
 
 class _FakeApiError(Exception):
@@ -181,6 +189,7 @@ def _backend(
     name_prefix: str = "mindroom-worker",
     owner_deployment_name: str | None = None,
     runtime_paths: RuntimePaths | None = None,
+    tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = _KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -214,6 +223,7 @@ def _backend(
         config=config,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=resolved_runtime_paths.storage_root,
+        tool_validation_snapshot=tool_validation_snapshot or deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT),
     )
     apps_api = _FakeAppsApi()
     core_api = _FakeCoreApi()
@@ -235,7 +245,7 @@ def _backend(
     return backend, apps_api, core_api
 
 
-def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
+def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # noqa: PLR0915
     """Ensuring one worker should create a service/deployment pair on shared storage."""
     backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-demo")
     worker_key = _TEST_SCOPED_WORKER_KEY_A
@@ -260,6 +270,8 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_RUNTIME_PATHS_JSON" in env_names
+    assert "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON" in env_names
+    assert "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON" not in env_names
     assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" in env_names
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
@@ -267,6 +279,8 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
+    validation_snapshot = json.loads(env_values["MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"])
+    assert validation_snapshot == _TEST_TOOL_VALIDATION_SNAPSHOT
     expected_dedicated_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
@@ -383,6 +397,30 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
     assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+
+
+def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
+    """Worker env should reflect the authoritative snapshot passed into the backend."""
+    custom_snapshot = {
+        "worker_only": {
+            "config_fields": [],
+            "agent_override_fields": [],
+            "authored_override_validator": "default",
+            "runtime_loadable": False,
+        },
+    }
+    backend, apps_api, _core_api = _backend(
+        owner_deployment_name="mindroom-demo",
+        tool_validation_snapshot=custom_snapshot,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert json.loads(env_values["MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"]) == custom_snapshot
 
 
 def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path: Path) -> None:

@@ -17,12 +17,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any
 
+import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import sandbox_proxy
@@ -30,11 +31,14 @@ from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
+    ToolMetadataValidationError,
+    deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
     get_tool_by_name,
     sanitize_tool_init_overrides,
-    validate_authored_overrides,
+    validate_authored_tool_entry_overrides,
 )
+from mindroom.tool_system.plugins import PluginValidationError
 from mindroom.tool_system.sandbox_proxy import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -57,6 +61,7 @@ logger = get_logger(__name__)
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
+_TOOL_VALIDATION_SNAPSHOT_ENV = "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"
 
 
 def _startup_runtime_paths_from_env() -> RuntimePaths:
@@ -99,11 +104,88 @@ def _startup_runner_token_from_env() -> str | None:
     return raw_token or None
 
 
+def _upstream_tool_validation_snapshot_from_env() -> dict[str, object]:
+    raw_payload = os.environ.get(_TOOL_VALIDATION_SNAPSHOT_ENV, "").strip()
+    if not raw_payload:
+        return {}
+    return deserialize_tool_validation_snapshot(json.loads(raw_payload))
+
+
 def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
-    """Return the active runtime config, or an explicit empty config if none exists."""
+    """Return the runtime config visible inside one sandbox runner."""
     if runtime_paths.config_path.exists():
-        return load_config(runtime_paths)
+        if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
+            return load_config(runtime_paths)
+        return _dedicated_worker_runtime_config_or_empty(runtime_paths)
     return Config.validate_with_runtime({}, runtime_paths)
+
+
+def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+    """Return dedicated-worker config, tolerating plugins unavailable in that worker image."""
+    with runtime_paths.config_path.open() as f:
+        data = yaml.safe_load(f) or {}
+
+    tool_validation_snapshot = _upstream_tool_validation_snapshot_from_env()
+    if not tool_validation_snapshot:
+        return load_config(runtime_paths)
+
+    # Dedicated workers only need the authored config shape plus the subset of
+    # plugin entries that actually exist in that runtime filesystem. Upstream
+    # validation remains authoritative for the full configured tool surface.
+    config = Config.model_validate(
+        _normalized_config_data(data),
+        context={"runtime_paths": runtime_paths},
+    )
+    config = _config_with_available_plugins(config, runtime_paths)
+
+    try:
+        config._validate_authored_tool_entries_with_snapshot(
+            tool_validation_snapshot=tool_validation_snapshot,
+        )
+    except (
+        PluginValidationError,
+        ToolConfigOverrideError,
+        ToolMetadataValidationError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise ConfigRuntimeValidationError(str(exc)) from exc
+    return config
+
+
+def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) -> Config:
+    """Return one config snapshot filtered to plugin entries visible in this runtime."""
+    if not config.plugins:
+        return config
+
+    from mindroom.tool_system import plugins as plugin_module  # noqa: PLC0415
+
+    available_plugins = []
+    skipped_plugin_paths: list[str] = []
+    for plugin_entry in config.plugins:
+        if not plugin_entry.enabled:
+            available_plugins.append(plugin_entry)
+            continue
+
+        try:
+            plugin_root = plugin_module._resolve_plugin_root(plugin_entry.path, runtime_paths)
+        except Exception:
+            skipped_plugin_paths.append(plugin_entry.path)
+            continue
+
+        if plugin_root.exists() and plugin_root.is_dir():
+            available_plugins.append(plugin_entry)
+        else:
+            skipped_plugin_paths.append(plugin_entry.path)
+
+    if not skipped_plugin_paths:
+        return config
+
+    logger.info(
+        "sandbox_runner_skipping_unavailable_plugins",
+        plugin_paths=sorted(skipped_plugin_paths),
+    )
+    return config.model_copy(update={"plugins": available_plugins}, deep=True)
 
 
 def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
@@ -698,7 +780,7 @@ def _validate_execute_request_payload(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.tool_config_overrides:
         try:
-            payload.tool_config_overrides = validate_authored_overrides(
+            payload.tool_config_overrides = validate_authored_tool_entry_overrides(
                 payload.tool_name,
                 payload.tool_config_overrides,
                 config_path_prefix="request.tool_config_overrides",

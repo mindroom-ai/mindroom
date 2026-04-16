@@ -58,6 +58,7 @@ _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
+_TOOL_VALIDATION_SNAPSHOT_ENV = "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -235,12 +236,14 @@ class KubernetesResourceManager:
         config: _KubernetesWorkerBackendConfig,
         auth_token: str | None,
         storage_root: Path,
+        tool_validation_snapshot: dict[str, dict[str, object]],
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
         self.runtime_paths = runtime_paths
         self.config = config
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
+        self.tool_validation_snapshot = tool_validation_snapshot
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -598,6 +601,14 @@ class KubernetesResourceManager:
                 "name": _STARTUP_RUNTIME_PATHS_ENV,
                 "value": json.dumps(
                     serialize_public_runtime_paths(startup_runtime_paths),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            },
+            {
+                "name": _TOOL_VALIDATION_SNAPSHOT_ENV,
+                "value": json.dumps(
+                    self.tool_validation_snapshot,
                     separators=(",", ":"),
                     sort_keys=True,
                 ),

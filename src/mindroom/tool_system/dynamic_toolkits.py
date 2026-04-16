@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.models import ResolvedToolConfig
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.metadata import validate_authored_tool_entry_overrides
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -112,9 +113,7 @@ def _normalize_effective_tool_config_overrides(
     tool_name: str,
     overrides: dict[str, object],
 ) -> dict[str, object]:
-    from mindroom.tool_system.metadata import validate_authored_overrides  # noqa: PLC0415
-
-    return validate_authored_overrides(tool_name, overrides)
+    return validate_authored_tool_entry_overrides(tool_name, overrides)
 
 
 def get_loaded_toolkits_for_session(

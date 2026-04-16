@@ -25,6 +25,7 @@ from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runti
 from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
 from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
 from mindroom.api.config_lifecycle import read_app_committed_config as read_api_app_committed_config
+from mindroom.api.config_lifecycle import read_app_committed_runtime_config as read_api_app_committed_runtime_config
 from mindroom.api.config_lifecycle import read_committed_config as read_api_committed_config
 from mindroom.api.config_lifecycle import read_raw_config_source as read_api_raw_config_source
 from mindroom.api.config_lifecycle import replace_committed_config as replace_api_committed_config
@@ -54,7 +55,12 @@ from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
-from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
+from mindroom.workers.runtime import (
+    get_primary_worker_manager,
+    primary_worker_backend_available,
+    primary_worker_backend_name,
+    serialized_kubernetes_worker_validation_snapshot,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -143,7 +149,11 @@ def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> f
     return max(0.0, interval)
 
 
-def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
+def _cleanup_workers_once(
+    runtime_paths: constants.RuntimePaths,
+    *,
+    runtime_config: Config | None = None,
+) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
     proxy_config = sandbox_proxy_config(runtime_paths)
     if not primary_worker_backend_available(
@@ -153,11 +163,21 @@ def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
     ):
         return 0
 
+    if runtime_config is None and primary_worker_backend_name(runtime_paths) == "kubernetes":
+        return 0
+
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    if runtime_config is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
+        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+            runtime_paths,
+            runtime_config=runtime_config,
+        )
     worker_manager = get_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
+        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
     )
     cleaned_workers = worker_manager.cleanup_idle_workers()
     if cleaned_workers:
@@ -190,7 +210,19 @@ async def _worker_cleanup_loop(
             break
         except TimeoutError:
             try:
-                await asyncio.to_thread(_cleanup_workers_once, _app_runtime_paths(api_app))
+                try:
+                    runtime_config, runtime_paths = read_api_app_committed_runtime_config(api_app)
+                except HTTPException:
+                    runtime_config = None
+                    runtime_paths = _app_runtime_paths(api_app)
+                if runtime_config is None:
+                    await asyncio.to_thread(_cleanup_workers_once, runtime_paths)
+                else:
+                    await asyncio.to_thread(
+                        _cleanup_workers_once,
+                        runtime_paths,
+                        runtime_config=runtime_config,
+                    )
             except Exception:
                 logger.exception("Background worker cleanup failed")
 
