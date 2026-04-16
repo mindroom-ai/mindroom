@@ -1371,6 +1371,115 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
     workers_runtime_module._reset_primary_worker_manager()
 
 
+def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Kubernetes worker-manager caching should track the authoritative validation snapshot."""
+    workers_runtime_module._reset_primary_worker_manager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    first_snapshot = {
+        "calculator": {
+            "config_fields": [],
+            "agent_override_fields": [],
+            "authored_override_validator": "default",
+            "runtime_loadable": True,
+        },
+    }
+    second_snapshot = {
+        "calculator": {
+            "config_fields": [],
+            "agent_override_fields": [],
+            "authored_override_validator": "default",
+            "runtime_loadable": True,
+        },
+        "worker_only": {
+            "config_fields": [],
+            "agent_override_fields": [],
+            "authored_override_validator": "default",
+            "runtime_loadable": False,
+        },
+    }
+    snapshots = iter([first_snapshot, second_snapshot])
+    captured_snapshots: list[dict[str, dict[str, object]]] = []
+
+    class FakeKubernetesBackend:
+        backend_name = "kubernetes"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_runtime(
+            cls,
+            runtime_paths: RuntimePaths,
+            *,
+            auth_token: str | None,
+            storage_root: Path,
+            tool_validation_snapshot: dict[str, dict[str, object]],
+        ) -> Self:
+            del runtime_paths, auth_token, storage_root
+            captured_snapshots.append(tool_validation_snapshot)
+            return cls()
+
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+        def get_worker(self, worker_key: str, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+        def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+        def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[object]:
+            raise NotImplementedError
+
+        def evict_worker(
+            self,
+            worker_key: str,
+            *,
+            preserve_state: bool = True,
+            now: float | None = None,
+        ) -> object:
+            raise NotImplementedError
+
+        def cleanup_idle_workers(self, *, now: float | None = None) -> list[object]:
+            raise NotImplementedError
+
+        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+            raise NotImplementedError
+
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_serialized_kubernetes_worker_validation_snapshot",
+        lambda _runtime_paths: next(snapshots),
+    )
+    monkeypatch.setattr(workers_runtime_module, "KubernetesWorkerBackend", FakeKubernetesBackend)
+
+    first_manager = workers_runtime_module.get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+    second_manager = workers_runtime_module.get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+
+    assert first_manager is not second_manager
+    assert captured_snapshots == [first_snapshot, second_snapshot]
+    workers_runtime_module._reset_primary_worker_manager()
+
+
 def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Worker-routed tools should stay proxy-enabled when the Kubernetes backend provides worker handles directly."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")

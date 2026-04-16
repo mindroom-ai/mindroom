@@ -236,12 +236,14 @@ class KubernetesResourceManager:
         config: _KubernetesWorkerBackendConfig,
         auth_token: str | None,
         storage_root: Path,
+        tool_validation_snapshot: dict[str, dict[str, object]],
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
         self.runtime_paths = runtime_paths
         self.config = config
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
+        self.tool_validation_snapshot = tool_validation_snapshot
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -249,7 +251,6 @@ class KubernetesResourceManager:
         self._control_plane_node_name_loaded = False
         self._owner_reference: dict[str, object] | None = None
         self._owner_reference_loaded = False
-        self._worker_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
 
     @property
     def _apps(self) -> _AppsApiProtocol:
@@ -607,7 +608,7 @@ class KubernetesResourceManager:
             {
                 "name": _TOOL_VALIDATION_SNAPSHOT_ENV,
                 "value": json.dumps(
-                    self._worker_validation_snapshot(),
+                    self.tool_validation_snapshot,
                     separators=(",", ":"),
                     sort_keys=True,
                 ),
@@ -646,26 +647,6 @@ class KubernetesResourceManager:
         for name, value in sorted(self.config.extra_env.items()):
             env.append({"name": name, "value": value})
         return env
-
-    def _worker_validation_snapshot(self) -> dict[str, dict[str, object]]:
-        """Return the serialized validation snapshot already accepted in the primary runtime."""
-        if self._worker_tool_validation_snapshot is not None:
-            return self._worker_tool_validation_snapshot
-
-        from mindroom.config.main import load_config  # noqa: PLC0415
-        from mindroom.tool_system.metadata import (  # noqa: PLC0415
-            resolved_tool_validation_snapshot_for_runtime,
-            serialize_tool_validation_snapshot,
-        )
-
-        if not self.runtime_paths.config_path.exists():
-            self._worker_tool_validation_snapshot = {}
-            return self._worker_tool_validation_snapshot
-
-        config = load_config(self.runtime_paths)
-        snapshot = resolved_tool_validation_snapshot_for_runtime(self.runtime_paths, config)
-        self._worker_tool_validation_snapshot = serialize_tool_validation_snapshot(snapshot)
-        return self._worker_tool_validation_snapshot
 
     def _worker_google_application_credentials_path(
         self,

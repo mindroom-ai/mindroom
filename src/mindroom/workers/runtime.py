@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,21 @@ _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _PRIMARY_WORKER_MANAGER: WorkerManager | None = None
 _PRIMARY_WORKER_MANAGER_CONFIG: tuple[str, ...] | None = None
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
+
+
+def _serialized_kubernetes_worker_validation_snapshot(
+    runtime_paths: RuntimePaths,
+) -> dict[str, dict[str, object]]:
+    """Build the authoritative worker validation snapshot in the primary runtime."""
+    from mindroom.config.main import load_config  # noqa: PLC0415
+    from mindroom.tool_system.metadata import (  # noqa: PLC0415
+        resolved_tool_validation_snapshot_for_runtime,
+        serialize_tool_validation_snapshot,
+    )
+
+    config = load_config(runtime_paths)
+    snapshot = resolved_tool_validation_snapshot_for_runtime(runtime_paths, config)
+    return serialize_tool_validation_snapshot(snapshot)
 
 
 def _normalize_backend_name(raw_value: str | None) -> str:
@@ -75,12 +91,22 @@ def _primary_worker_backend_config_signature(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None,
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
 ) -> tuple[str, ...]:
     backend_name = primary_worker_backend_name(runtime_paths)
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "kubernetes":
-        return kubernetes_backend_config_signature(runtime_paths, auth_token=proxy_token, storage_root=storage_root)
+        if kubernetes_tool_validation_snapshot is None:
+            kubernetes_tool_validation_snapshot = _serialized_kubernetes_worker_validation_snapshot(runtime_paths)
+        return (
+            *kubernetes_backend_config_signature(
+                runtime_paths,
+                auth_token=proxy_token,
+                storage_root=storage_root,
+            ),
+            json.dumps(kubernetes_tool_validation_snapshot, separators=(",", ":"), sort_keys=True),
+        )
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
 
@@ -91,6 +117,7 @@ def _build_primary_worker_manager(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None,
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
 ) -> WorkerManager:
     backend_name = primary_worker_backend_name(runtime_paths)
     if backend_name == "static_runner":
@@ -104,11 +131,14 @@ def _build_primary_worker_manager(
         if storage_root is None:
             msg = "Kubernetes worker backend requires an explicit runtime storage root."
             raise WorkerBackendError(msg)
+        if kubernetes_tool_validation_snapshot is None:
+            kubernetes_tool_validation_snapshot = _serialized_kubernetes_worker_validation_snapshot(runtime_paths)
         return WorkerManager(
             KubernetesWorkerBackend.from_runtime(
                 runtime_paths,
                 auth_token=proxy_token,
                 storage_root=storage_root,
+                tool_validation_snapshot=kubernetes_tool_validation_snapshot,
             ),
         )
     msg = f"Unsupported worker backend: {backend_name}"
@@ -125,11 +155,16 @@ def get_primary_worker_manager(
     """Return the primary-runtime worker manager for the current backend config."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
 
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    if primary_worker_backend_name(runtime_paths) == "kubernetes":
+        kubernetes_tool_validation_snapshot = _serialized_kubernetes_worker_validation_snapshot(runtime_paths)
+
     config_signature = _primary_worker_backend_config_signature(
         runtime_paths,
         proxy_url=proxy_url,
         proxy_token=proxy_token,
         storage_root=storage_root,
+        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
     )
     with _PRIMARY_WORKER_MANAGER_LOCK:
         if _PRIMARY_WORKER_MANAGER is None or config_signature != _PRIMARY_WORKER_MANAGER_CONFIG:
@@ -138,6 +173,7 @@ def get_primary_worker_manager(
                 proxy_url=proxy_url,
                 proxy_token=proxy_token,
                 storage_root=storage_root,
+                kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
             )
             _PRIMARY_WORKER_MANAGER_CONFIG = config_signature
     return _PRIMARY_WORKER_MANAGER

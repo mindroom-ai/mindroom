@@ -38,6 +38,7 @@ class KubernetesWorkerBackend:
         config: _KubernetesWorkerBackendConfig,
         auth_token: str | None,
         storage_root: Path,
+        tool_validation_snapshot: dict[str, dict[str, object]],
     ) -> None:
         self.runtime_paths = runtime_paths
         self.config = config
@@ -49,6 +50,7 @@ class KubernetesWorkerBackend:
             config=config,
             auth_token=auth_token,
             storage_root=self.storage_root,
+            tool_validation_snapshot=tool_validation_snapshot,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -60,6 +62,7 @@ class KubernetesWorkerBackend:
         *,
         auth_token: str | None,
         storage_root: Path,
+        tool_validation_snapshot: dict[str, dict[str, object]],
     ) -> KubernetesWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
         return cls(
@@ -67,6 +70,7 @@ class KubernetesWorkerBackend:
             config=_KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
             auth_token=auth_token,
             storage_root=storage_root,
+            tool_validation_snapshot=tool_validation_snapshot,
         )
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
