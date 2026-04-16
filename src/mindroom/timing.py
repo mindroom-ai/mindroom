@@ -32,6 +32,11 @@ def _is_enabled() -> bool:
     return os.environ.get("MINDROOM_TIMING", "") == "1"
 
 
+def timing_enabled() -> bool:
+    """Return whether structured timing diagnostics should be emitted."""
+    return _is_enabled()
+
+
 type TimingMetadataValue = str | int | float | bool
 
 PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
@@ -150,6 +155,19 @@ def get_dispatch_pipeline_timing(source: object) -> DispatchPipelineTiming | Non
     if isinstance(raw_timing, DispatchPipelineTiming):
         return raw_timing
     return None
+
+
+def emit_timing_event(event_name: str, **event_data: object) -> None:
+    """Emit one structured timing event when timing instrumentation is enabled."""
+    if not _is_enabled():
+        return
+    scope = event_data.pop("timing_scope", None)
+    if not isinstance(scope, str) or not scope:
+        scope = timing_scope.get()
+    filtered_event_data = {key: value for key, value in event_data.items() if value is not None}
+    if scope:
+        filtered_event_data["timing_scope"] = scope
+    logger.info(event_name, **filtered_event_data)
 
 
 def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:  # noqa: C901

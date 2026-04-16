@@ -818,11 +818,12 @@ def room_scan_thread_membership_access_for_client(
     ) -> tuple[list[dict[str, object]], bool]:
         from mindroom.matrix.client import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
 
-        return await _fetch_thread_event_sources_via_room_messages(
+        scan_result = await _fetch_thread_event_sources_via_room_messages(
             client,
             room_id,
             thread_root_id,
         )
+        return scan_result.event_sources, True
 
     return room_scan_thread_membership_access(
         lookup_thread_id=lookup_thread_id,

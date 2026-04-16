@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 import mindroom.timing as timing_module
-from mindroom.timing import DispatchPipelineTiming, timed, timing_scope
+from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timing_enabled, timing_scope
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -224,6 +224,34 @@ def test_timed_logs_omit_scope_when_unset(monkeypatch: pytest.MonkeyPatch) -> No
     run()
 
     _assert_timing_logged(logger, "plain_label")
+
+
+def test_emit_timing_event_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Structured timing events should inherit the current timing scope."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    token = timing_scope.set("scope-123")
+    try:
+        emit_timing_event("custom_timing_event", value=42, ok=True)
+    finally:
+        timing_scope.reset(token)
+
+    logger.info.assert_called_once_with(
+        "custom_timing_event",
+        value=42,
+        ok=True,
+        timing_scope="scope-123",
+    )
+
+
+def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The public timing-enabled helper should mirror the environment switch."""
+    monkeypatch.delenv("MINDROOM_TIMING", raising=False)
+    assert timing_enabled() is False
+
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    assert timing_enabled() is True
 
 
 def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> None:

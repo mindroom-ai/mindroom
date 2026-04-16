@@ -21,6 +21,7 @@ import pytest_asyncio
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache as matrix_cache
+import mindroom.timing as timing_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -49,6 +50,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
+from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadRootProof,
@@ -3355,6 +3357,162 @@ class TestThreadingBehavior:
             assert coordinator._room_update_tasks.get("!room:localhost") is None
         finally:
             await coordinator.close()
+
+    @pytest.mark.asyncio
+    async def test_queue_room_update_logs_timing_breakdown_when_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Room-scoped cache updates should log predecessor wait versus update time."""
+        monkeypatch.setenv("MINDROOM_TIMING", "1")
+        timing_logger = MagicMock()
+        monkeypatch.setattr(timing_module, "logger", timing_logger)
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+        first_started = asyncio.Event()
+        allow_first_finish = asyncio.Event()
+
+        async def first_update() -> str:
+            first_started.set()
+            await allow_first_finish.wait()
+            return "first"
+
+        async def second_update() -> str:
+            return "second"
+
+        try:
+            first_task = coordinator.queue_room_update(
+                "!room:localhost",
+                first_update,
+                name="matrix_cache_first_update",
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            second_task = coordinator.queue_room_update(
+                "!room:localhost",
+                second_update,
+                name="matrix_cache_second_update",
+            )
+            await asyncio.sleep(0)
+            allow_first_finish.set()
+            assert await first_task == "first"
+            assert await second_task == "second"
+        finally:
+            await coordinator.close()
+
+        timing_calls = [
+            call for call in timing_logger.info.call_args_list if call.args == ("Event cache update timing",)
+        ]
+        assert any(
+            call.kwargs["barrier_kind"] == "room"
+            and call.kwargs["operation"] == "matrix_cache_second_update"
+            and call.kwargs["queued_behind_predecessor"] is True
+            and call.kwargs["predecessor_count"] >= 1
+            and call.kwargs["predecessor_wait_ms"] >= 0.0
+            and call.kwargs["update_run_ms"] >= 0.0
+            and call.kwargs["total_ms"] >= call.kwargs["update_run_ms"]
+            for call in timing_calls
+        )
+
+    @pytest.mark.asyncio
+    async def test_wait_for_room_idle_logs_timing_when_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Room-idle waits should log how long the caller sat behind queued room work."""
+        monkeypatch.setenv("MINDROOM_TIMING", "1")
+        timing_logger = MagicMock()
+        monkeypatch.setattr(timing_module, "logger", timing_logger)
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+        update_started = asyncio.Event()
+        allow_update_finish = asyncio.Event()
+
+        async def slow_update() -> None:
+            update_started.set()
+            await allow_update_finish.wait()
+
+        try:
+            queued_task = coordinator.queue_room_update(
+                "!room:localhost",
+                slow_update,
+                name="matrix_cache_slow_update",
+            )
+            await asyncio.wait_for(update_started.wait(), timeout=1.0)
+            waiter = asyncio.create_task(coordinator.wait_for_room_idle("!room:localhost"))
+            await asyncio.sleep(0)
+            allow_update_finish.set()
+            await queued_task
+            await waiter
+        finally:
+            await coordinator.close()
+
+        idle_wait_calls = [
+            call for call in timing_logger.info.call_args_list if call.args == ("Event cache idle wait timing",)
+        ]
+        assert any(
+            call.kwargs["barrier_kind"] == "room"
+            and call.kwargs["pending_task_count"] >= 1
+            and call.kwargs["wait_ms"] >= 0.0
+            for call in idle_wait_calls
+        )
+
+    @pytest.mark.asyncio
+    async def test_append_live_event_logs_phase_breakdown_when_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Live ingress appends should expose resolver, queue, and cache-write timings."""
+        monkeypatch.setenv("MINDROOM_TIMING", "1")
+        timing_logger = MagicMock()
+        monkeypatch.setattr(timing_module, "logger", timing_logger)
+        event_cache = _runtime_event_cache()
+        event_cache.append_event = AsyncMock(return_value=True)
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+        access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
+            return_value=MutationThreadImpact.threaded("$thread:localhost"),
+        )
+        event = nio.RoomMessageText.from_dict(
+            {
+                "type": "m.room.message",
+                "room_id": "!room:localhost",
+                "event_id": "$reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234,
+                "content": {
+                    "body": "hello",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
+                },
+            },
+        )
+
+        await access.append_live_event(
+            "!room:localhost",
+            event,
+            event_info=EventInfo.from_event(event.source),
+        )
+
+        append_calls = [
+            call for call in timing_logger.info.call_args_list if call.args == ("Live event cache append timing",)
+        ]
+        assert any(
+            call.kwargs["thread_id"] == "$thread:localhost"
+            and call.kwargs["event_id"] == "$reply:localhost"
+            and call.kwargs["impact_state"] == "threaded"
+            and call.kwargs["impact_resolution_ms"] >= 0.0
+            and call.kwargs["queue_and_update_ms"] >= 0.0
+            and call.kwargs["invalidate_ms"] >= 0.0
+            and call.kwargs["append_ms"] >= 0.0
+            and call.kwargs["outcome"] == "ok"
+            for call in append_calls
+        )
 
     @pytest.mark.asyncio
     async def test_sync_edit_marks_cached_thread_stale_and_next_read_refetches(

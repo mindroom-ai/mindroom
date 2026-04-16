@@ -17,6 +17,7 @@ from nio.responses import RoomThreadsError, RoomThreadsResponse
 import mindroom.matrix.client as matrix_client_module
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_CACHE,
@@ -618,6 +619,9 @@ class TestThreadHistory:
             ANY,
             hydrate_sidecars=False,
             allow_stale_fallback=True,
+            cache_reject_diagnostics={
+                THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
+            },
         )
 
     @pytest.mark.asyncio
@@ -662,6 +666,9 @@ class TestThreadHistory:
             ANY,
             hydrate_sidecars=False,
             allow_stale_fallback=True,
+            cache_reject_diagnostics={
+                THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
+            },
         )
 
     @pytest.mark.asyncio
@@ -2343,8 +2350,68 @@ class TestThreadHistoryCache:
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics["homeserver_scan_pages"] == 1
+        assert history.diagnostics["homeserver_scanned_event_count"] == 2
+        assert history.diagnostics["homeserver_thread_event_count"] == 2
+        assert history.diagnostics["homeserver_fetch_ms"] >= 0.0
         assert cached_events is not None
         assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_dispatch_thread_history_includes_cache_reject_reason(self, tmp_path: Path) -> None:
+        """Strict dispatch refetches should explain why durable cache reuse was rejected."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply in thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        await self._seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[self._cache_source(root_event), self._cache_source(reply_event)],
+        )
+        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
+
+        client = MagicMock()
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [reply_event, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            history = await matrix_client_module.fetch_dispatch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == (
+            "thread_invalidated_after_validation"
+        )
+        assert history.diagnostics["cache_invalidation_reason"] == "sync_thread_mutation"
+        assert history.diagnostics["homeserver_scan_pages"] == 1
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_miss_persists_reference_descendant_in_causal_order(
