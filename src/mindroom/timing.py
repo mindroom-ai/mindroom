@@ -129,11 +129,6 @@ def create_dispatch_pipeline_timing(*, event_id: str, room_id: str) -> DispatchP
     return timing
 
 
-def timing_enabled() -> bool:
-    """Return whether structured timing instrumentation is enabled."""
-    return _is_enabled()
-
-
 def attach_dispatch_pipeline_timing(
     source: object,
     timing: DispatchPipelineTiming | None,

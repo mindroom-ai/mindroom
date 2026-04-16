@@ -372,18 +372,6 @@ class TurnController:
             requester_user_id,
         )
 
-    def _create_ingress_dispatch_timing(
-        self,
-        *,
-        room_id: str,
-        event_id: str,
-        event_source: object,
-    ) -> DispatchPipelineTiming | None:
-        """Start one ingress timing tracker and attach it to the event source."""
-        dispatch_timing = create_dispatch_pipeline_timing(event_id=event_id, room_id=room_id)
-        attach_dispatch_pipeline_timing(event_source, dispatch_timing)
-        return dispatch_timing
-
     async def _append_live_event_with_timing(
         self,
         room_id: str,
@@ -1182,11 +1170,11 @@ class TurnController:
             sender=event.sender,
             thread_id=ingress_thread_id,
         )
-        dispatch_timing = self._create_ingress_dispatch_timing(
-            room_id=room.room_id,
+        dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
-            event_source=event.source,
+            room_id=room.room_id,
         )
+        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         event_info = EventInfo.from_event(event.source)
         await self._append_live_event_with_timing(
             room.room_id,
@@ -1508,11 +1496,11 @@ class TurnController:
         prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return
-        dispatch_timing = self._create_ingress_dispatch_timing(
-            room_id=room.room_id,
+        dispatch_timing = create_dispatch_pipeline_timing(
             event_id=prechecked_event.event.event_id,
-            event_source=prechecked_event.event.source,
+            room_id=room.room_id,
         )
+        attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
         # Prime transitive ancestor lookups before writing advisory cache membership.
         await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
         event_info = EventInfo.from_event(prechecked_event.event.source)

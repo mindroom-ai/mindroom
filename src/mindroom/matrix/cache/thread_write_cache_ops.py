@@ -42,16 +42,10 @@ class ThreadMutationCacheOps:
         update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
         *,
         name: str,
-        log_context: dict[str, object] | None = None,
     ) -> asyncio.Task[object]:
         """Run one cache mutation under the room-ordered write barrier."""
         coordinator = self.runtime.event_cache_write_coordinator
-        return coordinator.queue_room_update(
-            room_id,
-            update_coro_factory,
-            name=name,
-            log_context=log_context,
-        )
+        return coordinator.queue_room_update(room_id, update_coro_factory, name=name)
 
     async def store_events_batch(
         self,
