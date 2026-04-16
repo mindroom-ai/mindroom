@@ -682,6 +682,89 @@ async def test_prepare_dispatch_builds_target_via_conversation_resolver(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tmp_path: Path) -> None:
+    """Router relays should skip the expensive dispatch preview read during preparation."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$router-relay",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "@mindroom_code:localhost please check this thread",
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                "m.relates_to": {
+                    "event_id": "$thread-root",
+                    "rel_type": "m.thread",
+                },
+            },
+        },
+    )
+    trusted_context = MessageContext(
+        am_i_mentioned=True,
+        is_thread=True,
+        thread_id="$thread-root",
+        thread_history=[],
+        mentioned_agents=[bot.matrix_id],
+        has_non_agent_mentions=False,
+        replay_guard_history=[],
+        requires_full_thread_history=True,
+    )
+    bot._conversation_resolver.extract_trusted_router_relay_context = AsyncMock(return_value=trusted_context)
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock()
+
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@user:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+    )
+
+    assert dispatch is not None
+    assert dispatch.context is trusted_context
+    bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(room, event)
+    bot._conversation_resolver.extract_dispatch_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_relays(tmp_path: Path) -> None:
+    """Non-router internal relays should keep using the standard dispatch context path."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$agent-relay",
+            "sender": "@mindroom_code:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "@mindroom_code:localhost internal follow-up",
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+            },
+        },
+    )
+    standard_context = _dispatch_context(bot)
+    bot._conversation_resolver.extract_trusted_router_relay_context = AsyncMock()
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=standard_context)
+
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@user:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+    )
+
+    assert dispatch is not None
+    assert dispatch.context is standard_context
+    bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
+    bot._conversation_resolver.extract_trusted_router_relay_context.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_path: Path) -> None:
     """Hook-originated messages should continue into normal agent dispatch resolution."""
     bot = _agent_bot(tmp_path)
