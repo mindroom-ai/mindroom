@@ -2372,6 +2372,10 @@ def build_edit_event_content(
 ) -> dict[str, Any]:
     """Wrap replacement content in one Matrix m.replace edit envelope."""
     replacement_content = dict(new_content)
+    # Matrix applies m.new_content over the original event while preserving the
+    # original event's relationship metadata, so nested relations in the
+    # replacement payload are redundant and can confuse clients.
+    replacement_content.pop("m.relates_to", None)
     edit_content = {
         "msgtype": "m.text",
         "body": f"* {new_text}",

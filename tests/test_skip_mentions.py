@@ -413,7 +413,8 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
     assert record_args[0] == "!test:server"
     assert record_args[1] == "$edit-event"
     assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
-    assert record_args[2]["m.new_content"]["m.relates_to"]["event_id"] == "$thread"
+    assert record_args[2]["m.relates_to"]["event_id"] == "$original"
+    assert "m.relates_to" not in record_args[2]["m.new_content"]
 
 
 @pytest.mark.asyncio
