@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import typing
 import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
     import structlog
@@ -54,6 +56,29 @@ class _EventCacheWriteCoordinator:
         asyncio.Task[Any],
         asyncio.Task[Any] | None,
     ] = field(default_factory=weakref.WeakKeyDictionary, init=False)
+
+    @staticmethod
+    def _active_predecessor_count(previous_tasks: tuple[asyncio.Task[Any], ...]) -> int:
+        return sum(1 for task in previous_tasks if not task.done())
+
+    def _emit_idle_wait_timing(
+        self,
+        *,
+        room_id: str,
+        wait_started: float | None,
+        wait_iterations: int,
+        pending_task_count: int,
+    ) -> None:
+        if wait_started is None:
+            return
+        emit_timing_event(
+            "Event cache idle wait timing",
+            barrier_kind="room",
+            room_id=room_id,
+            wait_ms=round((time.perf_counter() - wait_started) * 1000, 1),
+            wait_iterations=wait_iterations,
+            pending_task_count=pending_task_count,
+        )
 
     def _pending_predecessor(self, task: asyncio.Task[Any]) -> asyncio.Task[Any] | None:
         predecessor = self._room_update_predecessors.get(task)
@@ -108,10 +133,39 @@ class _EventCacheWriteCoordinator:
     ) -> asyncio.Task[object]:
         """Schedule one room-scoped cache update behind any active predecessor."""
         previous_task = self._room_update_tasks.get(room_id)
+        predecessor_count = self._active_predecessor_count((previous_task,)) if previous_task is not None else 0
 
         async def run_after_previous() -> object:
-            await self._await_predecessor(room_id, name, previous_task)
-            return await update_coro_factory()
+            started = time.perf_counter()
+            outcome = "ok"
+            update_started: float | None = None
+            try:
+                await self._await_predecessor(room_id, name, previous_task)
+                update_started = time.perf_counter()
+                return await update_coro_factory()
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except Exception:
+                outcome = "error"
+                raise
+            finally:
+                update_run_ms = (
+                    round((time.perf_counter() - update_started) * 1000, 1) if update_started is not None else 0.0
+                )
+                total_ms = round((time.perf_counter() - started) * 1000, 1)
+                emit_timing_event(
+                    "Event cache update timing",
+                    barrier_kind="room",
+                    room_id=room_id,
+                    operation=name,
+                    predecessor_count=predecessor_count,
+                    queued_behind_predecessor=predecessor_count > 0,
+                    predecessor_wait_ms=round(total_ms - update_run_ms, 1),
+                    update_run_ms=update_run_ms,
+                    total_ms=total_ms,
+                    outcome=outcome,
+                )
 
         task = create_background_task(
             run_after_previous(),
@@ -141,10 +195,23 @@ class _EventCacheWriteCoordinator:
 
     async def wait_for_room_idle(self, room_id: str) -> None:
         """Wait for the currently queued same-room update chain to drain."""
+        wait_started: float | None = None
+        wait_iterations = 0
+        pending_task_count = 0
         while True:
             tail_task = self._room_update_tasks.get(room_id)
             if tail_task is None:
+                self._emit_idle_wait_timing(
+                    room_id=room_id,
+                    wait_started=wait_started,
+                    wait_iterations=wait_iterations,
+                    pending_task_count=pending_task_count,
+                )
                 return
+            if wait_started is None:
+                wait_started = time.perf_counter()
+                pending_task_count = self._active_predecessor_count((tail_task,))
+            wait_iterations += 1
             try:
                 await tail_task
             except asyncio.CancelledError:
