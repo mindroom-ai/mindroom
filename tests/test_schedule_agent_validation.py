@@ -13,7 +13,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.scheduling import ScheduledWorkflow, schedule_task
+from mindroom.scheduling import ScheduledWorkflow, SchedulingRuntime, schedule_task
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 
@@ -43,6 +43,22 @@ def _conversation_cache(thread_history: list[object] | None = None) -> MagicMock
 
 def _event_cache() -> AsyncMock:
     return make_event_cache_mock()
+
+
+def _scheduling_runtime(
+    *,
+    client: AsyncMock,
+    config: Config,
+    room: nio.MatrixRoom,
+) -> SchedulingRuntime:
+    return SchedulingRuntime(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room=room,
+        conversation_cache=_conversation_cache(),
+        event_cache=_event_cache(),
+    )
 
 
 @pytest.mark.asyncio
@@ -89,16 +105,11 @@ async def test_schedule_validates_agents_in_room() -> None:
 
         # Try to schedule a task mentioning calculator in test_room (where it's not configured)
         task_id, response = await schedule_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id=None,
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
         )
 
         # Should fail because calculator is not in test_room
@@ -154,16 +165,11 @@ async def test_schedule_validates_agents_in_thread() -> None:
 
         # Try to schedule in a thread
         task_id, response = await schedule_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id="$thread123",
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
         )
 
         # Should fail because calculator is not in the room
@@ -224,16 +230,18 @@ async def test_schedule_allows_agents_in_room() -> None:
 
         # Try to schedule in a thread where calculator is in the room
         task_id, response = await schedule_task(
-            client=client,
+            runtime=SchedulingRuntime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                room=room,
+                conversation_cache=conversation_cache,
+                event_cache=_event_cache(),
+            ),
             room_id="test_room",
             thread_id="$thread123",
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=conversation_cache,
         )
 
         # Should succeed because calculator is in the room
@@ -293,16 +301,11 @@ async def test_schedule_with_multiple_agents_validation() -> None:
         mock_parse.return_value = mock_workflow
 
         task_id, response = await schedule_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id=None,
             scheduled_by="@user:localhost",
             full_text="in 5 minutes research and calculate",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
         )
 
         # Should fail because calculator is not in room
@@ -362,16 +365,18 @@ async def test_schedule_with_no_agent_mentions() -> None:
         conversation_cache = _conversation_cache()
 
         task_id, response = await schedule_task(
-            client=client,
+            runtime=SchedulingRuntime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                room=room,
+                conversation_cache=conversation_cache,
+                event_cache=_event_cache(),
+            ),
             room_id="test_room",
             thread_id="$thread123",
             scheduled_by="@user:localhost",
             full_text="in 5 minutes remind me about deployment",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=conversation_cache,
             new_thread=True,
         )
 
@@ -428,16 +433,11 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
         mock_parse.return_value = mock_workflow
 
         task_id, response = await schedule_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id=None,
             scheduled_by="@blocked:localhost",
             full_text="in 5 minutes ask calculator to calculate",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
         )
 
     assert task_id is None
@@ -482,16 +482,11 @@ async def test_schedule_with_nonexistent_agent() -> None:
         mock_parse.return_value = mock_workflow
 
         task_id, _response = await schedule_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id=None,
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask imaginary agent",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
         )
 
         # Should succeed if imaginary_agent is not recognized as a valid agent

@@ -1703,7 +1703,8 @@ async def test_hook_dispatch_skill_tool_command_builds_full_tool_runtime_context
 
     async def fake_run_skill_command_tool(**kwargs: object) -> str:
         nonlocal captured_runtime_context
-        captured_runtime_context = kwargs["runtime_context"]
+        dispatch_context = kwargs["dispatch_context"]
+        captured_runtime_context = dispatch_context.runtime_context
         return "tool-result"
 
     spec = _SkillCommandSpec(

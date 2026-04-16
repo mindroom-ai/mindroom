@@ -29,6 +29,7 @@ from mindroom.commands.handler import (
     CommandHandlerContext,
     _run_skill_command_tool,
     handle_command,
+    skill_tool_dispatch_context_from_runtime_context,
 )
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -548,23 +549,22 @@ class TurnController:
             command_tool: str,
             skill_name: str,
             args_text: str,
-            requester_user_id: str | None = None,
-            room_id: str | None = None,
+            requester_user_id: str,
+            room_id: str,
             thread_id: str | None = None,
         ) -> str:
-            runtime_context = None
-            if room_id is not None:
-                runtime_context = self.deps.tool_runtime.build_context(
-                    self.deps.resolver.build_message_target(
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        reply_to_event_id=event.event_id,
-                        event_source=event.source,
-                    ),
-                    user_id=requester_user_id,
-                    agent_name=agent_name,
-                    source_envelope=source_envelope,
-                )
+            target = self.deps.resolver.build_message_target(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
+            runtime_context = self.deps.tool_runtime.build_required_context(
+                target,
+                user_id=requester_user_id,
+                agent_name=agent_name,
+                source_envelope=source_envelope,
+            )
             return await _run_skill_command_tool(
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
@@ -573,7 +573,7 @@ class TurnController:
                 command_tool=command_tool,
                 skill_name=skill_name,
                 args_text=args_text,
-                runtime_context=runtime_context,
+                dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
             )
 
         context = CommandHandlerContext(

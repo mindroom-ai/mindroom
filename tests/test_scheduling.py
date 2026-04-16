@@ -17,6 +17,7 @@ from mindroom.scheduling import (
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
+    SchedulingRuntime,
     _run_cron_task,
     _run_once_task,
     cancel_all_scheduled_tasks,
@@ -53,6 +54,24 @@ def _conversation_cache(
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     access.notify_outbound_message = Mock()
     return access
+
+
+def _scheduling_runtime(
+    *,
+    client: AsyncMock | None = None,
+    config: object | None = None,
+    room: object | None = None,
+    conversation_cache: AsyncMock | None = None,
+    event_cache: AsyncMock | None = None,
+) -> SchedulingRuntime:
+    return SchedulingRuntime(
+        client=client or AsyncMock(),
+        config=config or MagicMock(),
+        runtime_paths=_runtime_paths(),
+        room=room or MagicMock(),
+        conversation_cache=conversation_cache or _conversation_cache(),
+        event_cache=event_cache or _event_cache(),
+    )
 
 
 def _record(
@@ -1164,29 +1183,24 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
         new=AsyncMock(return_value=("task123", "✅ Scheduled")),
     ) as mock_schedule:
         result = await edit_scheduled_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="!test:server",
             task_id="task123",
             full_text="tomorrow at 9am updated task",
             scheduled_by="@user:server",
-            config=config,
-            runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
             thread_id="$fallback_thread",
         )
 
     assert "✅ Updated task `task123`." in result
     mock_schedule.assert_awaited_once()
     call_kwargs = mock_schedule.await_args.kwargs
-    assert call_kwargs["client"] is client
+    assert call_kwargs["runtime"].client is client
     assert call_kwargs["room_id"] == "!test:server"
     assert call_kwargs["thread_id"] == "$original_thread"
     assert call_kwargs["scheduled_by"] == "@user:server"
     assert call_kwargs["full_text"] == "tomorrow at 9am updated task"
-    assert call_kwargs["config"] is config
-    assert call_kwargs["room"] is room
+    assert call_kwargs["runtime"].config is config
+    assert call_kwargs["runtime"].room is room
     assert call_kwargs["new_thread"] is False
     assert call_kwargs["task_id"] == "task123"
     assert call_kwargs["existing_task"].task_id == "task123"
@@ -1221,16 +1235,11 @@ async def test_edit_scheduled_task_preserves_new_thread_mode() -> None:
         new=AsyncMock(return_value=("task123", "✅ Scheduled")),
     ) as mock_schedule:
         result = await edit_scheduled_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="!test:server",
             task_id="task123",
             full_text="tomorrow at 9am updated task",
             scheduled_by="@user:server",
-            config=config,
-            runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
             thread_id="$fallback_thread",
         )
 
@@ -1254,16 +1263,11 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
     client.room_get_state_event = AsyncMock(return_value=state_response)
 
     result = await edit_scheduled_task(
-        client=client,
+        runtime=_scheduling_runtime(client=client, room=room),
         room_id="!test:server",
         task_id="task123",
         full_text="tomorrow at 9am updated task",
         scheduled_by="@user:server",
-        config=MagicMock(),
-        runtime_paths=_runtime_paths(),
-        event_cache=_event_cache(),
-        room=room,
-        conversation_cache=_conversation_cache(),
         thread_id="$thread123",
     )
 
@@ -1411,16 +1415,11 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
         ),
     ):
         task_id, message = await schedule_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="!test:server",
             thread_id=None,
             scheduled_by="@blocked:server",
             full_text="remind me in 5 minutes to check logs",
-            config=config,
-            runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
         )
 
     assert task_id is None
@@ -1445,16 +1444,11 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
         ),
     ):
         task_id, message = await schedule_task(
-            client=client,
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="!test:server",
             thread_id=None,
             scheduled_by="@blocked:server",
             full_text="remind me in 5 minutes",
-            config=config,
-            runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            room=room,
-            conversation_cache=_conversation_cache(),
             new_thread=True,
         )
 

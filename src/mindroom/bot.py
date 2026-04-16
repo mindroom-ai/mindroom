@@ -56,8 +56,6 @@ from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    build_tool_execution_identity,
     tool_execution_identity,
 )
 
@@ -707,19 +705,6 @@ class AgentBot:
         """Whether to show tool call details inline in responses."""
         return show_tool_calls_for_agent(self.config, self.agent_name)
 
-    def _build_shared_execution_identity(self) -> ToolExecutionIdentity:
-        """Build a non-request execution identity for shared agent materialization."""
-        return build_tool_execution_identity(
-            channel="matrix",
-            agent_name=self.agent_name,
-            runtime_paths=self.runtime_paths,
-            requester_id=None,
-            room_id=None,
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-        )
-
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
@@ -729,14 +714,13 @@ class AgentBot:
                 f"Private agent '{self.agent_name}' requires an explicit execution identity."
             )
             raise ValueError(msg)
-        execution_identity = self._build_shared_execution_identity()
         knowledge = self._knowledge_access_support.for_agent(self.agent_name)
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
             runtime_paths=self.runtime_paths,
             knowledge=knowledge,
-            execution_identity=execution_identity,
+            execution_identity=None,
             hook_registry=self.hook_registry,
         )
 

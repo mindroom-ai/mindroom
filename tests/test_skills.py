@@ -11,10 +11,17 @@ import pytest
 from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
-from mindroom.commands.handler import _collect_agent_toolkits, _run_skill_command_tool
+from mindroom.commands.handler import (
+    SkillToolDispatchContext,
+    _collect_agent_toolkits,
+    _run_skill_command_tool,
+    skill_tool_dispatch_context_from_runtime_context,
+    skill_tool_dispatch_context_from_target,
+)
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import (
@@ -47,6 +54,27 @@ def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> Ru
     return resolve_runtime_paths(
         config_path=config_path or storage_path / "config.yaml",
         storage_path=storage_path,
+    )
+
+
+def _skill_dispatch_context(
+    *,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+    requester_user_id: str | None = None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+) -> SkillToolDispatchContext:
+    target = (
+        MessageTarget.resolve(room_id=room_id, thread_id=thread_id, reply_to_event_id=None)
+        if room_id is not None
+        else None
+    )
+    return skill_tool_dispatch_context_from_target(
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_user_id=requester_user_id,
+        target=target,
     )
 
 
@@ -449,9 +477,13 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
         command_tool="shell.demo",
         skill_name="dispatch",
         args_text="hello",
-        requester_user_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
+        dispatch_context=_skill_dispatch_context(
+            agent_name="code",
+            runtime_paths=_runtime_paths(runtime_storage_path),
+            requester_user_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        ),
     )
 
     identity = ToolExecutionIdentity(
@@ -523,9 +555,13 @@ async def test_skill_command_tool_dispatch_preserves_runtime_env_when_storage_ro
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            requester_user_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id="$thread",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=original_runtime_paths,
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
         )
 
     assert result == "skill:dispatch:hello"
@@ -664,6 +700,10 @@ async def test_skill_command_tool_dispatch() -> None:
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+            ),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -709,6 +749,10 @@ async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+            ),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -760,9 +804,13 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            requester_user_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id="$thread",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -826,7 +874,7 @@ async def test_skill_command_tool_dispatch_uses_canonical_runtime_thread_identit
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            runtime_context=runtime_context,
+            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -888,7 +936,7 @@ async def test_skill_command_tool_dispatch_ignores_raw_room_mode_thread_id() -> 
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            runtime_context=runtime_context,
+            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -970,7 +1018,7 @@ async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_contex
             command_tool="demo",
             skill_name="dispatch",
             args_text="hello",
-            runtime_context=runtime_context,
+            dispatch_context=skill_tool_dispatch_context_from_runtime_context(runtime_context),
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -982,8 +1030,8 @@ async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_contex
 
 
 @pytest.mark.asyncio
-async def test_skill_command_tool_dispatch_rejects_mixed_runtime_shapes() -> None:
-    """Skill tool dispatch should accept either raw Matrix coordinates or a runtime context, not both."""
+async def test_skill_command_tool_dispatch_context_from_runtime_context_preserves_live_shape() -> None:
+    """Live skill dispatch should derive execution identity from one full runtime context."""
 
     class DemoTools(Toolkit):
         def __init__(self) -> None:
@@ -1021,24 +1069,25 @@ async def test_skill_command_tool_dispatch_rejects_mixed_runtime_shapes() -> Non
             conversation_cache=make_conversation_cache_mock(),
         )
 
-        with pytest.raises(ValueError, match="either runtime_context or raw Matrix coordinates"):
-            await _run_skill_command_tool(
-                config=config,
-                runtime_paths=runtime_paths,
-                agent_name="code",
-                command_tool="demo",
-                skill_name="dispatch",
-                args_text="hello",
-                requester_user_id="@alice:example.org",
-                room_id="!room:example.org",
-                thread_id="$thread",
-                runtime_context=runtime_context,
-            )
+        dispatch_context = skill_tool_dispatch_context_from_runtime_context(runtime_context)
     finally:
         _TOOL_REGISTRY.clear()
         _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+
+    assert dispatch_context.runtime_context is runtime_context
+    assert dispatch_context.execution_identity == ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=create_session_id("!room:example.org", "$thread"),
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+    )
 
 
 @pytest.mark.asyncio
@@ -1084,9 +1133,13 @@ async def test_skill_command_tool_dispatch_preserves_tenant_scoped_worker_key() 
                 command_tool="demo",
                 skill_name="dispatch",
                 args_text="hello",
-                requester_user_id="@alice:example.org",
-                room_id="!room:example.org",
-                thread_id="$thread",
+                dispatch_context=_skill_dispatch_context(
+                    agent_name="code",
+                    runtime_paths=resolve_runtime_paths(),
+                    requester_user_id="@alice:example.org",
+                    room_id="!room:example.org",
+                    thread_id="$thread",
+                ),
             )
     finally:
         _TOOL_REGISTRY.clear()
@@ -1114,6 +1167,10 @@ async def test_skill_command_tool_dispatch_threads_config_path_to_self_config(tm
         command_tool="get_own_config",
         skill_name="dispatch",
         args_text="",
+        dispatch_context=_skill_dispatch_context(
+            agent_name="code",
+            runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
+        ),
     )
 
     assert "Skill Config Writer" in result
@@ -1199,9 +1256,13 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
             command_tool="lookup",
             skill_name="dispatch",
             args_text="hello",
-            requester_user_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id="$thread",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
         )
     finally:
         _TOOL_REGISTRY.clear()

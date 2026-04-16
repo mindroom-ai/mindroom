@@ -150,6 +150,18 @@ class ScheduledTaskRecord:
     workflow: ScheduledWorkflow
 
 
+@dataclass(frozen=True)
+class SchedulingRuntime:
+    """Live scheduling collaborators required to create or edit running tasks."""
+
+    client: nio.AsyncClient
+    config: Config
+    runtime_paths: RuntimePaths
+    room: nio.MatrixRoom
+    conversation_cache: ConversationCacheProtocol
+    event_cache: ConversationEventCache
+
+
 @dataclass
 class _DeferredOverdueTaskStart:
     """A one-time scheduled task that should start after Matrix sync is live."""
@@ -1192,16 +1204,11 @@ def _extract_mentioned_agents_from_text(
 
 
 async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
-    client: nio.AsyncClient,
+    runtime: SchedulingRuntime,
     room_id: str,
     thread_id: str | None,
     scheduled_by: str,
     full_text: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    room: nio.MatrixRoom,
-    conversation_cache: ConversationCacheProtocol,
-    event_cache: ConversationEventCache,
     new_thread: bool = False,
     mentioned_agents: list[MatrixID] | None = None,
     task_id: str | None = None,
@@ -1213,6 +1220,13 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         Tuple of (task_id, response_message)
 
     """
+    client = runtime.client
+    config = runtime.config
+    runtime_paths = runtime.runtime_paths
+    room = runtime.room
+    conversation_cache = runtime.conversation_cache
+    event_cache = runtime.event_cache
+
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
@@ -1349,19 +1363,15 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
 
 async def edit_scheduled_task(
-    client: nio.AsyncClient,
+    runtime: SchedulingRuntime,
     room_id: str,
     task_id: str,
     full_text: str,
     scheduled_by: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    room: nio.MatrixRoom,
-    conversation_cache: ConversationCacheProtocol,
-    event_cache: ConversationEventCache,
     thread_id: str | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
+    client = runtime.client
     existing_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
     if not existing_task:
         return f"❌ Task `{task_id}` not found."
@@ -1372,16 +1382,11 @@ async def edit_scheduled_task(
     target_thread_id = None if target_new_thread else existing_task.workflow.thread_id or thread_id
 
     edited_task_id, response_text = await schedule_task(
-        client=client,
+        runtime=runtime,
         room_id=room_id,
         thread_id=target_thread_id,
         scheduled_by=scheduled_by,
         full_text=full_text,
-        config=config,
-        runtime_paths=runtime_paths,
-        room=room,
-        conversation_cache=conversation_cache,
-        event_cache=event_cache,
         new_thread=target_new_thread,
         task_id=task_id,
         existing_task=existing_task,
