@@ -8,6 +8,7 @@ from mindroom.constants import patch_chromadb_for_python314
 # MindRoom should never emit vendor network telemetry, even if a user .env enables it.
 os.environ["AGNO_TELEMETRY"] = "false"
 os.environ["ANONYMIZED_TELEMETRY"] = "false"
+os.environ["MEM0_TELEMETRY"] = "false"
 
 patch_chromadb_for_python314()
 
