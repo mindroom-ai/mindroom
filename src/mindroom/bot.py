@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
@@ -56,6 +57,7 @@ from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import (
+    agent_state_root_path,
     tool_execution_identity,
 )
 
@@ -315,6 +317,7 @@ class AgentBot:
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
     _turn_controller: TurnController
+    _invited_rooms: set[str]
 
     def __init__(
         self,
@@ -351,6 +354,7 @@ class AgentBot:
         )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
+        self._invited_rooms = self._load_invited_rooms()
         self._init_runtime_components()
 
     def _init_runtime_components(self) -> None:
@@ -801,6 +805,65 @@ class AgentBot:
             hook_registry=self.hook_registry,
         )
 
+    def _should_accept_invite(self) -> bool:
+        """Return whether this entity should accept one inbound room invite."""
+        if self.agent_name == ROUTER_AGENT_NAME:
+            return True
+        if self.agent_name in self.config.teams:
+            return True
+        agent_config = self.config.agents.get(self.agent_name)
+        if agent_config is None:
+            return False
+        return agent_config.accept_invites
+
+    def _should_persist_invited_rooms(self) -> bool:
+        """Return whether this entity persists invited room IDs across restarts."""
+        if self.agent_name == ROUTER_AGENT_NAME or self.agent_name in self.config.teams:
+            return False
+        agent_config = self.config.agents.get(self.agent_name)
+        if agent_config is None:
+            return False
+        return agent_config.accept_invites
+
+    def _invited_rooms_path(self) -> Path:
+        """Return the durable path for invited room IDs for this entity."""
+        return agent_state_root_path(self.storage_path, self.agent_name) / "invited_rooms.json"
+
+    def _load_invited_rooms(self) -> set[str]:
+        """Load invited rooms persisted for one eligible named agent."""
+        if not self._should_persist_invited_rooms():
+            return set()
+        path = self._invited_rooms_path()
+        if not path.exists():
+            return set()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self.logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
+            return set()
+        if not isinstance(raw, list) or not all(isinstance(room_id, str) for room_id in raw):
+            self.logger.warning("invalid_invited_rooms_file", path=str(path))
+            return set()
+        return set(raw)
+
+    def _save_invited_rooms(self) -> None:
+        """Persist invited room IDs atomically for one eligible named agent."""
+        if not self._should_persist_invited_rooms():
+            return
+        path = self._invited_rooms_path()
+        temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_text(
+                f"{json.dumps(sorted(self._invited_rooms), ensure_ascii=True, indent=2)}\n",
+                encoding="utf-8",
+            )
+            temp_path.replace(path)
+        except OSError:
+            self.logger.exception("failed_to_save_invited_rooms", path=str(path))
+        finally:
+            temp_path.unlink(missing_ok=True)
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
@@ -863,6 +926,8 @@ class AgentBot:
 
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
+        if self._should_persist_invited_rooms():
+            configured_rooms.update(self._invited_rooms)
         if self.agent_name == ROUTER_AGENT_NAME:
             # The router is the long-lived manager of the root Space even though it is
             # not part of the normal configured room list for conversational routing.
@@ -1302,9 +1367,15 @@ class AgentBot:
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None
+        if not self._should_accept_invite():
+            self.logger.info("Ignored invite", room_id=room.room_id, sender=event.sender)
+            return
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
+            if self._should_persist_invited_rooms() and room.room_id not in self._invited_rooms:
+                self._invited_rooms.add(room.room_id)
+                self._save_invited_rooms()
             # If this is the router agent and the room is empty, send a welcome message
             if self.agent_name == ROUTER_AGENT_NAME:
                 await self._send_welcome_message_if_empty(room.room_id)

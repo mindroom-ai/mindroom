@@ -1113,9 +1113,17 @@ class TestAgentBot:
         bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(("accept_invites", "expected_join_calls"), [(True, 1), (False, 0)])
+    async def test_agent_bot_on_invite(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        accept_invites: bool,
+        expected_join_calls: int,
+    ) -> None:
         """Test handling room invitations."""
         config = self._config_for_storage(tmp_path)
+        config.agents[mock_agent_user.agent_name].accept_invites = accept_invites
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _install_runtime_cache_support(bot)
@@ -1127,9 +1135,11 @@ class TestAgentBot:
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
 
-        await bot._on_invite(mock_room, mock_event)
+        join_room = AsyncMock(return_value=True)
+        with patch("mindroom.bot.join_room", join_room):
+            await bot._on_invite(mock_room, mock_event)
 
-        bot.client.join.assert_called_once_with("!test:localhost")
+        assert join_room.await_count == expected_join_calls
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
