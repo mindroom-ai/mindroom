@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import signal
@@ -12,8 +13,10 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated, cast
 
 from agno.tools.toolkit import Toolkit
+from pydantic import BeforeValidator
 
 from mindroom.constants import RuntimePaths, shell_execution_runtime_env_values
 from mindroom.logging_config import get_logger
@@ -59,11 +62,29 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 _MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
+_SHELL_ARGS_ERROR = '\'args\' must be a flat list of strings. Send args like ["bash", "-lc", "ls"].'
 
 # Module-level process registry shared across all MindRoomShellTools instances.
 # This ensures handles survive toolkit re-creation (e.g. in sandbox runner mode
 # where _resolve_entrypoint builds a fresh toolkit per request).
 _process_registry: dict[str, _ProcessRecord] = {}
+
+
+def _normalize_shell_args(args: object) -> list[str]:
+    """Normalize stringified shell args while keeping the public schema as list[str]."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError as exc:
+            raise ValueError(_SHELL_ARGS_ERROR) from exc
+
+    if not isinstance(args, list):
+        raise ValueError(_SHELL_ARGS_ERROR)  # noqa: TRY004
+
+    if any(not isinstance(item, str) for item in args):
+        raise ValueError(_SHELL_ARGS_ERROR)
+
+    return cast("list[str]", args)
 
 
 def _shell_path_prepend_entries(shell_path_prepend: str | None) -> tuple[str, ...]:
@@ -251,6 +272,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 tools.extend([self.run_shell_command, self.check_shell_command, self.kill_shell_command])
 
             super().__init__(name="shell_tools", tools=tools, **kwargs)  # ty: ignore[invalid-argument-type]
+            run_shell_command_function = self.async_functions.get("run_shell_command")
+            if run_shell_command_function is not None:
+                effective_strict = (
+                    False if run_shell_command_function.strict is None else run_shell_command_function.strict
+                )
+                run_shell_command_function.process_entrypoint(strict=effective_strict)
 
             self._runtime_env = dict(
                 shell_execution_runtime_env_values(
@@ -264,7 +291,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
 
-        async def run_shell_command(self, args: list[str], tail: int = 100, timeout: int = 120) -> str:  # noqa: ASYNC109
+        async def run_shell_command(
+            self,
+            args: Annotated[list[str], BeforeValidator(_normalize_shell_args)],
+            tail: int = 100,
+            timeout: int = 120,  # noqa: ASYNC109
+        ) -> str:
             """Runs a shell command and returns the output or error.
 
             If the command completes within ``timeout`` seconds the last ``tail``
