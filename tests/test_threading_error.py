@@ -1400,7 +1400,12 @@ class TestThreadingBehavior:
         sync_error = MagicMock(spec=nio.SyncError)
         bot._first_sync_done = True
 
-        with patch("mindroom.bot.time.monotonic", side_effect=[100.0, 200.0]):
+        monotonic_values = iter([100.0, 200.0])
+
+        def monotonic_side_effect() -> float:
+            return next(monotonic_values, 200.0)
+
+        with patch("mindroom.bot.time.monotonic", side_effect=monotonic_side_effect):
             await bot._on_sync_response(sync_response)
             await bot._on_sync_error(sync_error)
 
