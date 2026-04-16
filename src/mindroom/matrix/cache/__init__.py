@@ -9,7 +9,7 @@ Developer note:
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
 - `_EventCache` and `_EventCacheWriteCoordinator` remain private concrete implementations used by `runtime_support.py` as the composition-root exception.
-- `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package.
+- `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package and may use cache-internal helper modules through narrow Tach visibility.
 
 Main invariants:
 - Runtime disable and room/db ordering live only in the concrete event-cache implementation.
@@ -30,8 +30,11 @@ from .thread_history_result import (
     ThreadHistoryResult,
     thread_history_result,
 )
-from .thread_reads import ThreadReadPolicy
-from .thread_writes import ThreadWritePolicy
+from .thread_reads import ThreadReadPolicy as _ThreadReadPolicy  # noqa: F401
+from .thread_write_cache_ops import ThreadMutationCacheOps as _ThreadMutationCacheOps  # noqa: F401
+from .thread_writes import ThreadLiveWritePolicy as _ThreadLiveWritePolicy  # noqa: F401
+from .thread_writes import ThreadOutboundWritePolicy as _ThreadOutboundWritePolicy  # noqa: F401
+from .thread_writes import ThreadSyncWritePolicy as _ThreadSyncWritePolicy  # noqa: F401
 from .write_coordinator import EventCacheWriteCoordinator, _EventCacheWriteCoordinator
 
 __all__ = [
@@ -45,8 +48,6 @@ __all__ = [
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
-    "ThreadReadPolicy",
-    "ThreadWritePolicy",
     "_EventCache",
     "_EventCacheWriteCoordinator",
     "normalize_nio_event_for_cache",

@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from nio.api import RelationshipType
 
+import mindroom.matrix.cache as matrix_cache
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -294,8 +295,25 @@ def _install_runtime_write_coordinator(bot: AgentBot) -> _EventCacheWriteCoordin
     return coordinator
 
 
+def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
+    """Thread policy wrappers should not remain on the public cache package surface."""
+    assert "ThreadReadPolicy" not in matrix_cache.__all__
+    assert "ThreadWritePolicy" not in matrix_cache.__all__
+    assert not hasattr(matrix_cache, "ThreadReadPolicy")
+    assert not hasattr(matrix_cache, "ThreadWritePolicy")
+
+
 class TestMatrixConversationCacheThreadReads:
     """Targeted read-path tests for invalidate-and-refetch behavior."""
+
+    def test_conversation_cache_does_not_keep_write_policy_wrapper(self) -> None:
+        """Conversation cache should own write collaborators directly, not through a write-policy façade."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(),
+        )
+
+        assert not hasattr(access, "_writes")
 
     @pytest.mark.parametrize(
         "error",
@@ -310,7 +328,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._writes._outbound.notify_outbound_message = Mock(side_effect=error)
+        access._outbound.notify_outbound_message = Mock(side_effect=error)
 
         access.notify_outbound_message(
             "!room:localhost",
@@ -331,7 +349,7 @@ class TestMatrixConversationCacheThreadReads:
             logger=MagicMock(),
             runtime=_conversation_runtime(),
         )
-        access._writes._outbound.notify_outbound_redaction = Mock(side_effect=error)
+        access._outbound.notify_outbound_redaction = Mock(side_effect=error)
 
         access.notify_outbound_redaction(
             "!room:localhost",
@@ -713,7 +731,7 @@ class TestMatrixConversationCacheThreadReads:
             runtime=_conversation_runtime(event_cache=event_cache),
         )
 
-        await access._writes._cache_ops.invalidate_known_thread(
+        await access._write_cache_ops.invalidate_known_thread(
             "!room:localhost",
             "$thread:localhost",
             reason="test_failure",
@@ -731,7 +749,7 @@ class TestMatrixConversationCacheThreadReads:
             runtime=_conversation_runtime(event_cache=event_cache),
         )
 
-        await access._writes._cache_ops.invalidate_room_threads(
+        await access._write_cache_ops.invalidate_room_threads(
             "!room:localhost",
             reason="test_failure",
         )
@@ -3601,7 +3619,7 @@ class TestThreadingBehavior:
         read_task = asyncio.create_task(access.get_thread_history("!room:localhost", "$thread:localhost"))
         await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
         write_task = asyncio.create_task(
-            access._writes._outbound._apply_outbound_message_notification(
+            access._outbound._apply_outbound_message_notification(
                 "!room:localhost",
                 "$reply-new:localhost",
                 new_event_source,

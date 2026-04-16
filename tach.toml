@@ -81,13 +81,27 @@ expose = [
     "THREAD_HISTORY_SOURCE_STALE_CACHE",
     "ThreadCacheState",
     "ThreadHistoryResult",
-    "ThreadReadPolicy",
-    "ThreadWritePolicy",
     "normalize_nio_event_for_cache",
     "thread_cache_state_is_usable",
     "thread_history_result",
 ]
 from = ["mindroom.matrix.cache"]
+
+[[interfaces]]
+expose = [
+    "ConversationEventCache",
+    "ThreadHistoryResult",
+    "_ThreadReadPolicy",
+    "_ThreadMutationCacheOps",
+    "_ThreadOutboundWritePolicy",
+    "_ThreadLiveWritePolicy",
+    "_ThreadSyncWritePolicy",
+    "normalize_nio_event_for_cache",
+    "thread_history_result",
+]
+from = ["mindroom.matrix.cache"]
+visibility = ["mindroom.matrix.conversation_cache"]
+exclusive = true
 
 [[interfaces]]
 expose = ["_EventCache", "_EventCacheWriteCoordinator"]
