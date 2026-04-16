@@ -138,58 +138,6 @@ class ThreadReadPolicy:
             full_history=False,
         )
 
-    async def get_thread_snapshot(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult:
-        """Resolve advisory lightweight thread context for one thread under the room-scoped barrier."""
-        return await self.read_thread(
-            room_id,
-            thread_id,
-            full_history=False,
-            dispatch_safe=False,
-        )
-
-    async def get_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult:
-        """Resolve advisory full thread history for one conversation root."""
-        return await self.read_thread(
-            room_id,
-            thread_id,
-            full_history=True,
-            dispatch_safe=False,
-        )
-
-    async def get_dispatch_thread_snapshot(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult:
-        """Resolve strict lightweight thread context for dispatch under the room-scoped barrier."""
-        return await self.read_thread(
-            room_id,
-            thread_id,
-            full_history=False,
-            dispatch_safe=True,
-        )
-
-    async def get_dispatch_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult:
-        """Resolve strict full thread history for dispatch."""
-        return await self.read_thread(
-            room_id,
-            thread_id,
-            full_history=True,
-            dispatch_safe=True,
-        )
-
     async def get_latest_thread_event_id_if_needed(
         self,
         room_id: str,
