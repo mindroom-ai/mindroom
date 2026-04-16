@@ -4,12 +4,12 @@ Developer note:
 - `event_cache.py` owns the concrete durable cache implementation, runtime, locking, and schema lifecycle.
 - `event_cache_events.py` owns event lookup normalization, lookup/index rows, edits, and redaction tombstones.
 - `event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
-- `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
+- `MatrixConversationCache` owns its private read and write helper logic above the cache package, while `thread_bookkeeping.py` remains the shared thread-impact domain.
 
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
 - `_EventCache` and `_EventCacheWriteCoordinator` remain private concrete implementations used by `runtime_support.py` as the composition-root exception.
-- `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package.
+- `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package, including the private read and write wrapper logic that used to be exported here.
 
 Main invariants:
 - Runtime disable and room/db ordering live only in the concrete event-cache implementation.
@@ -30,8 +30,6 @@ from .thread_history_result import (
     ThreadHistoryResult,
     thread_history_result,
 )
-from .thread_reads import ThreadReadPolicy
-from .thread_writes import ThreadWritePolicy
 from .write_coordinator import EventCacheWriteCoordinator, _EventCacheWriteCoordinator
 
 __all__ = [
@@ -45,8 +43,6 @@ __all__ = [
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
-    "ThreadReadPolicy",
-    "ThreadWritePolicy",
     "_EventCache",
     "_EventCacheWriteCoordinator",
     "normalize_nio_event_for_cache",

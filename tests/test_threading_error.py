@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from nio.api import RelationshipType
 
+import mindroom.matrix.cache as matrix_cache
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -39,7 +40,6 @@ from mindroom.matrix.cache.thread_history_result import (
 from mindroom.matrix.cache.thread_history_result import (
     thread_history_result as _thread_history_result_impl,
 )
-from mindroom.matrix.cache.thread_writes import _collect_sync_timeline_cache_updates
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import (
     DeliveredMatrixEvent,
@@ -47,7 +47,10 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     ThreadHistoryResult,
 )
-from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.conversation_cache import (
+    MatrixConversationCache,
+    _collect_sync_timeline_cache_updates,
+)
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.thread_membership import (
@@ -292,6 +295,14 @@ def _install_runtime_write_coordinator(bot: AgentBot) -> _EventCacheWriteCoordin
     )
     bot.event_cache_write_coordinator = coordinator
     return coordinator
+
+
+def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
+    """Thread read and write wrappers should not be part of the cache package surface."""
+    assert "ThreadReadPolicy" not in matrix_cache.__all__
+    assert "ThreadWritePolicy" not in matrix_cache.__all__
+    assert not hasattr(matrix_cache, "ThreadReadPolicy")
+    assert not hasattr(matrix_cache, "ThreadWritePolicy")
 
 
 class TestMatrixConversationCacheThreadReads:
