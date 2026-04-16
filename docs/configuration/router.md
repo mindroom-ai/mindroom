@@ -12,13 +12,17 @@ The router is a built-in system component that handles intelligent message routi
 router:
   # Model for routing decisions (defaults to "default")
   model: haiku
+
+  # Prewarm up to 20 most recently active thread snapshots per joined room after startup (default: true)
+  startup_thread_prewarm: true
 ```
 
-The router only has one configuration option:
+The router has two configuration options:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
+| `startup_thread_prewarm` | bool | `true` | After the first sync completes, prewarm up to 20 most recently active thread snapshots per joined room in the background so the first reply in those threads avoids a cold cache rebuild |
 
 ## How Routing Works
 

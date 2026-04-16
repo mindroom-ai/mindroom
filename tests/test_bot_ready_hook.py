@@ -471,6 +471,9 @@ async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
     bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
     bot._conversation_cache.logger = MagicMock()
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
 
     thread_roots = [
         nio.RoomMessageText.from_dict(
@@ -503,7 +506,7 @@ async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path
         ) as mock_get_room_threads_page,
         patch(
             "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
-            new=AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+            new=AsyncMock(side_effect=AssertionError("startup prewarm should use cache dispatch entrypoint")),
         ) as mock_fetch_dispatch_thread_snapshot,
     ):
         await bot._on_sync_response(MagicMock())
@@ -514,14 +517,11 @@ async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path
         "!room:localhost",
         limit=20,
     )
-    assert [call.args[2] for call in mock_fetch_dispatch_thread_snapshot.await_args_list] == [
-        "$thread-a:localhost",
-        "$thread-b:localhost",
+    assert [call.args for call in bot._conversation_cache.get_dispatch_thread_snapshot.await_args_list] == [
+        ("!room:localhost", "$thread-a:localhost"),
+        ("!room:localhost", "$thread-b:localhost"),
     ]
-    for call in mock_fetch_dispatch_thread_snapshot.await_args_list:
-        assert call.args[:2] == (bot.client, "!room:localhost")
-        assert call.kwargs["event_cache"] is bot.event_cache
-        assert call.kwargs["runtime_started_at"] == bot._runtime_view.runtime_started_at
+    mock_fetch_dispatch_thread_snapshot.assert_not_awaited()
     bot._conversation_cache.logger.info.assert_any_call(
         "startup_thread_prewarm_complete",
         room_id="!room:localhost",
@@ -529,6 +529,28 @@ async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path
         threads_failed=0,
         elapsed_ms=ANY,
     )
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_joined_rooms_failure_is_fail_open(tmp_path: Path) -> None:
+    """Startup thread prewarm should log and stop cleanly when joined room lookup fails."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
+    bot.client.joined_rooms.side_effect = RuntimeError("boom")
+    bot._conversation_cache.logger = MagicMock()
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch("mindroom.background_tasks.logger.exception") as mock_background_logger_exception,
+    ):
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    bot._conversation_cache.logger.warning.assert_any_call(
+        "startup_thread_prewarm_joined_rooms_failed",
+        error="boom",
+    )
+    mock_background_logger_exception.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -571,16 +593,17 @@ async def test_bot_ready_can_disable_startup_thread_prewarm(tmp_path: Path) -> N
             "mindroom.matrix.conversation_cache.get_room_threads_page",
             new=AsyncMock(),
         ) as mock_get_room_threads_page,
-        patch(
-            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+        patch.object(
+            bot._conversation_cache,
+            "get_dispatch_thread_snapshot",
             new=AsyncMock(),
-        ) as mock_fetch_dispatch_thread_snapshot,
+        ) as mock_get_dispatch_thread_snapshot,
     ):
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     mock_get_room_threads_page.assert_not_awaited()
-    mock_fetch_dispatch_thread_snapshot.assert_not_awaited()
+    mock_get_dispatch_thread_snapshot.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -620,20 +643,21 @@ async def test_startup_thread_prewarm_skips_failed_threads_and_logs_counts(tmp_p
             "mindroom.matrix.conversation_cache.get_room_threads_page",
             new=AsyncMock(return_value=(thread_roots, None)),
         ),
-        patch(
-            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+        patch.object(
+            bot._conversation_cache,
+            "get_dispatch_thread_snapshot",
             new=AsyncMock(
                 side_effect=[
                     RuntimeError("boom"),
                     thread_history_result([], is_full_history=False),
                 ],
             ),
-        ) as mock_fetch_dispatch_thread_snapshot,
+        ) as mock_get_dispatch_thread_snapshot,
     ):
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    assert [call.args[2] for call in mock_fetch_dispatch_thread_snapshot.await_args_list] == [
+    assert [call.args[1] for call in mock_get_dispatch_thread_snapshot.await_args_list] == [
         "$thread-a:localhost",
         "$thread-b:localhost",
     ]

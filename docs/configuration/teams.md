@@ -65,6 +65,9 @@ teams:
     # Model for team coordination (default: "default")
     model: sonnet
 
+    # Prewarm up to 20 most recently active thread snapshots per joined room after startup (default: true)
+    startup_thread_prewarm: true
+
     # Team-scoped replay controls (optional; inherit from defaults when omitted)
     num_history_runs: 8
     num_history_messages: null
@@ -88,6 +91,7 @@ teams:
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
 | `model` | No | `default` | Model used for team coordination and synthesis |
+| `startup_thread_prewarm` | No | `true` | After the first sync completes, prewarm up to 20 most recently active thread snapshots per joined room in the background so the first reply in those threads avoids a cold cache rebuild |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
