@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -40,6 +41,14 @@ def _get_toolkit(tmp_path: Path) -> Toolkit:
     return get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
 
 
+def _get_run_shell_command_function(tool: Toolkit) -> Function:
+    return tool.async_functions["run_shell_command"]
+
+
+async def _aexecute_run_shell_command(tool: Toolkit, args: object) -> FunctionExecutionResult:
+    return await FunctionCall(function=_get_run_shell_command_function(tool), arguments={"args": args}).aexecute()
+
+
 # ---------------------------------------------------------------------------
 # run_shell_command
 # ---------------------------------------------------------------------------
@@ -54,6 +63,73 @@ async def test_run_shell_command_returns_output(tmp_path: Path) -> None:
 
     result = await entrypoint(["echo", "hello world"])
     assert result == "hello world"
+
+
+def test_run_shell_command_schema_keeps_args_as_string_array(tmp_path: Path) -> None:
+    """The tool schema should expose args as array<string>, not anyOf."""
+    tool = _get_toolkit(tmp_path)
+    args_schema = _get_run_shell_command_function(tool).parameters["properties"]["args"]
+
+    assert args_schema["type"] == "array"
+    assert args_schema["items"] == {"type": "string"}
+    assert "anyOf" not in args_schema
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_parses_json_string_args(tmp_path: Path) -> None:
+    """JSON-stringified args should be parsed into a shell argv list."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint('["echo", "hello world"]')
+    assert result == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_parses_single_item_json_args(tmp_path: Path) -> None:
+    """A single command item in JSON string form should execute normally."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint('["ls"]')
+    assert result
+    assert not result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        '["echo",',
+        '{"cmd": "ls"}',
+        '"echo"',
+        "",
+        '["echo", 42]',
+        '["bash", ["-c", "ls"]]',
+        '["echo", {"x": 1}]',
+    ],
+)
+async def test_run_shell_command_rejects_invalid_stringified_args(tmp_path: Path, args: str) -> None:
+    """Malformed or non-flat stringified args should fail validation."""
+    tool = _get_toolkit(tmp_path)
+    result = await _aexecute_run_shell_command(tool, args)
+
+    assert result.status == "failure"
+    assert result.error is not None
+    assert "'args' must be a flat list of strings" in result.error
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_empty_json_list_uses_existing_empty_behavior(tmp_path: Path) -> None:
+    """An empty JSON list should fall through to the existing subprocess error path."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint("[]")
+    assert result.startswith("Error:")
 
 
 @pytest.mark.asyncio
