@@ -251,14 +251,13 @@ class TestDMIntegration:
 
     async def test_agent_accepts_dm_invites(self, tmp_path: Path) -> None:
         """Test that agents accept DM invitations when configured."""
-        config = _config(tmp_path)
+        config = _config(
+            tmp_path,
+            agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
+        )
 
         # Use the correct MatrixID from config
-        test_agent_matrix_id = (
-            config.get_ids(runtime_paths_for(config))["test_agent"]
-            if "test_agent" in config.get_ids(runtime_paths_for(config))
-            else MatrixID.parse("@mindroom_test_agent:localhost")
-        )
+        test_agent_matrix_id = config.get_ids(runtime_paths_for(config))["test_agent"]
         agent_user = AgentMatrixUser(
             agent_name="test_agent",
             user_id=test_agent_matrix_id.full_id,
@@ -279,9 +278,13 @@ class TestDMIntegration:
         bot.logger = MagicMock()
 
         # Mock join_room to return success
-        with patch("mindroom.bot.join_room", return_value=True) as mock_join:
+        with (
+            patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
+            patch("mindroom.bot_room_lifecycle.join_room", return_value=True) as mock_join,
+        ):
             room = MagicMock()
             room.room_id = "!dm:localhost"
+            room.canonical_alias = None
             event = MagicMock()
             event.sender = "@user:localhost"
 

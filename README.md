@@ -263,6 +263,7 @@ agents:
     role: A helpful AI assistant
     model: default
     rooms: [lobby]
+    accept_invites: true  # Optional: accept authorized ad-hoc room invites
 
 models:
   default:
@@ -327,6 +328,7 @@ agents:
     role: A helpful AI assistant
     model: default
     rooms: [lobby]
+    accept_invites: true
     knowledge_bases: [engineering_docs]
     # Per-agent overrides for history/context (override defaults above):
     # compress_tool_results: false

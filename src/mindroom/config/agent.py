@@ -190,6 +190,7 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    accept_invites: bool = Field(default=True, description="Whether this agent accepts room invites")
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
     learning_mode: AgentLearningMode | None = Field(

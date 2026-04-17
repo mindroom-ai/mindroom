@@ -90,7 +90,7 @@ class TestTeamRoomMembership:
             joined_rooms.append(room_id)
             return True
 
-        monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
+        monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
 
         # Mock restore_scheduled_tasks
         async def mock_restore_scheduled_tasks(
@@ -167,3 +167,62 @@ class TestTeamRoomMembership:
         # Verify the team left the old room
         assert len(left_rooms) == 1
         assert "!old_room:localhost" in left_rooms
+
+    @pytest.mark.asyncio
+    async def test_team_accepts_invite_without_agent_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Teams should still accept invites even though they have no AgentConfig entry."""
+        team_user = AgentMatrixUser(
+            agent_name="team1",
+            user_id="@mindroom_team1:localhost",
+            display_name="Team 1",
+            password=TEST_PASSWORD,
+        )
+        config = _bind_runtime_paths(
+            Config(
+                agents={
+                    "agent1": AgentConfig(
+                        display_name="Agent 1",
+                        role="Test agent",
+                    ),
+                },
+                teams={
+                    "team1": TeamConfig(
+                        display_name="Team 1",
+                        role="Test team",
+                        agents=["agent1"],
+                    ),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        team_matrix_ids = [
+            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+        ]
+        bot = TeamBot(
+            agent_user=team_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            team_agents=team_matrix_ids,
+            team_mode="round_robin",
+            team_model=None,
+            enable_streaming=False,
+        )
+        bot.client = AsyncMock()
+
+        join_room = AsyncMock(return_value=True)
+        monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+
+        room = MagicMock(room_id="!team-room:localhost")
+        room.canonical_alias = None
+        event = MagicMock(sender="@user:localhost")
+
+        await bot._on_invite(room, event)
+
+        join_room.assert_awaited_once_with(bot.client, "!team-room:localhost")

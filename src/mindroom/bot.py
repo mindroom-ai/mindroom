@@ -11,6 +11,7 @@ from uuid import uuid4
 import nio
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
+from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.hooks import (
     AgentLifecycleContext,
@@ -39,7 +40,6 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
-from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.thread_membership import resolve_related_event_thread_id_best_effort
 from mindroom.matrix.users import (
@@ -55,9 +55,7 @@ from mindroom.post_response_effects import (
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.tool_system.worker_routing import (
-    tool_execution_identity,
-)
+from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants, interactive
 from .agents import (
@@ -74,7 +72,6 @@ from .coalescing import (
     CoalescingGate,
 )
 from .commands import config_confirmation
-from .commands.handler import _generate_welcome_message
 from .constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
@@ -109,7 +106,6 @@ from .matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
     get_joined_rooms,
-    join_room,
 )
 from .media_inputs import MediaInputs
 from .response_runner import (
@@ -315,6 +311,8 @@ class AgentBot:
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
     _turn_controller: TurnController
+    _room_lifecycle: BotRoomLifecycle
+    _invited_rooms: set[str]
 
     def __init__(
         self,
@@ -351,6 +349,20 @@ class AgentBot:
         )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
+        self._room_lifecycle = BotRoomLifecycle(
+            BotRoomLifecycleDeps(
+                agent_name=self.agent_name,
+                agent_user=self.agent_user,
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                get_logger=lambda: self.logger,
+                get_configured_rooms=lambda: self.rooms,
+                send_response=lambda *args, **kwargs: self._send_response(*args, **kwargs),
+                on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
+                on_router_invite_joined=lambda room_id: self._send_welcome_message_if_empty(room_id),
+            ),
+        )
+        self._invited_rooms = self._room_lifecycle.invited_rooms
         self._init_runtime_components()
 
     def _init_runtime_components(self) -> None:
@@ -801,25 +813,29 @@ class AgentBot:
             hook_registry=self.hook_registry,
         )
 
+    def _should_accept_invite(self) -> bool:
+        """Return whether this entity should accept one inbound room invite."""
+        return self._room_lifecycle.should_accept_invite()
+
+    def _should_persist_invited_rooms(self) -> bool:
+        """Return whether this entity persists invited room IDs across restarts."""
+        return self._room_lifecycle.should_persist_invited_rooms()
+
+    def _invited_rooms_path(self) -> Path:
+        """Return the durable path for invited room IDs for this entity."""
+        return self._room_lifecycle.invited_rooms_file_path()
+
+    def _load_invited_rooms(self) -> set[str]:
+        """Load invited rooms persisted for one eligible named agent."""
+        return self._room_lifecycle.load_invited_rooms()
+
+    def _save_invited_rooms(self) -> None:
+        """Persist invited room IDs atomically for one eligible named agent."""
+        self._room_lifecycle.save_invited_rooms()
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
-        assert self.client is not None
-        joined_rooms = await get_joined_rooms(self.client)
-        current_rooms = set(joined_rooms or [])
-        current_rooms.update(self.client.rooms)
-
-        for room_id in self.rooms:
-            if room_id in current_rooms:
-                self.logger.debug("Already joined room", room_id=room_id)
-                await self._post_join_room_setup(room_id)
-                continue
-
-            if await join_room(self.client, room_id):
-                current_rooms.add(room_id)
-                self.logger.info("Joined room", room_id=room_id)
-                await self._post_join_room_setup(room_id)
-            else:
-                self.logger.warning("Failed to join room", room_id=room_id)
+        await self._room_lifecycle.join_configured_rooms()
 
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
@@ -854,24 +870,7 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
-        assert self.client is not None
-
-        # Get all rooms we're currently in
-        joined_rooms = await get_joined_rooms(self.client)
-        if joined_rooms is None:
-            return
-
-        current_rooms = set(joined_rooms)
-        configured_rooms = set(self.rooms)
-        if self.agent_name == ROUTER_AGENT_NAME:
-            # The router is the long-lived manager of the root Space even though it is
-            # not part of the normal configured room list for conversational routing.
-            root_space_id = MatrixState.load(runtime_paths=self.runtime_paths).space_room_id
-            if root_space_id is not None:
-                configured_rooms.add(root_space_id)
-
-        # Leave rooms we're no longer configured for (preserving DM rooms)
-        await leave_non_dm_rooms(self.client, list(current_rooms - configured_rooms))
+        await self._room_lifecycle.leave_unconfigured_rooms()
 
     async def ensure_user_account(self) -> None:
         """Ensure this agent has a Matrix user account.
@@ -1185,47 +1184,7 @@ class AgentBot:
 
         Only called by the router agent when joining a room.
         """
-        assert self.client is not None
-
-        # Check if room has any messages
-        response = await self.client.room_messages(
-            room_id,
-            limit=2,  # Get 2 messages to check if we already sent welcome
-            message_filter={"types": ["m.room.message"]},
-        )
-
-        # nio returns error types on failure - this is necessary
-        if not isinstance(response, nio.RoomMessagesResponse):
-            self.logger.error("Failed to check room messages", room_id=room_id, error=str(response))
-            return
-
-        # Only send welcome message if room is empty or only has our own welcome message
-        if not response.chunk:
-            # Room is completely empty
-            self.logger.info("Room is empty, sending welcome message", room_id=room_id)
-
-            # Generate and send the welcome message
-            welcome_msg = _generate_welcome_message(room_id, self.config, self.runtime_paths)
-            await self._send_response(
-                room_id=room_id,
-                reply_to_event_id=None,
-                response_text=welcome_msg,
-                thread_id=None,
-                skip_mentions=True,
-            )
-            self.logger.info("Welcome message sent", room_id=room_id)
-        elif len(response.chunk) == 1:
-            # Check if the only message is our welcome message
-            msg = response.chunk[0]
-            if (
-                isinstance(msg, nio.RoomMessageText)
-                and msg.sender == self.agent_user.user_id
-                and "Welcome to MindRoom" in msg.body
-            ):
-                self.logger.debug("Welcome message already sent", room_id=room_id)
-                return
-            # Otherwise, room has a different message, don't send welcome
-        # Room has other messages, don't send welcome
+        await self._room_lifecycle.send_welcome_message_if_empty(room_id)
 
     def _maybe_start_deferred_overdue_task_drain(self) -> None:
         """Start draining queued overdue tasks once Matrix sync is ready."""
@@ -1301,15 +1260,7 @@ class AgentBot:
         await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=not self._first_sync_done)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
-        assert self.client is not None
-        self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
-        if await join_room(self.client, room.room_id):
-            self.logger.info("Joined room", room_id=room.room_id)
-            # If this is the router agent and the room is empty, send a welcome message
-            if self.agent_name == ROUTER_AGENT_NAME:
-                await self._send_welcome_message_if_empty(room.room_id)
-        else:
-            self.logger.error("Failed to join room", room_id=room.room_id)
+        await self._room_lifecycle.on_invite(room, event)
 
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Delegate one flushed coalesced batch to the turn engine."""

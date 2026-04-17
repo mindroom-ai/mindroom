@@ -14,7 +14,8 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import get_joined_rooms, get_room_members
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import MatrixID, agent_username_localpart
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
@@ -46,11 +47,30 @@ def _get_all_known_bot_usernames(runtime_paths: RuntimePaths) -> set[str]:
     return bot_usernames
 
 
+def _load_all_persisted_invited_rooms(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> dict[str, set[str]]:
+    """Load persisted invited rooms for opted-in agents, keyed by bot username."""
+    invited_rooms_by_bot: dict[str, set[str]] = {}
+
+    for agent_name in config.agents:
+        if not should_persist_invited_rooms(config, agent_name):
+            continue
+
+        rooms = load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, agent_name))
+        if rooms:
+            invited_rooms_by_bot[agent_username_localpart(agent_name, runtime_paths)] = rooms
+
+    return invited_rooms_by_bot
+
+
 async def _cleanup_orphaned_bots_in_room(
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    persisted_invited_rooms_by_bot: dict[str, set[str]] | None = None,
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
@@ -61,6 +81,7 @@ async def _cleanup_orphaned_bots_in_room(
         room_id: The room to check
         config: Current configuration
         runtime_paths: Explicit runtime context for Matrix state and identity resolution
+        persisted_invited_rooms_by_bot: Preloaded persisted invited rooms keyed by bot username
 
     Returns:
         List of bot usernames that were kicked
@@ -87,6 +108,8 @@ async def _cleanup_orphaned_bots_in_room(
     # Get configured bots for this room
     configured_bots = config.get_configured_bots_for_room(room_id, runtime_paths)
     known_bot_usernames = _get_all_known_bot_usernames(runtime_paths)
+    if persisted_invited_rooms_by_bot is None:
+        persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
 
     kicked_bots = []
 
@@ -95,6 +118,14 @@ async def _cleanup_orphaned_bots_in_room(
 
         # Check if this is a mindroom bot and shouldn't be in this room
         if matrix_id.username in known_bot_usernames and matrix_id.username not in configured_bots:
+            if room_id in persisted_invited_rooms_by_bot.get(matrix_id.username, set()):
+                logger.debug(
+                    "orphaned_bot_cleanup_preserved_persisted_invited_room",
+                    agent=matrix_id.username,
+                    room_id=room_id,
+                )
+                continue
+
             logger.info(
                 "orphaned_bot_found",
                 agent=matrix_id.username,
@@ -143,9 +174,16 @@ async def cleanup_all_orphaned_bots(
         return kicked_bots
 
     logger.info("orphaned_bot_cleanup_started", room_count=len(joined_rooms))
+    persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
 
     for room_id in joined_rooms:
-        room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config, runtime_paths)
+        room_kicked = await _cleanup_orphaned_bots_in_room(
+            client,
+            room_id,
+            config,
+            runtime_paths,
+            persisted_invited_rooms_by_bot,
+        )
         if room_kicked:
             kicked_bots[room_id] = room_kicked
 
