@@ -185,6 +185,8 @@ knowledge_bases:
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
       poll_interval_seconds: 300
+      startup_behavior: background
+      lfs: false
       skip_hidden: true
       include_patterns:
         - "docs/**"
@@ -198,6 +200,10 @@ knowledge_bases:
 | `branch` | string | `main` | Branch to track |
 | `poll_interval_seconds` | int | `300` | How often to check for updates (minimum: 5) |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
+| `lfs` | bool | `false` | Enable Git LFS support and run `git lfs pull` after sync |
+| `startup_behavior` | string | `blocking` | `blocking` waits for startup sync, `background` defers sync to the background loop |
+| `sync_timeout_seconds` | int | `3600` | Abort one Git command if it exceeds this timeout |
+| `stale_lock_recovery` | bool | `true` | Remove stale `.git/index.lock` files when no live git process owns the repo |
 | `skip_hidden` | bool | `true` | Skip files/folders starting with `.` |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns to include |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns to exclude |
@@ -205,7 +211,9 @@ knowledge_bases:
 ### Sync Behavior
 
 - On startup, the repo is cloned (or fetched if it already exists)
+- When `startup_behavior: background`, manager initialization loads the existing index immediately and lets repo sync continue in the background
 - Every `poll_interval_seconds`, MindRoom runs `git fetch` + `git reset --hard origin/<branch>`
+- When `lfs: true`, MindRoom also runs `git lfs pull origin <branch>` after sync
 - Local uncommitted changes in the checkout folder are discarded on each sync
 - Only changed files are re-indexed (not the entire repo each time)
 - Deleted files are automatically removed from the index

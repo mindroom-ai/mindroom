@@ -260,6 +260,10 @@ knowledge_bases:
       repo_url: "https://github.com/org/docs.git"
       branch: main
       poll_interval_seconds: 300
+      # startup_behavior: blocking  # Or "background" for large repos
+      # lfs: false  # Enable Git LFS support
+      # sync_timeout_seconds: 3600  # Abort a hung git command after this many seconds
+      # stale_lock_recovery: true  # Recover stale .git/index.lock files
       # credentials_service: null  # CredentialsManager service for private HTTPS repos
       # skip_hidden: true  # Skip hidden files/folders during indexing
       # include_patterns: []  # Root-anchored glob patterns to include

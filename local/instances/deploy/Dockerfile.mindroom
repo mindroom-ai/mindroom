@@ -47,9 +47,9 @@ WORKDIR /app
 
 # Install runtime dependencies:
 # - curl for health checks
-# - git for remote knowledge base cloning/sync
+# - git and git-lfs for remote knowledge base cloning/sync
 # - bash for shell tooling
-RUN apt-get update && apt-get install -y bash curl git \
+RUN apt-get update && apt-get install -y bash curl git git-lfs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user before copying files

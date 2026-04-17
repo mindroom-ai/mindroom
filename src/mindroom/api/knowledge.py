@@ -172,21 +172,24 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         if manager is None:
             file_count = len(_list_file_info(root)[0])
             indexed_count = 0
+            git_status = None
         else:
             status = manager.get_status()
             file_count = int(status["file_count"])
             indexed_count = int(status["indexed_count"])
+            git_status = status.get("git")
 
-        bases.append(
-            {
-                "name": base_id,
-                "path": str(root),
-                "watch": base_config.watch,
-                "file_count": file_count,
-                "indexed_count": indexed_count,
-                "manager_available": manager is not None,
-            },
-        )
+        base_entry = {
+            "name": base_id,
+            "path": str(root),
+            "watch": base_config.watch,
+            "file_count": file_count,
+            "indexed_count": indexed_count,
+            "manager_available": manager is not None,
+        }
+        if git_status is not None:
+            base_entry["git"] = git_status
+        bases.append(base_entry)
 
     return {
         "bases": bases,
@@ -293,11 +296,13 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         manager_status = manager.get_status()
         indexed_count = int(manager_status["indexed_count"])
         file_count = int(manager_status["file_count"])
+        git_status = manager_status.get("git")
     else:
         indexed_count = 0
         file_count = len(_list_file_info(root)[0])
+        git_status = None
 
-    return {
+    payload = {
         "base_id": base_id,
         "folder_path": str(root),
         "watch": config.knowledge_bases[base_id].watch,
@@ -305,6 +310,9 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "indexed_count": indexed_count,
         "manager_available": manager is not None,
     }
+    if git_status is not None:
+        payload["git"] = git_status
+    return payload
 
 
 @router.post("/bases/{base_id}/reindex")

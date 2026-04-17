@@ -195,6 +195,10 @@ def _make_git_config(
     repo_url: str = "https://github.com/example/knowledge.git",
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
+    lfs: bool = False,
+    startup_behavior: str = "blocking",
+    sync_timeout_seconds: int = 3600,
+    stale_lock_recovery: bool = True,
 ) -> Config:
     config = Config(
         agents={},
@@ -207,6 +211,10 @@ def _make_git_config(
                     repo_url=repo_url,
                     branch="main",
                     poll_interval_seconds=30,
+                    lfs=lfs,
+                    startup_behavior=startup_behavior,
+                    sync_timeout_seconds=sync_timeout_seconds,
+                    stale_lock_recovery=stale_lock_recovery,
                     skip_hidden=True,
                     include_patterns=include_patterns or [],
                     exclude_patterns=exclude_patterns or [],
@@ -527,6 +535,30 @@ def test_knowledge_base_chunk_overlap_must_be_smaller_than_chunk_size() -> None:
     """KnowledgeBaseConfig should reject overlap >= size."""
     with pytest.raises(ValidationError, match="chunk_overlap must be smaller than chunk_size"):
         KnowledgeBaseConfig(path="./docs", chunk_size=500, chunk_overlap=500)
+
+
+def test_get_status_includes_git_sync_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status should expose Git sync metadata for git-backed knowledge bases."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", startup_behavior="background", lfs=True),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    manager._git_last_error = "sync failed"
+
+    status = manager.get_status()
+
+    assert status["git"]["lfs"] is True
+    assert status["git"]["startup_behavior"] == "background"
+    assert status["git"]["last_error"] == "sync failed"
+    assert status["git"]["repo_present"] is False
 
 
 @pytest.mark.asyncio
@@ -2255,6 +2287,53 @@ async def test_initialize_git_backed_base_syncs_before_single_full_reindex(
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_background_git_startup_defers_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background git startup should avoid blocking sync and start the background loop."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge", startup_behavior="background")
+    runtime_paths = runtime_paths_for(config)
+
+    prepare_background_git_startup = AsyncMock(
+        return_value={
+            "startup_mode": "resume",
+            "loaded_count": 0,
+            "indexed_count": 0,
+            "removed_count": 0,
+            "git_deferred": True,
+        },
+    )
+    start_git_sync = AsyncMock(return_value=None)
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    initialize = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
+    monkeypatch.setattr(KnowledgeManager, "_start_git_sync", start_git_sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+
+    try:
+        await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths,
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+    prepare_background_git_startup.assert_awaited_once_with("resume")
+    start_git_sync.assert_awaited_once()
+    sync_git_repository.assert_not_awaited()
+    initialize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_resumes_partial_git_index_with_full_file_sync(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2373,6 +2452,58 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
 
 
 @pytest.mark.asyncio
+async def test_sync_git_repository_once_pulls_lfs_after_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LFS-enabled repos should explicitly pull LFS objects after resetting to the remote branch."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", lfs=True),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    git_calls: list[list[str]] = []
+
+    async def _fake_ensure_git_repository(_git_config: object) -> bool:
+        return False
+
+    async def _fake_git_rev_parse(ref: str) -> str | None:
+        if ref == "HEAD":
+            return "before"
+        if ref == "origin/main":
+            return "after"
+        return None
+
+    list_tracked_files_results = iter([{"doc.md"}, {"doc.md"}])
+
+    async def _fake_git_list_tracked_files() -> set[str]:
+        return next(list_tracked_files_results)
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        git_calls.append(args)
+        if args[:3] == ["diff", "--name-only", "--no-renames"]:
+            return "doc.md\n"
+        return ""
+
+    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    changed_files, removed_files, updated = await manager._sync_git_repository_once(manager._git_config())
+
+    assert updated is True
+    assert changed_files == {"doc.md"}
+    assert removed_files == set()
+    assert ["lfs", "pull", "origin", "main"] in git_calls
+
+
+@pytest.mark.asyncio
 async def test_run_git_redacts_credentials_in_error_message(
     dummy_manager: KnowledgeManager,
     monkeypatch: pytest.MonkeyPatch,
@@ -2410,6 +2541,93 @@ async def test_run_git_redacts_credentials_in_error_message(
     message = str(exc_info.value)
     assert "secret-token" not in message
     assert "x-access-token:***@github.com/example/private.git" in message
+
+
+@pytest.mark.asyncio
+async def test_run_git_retries_after_removing_stale_index_lock(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale git index lock should be removed and the command retried once."""
+    repo_root = tmp_path / "repo"
+    git_dir = repo_root / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = git_dir / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (
+                b"",
+                (
+                    f"fatal: Unable to create '{lock_path}': File exists.\n"
+                    "Another git process seems to be running in this repository."
+                ).encode("utf-8"),
+            )
+
+    class _SuccessfulProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b"ok\n", b"")
+
+    processes = [_FailingProcess(), _SuccessfulProcess()]
+    recorded_cwds: list[str] = []
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> object:
+        _ = args
+        recorded_cwds.append(str(kwargs["cwd"]))
+        return processes.pop(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(dummy_manager, "_git_process_ids_for_repo", lambda _repo_root: ())
+
+    result = await dummy_manager._run_git(["checkout", "main"], cwd=repo_root)
+
+    assert result == "ok\n"
+    assert recorded_cwds == [str(repo_root), str(repo_root)]
+    assert lock_path.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_run_git_preserves_index_lock_when_git_process_still_active(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A live git process should prevent stale-lock cleanup."""
+    repo_root = tmp_path / "repo"
+    git_dir = repo_root / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = git_dir / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (
+                b"",
+                (
+                    f"fatal: Unable to create '{lock_path}': File exists.\n"
+                    "Another git process seems to be running in this repository."
+                ).encode("utf-8"),
+            )
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(dummy_manager, "_git_process_ids_for_repo", lambda _repo_root: (4321,))
+
+    with pytest.raises(RuntimeError, match="index.lock"):
+        await dummy_manager._run_git(["checkout", "main"], cwd=repo_root)
+
+    assert lock_path.exists() is True
 
 
 @pytest.mark.asyncio
