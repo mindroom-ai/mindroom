@@ -135,6 +135,21 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     )
 
 
+def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> None:
+    """OpenAI-compatible prompt guidance should be opt-in at agent construction time."""
+    config = _test_config()
+
+    matrix_agent = _create_agent_for_test("general", config)
+    openai_compat_agent = _create_agent_for_test(
+        "general",
+        config,
+        include_openai_compat_guidance=True,
+    )
+
+    assert agent_prompts.OPENAI_COMPAT_HISTORY_GUIDANCE not in matrix_agent.role
+    assert agent_prompts.OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
+
+
 def test_config_round_trips_structured_agent_tool_entries() -> None:
     """Structured tool entries should stay authored while runtime access stays name-based."""
     runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))

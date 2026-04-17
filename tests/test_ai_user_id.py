@@ -845,6 +845,43 @@ async def test_send_skill_command_response_returns_event_id_after_post_effect_fa
 
 
 @pytest.mark.asyncio
+async def test_send_skill_command_response_passes_user_id_to_ai_response(tmp_path: Path) -> None:
+    """Skill-command replies should preserve the Matrix sender on the ai_response path."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")) as mock_ai,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.send_text = AsyncMock(return_value="$skill-reply")
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    assert mock_ai.await_args is not None
+    assert mock_ai.await_args.kwargs["user_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
 async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
     tmp_path: Path,
 ) -> None:
@@ -2310,9 +2347,11 @@ class TestUserIdPassthrough:
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                 config=_config(),
+                include_openai_compat_guidance=True,
             )
 
         assert mock_prepare.call_args.args[2].config_path == config_path
+        assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -2339,10 +2378,12 @@ class TestUserIdPassthrough:
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                     config=_config(),
+                    include_openai_compat_guidance=True,
                 )
             ]
 
         assert mock_prepare.call_args.args[2].config_path == config_path
+        assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:

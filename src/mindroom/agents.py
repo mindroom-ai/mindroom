@@ -962,6 +962,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     history_storage: SqliteDb | None = None,
     active_model_name: str | None = None,
     include_interactive_questions: bool = True,
+    include_openai_compat_guidance: bool = False,
     delegation_depth: int = 0,
     timing_scope: str | None = None,
 ) -> Agent:
@@ -983,6 +984,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        include_openai_compat_guidance: Whether to include OpenAI-compatible
+            history-format guidance in the shared identity prompt.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
         timing_scope: Optional correlated timing scope id for nested
@@ -1103,11 +1106,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config.get_domain(runtime_paths),
         runtime_paths,
     ).full_id
-    identity_context = agent_prompts.AGENT_IDENTITY_CONTEXT.format(
+    identity_context = agent_prompts.build_agent_identity_context(
         display_name=agent_config.display_name,
         matrix_id=matrix_id,
         model_provider=model_provider,
         model_id=model_id,
+        include_openai_compat_guidance=include_openai_compat_guidance,
     )
 
     # Add current date context with the user's configured timezone

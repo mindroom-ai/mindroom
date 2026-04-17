@@ -1046,6 +1046,7 @@ def test_team_builder_passes_team_session_id_to_create_agent(tmp_path: Path) -> 
 
     assert result is mock_create_agent.return_value
     assert mock_create_agent.call_args.kwargs["session_id"] == "team-session"
+    assert mock_create_agent.call_args.kwargs["include_openai_compat_guidance"] is False
 
 
 def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) -> None:
@@ -1090,6 +1091,7 @@ def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) 
         )
 
     assert mock_create.call_args.kwargs["session_id"] == "openai-team-session"
+    assert mock_create.call_args.kwargs["include_openai_compat_guidance"] is True
 
 
 def test_openai_derived_stable_session_id_preserves_dynamic_toolkit_state(tmp_path: Path) -> None:

@@ -1,15 +1,39 @@
 """Rich prompts for agents - like prompts.py but for agents instead of tools."""
 
 # Universal identity context template for all agents
-AGENT_IDENTITY_CONTEXT = """## Your Identity
+AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name} (Matrix ID: {matrix_id}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).
 You are powered by the {model_provider} model: {model_id}.
 When working in teams with other agents, you should identify yourself as {display_name} and leverage your specific expertise.
 
-Conversation messages are prefixed with the sender's full Matrix ID (e.g. `@alice:example.org: hello`).
-When mentioning a user, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.
+In Matrix chat contexts, conversation history may be provided inside a `<conversation>` block, with each prior message wrapped as `<msg from="@user:server"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID, and the CDATA body preserves code snippets, markdown, and other special characters exactly as written. The current message you are responding to may also be wrapped in the same `<msg from="...">` tag.
+{openai_compat_history_guidance}When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.
 
 """
+
+OPENAI_COMPAT_HISTORY_GUIDANCE = (
+    "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. "
+    "Always use the sender or role labels exactly as provided in the prompt.\n"
+)
+
+
+def build_agent_identity_context(
+    *,
+    display_name: str,
+    matrix_id: str,
+    model_provider: str,
+    model_id: str,
+    include_openai_compat_guidance: bool = False,
+) -> str:
+    """Render the shared identity prompt with optional OpenAI-compatible guidance."""
+    return AGENT_IDENTITY_CONTEXT_TEMPLATE.format(
+        display_name=display_name,
+        matrix_id=matrix_id,
+        model_provider=model_provider,
+        model_id=model_id,
+        openai_compat_history_guidance=(OPENAI_COMPAT_HISTORY_GUIDANCE if include_openai_compat_guidance else ""),
+    )
+
 
 INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:
 
