@@ -113,6 +113,15 @@ class PendingInboundStore:
             ]
         return [replay for _timestamp, replay in sorted(replays, key=lambda item: (item[0], item[1].event_id))]
 
+    def contains(self, event_id: str) -> bool:
+        """Return whether one inbound event is still tracked as replayable."""
+        normalized_event_id = _normalized_event_id(event_id)
+        if normalized_event_id is None:
+            return False
+        with self._thread_lock, self._file_lock(exclusive=False):
+            self._records = self._read_records_locked(repair_corrupt_file=False)
+            return normalized_event_id in self._records
+
     def _load_records(self) -> None:
         """Load pending inbound state from disk."""
         with self._thread_lock, self._file_lock(exclusive=True):

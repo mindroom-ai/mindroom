@@ -15,6 +15,8 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.edit_regenerator import EditHandlingResult
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -460,9 +462,48 @@ async def test_edit_with_no_durable_regeneration_outcome_stays_replayable(tmp_pa
     assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
 
     with (
-        patch.object(bot._edit_regenerator, "handle_message_edit", new=AsyncMock(return_value=None)),
+        patch.object(
+            bot._edit_regenerator,
+            "handle_message_edit",
+            new=AsyncMock(return_value=EditHandlingResult.retry_later()),
+        ),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
     ):
         await bot._on_message(room, event)
 
     assert [replay.event_id for replay in bot._turn_store.pending_inbound_replays()] == ["$edit-pending:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_startup_replayed_edit_retries_until_regeneration_reaches_terminal_outcome(tmp_path: Path) -> None:
+    """Startup replay should re-attempt edits that were replayed before their durable anchor existed."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    event = _edit_event(event_id="$edit-retry:localhost")
+    assert bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=event.source) is True
+
+    with (
+        patch.object(
+            bot._edit_regenerator,
+            "handle_message_edit",
+            new=AsyncMock(
+                side_effect=[
+                    EditHandlingResult.retry_later(),
+                    EditHandlingResult.terminal(
+                        HandledTurnState.from_source_event_id(
+                            "$edit-retry:localhost",
+                            response_event_id="$regen:localhost",
+                        ),
+                    ),
+                ],
+            ),
+        ) as mock_handle_message_edit,
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        replayed_source_event_ids = await bot.replay_pending_inbound_turns()
+        assert replayed_source_event_ids == {"$edit-retry:localhost"}
+        await asyncio.sleep(0.75)
+        await wait_for_background_tasks(owner=bot._runtime_view)
+
+    assert mock_handle_message_edit.await_count == 2
+    assert bot._turn_store.pending_inbound_replays() == []

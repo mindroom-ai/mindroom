@@ -1886,6 +1886,7 @@ class ResponseRunner:
         user_id: str | None,
         reply_to_event: _ReplyEventWithSource | None = None,
         source_envelope: MessageEnvelope | None = None,
+        response_transaction_id: str | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
         target = self.deps.resolver.build_message_target(
@@ -1905,6 +1906,7 @@ class ResponseRunner:
                 user_id=user_id,
                 reply_to_event=reply_to_event,
                 source_envelope=source_envelope,
+                response_transaction_id=response_transaction_id,
             )
 
     async def send_skill_command_response_locked(
@@ -1919,6 +1921,7 @@ class ResponseRunner:
         user_id: str | None,
         reply_to_event: _ReplyEventWithSource | None = None,
         source_envelope: MessageEnvelope | None = None,
+        response_transaction_id: str | None = None,
     ) -> str | None:
         """Send a skill command response after acquiring the per-thread lock."""
         if not prompt.strip():
@@ -2035,6 +2038,7 @@ class ResponseRunner:
             SendTextRequest(
                 target=resolved_target,
                 response_text=response.formatted_text,
+                transaction_id=response_transaction_id,
                 skip_mentions=True,
                 tool_trace=tool_trace if show_tool_calls else None,
                 extra_content=run_metadata_content or None,

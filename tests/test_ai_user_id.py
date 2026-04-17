@@ -882,6 +882,46 @@ async def test_send_skill_command_response_passes_user_id_to_ai_response(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_send_skill_command_response_forwards_reserved_transaction_id_to_send_text(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should pass the reserved tx-id through the first visible send."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.send_text = AsyncMock(return_value="$skill-reply")
+
+        await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+            response_transaction_id="reply_txid",
+        )
+
+    assert coordinator.deps.delivery_gateway.send_text.await_args is not None
+    request = coordinator.deps.delivery_gateway.send_text.await_args.args[0]
+    assert request.transaction_id == "reply_txid"
+
+
+@pytest.mark.asyncio
 async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
     tmp_path: Path,
 ) -> None:

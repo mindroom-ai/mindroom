@@ -66,6 +66,24 @@ class EditRegeneratorDeps:
     generate_response: _GenerateResponse
 
 
+@dataclass(frozen=True)
+class EditHandlingResult:
+    """Outcome of one edit regeneration attempt with explicit retry semantics."""
+
+    terminal_outcome: HandledTurnState | None = None
+    should_retry: bool = False
+
+    @classmethod
+    def terminal(cls, handled_turn: HandledTurnState) -> EditHandlingResult:
+        """Return one terminal edit outcome."""
+        return cls(terminal_outcome=handled_turn)
+
+    @classmethod
+    def retry_later(cls) -> EditHandlingResult:
+        """Return one non-terminal edit outcome that should be retried in-process."""
+        return cls(should_retry=True)
+
+
 @dataclass
 class EditRegenerator:
     """Re-run the owned response for one edited user turn."""
@@ -120,17 +138,17 @@ class EditRegenerator:
         event: nio.RoomMessageText,
         event_info: EventInfo,
         requester_user_id: str,
-    ) -> HandledTurnState | None:
+    ) -> EditHandlingResult:
         """Handle an edited message and return a terminal edit outcome when available."""
         if not event_info.original_event_id:
             self._logger().debug("Edit event has no original event ID")
-            return HandledTurnState.from_source_event_id(event.event_id)
+            return EditHandlingResult.terminal(HandledTurnState.from_source_event_id(event.event_id))
         original_event_id = event_info.original_event_id
 
         sender_agent_name = extract_agent_name(event.sender, self.deps.runtime.config, self.deps.runtime_paths)
         if sender_agent_name:
             self._logger().debug("ignoring_edit_from_other_agent", agent=sender_agent_name)
-            return HandledTurnState.from_source_event_id(event.event_id)
+            return EditHandlingResult.terminal(HandledTurnState.from_source_event_id(event.event_id))
 
         context = await self.deps.resolver.extract_message_context(room, event)
         loaded_turn = self.deps.turn_store.load_turn(
@@ -144,7 +162,7 @@ class EditRegenerator:
                 "No handled turn record found for edited message",
                 original_event_id=original_event_id,
             )
-            return None
+            return EditHandlingResult.retry_later()
         turn_record = loaded_turn.record
         context = await self.edit_regeneration_context(
             context,
@@ -155,8 +173,14 @@ class EditRegenerator:
             turn_record = replace(turn_record, response_owner=self.deps.agent_name)
         response_event_id = turn_record.response_event_id
         if response_event_id is None:
-            self._logger().debug("missing_previous_response_for_edit", event_id=original_event_id)
-            return None
+            if turn_record.completed:
+                self._logger().debug(
+                    "missing_previous_response_for_terminal_edit",
+                    event_id=original_event_id,
+                )
+                return EditHandlingResult.terminal(HandledTurnState.from_source_event_id(event.event_id))
+            self._logger().debug("waiting_for_previous_response_before_edit_regeneration", event_id=original_event_id)
+            return EditHandlingResult.retry_later()
         regeneration_target = turn_record.conversation_target or self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=context.thread_id,
@@ -170,7 +194,7 @@ class EditRegenerator:
                 original_event_id=original_event_id,
                 response_owner=regeneration_response_owner,
             )
-            return HandledTurnState.from_source_event_id(event.event_id)
+            return EditHandlingResult.terminal(HandledTurnState.from_source_event_id(event.event_id))
         needs_turn_record_backfill = (
             loaded_turn.requires_backfill
             or loaded_turn.response_owner_missing
@@ -188,7 +212,7 @@ class EditRegenerator:
         edited_content, _ = await extract_edit_body(event.source, self._client())
         if edited_content is None:
             self._logger().debug("Edited message missing resolved body", event_id=event.event_id)
-            return None
+            return EditHandlingResult.terminal(HandledTurnState.from_source_event_id(event.event_id))
         regeneration_handled_turn = HandledTurnState.create(
             turn_record.source_event_ids,
             response_event_id=response_event_id,
@@ -210,7 +234,7 @@ class EditRegenerator:
                     original_event_id=original_event_id,
                     anchor_event_id=regeneration_turn_record.anchor_event_id,
                 )
-                return None
+                return EditHandlingResult.terminal(HandledTurnState.from_source_event_id(event.event_id))
             updated_prompt_map = dict(coalesced_source_event_prompts)
             updated_prompt_map[original_event_id] = edited_content
             rebuilt_prompt_parts: list[str] = []
@@ -223,7 +247,7 @@ class EditRegenerator:
                         missing_source_event_id=source_event_id,
                         anchor_event_id=regeneration_turn_record.anchor_event_id,
                     )
-                    return None
+                    return EditHandlingResult.terminal(HandledTurnState.from_source_event_id(event.event_id))
                 rebuilt_prompt_parts.append(prompt_part)
             regeneration_prompt = coalesced_prompt(rebuilt_prompt_parts)
             regeneration_handled_turn = HandledTurnState.create(
@@ -267,9 +291,11 @@ class EditRegenerator:
             policy=ingress_policy,
         ):
             self._record_turn_record(regeneration_turn_record)
-            return HandledTurnState.from_source_event_id(
-                event.event_id,
-                response_event_id=response_event_id,
+            return EditHandlingResult.terminal(
+                HandledTurnState.from_source_event_id(
+                    event.event_id,
+                    response_event_id=response_event_id,
+                ),
             )
 
         regenerated_event_id = await self.deps.generate_response(
@@ -305,9 +331,11 @@ class EditRegenerator:
                 ),
             )
             self._logger().info("Successfully regenerated response for edited message")
-            return HandledTurnState.from_source_event_id(
-                event.event_id,
-                response_event_id=regenerated_event_id,
+            return EditHandlingResult.terminal(
+                HandledTurnState.from_source_event_id(
+                    event.event_id,
+                    response_event_id=regenerated_event_id,
+                ),
             )
         if needs_turn_record_backfill:
             self._record_turn_record(regeneration_turn_record)
@@ -316,7 +344,9 @@ class EditRegenerator:
             original_event_id=original_event_id,
             response_event_id=response_event_id,
         )
-        return HandledTurnState.from_source_event_id(
-            event.event_id,
-            response_event_id=response_event_id,
+        return EditHandlingResult.terminal(
+            HandledTurnState.from_source_event_id(
+                event.event_id,
+                response_event_id=response_event_id,
+            ),
         )

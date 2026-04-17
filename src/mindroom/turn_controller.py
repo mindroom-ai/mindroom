@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
@@ -16,6 +16,7 @@ from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
 )
+from mindroom.background_tasks import create_background_task
 from mindroom.coalescing import (
     CoalescedBatch,
     CoalescingGate,
@@ -93,6 +94,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.edit_regenerator import EditHandlingResult
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -126,7 +128,7 @@ class _EditRegenerator(Protocol):
         event: nio.RoomMessageText,
         event_info: EventInfo,
         requester_user_id: str,
-    ) -> HandledTurnState | None:
+    ) -> EditHandlingResult:
         """Regenerate the owned response for one edited user turn when possible."""
 
 
@@ -140,6 +142,7 @@ class _PrecheckedEvent[T]:
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
 type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
+_EDIT_RETRY_DELAY_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,7 @@ class TurnController:
     """Own sequencing for one inbound text or media turn."""
 
     deps: TurnControllerDeps
+    _pending_edit_retry_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -177,6 +181,48 @@ class TurnController:
             msg = "Matrix client is not ready for turn execution"
             raise RuntimeError(msg)
         return client
+
+    async def _send_owned_visible_reply(
+        self,
+        *,
+        handled_turn: HandledTurnState,
+        target: MessageTarget,
+        response_text: str,
+        skip_mentions: bool = False,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Reserve a stable tx-id before the first visible reply for one owned turn."""
+        pending_response = self.deps.turn_store.reserve_pending_response(handled_turn)
+        return await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text=response_text,
+                transaction_id=pending_response.response_transaction_id,
+                skip_mentions=skip_mentions,
+                extra_content=extra_content,
+            ),
+        )
+
+    def _schedule_edit_retry(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+        """Retry one replayable edit after a short delay while its inbound claim is still owned."""
+        existing_retry = self._pending_edit_retry_tasks.get(event.event_id)
+        if existing_retry is not None and not existing_retry.done():
+            return
+
+        async def retry_edit() -> None:
+            await asyncio.sleep(_EDIT_RETRY_DELAY_SECONDS)
+            current_task = asyncio.current_task()
+            if current_task is not None and self._pending_edit_retry_tasks.get(event.event_id) is current_task:
+                self._pending_edit_retry_tasks.pop(event.event_id, None)
+            if not self.deps.turn_store.has_pending_inbound(event.event_id):
+                return
+            await self.handle_text_event(room, event)
+
+        self._pending_edit_retry_tasks[event.event_id] = create_background_task(
+            retry_edit(),
+            name=f"retry_edit_{self.deps.agent_name}_{event.event_id}",
+            owner=self.deps.runtime,
+        )
 
     def _requester_user_id(
         self,
@@ -585,6 +631,16 @@ class TurnController:
         event = await self.deps.normalizer.resolve_text_event(
             TextNormalizationRequest(event=event),
         )
+        command_handled_turn = HandledTurnState.from_source_event_id(event.event_id)
+        reserved_command_response_transaction_id: str | None = None
+
+        def reserve_command_response_transaction_id() -> str:
+            nonlocal reserved_command_response_transaction_id
+            if reserved_command_response_transaction_id is None:
+                reserved_command_response_transaction_id = self.deps.turn_store.reserve_pending_response(
+                    command_handled_turn,
+                ).response_transaction_id
+            return reserved_command_response_transaction_id
 
         async def send_skill_command_response(
             *,
@@ -607,6 +663,7 @@ class TurnController:
                 user_id=user_id,
                 reply_to_event=reply_to_event,
                 source_envelope=source_envelope,
+                response_transaction_id=reserve_command_response_transaction_id(),
             )
 
         async def send_response(
@@ -627,6 +684,7 @@ class TurnController:
                 SendTextRequest(
                     target=target,
                     response_text=response_text,
+                    transaction_id=reserve_command_response_transaction_id(),
                     skip_mentions=skip_mentions,
                 ),
             )
@@ -720,12 +778,16 @@ class TurnController:
             thread_id=selection.thread_id,
             reply_to_event_id=selection.question_event_id,
         )
-        ack_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                target=ack_target,
-                response_text=(
-                    f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
-                ),
+        ack_handled_turn = HandledTurnState.create(
+            [selection.question_event_id]
+            if source_event_id is None or source_event_id == selection.question_event_id
+            else [source_event_id, selection.question_event_id],
+        )
+        ack_event_id = await self._send_owned_visible_reply(
+            handled_turn=ack_handled_turn,
+            target=ack_target,
+            response_text=(
+                f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
         )
         if not ack_event_id:
@@ -889,18 +951,17 @@ class TurnController:
             else:
                 routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
 
-        event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                target=resolved_target,
-                response_text=response_text,
-                extra_content=routed_extra_content or None,
-            ),
-        )
         tracked_handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
         tracked_handled_turn = self.deps.turn_store.attach_response_context(
             tracked_handled_turn,
             history_scope=None,
             conversation_target=resolved_target,
+        )
+        event_id = await self._send_owned_visible_reply(
+            handled_turn=tracked_handled_turn,
+            target=resolved_target,
+            response_text=response_text,
+            extra_content=routed_extra_content or None,
         )
         with bound_log_context(**resolved_target.log_context):
             if event_id:
@@ -1260,7 +1321,7 @@ class TurnController:
         async with self.deps.resolver.turn_thread_cache_scope():
             await self._handle_message_inner(room, event)
 
-    async def _handle_message_inner(  # noqa: C901, PLR0911
+    async def _handle_message_inner(  # noqa: C901, PLR0911, PLR0912
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -1314,14 +1375,16 @@ class TurnController:
         )
 
         if event_info.is_edit:
-            edit_outcome = await self.deps.edit_regenerator.handle_message_edit(
+            edit_result = await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
                 event_info,
                 prechecked_event.requester_user_id,
             )
-            if edit_outcome is not None:
-                self._mark_source_events_responded(edit_outcome)
+            if edit_result.terminal_outcome is not None:
+                self._mark_source_events_responded(edit_result.terminal_outcome)
+            elif edit_result.should_retry:
+                self._schedule_edit_retry(room, prechecked_event.event)
             return
 
         prepared_event = await self._resolve_text_event_with_ingress_timing(

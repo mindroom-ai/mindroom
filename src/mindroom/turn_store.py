@@ -160,6 +160,10 @@ class TurnStore:
         """Return replay metadata for incomplete inbound turns."""
         return self._pending_inbound.pending_replays()
 
+    def has_pending_inbound(self, event_id: str) -> bool:
+        """Return whether one inbound source event is still replayable."""
+        return self._pending_inbound.contains(event_id)
+
     def clear_inbound_records(self, source_event_ids: typing.Sequence[str]) -> None:
         """Delete any replayable inbound claims for the provided source events."""
         self._pending_inbound.remove(source_event_ids)
