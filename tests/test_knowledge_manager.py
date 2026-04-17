@@ -2919,6 +2919,52 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
 
 
 @pytest.mark.asyncio
+async def test_sync_git_repository_once_pulls_lfs_when_head_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LFS-enabled repos should hydrate the worktree even when the tracked commit is unchanged."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", lfs=True),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    git_calls: list[list[str]] = []
+
+    async def _fake_ensure_git_repository(_git_config: object) -> bool:
+        return False
+
+    async def _fake_git_rev_parse(ref: str) -> str | None:
+        if ref in {"HEAD", "origin/main"}:
+            return "same"
+        return None
+
+    async def _fake_git_list_tracked_files() -> set[str]:
+        return {"doc.md"}
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        git_calls.append(args)
+        return ""
+
+    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    changed_files, removed_files, updated = await manager._sync_git_repository_once(manager._git_config())
+
+    assert updated is False
+    assert changed_files == set()
+    assert removed_files == set()
+    assert ["lfs", "pull", "origin", "main"] in git_calls
+
+
+@pytest.mark.asyncio
 async def test_sync_git_repository_once_pulls_lfs_after_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

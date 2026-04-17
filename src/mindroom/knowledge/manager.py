@@ -683,6 +683,14 @@ class KnowledgeManager:
         await self._ensure_git_lfs_available(cwd=repo_root)
         await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
 
+    async def _hydrate_git_lfs_worktree(self, git_config: KnowledgeGitConfig, *, repo_root: Path | None = None) -> None:
+        if not git_config.lfs:
+            return
+        await self._run_git(
+            ["lfs", "pull", "origin", git_config.branch],
+            cwd=repo_root or self._knowledge_source_path(),
+        )
+
     async def _git_rev_parse(self, ref: str) -> str | None:
         try:
             output = await self._run_git(["rev-parse", ref])
@@ -742,8 +750,7 @@ class KnowledgeManager:
         )
         self._git_repo_present = True
         await self._ensure_git_lfs_repository_ready(knowledge_root)
-        if git_config.lfs:
-            await self._run_git(["lfs", "pull", "origin", git_config.branch], cwd=knowledge_root)
+        await self._hydrate_git_lfs_worktree(git_config, repo_root=knowledge_root)
         return True
 
     async def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
@@ -762,13 +769,13 @@ class KnowledgeManager:
             raise RuntimeError(msg)
 
         if before_head == remote_head:
+            await self._hydrate_git_lfs_worktree(git_config)
             return set(), set(), False
 
         await self._run_git(["checkout", git_config.branch])
         # Force-align the local checkout with remote to tolerate local dirty state.
         await self._run_git(["reset", "--hard", remote_ref])
-        if git_config.lfs:
-            await self._run_git(["lfs", "pull", "origin", git_config.branch])
+        await self._hydrate_git_lfs_worktree(git_config)
 
         after_files = await self._git_list_tracked_files()
         if before_head is None:
