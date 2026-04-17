@@ -878,6 +878,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_interactive_questions=False,
+        include_openai_compat_guidance=True,
         active_event_ids=set(),
         execution_identity=execution_identity,
     )
@@ -1062,6 +1063,7 @@ async def _stream_completion(
                 knowledge=knowledge,
                 user_id=user,
                 include_interactive_questions=False,
+                include_openai_compat_guidance=True,
                 active_event_ids=set(),
                 execution_identity=execution_identity,
             ),
@@ -1142,6 +1144,7 @@ def _build_team(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         session_id=session_id,
+        include_openai_compat_guidance=True,
         reason_prefix=f"Team '{team_name}'",
     )
 

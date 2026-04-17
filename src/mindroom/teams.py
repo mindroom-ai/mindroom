@@ -1023,6 +1023,7 @@ def materialize_exact_team_members(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
+    include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
@@ -1060,6 +1061,7 @@ def materialize_exact_team_members(
             else None,
             knowledge=knowledge,
             include_interactive_questions=False,
+            include_openai_compat_guidance=include_openai_compat_guidance,
         )
 
     team_members = materialize_exact_requested_team_members(

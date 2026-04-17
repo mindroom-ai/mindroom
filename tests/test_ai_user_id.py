@@ -2147,9 +2147,11 @@ class TestUserIdPassthrough:
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                 config=_config(),
+                include_openai_compat_guidance=True,
             )
 
         assert mock_prepare.call_args.args[2].config_path == config_path
+        assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -2176,10 +2178,12 @@ class TestUserIdPassthrough:
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                     config=_config(),
+                    include_openai_compat_guidance=True,
                 )
             ]
 
         assert mock_prepare.call_args.args[2].config_path == config_path
+        assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:

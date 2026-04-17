@@ -989,6 +989,7 @@ async def _prepare_agent_and_prompt(
     delegation_depth: int = 0,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     current_sender_id: str | None = None,
+    include_openai_compat_guidance: bool = False,
     timing_scope: str | None = None,
 ) -> tuple[Agent, str, list[str], PreparedHistoryState]:
     """Prepare agent and full prompt for AI processing.
@@ -1029,6 +1030,7 @@ async def _prepare_agent_and_prompt(
         active_model_name=runtime_model.model_name,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
+        include_openai_compat_guidance=include_openai_compat_guidance,
         execution_identity=execution_identity,
         delegation_depth=delegation_depth,
         timing_scope=timing_scope,
@@ -1097,6 +1099,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
+    include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
@@ -1128,6 +1131,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        include_openai_compat_guidance: Whether to include OpenAI-compatible
+            history-format guidance in the shared identity prompt.
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
@@ -1202,6 +1207,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
                     current_sender_id=user_id,
+                    include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                 )
                 if pipeline_timing is not None:
@@ -1424,6 +1430,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     run_id: str | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
+    include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
@@ -1454,6 +1461,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        include_openai_compat_guidance: Whether to include OpenAI-compatible
+            history-format guidance in the shared identity prompt.
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
@@ -1528,6 +1537,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
                     current_sender_id=user_id,
+                    include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                 )
                 if pipeline_timing is not None:
