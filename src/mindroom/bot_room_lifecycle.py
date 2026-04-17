@@ -7,14 +7,18 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import _generate_welcome_message
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.client import get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
     save_invited_rooms,
     should_persist_invited_rooms,
 )
+from mindroom.matrix.rooms import leave_non_dm_rooms
+from mindroom.matrix.state import MatrixState
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -38,14 +42,9 @@ class BotRoomLifecycleDeps:
     runtime_paths: RuntimePaths
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
-    get_joined_rooms: Callable[[nio.AsyncClient], Awaitable[list[str] | None]]
-    join_room: Callable[[nio.AsyncClient, str], Awaitable[bool]]
-    leave_non_dm_rooms: Callable[[nio.AsyncClient, list[str]], Awaitable[None]]
-    is_authorized_sender: Callable[..., bool]
     send_response: Callable[..., Awaitable[str | None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     on_router_invite_joined: Callable[[str], Awaitable[None]]
-    load_root_space_id: Callable[[], str | None]
 
 
 class BotRoomLifecycle:
@@ -105,7 +104,7 @@ class BotRoomLifecycle:
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot is configured for."""
         client = self._client()
-        joined_rooms = await self.deps.get_joined_rooms(client)
+        joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or [])
         current_rooms.update(client.rooms)
 
@@ -115,7 +114,7 @@ class BotRoomLifecycle:
                 await self.deps.on_configured_room_joined(room_id)
                 continue
 
-            if await self.deps.join_room(client, room_id):
+            if await join_room(client, room_id):
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
                 await self.deps.on_configured_room_joined(room_id)
@@ -125,7 +124,7 @@ class BotRoomLifecycle:
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
-        joined_rooms = await self.deps.get_joined_rooms(client)
+        joined_rooms = await get_joined_rooms(client)
         if joined_rooms is None:
             return
 
@@ -134,11 +133,11 @@ class BotRoomLifecycle:
         if self.should_persist_invited_rooms():
             configured_rooms.update(self.invited_rooms)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
-            root_space_id = self.deps.load_root_space_id()
+            root_space_id = MatrixState.load(runtime_paths=self.deps.runtime_paths).space_room_id
             if root_space_id is not None:
                 configured_rooms.add(root_space_id)
 
-        await self.deps.leave_non_dm_rooms(client, list(current_rooms - configured_rooms))
+        await leave_non_dm_rooms(client, list(current_rooms - configured_rooms))
 
     async def send_welcome_message_if_empty(self, room_id: str) -> None:
         """Send the router welcome message only when the room has no other history."""
@@ -186,7 +185,7 @@ class BotRoomLifecycle:
         room_alias = room.canonical_alias
         if not isinstance(room_alias, str):
             room_alias = None
-        if not self.deps.is_authorized_sender(
+        if not is_authorized_sender(
             event.sender,
             self._config(),
             room.room_id,
@@ -201,7 +200,7 @@ class BotRoomLifecycle:
             return
 
         self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
-        if not await self.deps.join_room(client, room.room_id):
+        if not await join_room(client, room.room_id):
             self._logger().error("Failed to join room", room_id=room.room_id)
             return
 

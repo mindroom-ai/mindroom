@@ -1139,8 +1139,8 @@ class TestAgentBot:
 
         join_room = AsyncMock(return_value=True)
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.join_room", join_room),
+            patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
+            patch("mindroom.bot_room_lifecycle.join_room", join_room),
         ):
             await bot._on_invite(mock_room, mock_event)
 

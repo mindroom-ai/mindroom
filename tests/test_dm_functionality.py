@@ -279,8 +279,8 @@ class TestDMIntegration:
 
         # Mock join_room to return success
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.join_room", return_value=True) as mock_join,
+            patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
+            patch("mindroom.bot_room_lifecycle.join_room", return_value=True) as mock_join,
         ):
             room = MagicMock()
             room.room_id = "!dm:localhost"

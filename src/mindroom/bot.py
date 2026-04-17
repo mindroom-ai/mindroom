@@ -40,7 +40,6 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
-from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.thread_membership import resolve_related_event_thread_id_best_effort
 from mindroom.matrix.users import (
@@ -107,7 +106,6 @@ from .matrix.client import (
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
     get_joined_rooms,
-    join_room,
 )
 from .media_inputs import MediaInputs
 from .response_runner import (
@@ -359,14 +357,9 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
-                get_joined_rooms=lambda client: get_joined_rooms(client),
-                join_room=lambda client, room_id: join_room(client, room_id),
-                leave_non_dm_rooms=lambda client, room_ids: leave_non_dm_rooms(client, room_ids),
-                is_authorized_sender=lambda *args, **kwargs: is_authorized_sender(*args, **kwargs),
                 send_response=lambda *args, **kwargs: self._send_response(*args, **kwargs),
                 on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
                 on_router_invite_joined=lambda room_id: self._send_welcome_message_if_empty(room_id),
-                load_root_space_id=lambda: MatrixState.load(runtime_paths=self.runtime_paths).space_room_id,
             ),
         )
         self._invited_rooms = self._room_lifecycle.invited_rooms

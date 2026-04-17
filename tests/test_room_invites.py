@@ -94,7 +94,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
         joined_rooms.append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(
@@ -107,7 +107,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-    monkeypatch.setattr("mindroom.bot.get_joined_rooms", AsyncMock(return_value=[]))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
     # Test that the bot joins its configured rooms
     await bot.join_configured_rooms()
@@ -141,8 +141,8 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
     bot.client = mock_client
 
     join_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot.join_room", join_room)
-    monkeypatch.setattr("mindroom.bot.get_joined_rooms", AsyncMock(return_value=["!room1:localhost"]))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=["!room1:localhost"]))
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
 
     await bot.join_configured_rooms()
@@ -231,12 +231,12 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
         left_room_ids.extend(room_ids)
 
     monkeypatch.setattr(
-        "mindroom.bot.get_joined_rooms",
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
         AsyncMock(return_value=["!room1:localhost", "!space:localhost", "!room2:localhost"]),
     )
-    monkeypatch.setattr("mindroom.bot.leave_non_dm_rooms", mock_leave_non_dm_rooms)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
     monkeypatch.setattr(
-        "mindroom.bot.MatrixState.load",
+        "mindroom.bot_room_lifecycle.MatrixState.load",
         lambda **_kwargs: MatrixState(space_room_id="!space:localhost"),
     )
 
@@ -286,7 +286,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
         response.__class__ = nio.RoomLeaveResponse
         return response
 
-    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
     mock_client.room_leave = mock_room_leave
 
     # Mock restore_scheduled_tasks
@@ -357,7 +357,7 @@ async def test_agent_refuses_invite_when_accept_invites_disabled(
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot.join_room", join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
     room = MagicMock(room_id="!invited-room:localhost")
     event = MagicMock(sender="@user:localhost")
@@ -401,8 +401,8 @@ async def test_agent_refuses_invite_from_unauthorized_sender(
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot.is_authorized_sender", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr("mindroom.bot.join_room", join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
     room = MagicMock(room_id="!invited-room:localhost")
     room.canonical_alias = None
@@ -440,7 +440,7 @@ async def test_unknown_entity_refuses_invite(
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot.join_room", join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
     room = MagicMock(room_id="!invited-room:localhost")
     room.canonical_alias = None
@@ -482,8 +482,8 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot.is_authorized_sender", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr("mindroom.bot.join_room", join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
     room = MagicMock(room_id="!project-room:localhost")
     room.canonical_alias = None
@@ -539,7 +539,7 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
         left_room_ids.extend(room_ids)
 
     monkeypatch.setattr(
-        "mindroom.bot.get_joined_rooms",
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
         AsyncMock(
             return_value=[
                 "!configured-room:localhost",
@@ -548,7 +548,7 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
             ],
         ),
     )
-    monkeypatch.setattr("mindroom.bot.leave_non_dm_rooms", mock_leave_non_dm_rooms)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
 
     await bot.leave_unconfigured_rooms()
 
