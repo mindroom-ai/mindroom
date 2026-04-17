@@ -99,9 +99,9 @@ from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
-from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1132,12 +1132,16 @@ class TestAgentBot:
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
+        mock_room.canonical_alias = None
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
 
         join_room = AsyncMock(return_value=True)
-        with patch("mindroom.bot.join_room", join_room):
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.join_room", join_room),
+        ):
             await bot._on_invite(mock_room, mock_event)
 
         assert join_room.await_count == expected_join_calls

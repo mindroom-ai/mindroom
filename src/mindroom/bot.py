@@ -37,6 +37,11 @@ from mindroom.matrix.identity import (
     extract_agent_name,
     is_agent_id,
 )
+from mindroom.matrix.invited_rooms_store import (
+    invited_rooms_path,
+    load_invited_rooms,
+    should_persist_invited_rooms,
+)
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
@@ -56,10 +61,7 @@ from mindroom.post_response_effects import (
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.tool_system.worker_routing import (
-    agent_state_root_path,
-    tool_execution_identity,
-)
+from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants, interactive
 from .agents import (
@@ -818,32 +820,17 @@ class AgentBot:
 
     def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
-        if self.agent_name == ROUTER_AGENT_NAME:
-            return False
-        if self.agent_name in self.config.agents:
-            return self.config.agents[self.agent_name].accept_invites
-        return False
+        return should_persist_invited_rooms(self.config, self.agent_name)
 
     def _invited_rooms_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
-        return agent_state_root_path(self.storage_path, self.agent_name) / "invited_rooms.json"
+        return invited_rooms_path(self.runtime_paths.storage_root, self.agent_name)
 
     def _load_invited_rooms(self) -> set[str]:
         """Load invited rooms persisted for one eligible named agent."""
         if not self._should_persist_invited_rooms():
             return set()
-        path = self._invited_rooms_path()
-        if not path.exists():
-            return set()
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            self.logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
-            return set()
-        if not isinstance(raw, list) or not all(isinstance(room_id, str) for room_id in raw):
-            self.logger.warning("invalid_invited_rooms_file", path=str(path))
-            return set()
-        return set(raw)
+        return load_invited_rooms(self._invited_rooms_path())
 
     def _save_invited_rooms(self) -> None:
         """Persist invited room IDs atomically for one eligible named agent."""
@@ -1368,6 +1355,18 @@ class AgentBot:
         assert self.client is not None
         if not self._should_accept_invite():
             self.logger.info("Ignored invite", room_id=room.room_id, sender=event.sender)
+            return
+        room_alias = room.canonical_alias
+        if not isinstance(room_alias, str):
+            room_alias = None
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            self.runtime_paths,
+            room_alias=room_alias,
+        ):
+            self.logger.debug("ignoring_invite_from_unauthorized_sender", user_id=event.sender, room_id=room.room_id)
             return
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):

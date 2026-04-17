@@ -8,7 +8,6 @@ DM rooms are preserved and not cleaned up.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import nio
@@ -16,10 +15,10 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID, agent_username_localpart
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
-from mindroom.tool_system.worker_routing import agent_state_root_path
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -55,25 +54,13 @@ def _load_all_persisted_invited_rooms(
     """Load persisted invited rooms for opted-in agents, keyed by bot username."""
     invited_rooms_by_bot: dict[str, set[str]] = {}
 
-    for agent_name, agent_config in config.agents.items():
-        if not agent_config.accept_invites:
+    for agent_name in config.agents:
+        if not should_persist_invited_rooms(config, agent_name):
             continue
 
-        path = agent_state_root_path(runtime_paths.storage_root, agent_name) / "invited_rooms.json"
-        if not path.exists():
-            continue
-
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            logger.warning("failed_to_load_invited_rooms", agent_name=agent_name, path=str(path), exc_info=True)
-            continue
-
-        if not isinstance(raw, list) or not all(isinstance(room_id, str) for room_id in raw):
-            logger.warning("invalid_invited_rooms_file", agent_name=agent_name, path=str(path))
-            continue
-
-        invited_rooms_by_bot[agent_username_localpart(agent_name, runtime_paths)] = set(raw)
+        rooms = load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, agent_name))
+        if rooms:
+            invited_rooms_by_bot[agent_username_localpart(agent_name, runtime_paths)] = rooms
 
     return invited_rooms_by_bot
 
@@ -94,6 +81,7 @@ async def _cleanup_orphaned_bots_in_room(
         room_id: The room to check
         config: Current configuration
         runtime_paths: Explicit runtime context for Matrix state and identity resolution
+        persisted_invited_rooms_by_bot: Preloaded persisted invited rooms keyed by bot username
 
     Returns:
         List of bot usernames that were kicked
@@ -131,7 +119,11 @@ async def _cleanup_orphaned_bots_in_room(
         # Check if this is a mindroom bot and shouldn't be in this room
         if matrix_id.username in known_bot_usernames and matrix_id.username not in configured_bots:
             if room_id in persisted_invited_rooms_by_bot.get(matrix_id.username, set()):
-                logger.debug("orphaned_bot_cleanup_preserved_persisted_invited_room", agent=matrix_id.username, room_id=room_id)
+                logger.debug(
+                    "orphaned_bot_cleanup_preserved_persisted_invited_room",
+                    agent=matrix_id.username,
+                    room_id=room_id,
+                )
                 continue
 
             logger.info(

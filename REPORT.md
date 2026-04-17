@@ -4,6 +4,7 @@
 
 Added `accept_invites` to `AgentConfig` with a default of `True`.
 Added invite acceptance and invited-room persistence helpers in `src/mindroom/bot.py`.
+Round 4 added an `is_authorized_sender()` gate in `AgentBot._on_invite()` so unauthorized Matrix users cannot force persistent memberships through invites.
 Persisted invited rooms only for named non-router agents whose `accept_invites` setting remains enabled.
 Preserved router and team invite acceptance behavior.
 Restored the default invite-acceptance path for entities without an explicit `AgentConfig`.
@@ -14,6 +15,16 @@ Round 3 reverted the earlier persisted-room lookup from `src/mindroom/config/mai
 Round 3 now preloads all persisted invited rooms once inside `src/mindroom/matrix/room_cleanup.py` with `_load_all_persisted_invited_rooms()` before orphan cleanup decisions are made.
 That keeps configured-room resolution limited to static config while still preserving ad-hoc invited rooms across service restarts.
 Updated `tests/test_room_invites.py`, `tests/test_multi_agent_bot.py`, and `tests/test_dm_room_preservation.py` to cover the preload path.
+Round 4 extracted the shared invited-room storage contract into `src/mindroom/matrix/invited_rooms_store.py` so `bot.py` and `room_cleanup.py` use the same path, load, and persistence eligibility logic.
+
+## Known Limitations
+
+`invited_rooms.json` is append-only, so stale room IDs can accumulate after a bot leaves or is kicked.
+That is acceptable for now because those stale IDs do not rejoin the bot to the room, and orphan cleanup will not kick a bot from a room it is no longer in.
+Teams still accept invites but do not persist invited rooms across restarts because they do not have `AgentConfig` entries and `should_persist_invited_rooms()` intentionally returns `False` for them.
+That restart eviction behavior is pre-existing and was not introduced by ISSUE-152.
+Saving invited rooms remains synchronous.
+Moving that tiny write to `asyncio.to_thread()` is not worth the added complexity for this path.
 
 ## Validation
 

@@ -18,17 +18,17 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from nio.responses import Response
 
 
-def _invited_rooms_path(storage_path: Path, agent_name: str) -> Path:
-    return agent_state_root_path(storage_path, agent_name) / "invited_rooms.json"
+def _invited_rooms_path(config: Config, agent_name: str) -> Path:
+    return invited_rooms_path(runtime_paths_for(config).storage_root, agent_name)
 
 
 @pytest.fixture
@@ -365,7 +365,54 @@ async def test_agent_refuses_invite_when_accept_invites_disabled(
     await bot._on_invite(room, event)
 
     join_room.assert_not_awaited()
-    assert not _invited_rooms_path(tmp_path, "agent1").exists()
+    assert not _invited_rooms_path(config, "agent1").exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_refuses_invite_from_unauthorized_sender(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unauthorized users should not be able to force durable membership via invites."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+
+    join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot.is_authorized_sender", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("mindroom.bot.join_room", join_room)
+
+    room = MagicMock(room_id="!invited-room:localhost")
+    room.canonical_alias = None
+    event = MagicMock(sender="@intruder:localhost")
+
+    await bot._on_invite(room, event)
+
+    join_room.assert_not_awaited()
+    assert bot._invited_rooms == set()
+    assert not _invited_rooms_path(config, "agent1").exists()
 
 
 @pytest.mark.asyncio
@@ -396,12 +443,13 @@ async def test_unknown_entity_refuses_invite(
     monkeypatch.setattr("mindroom.bot.join_room", join_room)
 
     room = MagicMock(room_id="!invited-room:localhost")
+    room.canonical_alias = None
     event = MagicMock(sender="@user:localhost")
 
     await bot._on_invite(room, event)
 
     join_room.assert_not_awaited()
-    assert not _invited_rooms_path(tmp_path, "agent1").exists()
+    assert not _invited_rooms_path(config, "agent1").exists()
 
 
 @pytest.mark.asyncio
@@ -434,16 +482,18 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot.is_authorized_sender", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("mindroom.bot.join_room", join_room)
 
     room = MagicMock(room_id="!project-room:localhost")
+    room.canonical_alias = None
     event = MagicMock(sender="@user:localhost")
 
     await bot._on_invite(room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!project-room:localhost")
     assert bot._invited_rooms == {"!project-room:localhost"}
-    assert _invited_rooms_path(tmp_path, "agent1").read_text(encoding="utf-8") == '[\n  "!project-room:localhost"\n]\n'
+    assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == '[\n  "!project-room:localhost"\n]\n'
 
 
 @pytest.mark.asyncio
@@ -452,10 +502,6 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
     tmp_path: Path,
 ) -> None:
     """Cleanup should preserve one previously invited non-DM room."""
-    invited_rooms_path = _invited_rooms_path(tmp_path, "agent1")
-    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
-    invited_rooms_path.write_text('[\n  "!invited-room:localhost"\n]\n', encoding="utf-8")
-
     agent_user = AgentMatrixUser(
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
@@ -475,6 +521,9 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
         ),
         test_runtime_paths(tmp_path),
     )
+    invited_rooms_path = _invited_rooms_path(config, "agent1")
+    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_rooms_path.write_text('[\n  "!invited-room:localhost"\n]\n', encoding="utf-8")
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
@@ -509,10 +558,6 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
 def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -> None:
     """Invalid UTF-8 in the persisted invite file should be ignored."""
-    invited_rooms_path = _invited_rooms_path(tmp_path, "agent1")
-    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
-    invited_rooms_path.write_bytes(b"\x80")
-
     agent_user = AgentMatrixUser(
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
@@ -531,6 +576,9 @@ def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -
         ),
         test_runtime_paths(tmp_path),
     )
+    invited_rooms_path = _invited_rooms_path(config, "agent1")
+    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_rooms_path.write_bytes(b"\x80")
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,

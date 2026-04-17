@@ -1697,6 +1697,7 @@ class Config(BaseModel):
             configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
 
         return configured_bots
+
     def save_to_yaml(
         self,
         config_path: Path,
