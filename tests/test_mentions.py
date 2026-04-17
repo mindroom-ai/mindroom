@@ -241,6 +241,68 @@ class TestMentionParsing:
 
         assert content["m.mentions"]["user_ids"] == ["@mindroom_research:matrix.org"]
 
+    def test_format_message_with_full_matrix_user_id_creates_clickable_mention(self) -> None:
+        """Non-agent full Matrix IDs should be rendered as clickable mentions."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Yes, @bas.nijholt:chat-mindroom.example.com -- noted.",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == "Yes, @bas.nijholt:chat-mindroom.example.com -- noted."
+        assert content["m.mentions"]["user_ids"] == ["@bas.nijholt:chat-mindroom.example.com"]
+        assert (
+            content["formatted_body"] == '<p>Yes, <a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a> -- noted.</p>\n"
+        )
+
+    def test_format_message_with_agent_and_full_matrix_user_id_preserves_both_mentions(self) -> None:
+        """Agent mentions and explicit full Matrix user IDs should coexist cleanly."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "@calculator please follow up with @bas.nijholt:chat-mindroom.example.com",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == (
+            "@mindroom_calculator:matrix.org please follow up with @bas.nijholt:chat-mindroom.example.com"
+        )
+        assert content["m.mentions"]["user_ids"] == [
+            "@mindroom_calculator:matrix.org",
+            "@bas.nijholt:chat-mindroom.example.com",
+        ]
+        assert (
+            content["formatted_body"]
+            == '<p><a href="https://matrix.to/#/@mindroom_calculator:matrix.org">@Calculator</a> '
+            'please follow up with <a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a></p>\n"
+        )
+
+    def test_format_message_with_duplicate_full_matrix_user_ids_deduplicates_mentions(self) -> None:
+        """Repeated full Matrix user IDs should appear once in m.mentions."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "@bas.nijholt:chat-mindroom.example.com and again @bas.nijholt:chat-mindroom.example.com",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == (
+            "@bas.nijholt:chat-mindroom.example.com and again @bas.nijholt:chat-mindroom.example.com"
+        )
+        assert content["m.mentions"]["user_ids"] == ["@bas.nijholt:chat-mindroom.example.com"]
+        assert (
+            content["formatted_body"] == '<p><a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a> and again "
+            '<a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a></p>\n"
+        )
+
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""
         config = _make_config(_default_runtime_paths())

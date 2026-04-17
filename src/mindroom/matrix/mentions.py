@@ -1,6 +1,7 @@
 """Matrix mention utilities."""
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
@@ -11,6 +12,20 @@ from mindroom.tool_system.events import build_tool_trace_content
 
 if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
+
+_AGENT_MENTION_PATTERN = re.compile(r"@(mindroom_)?(\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
+_FULL_MATRIX_ID_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._=/-])@([A-Za-z0-9._=/-]+):((?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+(?::\d+)?)",
+)
+
+
+@dataclass(frozen=True)
+class _MentionReplacement:
+    start: int
+    end: int
+    plain_text: str
+    markdown_text: str
+    user_id: str
 
 
 def parse_mentions_in_text(
@@ -31,36 +46,104 @@ def parse_mentions_in_text(
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
 
     """
-    # Pattern to match @agent_name (with optional case-insensitive @mindroom_ prefix or domain)
-    # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
-    pattern = r"@(mindroom_)?(\w+)(?::[^\s]+)?"
+    replacements = _collect_agent_mention_replacements(
+        text,
+        sender_domain=sender_domain,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    replacements.extend(
+        _collect_full_matrix_id_replacements(
+            text,
+            occupied_ranges=[(replacement.start, replacement.end) for replacement in replacements],
+        ),
+    )
+    ordered_replacements = sorted(replacements, key=lambda replacement: replacement.start)
 
-    # Find all mentions and process them
-    mentions_data = []
-    for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-        mention_info = _process_mention(match, config, sender_domain, runtime_paths)
-        if mention_info:
-            mentions_data.append(mention_info)
-
-    # Build outputs from collected data
-    plain_text = text
-    markdown_text = text
     mentioned_user_ids: list[str] = []
+    for replacement in ordered_replacements:
+        if replacement.user_id not in mentioned_user_ids:
+            mentioned_user_ids.append(replacement.user_id)
 
-    # Apply replacements (reverse order to preserve positions)
-    for original, user_id, display_name in reversed(mentions_data):
-        # Plain text: replace with full Matrix ID
-        plain_text = plain_text.replace(original, user_id, 1)
+    return (
+        _apply_replacements(text, ordered_replacements, use_markdown=False),
+        mentioned_user_ids,
+        _apply_replacements(text, ordered_replacements, use_markdown=True),
+    )
 
-        # Markdown: replace with clickable link
-        link = f"[@{display_name}](https://matrix.to/#/{user_id})"
-        markdown_text = markdown_text.replace(original, link, 1)
 
-        # Collect unique user IDs
-        if user_id not in mentioned_user_ids:
-            mentioned_user_ids.insert(0, user_id)  # Insert at start to maintain order
+def _collect_agent_mention_replacements(
+    text: str,
+    *,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[_MentionReplacement]:
+    """Return replacement data for configured agent mentions in text."""
+    replacements: list[_MentionReplacement] = []
+    for match in _AGENT_MENTION_PATTERN.finditer(text):
+        mention_info = _process_mention(match, config, sender_domain, runtime_paths)
+        if mention_info is None:
+            continue
+        _original, user_id, display_name = mention_info
+        replacements.append(
+            _MentionReplacement(
+                start=match.start(),
+                end=match.end(),
+                plain_text=user_id,
+                markdown_text=f"[@{display_name}](https://matrix.to/#/{user_id})",
+                user_id=user_id,
+            ),
+        )
+    return replacements
 
-    return plain_text, mentioned_user_ids, markdown_text
+
+def _collect_full_matrix_id_replacements(
+    text: str,
+    *,
+    occupied_ranges: list[tuple[int, int]],
+) -> list[_MentionReplacement]:
+    """Return replacement data for explicit full Matrix user IDs in text."""
+    replacements: list[_MentionReplacement] = []
+    for match in _FULL_MATRIX_ID_PATTERN.finditer(text):
+        if _range_overlaps_existing(match.start(), match.end(), occupied_ranges):
+            continue
+        user_id = match.group(0)
+        replacements.append(
+            _MentionReplacement(
+                start=match.start(),
+                end=match.end(),
+                plain_text=user_id,
+                markdown_text=f"[{user_id}](https://matrix.to/#/{user_id})",
+                user_id=user_id,
+            ),
+        )
+    return replacements
+
+
+def _range_overlaps_existing(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
+    """Return whether one text span overlaps any existing replacement span."""
+    return any(start < existing_end and end > existing_start for existing_start, existing_end in ranges)
+
+
+def _apply_replacements(
+    text: str,
+    replacements: list[_MentionReplacement],
+    *,
+    use_markdown: bool,
+) -> str:
+    """Apply collected mention replacements to text."""
+    if not replacements:
+        return text
+
+    parts: list[str] = []
+    last_end = 0
+    for replacement in replacements:
+        parts.append(text[last_end : replacement.start])
+        parts.append(replacement.markdown_text if use_markdown else replacement.plain_text)
+        last_end = replacement.end
+    parts.append(text[last_end:])
+    return "".join(parts)
 
 
 def _process_mention(
