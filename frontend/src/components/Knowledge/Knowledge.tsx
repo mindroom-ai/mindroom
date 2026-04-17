@@ -44,6 +44,19 @@ interface KnowledgeStatus {
   watch: boolean;
   file_count: number;
   indexed_count: number;
+  git?: {
+    repo_url: string;
+    branch: string;
+    lfs: boolean;
+    startup_behavior: 'blocking' | 'background';
+    syncing: boolean;
+    repo_present: boolean;
+    initial_sync_complete: boolean;
+    last_successful_sync_at: string | null;
+    last_successful_commit: string | null;
+    last_error: string | null;
+    pending_startup_mode: 'full_reindex' | 'resume' | 'incremental' | null;
+  };
 }
 
 interface KnowledgeFilesResponse {
@@ -84,6 +97,17 @@ function formatBytes(bytes: number): string {
 function formatModifiedDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatStartupMode(value: 'full_reindex' | 'resume' | 'incremental'): string {
+  switch (value) {
+    case 'full_reindex':
+      return 'Full Reindex';
+    case 'resume':
+      return 'Resume';
+    case 'incremental':
+      return 'Incremental';
+  }
 }
 
 function defaultPathForBase(baseName: string): string {
@@ -1242,10 +1266,51 @@ export function Knowledge() {
                   <Badge variant="outline">Files: {status?.file_count ?? 0}</Badge>
                   <Badge variant="outline">Indexed: {status?.indexed_count ?? 0}</Badge>
                   <Badge variant="outline">Total Size: {formatBytes(totalSize)}</Badge>
+                  {status?.git ? (
+                    <>
+                      <Badge variant="outline">Git: {status.git.startup_behavior}</Badge>
+                      <Badge variant={status.git.syncing ? 'default' : 'outline'}>
+                        {status.git.syncing ? 'Syncing' : 'Idle'}
+                      </Badge>
+                      <Badge variant="outline">
+                        {status.git.repo_present ? 'Repo Present' : 'Repo Missing'}
+                      </Badge>
+                      <Badge variant="outline">
+                        {status.git.initial_sync_complete
+                          ? 'Initial Sync Complete'
+                          : 'Initial Sync Pending'}
+                      </Badge>
+                      {status.git.pending_startup_mode ? (
+                        <Badge variant="secondary">
+                          Pending: {formatStartupMode(status.git.pending_startup_mode)}
+                        </Badge>
+                      ) : null}
+                      {status.git.lfs ? <Badge variant="secondary">LFS</Badge> : null}
+                      {status.git.last_error ? (
+                        <Badge variant="destructive">Git Error</Badge>
+                      ) : null}
+                    </>
+                  ) : null}
                 </div>
                 <p className="text-sm text-muted-foreground mt-2">
                   Folder: <code>{status?.folder_path ?? '-'}</code>
                 </p>
+                {status?.git ? (
+                  <div className="mt-2 space-y-1 text-sm text-muted-foreground">
+                    <p>
+                      Repo: <code>{status.git.repo_url}</code> ({status.git.branch})
+                    </p>
+                    {status.git.last_successful_commit ? (
+                      <p>
+                        Last Commit: <code>{status.git.last_successful_commit}</code>
+                      </p>
+                    ) : null}
+                    {status.git.last_successful_sync_at ? (
+                      <p>Last Sync: {formatModifiedDate(status.git.last_successful_sync_at)}</p>
+                    ) : null}
+                    {status.git.last_error ? <p>Git Error: {status.git.last_error}</p> : null}
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
           </>

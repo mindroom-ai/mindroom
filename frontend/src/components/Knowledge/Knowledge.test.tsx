@@ -28,6 +28,19 @@ type KnowledgeApiPayloads = {
     watch: boolean;
     file_count: number;
     indexed_count: number;
+    git?: {
+      repo_url: string;
+      branch: string;
+      lfs: boolean;
+      startup_behavior: 'blocking' | 'background';
+      syncing: boolean;
+      repo_present: boolean;
+      initial_sync_complete: boolean;
+      last_successful_sync_at: string | null;
+      last_successful_commit: string | null;
+      last_error: string | null;
+      pending_startup_mode: 'full_reindex' | 'resume' | 'incremental' | null;
+    };
   };
   files: {
     base_id: string;
@@ -299,6 +312,63 @@ describe('Knowledge', () => {
     expect(gitCard).toHaveTextContent('Git');
     expect(gitCard).toHaveTextContent('https://github.com/org/git-docs');
     expect(gitCard).toHaveTextContent('Branch: release');
+  });
+
+  it('shows git sync status details from the API', async () => {
+    mockStore({
+      git_docs: {
+        path: './knowledge_docs/git_docs',
+        watch: true,
+        git: {
+          repo_url: 'https://github.com/org/git-docs',
+          branch: 'release',
+          startup_behavior: 'background',
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      git_docs: {
+        status: {
+          base_id: 'git_docs',
+          folder_path: './knowledge_docs/git_docs',
+          watch: true,
+          file_count: 4,
+          indexed_count: 3,
+          git: {
+            repo_url: 'https://github.com/org/git-docs',
+            branch: 'release',
+            lfs: true,
+            startup_behavior: 'background',
+            syncing: true,
+            repo_present: true,
+            initial_sync_complete: false,
+            last_successful_sync_at: '2026-04-17T12:00:00+00:00',
+            last_successful_commit: 'abc123',
+            last_error: 'fetch failed',
+            pending_startup_mode: 'resume',
+          },
+        },
+        files: {
+          base_id: 'git_docs',
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText('Active: git_docs');
+
+    expect(screen.getByText('Git: background')).toBeInTheDocument();
+    expect(screen.getByText('Syncing')).toBeInTheDocument();
+    expect(screen.getByText('Repo Present')).toBeInTheDocument();
+    expect(screen.getByText('Initial Sync Pending')).toBeInTheDocument();
+    expect(screen.getByText('Pending: Resume')).toBeInTheDocument();
+    expect(screen.getByText('LFS')).toBeInTheDocument();
+    expect(screen.getByText('Git Error')).toBeInTheDocument();
+    expect(screen.getByText(/Last Commit:/)).toHaveTextContent('abc123');
+    expect(screen.getByText(/Git Error:/)).toHaveTextContent('fetch failed');
   });
 
   it('switches source type in settings and toggles git fields', async () => {

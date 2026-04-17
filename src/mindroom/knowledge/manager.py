@@ -133,6 +133,8 @@ def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_pa
         *_indexing_settings_key(config, storage_path, base_id, knowledge_path),
         str(base_config.watch),
         str(git_config.poll_interval_seconds) if git_config is not None else "",
+        git_config.startup_behavior if git_config is not None else "",
+        str(git_config.sync_timeout_seconds) if git_config is not None else "",
         git_config.credentials_service or "" if git_config is not None else "",
     )
 
@@ -377,6 +379,7 @@ class KnowledgeManager:
     _git_sync_task: asyncio.Task[None] | None = field(default=None, init=False)
     _git_sync_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _git_startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_syncing: bool = field(default=False, init=False)
     _git_repo_present: bool = field(default=False, init=False)
     _git_initial_sync_complete: bool = field(default=False, init=False)
@@ -1031,29 +1034,58 @@ class KnowledgeManager:
             "git_deferred": True,
         }
 
-    async def _run_pending_background_git_startup(self) -> dict[str, Any]:
-        startup_mode = self._git_background_startup_mode
-        if startup_mode is None:
-            return await self.sync_git_repository()
+    async def finish_pending_background_git_startup(
+        self,
+        *,
+        force_full_reindex: bool = False,
+    ) -> dict[str, Any] | None:
+        """Finish deferred Git startup work immediately when a caller cannot wait for the poll loop."""
+        git_config = self._git_config()
+        if git_config is None:
+            return None
 
-        git_result = await self.sync_git_repository(index_changes=False)
-        if startup_mode == "full_reindex":
-            indexed_count = await self.reindex_all()
-            result = {
-                **git_result,
-                "startup_mode": startup_mode,
-                "indexed_count": indexed_count,
-            }
-        else:
-            sync_result = await self.sync_indexed_files()
-            await asyncio.to_thread(self._save_persisted_indexing_settings)
-            result = {
-                **git_result,
-                "startup_mode": startup_mode,
-                **sync_result,
-            }
-        self._git_background_startup_mode = None
-        return result
+        async with self._git_startup_lock:
+            startup_mode = self._git_background_startup_mode
+            effective_mode = "full_reindex" if force_full_reindex else startup_mode
+            if effective_mode is None:
+                return None
+
+            git_result = await self.sync_git_repository(index_changes=False)
+            if effective_mode == "full_reindex":
+                indexed_count = await self.reindex_all()
+                result = {
+                    **git_result,
+                    "startup_mode": effective_mode,
+                    "indexed_count": indexed_count,
+                }
+            else:
+                sync_result = await self.sync_indexed_files()
+                await asyncio.to_thread(self._save_persisted_indexing_settings)
+                result = {
+                    **git_result,
+                    "startup_mode": effective_mode,
+                    **sync_result,
+                }
+            self._git_background_startup_mode = None
+            self._git_initial_sync_complete = True
+            return result
+
+    async def ensure_git_checkout_ready(self) -> None:
+        """Ensure the Git checkout exists before direct file writes land in the knowledge folder."""
+        if self._git_config() is None:
+            return
+        if await self.finish_pending_background_git_startup() is not None:
+            return
+        if (self._knowledge_source_path() / ".git").is_dir():
+            self._git_repo_present = True
+            return
+        await self.sync_git_repository(index_changes=False)
+
+    async def _run_pending_background_git_startup(self) -> dict[str, Any]:
+        result = await self.finish_pending_background_git_startup()
+        if result is not None:
+            return result
+        return await self.sync_git_repository()
 
     async def sync_git_repository(self, *, index_changes: bool = True) -> dict[str, Any]:
         """Fetch and force-align one configured Git repository, then update the index."""
@@ -1075,7 +1107,8 @@ class KnowledgeManager:
 
             current_head = await self._git_rev_parse("HEAD")
             self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
-            self._git_initial_sync_complete = True
+            if index_changes:
+                self._git_initial_sync_complete = True
             self._git_last_successful_sync_at = datetime.now(tz=UTC)
             self._git_last_successful_commit = current_head
             self._git_last_error = None
@@ -1358,11 +1391,9 @@ async def _stop_and_remove_shared_manager(base_id: str) -> None:
 
 async def _sync_manager_without_full_reindex(
     manager: KnowledgeManager,
-    *,
-    allow_background_git_startup: bool = True,
 ) -> dict[str, Any]:
     if manager._git_config() is not None:
-        if allow_background_git_startup and manager._git_background_startup_enabled():
+        if manager._git_background_startup_enabled():
             return await manager.prepare_background_git_startup("incremental")
         return await manager.sync_git_repository()
     return await manager.sync_indexed_files()
@@ -1370,11 +1401,9 @@ async def _sync_manager_without_full_reindex(
 
 async def _resume_manager_without_full_reindex(
     manager: KnowledgeManager,
-    *,
-    allow_background_git_startup: bool = True,
 ) -> dict[str, Any]:
     if manager._git_config() is not None:
-        if allow_background_git_startup and manager._git_background_startup_enabled():
+        if manager._git_background_startup_enabled():
             return await manager.prepare_background_git_startup("resume")
         git_result = await manager.sync_git_repository(index_changes=False)
         sync_result = await manager.sync_indexed_files()
@@ -1449,7 +1478,7 @@ async def _create_knowledge_manager_for_target(
     startup_mode: Literal["full_reindex", "resume", "incremental"] = (
         "full_reindex" if reindex_on_create else manager._startup_index_mode()
     )
-    background_git_startup = manager._git_background_startup_enabled() and not binding.request_scoped
+    background_git_startup = manager._git_background_startup_enabled()
     if background_git_startup:
         sync_result = await manager.prepare_background_git_startup(startup_mode)
         logger.info(
@@ -1463,15 +1492,9 @@ async def _create_knowledge_manager_for_target(
         await manager.initialize()
     else:
         if startup_mode == "resume":
-            sync_result = await _resume_manager_without_full_reindex(
-                manager,
-                allow_background_git_startup=background_git_startup,
-            )
+            sync_result = await _resume_manager_without_full_reindex(manager)
         else:
-            sync_result = await _sync_manager_without_full_reindex(
-                manager,
-                allow_background_git_startup=background_git_startup,
-            )
+            sync_result = await _sync_manager_without_full_reindex(manager)
         await asyncio.to_thread(manager._save_persisted_indexing_settings)
         sync_log_context: dict[str, object] = {
             "base_id": target.key.base_id,
@@ -1506,7 +1529,7 @@ async def _create_knowledge_manager_for_target(
 
     if binding.start_background_watchers:
         await manager.start_watcher()
-    elif manager._git_background_startup_enabled() and not binding.request_scoped:
+    elif manager._git_background_startup_enabled():
         await manager._start_git_sync()
     return manager
 
@@ -1551,7 +1574,9 @@ async def _ensure_shared_knowledge_manager_for_target(
                 await existing.stop_watcher()
             elif not target.binding.start_background_watchers and not background_git_startup_enabled:
                 await existing._stop_git_sync()
-            if target.binding.incremental_sync_on_access and not background_git_startup_enabled:
+            if existing._git_background_startup_mode is not None and not background_git_startup_enabled:
+                await existing.finish_pending_background_git_startup()
+            elif target.binding.incremental_sync_on_access and not background_git_startup_enabled:
                 await _sync_manager_without_full_reindex(existing)
             if target.binding.start_background_watchers:
                 await existing.start_watcher()

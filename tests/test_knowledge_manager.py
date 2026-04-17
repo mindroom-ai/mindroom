@@ -559,6 +559,41 @@ def test_get_status_includes_git_sync_metadata(
     assert status["git"]["repo_present"] is False
 
 
+def test_get_shared_knowledge_manager_for_config_misses_when_git_runtime_settings_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared manager cache lookups should miss when startup/runtime git settings drift."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config_a = _make_git_config(
+        tmp_path / "knowledge",
+        startup_behavior="blocking",
+        sync_timeout_seconds=3600,
+    )
+    config_b = _make_git_config(
+        tmp_path / "knowledge",
+        startup_behavior="background",
+        sync_timeout_seconds=900,
+    )
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config_a,
+        runtime_paths=runtime_paths_for(config_a),
+    )
+
+    resolved = get_shared_knowledge_manager_for_config(
+        "research",
+        config=config_b,
+        runtime_paths=runtime_paths_for(config_b),
+        candidate_manager=manager,
+    )
+
+    assert resolved is None
+
+
 @pytest.mark.asyncio
 async def test_load_indexed_files_recovers_source_paths(dummy_manager: KnowledgeManager) -> None:
     """Indexed source paths should be recovered from persisted vector metadata."""
@@ -2618,6 +2653,57 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_finishes_pending_background_startup_when_reuse_becomes_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reused shared managers should finish deferred startup immediately when background mode is disabled."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge", startup_behavior="background")
+    runtime_paths = runtime_paths_for(config)
+
+    start_git_sync = AsyncMock(return_value=None)
+    monkeypatch.setattr(KnowledgeManager, "_start_git_sync", start_git_sync)
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths,
+            start_watchers=False,
+            reindex_on_create=True,
+        )
+        manager = managers["research"]
+        assert manager._git_background_startup_mode == "full_reindex"
+
+        finish_pending_background_git_startup = AsyncMock(return_value={"indexed_count": 0})
+        sync_manager_without_full_reindex = AsyncMock(
+            return_value={"updated": False, "changed_count": 0, "removed_count": 0},
+        )
+        monkeypatch.setattr(manager, "finish_pending_background_git_startup", finish_pending_background_git_startup)
+        monkeypatch.setattr(
+            "mindroom.knowledge.manager._sync_manager_without_full_reindex",
+            sync_manager_without_full_reindex,
+        )
+
+        blocking_config = _make_git_config(tmp_path / "knowledge", startup_behavior="blocking")
+        blocking_managers = await initialize_shared_knowledge_managers(
+            blocking_config,
+            runtime_paths_for(blocking_config),
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+
+        assert blocking_managers["research"] is manager
+        finish_pending_background_git_startup.assert_awaited_once_with()
+        sync_manager_without_full_reindex.assert_not_awaited()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_resumes_partial_git_index_with_full_file_sync(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2734,6 +2820,42 @@ async def test_run_pending_background_git_startup_persists_completed_resume_chec
         runtime_paths=runtime_paths_for(changed_config),
     )
     assert changed_manager._startup_index_mode() == "full_reindex"
+
+
+@pytest.mark.asyncio
+async def test_finish_pending_background_git_startup_force_full_reindex_clears_pending_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced direct completion should clear deferred startup state after syncing and reindexing."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", startup_behavior="background"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    reindex_all = AsyncMock(return_value=3)
+    monkeypatch.setattr(manager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(manager, "reindex_all", reindex_all)
+
+    await manager.prepare_background_git_startup("resume")
+
+    result = await manager.finish_pending_background_git_startup(force_full_reindex=True)
+
+    assert result == {
+        "updated": False,
+        "changed_count": 0,
+        "removed_count": 0,
+        "startup_mode": "full_reindex",
+        "indexed_count": 3,
+    }
+    sync_git_repository.assert_awaited_once_with(index_changes=False)
+    reindex_all.assert_awaited_once_with()
+    assert manager._git_background_startup_mode is None
 
 
 def test_startup_index_mode_does_not_use_collection_count_for_existing_index(

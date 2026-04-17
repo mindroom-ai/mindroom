@@ -223,6 +223,13 @@ async def upload_knowledge_files(
     """Upload one or more files into a knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths, create=True)
+    git_backed_base = config.knowledge_bases[base_id].git is not None
+    manager: KnowledgeManager | None = None
+    if git_backed_base:
+        manager = await _ensure_manager(config, base_id, runtime_paths)
+        if manager is None:
+            raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
+        await manager.ensure_git_checkout_ready()
 
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
@@ -248,7 +255,8 @@ async def upload_knowledge_files(
         uploaded_paths.append(destination)
         uploaded.append(destination.relative_to(root).as_posix())
 
-    manager = await _ensure_manager(config, base_id, runtime_paths)
+    if manager is None:
+        manager = await _ensure_manager(config, base_id, runtime_paths)
     if manager is not None:
         for relative_path in uploaded:
             await manager.index_file(relative_path, upsert=True)
@@ -326,9 +334,12 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
 
     if config.knowledge_bases[base_id].git is not None:
-        await manager.sync_git_repository()
-
-    indexed_count = await manager.reindex_all()
+        result = await manager.finish_pending_background_git_startup(force_full_reindex=True)
+        if result is None:
+            raise HTTPException(status_code=500, detail="Knowledge manager did not run git reindex")
+        indexed_count = int(result["indexed_count"])
+    else:
+        indexed_count = await manager.reindex_all()
     return {
         "success": True,
         "base_id": base_id,

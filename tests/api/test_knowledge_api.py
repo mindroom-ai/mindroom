@@ -339,6 +339,46 @@ def test_knowledge_upload_initializes_manager_with_full_reindex(
     manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
 
 
+def test_git_knowledge_upload_waits_for_checkout_ready_before_writing(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Git-backed uploads should block until the checkout is ready for direct writes."""
+    config = _knowledge_config(tmp_path, with_git=True)
+    manager = MagicMock()
+    manager.index_file = AsyncMock(return_value=True)
+    checkout_ready = False
+    _publish_committed_runtime_config(test_client.app, config)
+
+    async def _ensure_git_checkout_ready() -> None:
+        nonlocal checkout_ready
+        checkout_ready = True
+
+    async def _stream_upload(
+        upload: object,
+        destination: Path,
+        filename: str,
+    ) -> None:
+        _ = upload, filename
+        assert checkout_ready is True
+        destination.write_bytes(b"hello")
+
+    manager.ensure_git_checkout_ready = AsyncMock(side_effect=_ensure_git_checkout_ready)
+
+    with (
+        patch("mindroom.api.knowledge._ensure_manager", new=AsyncMock(return_value=manager)),
+        patch("mindroom.api.knowledge._stream_upload_to_destination", new=AsyncMock(side_effect=_stream_upload)),
+    ):
+        response = test_client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("note.txt", b"hello", "text/plain"))],
+        )
+
+    assert response.status_code == 200
+    manager.ensure_git_checkout_ready.assert_awaited_once_with()
+    manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
+
+
 def test_knowledge_delete_initializes_manager_with_full_reindex(
     test_client: TestClient,
     tmp_path: Path,
@@ -388,23 +428,14 @@ def test_unknown_knowledge_base_returns_404(test_client: TestClient, tmp_path: P
     assert "not found" in response.json()["detail"]
 
 
-def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient, tmp_path: Path) -> None:
-    """Git-backed bases should fetch/sync before a full reindex."""
+def test_reindex_uses_git_startup_finisher_for_git_bases(test_client: TestClient, tmp_path: Path) -> None:
+    """Git-backed bases should delegate direct reindex requests through the startup finisher."""
     config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
-    call_order: list[str] = []
     _publish_committed_runtime_config(test_client.app, config)
-
-    async def _sync() -> dict[str, int | bool]:
-        call_order.append("sync")
-        return {"updated": True, "changed_count": 0, "removed_count": 0}
-
-    async def _reindex() -> int:
-        call_order.append("reindex")
-        return 2
-
-    manager.sync_git_repository = AsyncMock(side_effect=_sync)
-    manager.reindex_all = AsyncMock(side_effect=_reindex)
+    manager.finish_pending_background_git_startup = AsyncMock(
+        return_value={"startup_mode": "full_reindex", "indexed_count": 2},
+    )
 
     with (
         patch(
@@ -415,9 +446,32 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
         response = test_client.post("/api/knowledge/bases/research/reindex")
 
     assert response.status_code == 200
-    assert call_order == ["sync", "reindex"]
-    manager.sync_git_repository.assert_awaited_once()
-    manager.reindex_all.assert_awaited_once()
+    assert response.json()["indexed_count"] == 2
+    manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
+
+
+def test_reindex_finishes_pending_background_startup_for_git_bases(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Git-backed manual reindex should consume deferred startup work instead of duplicating it."""
+    config = _knowledge_config(tmp_path, with_git=True)
+    manager = MagicMock()
+    manager.finish_pending_background_git_startup = AsyncMock(
+        return_value={"startup_mode": "full_reindex", "indexed_count": 5},
+    )
+    manager.sync_git_repository = AsyncMock()
+    manager.reindex_all = AsyncMock()
+    _publish_committed_runtime_config(test_client.app, config)
+
+    with patch("mindroom.api.knowledge._ensure_manager", new=AsyncMock(return_value=manager)):
+        response = test_client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 200
+    assert response.json()["indexed_count"] == 5
+    manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
+    manager.sync_git_repository.assert_not_awaited()
+    manager.reindex_all.assert_not_awaited()
 
 
 def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClient) -> None:
