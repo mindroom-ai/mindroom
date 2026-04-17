@@ -70,9 +70,8 @@ from mindroom.response_runner import PostLockRequestPreparationError, ResponseRe
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
-    get_agents_in_thread,
     get_configured_agents_for_room,
-    has_multiple_non_agent_users_in_thread,
+    thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -395,22 +394,11 @@ class TurnController:
             room.room_id,
             thread_id,
         )
-        sender_visible_agents = filter_agents_by_sender_permissions(
-            get_agents_in_thread(
-                thread_history,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            ),
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
-        if sender_visible_agents:
-            return True
-        return has_multiple_non_agent_users_in_thread(
+        return thread_requires_explicit_agent_targeting(
             thread_history,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
+            sender_id=requester_user_id,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
         )
 
     async def _coalescing_key_for_event(

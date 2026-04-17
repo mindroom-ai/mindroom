@@ -183,6 +183,25 @@ def has_multiple_non_agent_users_in_thread(
     return False
 
 
+def thread_requires_explicit_agent_targeting(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether a thread already has visible ownership or multiple human participants."""
+    sender_visible_agents = authorization.filter_agents_by_sender_permissions(
+        get_agents_in_thread(thread_history, config, runtime_paths),
+        sender_id,
+        config,
+        runtime_paths,
+    )
+    if sender_visible_agents:
+        return True
+    return has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths)
+
+
 def get_configured_agents_for_room(
     room_id: str,
     config: Config,

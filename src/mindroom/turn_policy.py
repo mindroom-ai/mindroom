@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
-    filter_agents_by_sender_permissions,
     get_available_agents_for_sender,
     is_sender_allowed_for_agent_reply,
 )
@@ -40,8 +39,8 @@ from mindroom.teams import (
 from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
-    has_multiple_non_agent_users_in_thread,
     should_agent_respond,
+    thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import timed
 
@@ -393,25 +392,14 @@ class TurnPolicy:
 
         context = dispatch.context
         requester_user_id = dispatch.requester_user_id
-        agents_in_thread = get_agents_in_thread(
-            context.thread_history,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
-        sender_visible = filter_agents_by_sender_permissions(
-            agents_in_thread,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
-
-        if not context.mentioned_agents and not context.has_non_agent_mentions and not sender_visible:
-            if context.is_thread and has_multiple_non_agent_users_in_thread(
+        if not context.mentioned_agents and not context.has_non_agent_mentions:
+            if context.is_thread and thread_requires_explicit_agent_targeting(
                 context.thread_history,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
+                sender_id=requester_user_id,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
             ):
-                self.deps.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
+                self.deps.logger.info("Skipping routing: thread already requires explicit agent targeting")
                 return DispatchPlan(kind="ignore", ignore_reason="router")
             available_agents = get_available_agents_for_sender(
                 room,
