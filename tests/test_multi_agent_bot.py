@@ -5367,7 +5367,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
@@ -5508,7 +5508,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch(
@@ -5889,7 +5889,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
                 "mindroom.turn_policy.get_available_agents_for_sender",
                 return_value=[
@@ -5967,7 +5967,7 @@ class TestAgentBot:
         with (
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
                 "mindroom.turn_policy.get_available_agents_for_sender",
                 return_value=[config.get_ids(runtime_paths_for(config))["calculator"]],
