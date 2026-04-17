@@ -543,9 +543,10 @@ To interact with an agent:
 1. **Mention the agent by its Matrix display name or ID**: `@mindroom_agentname:<server>`
    - Example: `@mindroom_code what is 25 * 4?`
 
-2. **In threads**: Agents automatically respond to all messages without needing mentions
+2. **In threads**: Agents continue responding based on thread context, but multi-human threads require an explicit current `@mention`
    - Start a thread by replying to any message
-   - The agent will see and respond to all subsequent messages in that thread
+   - In single-human threads, the agent can continue the conversation without repeated mentions
+   - Once two or more humans are participating, mention the agent again before expecting a reply
 
 3. **Multiple agents**: You can mention multiple agents in one message
    - Example: `@mindroom_research @mindroom_code Compare renewable energy trends`
