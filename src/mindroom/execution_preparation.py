@@ -93,6 +93,40 @@ def _wrap_msg_body(sender: str, body: str) -> str:
     return f"<msg from={xml_quoteattr(sender)}>{safe_body}</msg>"
 
 
+def _format_history_line(sender: str, body: str, *, wrap: bool) -> str:
+    return _wrap_msg_body(sender, body) if wrap else f"{sender}: {body}"
+
+
+def _format_history_block(context_lines: list[str], *, wrap: bool) -> str:
+    joined = "\n".join(context_lines)
+    return f"<conversation>\n{joined}\n</conversation>" if wrap else joined
+
+
+def _collect_history_lines(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    max_messages: int | None,
+    max_message_length: int | None,
+    missing_sender_label: str | None,
+    wrap: bool,
+) -> list[str]:
+    messages = thread_history[-max_messages:] if max_messages is not None else thread_history
+    lines: list[str] = []
+    for msg in messages:
+        body = msg.body
+        if not body:
+            continue
+        if max_message_length is not None and len(body) >= max_message_length:
+            continue
+        sender = msg.sender
+        if not sender:
+            if missing_sender_label is None:
+                continue
+            sender = missing_sender_label
+        lines.append(_format_history_line(sender, body, wrap=wrap))
+    return lines
+
+
 def build_prompt_with_thread_history(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
@@ -106,42 +140,34 @@ def build_prompt_with_thread_history(
 ) -> str:
     """Build a prompt with thread history context when available.
 
-    History is rendered inside a <conversation> block as <msg from="..."> tags
-    so the model can unambiguously attribute each message even when bodies
-    contain colons, newlines, or quoted log lines. Bodies are passed through
-    verbatim (preserving code, markdown, and special characters); the only
-    transformation is neutralizing a literal "</msg>" sequence so it cannot
-    prematurely close the wrapper.
+    When ``current_sender`` is provided, history is rendered as
+    ``<msg from="...">body</msg>`` tags inside a ``<conversation>`` block and
+    the current prompt receives the same wrapping so the model can attribute
+    every turn — used for Matrix multi-sender threads where unseen messages
+    from other participants may be prepended. Bodies are passed through
+    verbatim; a literal ``</msg>`` is neutralized so it cannot prematurely
+    close the wrapper.
 
-    When ``current_sender`` is provided, the current ``prompt`` is wrapped in
-    the same <msg from="..."> tag so the model can also attribute the latest
-    message — useful in multi-user threads where the sender of the current
-    turn may differ from the senders of prior unseen messages.
+    When ``current_sender`` is ``None`` (e.g., the OpenAI-compatible API),
+    callers have already organized prior turns by role, so we render history
+    as plain ``sender: body`` lines and pass the current prompt through
+    unwrapped.
     """
-    if not thread_history:
-        if current_sender:
-            return f"{prompt_intro}{_wrap_msg_body(current_sender, prompt)}"
-        return prompt
-    messages = thread_history[-max_messages:] if max_messages is not None else thread_history
-    context_lines: list[str] = []
-    for msg in messages:
-        body = msg.body
-        if not body:
-            continue
-        if max_message_length is not None and len(body) >= max_message_length:
-            continue
-        sender = msg.sender
-        if not sender:
-            if missing_sender_label is None:
-                continue
-            sender = missing_sender_label
-        context_lines.append(_wrap_msg_body(sender, body))
-    if not context_lines:
-        if current_sender:
-            return f"{prompt_intro}{_wrap_msg_body(current_sender, prompt)}"
-        return prompt
-    context = "<conversation>\n" + "\n".join(context_lines) + "\n</conversation>"
+    wrap = current_sender is not None
     current_block = _wrap_msg_body(current_sender, prompt) if current_sender else prompt
+    standalone_prompt = f"{prompt_intro}{current_block}" if current_sender else prompt
+    if not thread_history:
+        return standalone_prompt
+    context_lines = _collect_history_lines(
+        thread_history,
+        max_messages=max_messages,
+        max_message_length=max_message_length,
+        missing_sender_label=missing_sender_label,
+        wrap=wrap,
+    )
+    if not context_lines:
+        return standalone_prompt
+    context = _format_history_block(context_lines, wrap=wrap)
     return f"{header}\n{context}\n\n{prompt_intro}{current_block}"
 
 

@@ -3034,8 +3034,9 @@ class TestTeamCompletion:
         assert response.status_code == 200
         prompt = mock_team.arun.call_args.args[0]
         assert "Previous conversation in this thread:" in prompt
-        assert '<msg from="user">Start</msg>' in prompt
-        assert '<msg from="assistant">Ack</msg>' in prompt
+        assert "user: Start" in prompt
+        assert "assistant: Ack" in prompt
+        assert "<msg from=" not in prompt
         assert "Current message:\nFollow-up" in prompt
 
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(
@@ -3094,8 +3095,8 @@ class TestTeamCompletion:
         prompt = mock_team.arun.call_args.args[0]
         assert prompt == "Follow-up"
         assert "Previous conversation in this thread:" not in prompt
-        assert '<msg from="user">Start</msg>' not in prompt
-        assert '<msg from="assistant">Ack</msg>' not in prompt
+        assert "user: Start" not in prompt
+        assert "assistant: Ack" not in prompt
 
     def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
         """Persisted team history should suppress request-history stuffing in the streaming path too."""
