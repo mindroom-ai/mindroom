@@ -121,6 +121,14 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
     assert bot.client.next_batch is None
 
 
+def test_agent_bot_does_not_own_sync_token_persistence(tmp_path: Path) -> None:
+    """Sync token persistence should live behind a dedicated helper, not AgentBot."""
+    bot = _agent_bot(tmp_path)
+
+    assert "_persist_sync_token" not in AgentBot.__dict__
+    assert "_persist_sync_token" not in vars(bot)
+
+
 @pytest.mark.asyncio
 async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> None:
     """Successful sync responses should update the saved next_batch token."""

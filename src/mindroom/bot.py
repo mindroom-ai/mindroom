@@ -40,7 +40,8 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
-from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_tokens import SyncTokenStore
 from mindroom.matrix.thread_membership import resolve_related_event_thread_id_best_effort
 from mindroom.matrix.users import (
     AgentMatrixUser,
@@ -318,6 +319,7 @@ class AgentBot:
     _room_lifecycle: BotRoomLifecycle
     _invited_rooms: set[str]
     _sync_checkpoint: SyncCheckpointCoordinator
+    _sync_token_store: SyncTokenStore
 
     def __init__(
         self,
@@ -368,9 +370,14 @@ class AgentBot:
             ),
         )
         self._invited_rooms = self._room_lifecycle.invited_rooms
+        self._sync_token_store = SyncTokenStore(
+            storage_path=self.storage_path,
+            agent_name=self.agent_name,
+            logger=self.logger,
+        )
         self._sync_checkpoint = SyncCheckpointCoordinator(
             agent_name=self.agent_name,
-            persist_sync_token=self._persist_sync_token,
+            persist_sync_token=self._sync_token_store.save,
             owner=self._runtime_view,
         )
         self._init_runtime_components()
@@ -944,7 +951,7 @@ class AgentBot:
         """Restore the saved Matrix sync token onto the current client."""
         assert self.client is not None
         try:
-            token = load_sync_token(self.storage_path, self.agent_name)
+            token = self._sync_token_store.load()
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             return
@@ -954,19 +961,6 @@ class AgentBot:
 
         self.client.next_batch = token
         self.logger.info("matrix_sync_token_restored")
-
-    def _persist_sync_token(self) -> None:
-        """Persist the current Matrix sync token."""
-        if self.client is None:
-            return
-        token = self.client.next_batch
-        if not isinstance(token, str) or not token:
-            return
-
-        try:
-            save_sync_token(self.storage_path, self.agent_name, token)
-        except OSError as exc:
-            self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
