@@ -24,6 +24,7 @@ ROUTER_AGENT_NAME = "router"
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
+SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 _RUNTIME_STARTUP_ENV_PREFIXES = ("MINDROOM_", "MATRIX_", "BROWSER_")
 _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
@@ -60,7 +61,7 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         *_RUNTIME_STARTUP_EXCLUDED_NAMES,
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_SECRET",
-        "MINDROOM_RUNTIME_PATHS_JSON",
+        SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
 _SHELL_EXTRA_ENV_EXCLUDED_NAMES = frozenset({*_EXECUTION_RUNTIME_EXCLUDED_NAMES, "CI_JOB_TOKEN"})
@@ -292,6 +293,22 @@ def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, obj
     }
 
 
+def serialize_startup_manifest(
+    runtime_paths: RuntimePaths,
+    *,
+    tool_validation_snapshot: Mapping[str, object] | None = None,
+    public_runtime: bool = False,
+) -> dict[str, object]:
+    """Return one JSON-compatible startup manifest for sandbox runners."""
+    serialized_runtime = (
+        serialize_public_runtime_paths(runtime_paths) if public_runtime else serialize_runtime_paths(runtime_paths)
+    )
+    return {
+        "runtime_paths": serialized_runtime,
+        "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
+    }
+
+
 def deserialize_runtime_paths(payload: Mapping[str, object]) -> RuntimePaths:
     """Build one RuntimePaths object from an explicit serialized payload."""
     raw_config_path = payload.get("config_path")
@@ -326,6 +343,25 @@ def deserialize_runtime_paths(payload: Mapping[str, object]) -> RuntimePaths:
         process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
+
+
+def deserialize_startup_manifest(payload: Mapping[str, object]) -> tuple[RuntimePaths, dict[str, object]]:
+    """Build one startup manifest from explicit serialized payload."""
+    raw_runtime_paths = payload.get("runtime_paths")
+    raw_tool_validation_snapshot = payload.get("tool_validation_snapshot", {})
+    if not isinstance(raw_runtime_paths, Mapping):
+        msg = "Serialized startup manifest is missing runtime_paths"
+        raise TypeError(msg)
+    if not isinstance(raw_tool_validation_snapshot, Mapping):
+        msg = "Serialized startup manifest is missing tool_validation_snapshot"
+        raise TypeError(msg)
+    runtime_paths_payload: dict[str, object] = {
+        key: value for key, value in raw_runtime_paths.items() if isinstance(key, str)
+    }
+    tool_validation_snapshot = {
+        key: value for key, value in raw_tool_validation_snapshot.items() if isinstance(key, str)
+    }
+    return deserialize_runtime_paths(runtime_paths_payload), tool_validation_snapshot
 
 
 def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:

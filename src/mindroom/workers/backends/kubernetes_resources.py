@@ -56,8 +56,6 @@ _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
-_STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
-_TOOL_VALIDATION_SNAPSHOT_ENV = "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -587,30 +585,20 @@ class KubernetesResourceManager:
 
     def _worker_env(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
+        local_dedicated_root = (self.storage_root / state_subpath).resolve()
         venv_path = f"{dedicated_root}/venv"
-        startup_runtime_paths = self._worker_runtime_paths(
+        startup_manifest_path = self._write_startup_manifest(
             worker_key=worker_key,
             dedicated_root=Path(dedicated_root),
+            local_dedicated_root=local_dedicated_root,
         )
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
             {
-                "name": _STARTUP_RUNTIME_PATHS_ENV,
-                "value": json.dumps(
-                    constants.serialize_runtime_paths(startup_runtime_paths),
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-            },
-            {
-                "name": _TOOL_VALIDATION_SNAPSHOT_ENV,
-                "value": json.dumps(
-                    self.tool_validation_snapshot,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
+                "name": constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+                "value": startup_manifest_path,
             },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
@@ -646,6 +634,33 @@ class KubernetesResourceManager:
         for name, value in sorted(self.config.extra_env.items()):
             env.append({"name": name, "value": value})
         return env
+
+    def _write_startup_manifest(
+        self,
+        *,
+        worker_key: str,
+        dedicated_root: Path,
+        local_dedicated_root: Path,
+    ) -> str:
+        runtime_dir = local_dedicated_root / ".runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        target_path = runtime_dir / "startup_manifest.json"
+        startup_runtime_paths = self._worker_runtime_paths(
+            worker_key=worker_key,
+            dedicated_root=dedicated_root,
+        )
+        target_path.write_text(
+            json.dumps(
+                constants.serialize_startup_manifest(
+                    startup_runtime_paths,
+                    tool_validation_snapshot=self.tool_validation_snapshot,
+                ),
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return str(dedicated_root / ".runtime" / target_path.name)
 
     def _worker_runtime_paths(
         self,

@@ -108,7 +108,7 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _refresh_runner_app_from_env()
 
 
-def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
+def _set_worker_tool_validation_snapshot(*tool_names: str) -> None:
     """Set the upstream-authored validation snapshot visible to one worker runtime."""
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = Config.validate_with_runtime({}, runtime_paths)
@@ -121,10 +121,66 @@ def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_
             "agent_override_fields": [],
             "authored_override_validator": "default",
         }
-    monkeypatch.setenv(
-        "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON",
-        json.dumps(snapshot, separators=(",", ":"), sort_keys=True),
+    _write_startup_manifest(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=snapshot,
     )
+
+
+def _write_startup_manifest(
+    *,
+    runtime_paths: RuntimePaths,
+    public_runtime: bool = False,
+    tool_validation_snapshot: dict[str, object] | None = None,
+) -> Path:
+    manifest_path = runtime_paths.storage_root / ".runtime" / "startup_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_payload = {
+        "runtime_paths": (
+            serialize_public_runtime_paths(runtime_paths) if public_runtime else serialize_runtime_paths(runtime_paths)
+        ),
+        "tool_validation_snapshot": tool_validation_snapshot or {},
+    }
+    manifest_path.write_text(
+        json.dumps(manifest_payload, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def _set_startup_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    manifest_path: Path,
+) -> None:
+    monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
+    monkeypatch.delenv("MINDROOM_RUNTIME_PATHS_JSON", raising=False)
+    monkeypatch.delenv("MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON", raising=False)
+
+
+def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dedicated workers should load tool validation snapshots from the startup manifest."""
+    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    config = Config.validate_with_runtime({}, runtime_paths)
+    snapshot = serialize_tool_validation_snapshot(
+        resolved_tool_validation_snapshot_for_runtime(runtime_paths, config),
+    )
+    snapshot["agentspace_slack_search"] = {
+        "config_fields": [],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    manifest_path = _write_startup_manifest(runtime_paths=runtime_paths, tool_validation_snapshot=snapshot)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+
+    loaded_snapshot = sandbox_runner_module._upstream_tool_validation_snapshot(runtime_paths)
+
+    assert "agentspace_slack_search" in loaded_snapshot
+    assert loaded_snapshot["agentspace_slack_search"].runtime_loadable is True
+    assert loaded_snapshot["agentspace_slack_search"].config_fields == ()
+    assert loaded_snapshot["agentspace_slack_search"].agent_override_fields == ()
 
 
 def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
@@ -264,7 +320,8 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
         storage_path=tmp_path / "storage",
         process_env={"MINDROOM_NAMESPACE": "alpha1234"},
     )
-    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_runtime_paths(payload_runtime)))
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
@@ -328,7 +385,8 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
         storage_path=tmp_path / "storage",
         process_env={"MINDROOM_NAMESPACE": "alpha1234"},
     )
-    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_public_runtime_paths(payload_runtime)))
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime, public_runtime=True)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
 
@@ -365,7 +423,10 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     )
     payload = serialize_runtime_paths(payload_runtime)
     payload["env_file_values"] = {"MINDROOM_NAMESPACE": "alpha1234"}
-    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(payload))
+    manifest_path = _write_startup_manifest(
+        runtime_paths=sandbox_runner_module.constants.deserialize_runtime_paths(payload),
+    )
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
@@ -409,7 +470,10 @@ async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
     )
     payload = serialize_runtime_paths(payload_runtime)
     payload["env_file_values"] = {"MINDROOM_NAMESPACE": "alpha1234"}
-    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(payload))
+    manifest_path = _write_startup_manifest(
+        runtime_paths=sandbox_runner_module.constants.deserialize_runtime_paths(payload),
+    )
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
     monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
@@ -885,7 +949,7 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    _set_worker_tool_validation_snapshot("agentspace_slack_search")
     _set_sandbox_token(monkeypatch)
 
     runtime_paths, config = _refresh_runner_app_from_env()
@@ -921,7 +985,7 @@ def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
     config_path = _missing_plugin_path_config_path(tmp_path)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
-    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    _set_worker_tool_validation_snapshot("agentspace_slack_search")
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Configured plugin path does not exist"):
@@ -937,7 +1001,7 @@ def test_sandbox_runner_still_rejects_invalid_tools_after_skipping_worker_plugin
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    _set_worker_tool_validation_snapshot("agentspace_slack_search")
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
     with pytest.raises(ConfigRuntimeValidationError) as exc_info:
