@@ -3185,6 +3185,18 @@ cli = [
 ]
 
 [[package]]
+name = "mdit-py-plugins"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markdown-it-py" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b2/fd/a756d36c0bfba5f6e39a1cdbdbfdd448dc02692467d83816dff4592a1ebc/mdit_py_plugins-0.5.0.tar.gz", hash = "sha256:f4918cb50119f50446560513a8e311d574ff6aaed72606ddae6d35716fe809c6", size = 44655, upload-time = "2025-08-11T07:25:49.083Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/86/dd6e5db36df29e76c7a7699123569a4a18c1623ce68d826ed96c62643cae/mdit_py_plugins-0.5.0-py3-none-any.whl", hash = "sha256:07a08422fc1936a5d26d146759e9155ea466e842f5ab2f7d2266dd084c8dab1f", size = 57205, upload-time = "2025-08-11T07:25:47.597Z" },
+]
+
+[[package]]
 name = "mdurl"
 version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3234,6 +3246,7 @@ dependencies = [
     { name = "markdown-it-py" },
     { name = "matrix-nio" },
     { name = "mcp", extra = ["cli"] },
+    { name = "mdit-py-plugins" },
     { name = "mem0ai" },
     { name = "openai" },
     { name = "pydantic" },
@@ -3667,6 +3680,7 @@ requires-dist = [
     { name = "matrix-nio", specifier = ">=0.25" },
     { name = "matrix-nio", extras = ["e2e"], marker = "extra == 'matrix-e2ee'", specifier = ">=0.25" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
+    { name = "mdit-py-plugins", specifier = ">=0.5.0" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },

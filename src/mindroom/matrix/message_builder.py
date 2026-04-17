@@ -8,6 +8,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
+from mdit_py_plugins.dollarmath import dollarmath_plugin
 from pygments import highlight as _pygments_highlight
 from pygments.formatters.html import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
@@ -404,10 +406,39 @@ def _highlight(code: str, lang: str, _attrs: str) -> str:
     return _pygments_highlight(code, lexer, _HIGHLIGHT_FORMATTER)
 
 
+def _render_preserved_math_inline(
+    _self: object,
+    tokens: list[Token],
+    idx: int,
+    _options: object,
+    _env: object,
+) -> str:
+    return escape(f"${tokens[idx].content}$")
+
+
+def _render_preserved_math_block(
+    _self: object,
+    tokens: list[Token],
+    idx: int,
+    _options: object,
+    _env: object,
+) -> str:
+    content = f"$$\n{tokens[idx].content.strip()}\n$$"
+    return f"<div>{escape(content)}</div>\n"
+
+
 def _build_markdown_renderer() -> MarkdownIt:
     renderer = MarkdownIt("commonmark", {"breaks": True, "highlight": _highlight})
     renderer.enable("table")
     renderer.enable("strikethrough")
+    renderer.use(
+        dollarmath_plugin,
+        allow_labels=False,
+        allow_space=False,
+        allow_digits=False,
+    )
+    renderer.add_render_rule("math_inline", _render_preserved_math_inline)
+    renderer.add_render_rule("math_block", _render_preserved_math_block)
     return renderer
 
 
