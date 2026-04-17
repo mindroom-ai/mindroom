@@ -675,9 +675,9 @@ class AgentBot:
         return joined_rooms or []
 
     async def _prewarm_claimed_startup_thread_room(self, room_id: str) -> None:
-        """Prewarm one claimed room and release the claim if the refresh does not finish."""
+        """Prewarm one claimed room and release the claim unless the room-level pass finishes."""
         try:
-            await self._conversation_cache.prewarm_recent_room_threads(
+            completed = await self._conversation_cache.prewarm_recent_room_threads(
                 room_id,
                 is_shutting_down=lambda: self._sync_shutting_down,
             )
@@ -687,6 +687,9 @@ class AgentBot:
         except Exception:
             await self.startup_thread_prewarm_registry.release(room_id)
             raise
+        if not completed:
+            await self.startup_thread_prewarm_registry.release(room_id)
+            return
         await self.startup_thread_prewarm_registry.mark_done(room_id, warmed_at=time.time())
 
     async def _run_startup_thread_prewarm(self) -> None:

@@ -554,8 +554,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         *,
         is_shutting_down: Callable[[], bool],
-    ) -> None:
-        """Warm the most recent thread roots for one room and log a per-room summary."""
+    ) -> bool:
+        """Warm one room's recent thread roots and report whether the room-level pass finished."""
         started_at = time.perf_counter()
         threads_warmed = 0
         threads_failed = 0
@@ -574,11 +574,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id=room_id,
                 error=str(exc),
             )
-            thread_roots = []
+            return False
 
         for thread_root in thread_roots:
             if is_shutting_down():
-                return
+                return False
 
             thread_id = thread_root.event_id.strip()
             if not thread_id:
@@ -619,6 +619,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             threads_failed=threads_failed,
             elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
         )
+        return True
 
     async def get_thread_snapshot(
         self,
