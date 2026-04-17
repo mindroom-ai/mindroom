@@ -556,7 +556,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
     ) -> list[str] | None:
-        """Return startup-prewarm thread IDs using local recency first and /threads as a top-up."""
+        """Return startup-prewarm thread IDs using local recency first and /threads as a top-up.
+
+        Tuwunel does not currently order /threads by latest thread activity, so the local cache is the
+        best available recency signal for startup prewarm. /threads is only used to fill any remaining
+        slots when we have fewer than the target number of locally known threads.
+        """
         thread_ids = await self.runtime.event_cache.get_recent_room_thread_ids(
             room_id,
             limit=_STARTUP_PREWARM_THREAD_LIMIT,
@@ -578,6 +583,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error=str(exc),
                 local_thread_count=len(thread_ids),
             )
+            # Partial local prewarm is still useful here because /threads is only a best-effort top-up.
             return thread_ids or None
 
         for thread_root in thread_roots:
