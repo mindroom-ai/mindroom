@@ -37,6 +37,7 @@ dependencies = [
   "markdown-it-py>=4",
   "matrix-nio>=0.25",
   "mcp[cli]>=1.12.4",
+  "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   "openai",
   "pydantic>=2",
