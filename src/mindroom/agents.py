@@ -25,6 +25,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import MatrixID
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
@@ -1097,9 +1098,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_id = model_name
 
     # Add identity context to all agents using the unified template
+    matrix_id = MatrixID.from_agent(
+        agent_name,
+        config.get_domain(runtime_paths),
+        runtime_paths,
+    ).full_id
     identity_context = agent_prompts.AGENT_IDENTITY_CONTEXT.format(
         display_name=agent_config.display_name,
-        agent_name=agent_name,
+        matrix_id=matrix_id,
         model_provider=model_provider,
         model_id=model_id,
     )
