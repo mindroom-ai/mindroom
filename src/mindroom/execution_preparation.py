@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
-from xml.sax.saxutils import escape as xml_escape
 from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from mindroom.constants import (
@@ -100,9 +99,12 @@ def build_prompt_with_thread_history(
 ) -> str:
     """Build a prompt with thread history context when available.
 
-    History is rendered as XML so the model can unambiguously attribute each
-    message to its sender even when bodies contain colons, newlines, or
-    quoted log lines that would otherwise look like a new sender prefix.
+    History is rendered inside a <conversation> block as <msg from="..."> tags
+    so the model can unambiguously attribute each message even when bodies
+    contain colons, newlines, or quoted log lines. Bodies are passed through
+    verbatim (preserving code, markdown, and special characters); the only
+    transformation is neutralizing a literal "</msg>" sequence so it cannot
+    prematurely close the wrapper.
     """
     if not thread_history:
         return prompt
@@ -119,7 +121,8 @@ def build_prompt_with_thread_history(
             if missing_sender_label is None:
                 continue
             sender = missing_sender_label
-        context_lines.append(f"<msg from={xml_quoteattr(sender)}>{xml_escape(body)}</msg>")
+        safe_body = body.replace("</msg>", "<\\/msg>")
+        context_lines.append(f"<msg from={xml_quoteattr(sender)}>{safe_body}</msg>")
     if not context_lines:
         return prompt
     context = "<conversation>\n" + "\n".join(context_lines) + "\n</conversation>"
