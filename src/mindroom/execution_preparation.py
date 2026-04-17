@@ -87,6 +87,12 @@ class PreparedExecutionContext:
     compaction_outcomes: list[CompactionOutcome]
 
 
+def _wrap_msg_body(sender: str, body: str) -> str:
+    """Render one message as a <msg from="..."> tag with verbatim body."""
+    safe_body = body.replace("</msg>", "<\\/msg>")
+    return f"<msg from={xml_quoteattr(sender)}>{safe_body}</msg>"
+
+
 def build_prompt_with_thread_history(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
@@ -96,6 +102,7 @@ def build_prompt_with_thread_history(
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
+    current_sender: str | None = None,
 ) -> str:
     """Build a prompt with thread history context when available.
 
@@ -105,8 +112,15 @@ def build_prompt_with_thread_history(
     verbatim (preserving code, markdown, and special characters); the only
     transformation is neutralizing a literal "</msg>" sequence so it cannot
     prematurely close the wrapper.
+
+    When ``current_sender`` is provided, the current ``prompt`` is wrapped in
+    the same <msg from="..."> tag so the model can also attribute the latest
+    message — useful in multi-user threads where the sender of the current
+    turn may differ from the senders of prior unseen messages.
     """
     if not thread_history:
+        if current_sender:
+            return f"{prompt_intro}{_wrap_msg_body(current_sender, prompt)}"
         return prompt
     messages = thread_history[-max_messages:] if max_messages is not None else thread_history
     context_lines: list[str] = []
@@ -121,12 +135,14 @@ def build_prompt_with_thread_history(
             if missing_sender_label is None:
                 continue
             sender = missing_sender_label
-        safe_body = body.replace("</msg>", "<\\/msg>")
-        context_lines.append(f"<msg from={xml_quoteattr(sender)}>{safe_body}</msg>")
+        context_lines.append(_wrap_msg_body(sender, body))
     if not context_lines:
+        if current_sender:
+            return f"{prompt_intro}{_wrap_msg_body(current_sender, prompt)}"
         return prompt
     context = "<conversation>\n" + "\n".join(context_lines) + "\n</conversation>"
-    return f"{header}\n{context}\n\n{prompt_intro}{prompt}"
+    current_block = _wrap_msg_body(current_sender, prompt) if current_sender else prompt
+    return f"{header}\n{context}\n\n{prompt_intro}{current_block}"
 
 
 def _classify_partial_reply(
@@ -241,6 +257,7 @@ def build_prompt_with_unseen_thread_context(
     current_event_id: str | None,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
+    current_sender_id: str | None = None,
 ) -> tuple[str, list[str]]:
     """Prepend unseen thread messages and return their persisted event ids."""
     if not current_event_id or not thread_history:
@@ -257,6 +274,7 @@ def build_prompt_with_unseen_thread_context(
         prompt,
         unseen_messages,
         partial_reply_kinds=partial_reply_kinds,
+        current_sender_id=current_sender_id,
     )
     return prompt_with_unseen, _get_unseen_event_ids_for_metadata(
         unseen_messages,
@@ -269,14 +287,22 @@ def _build_prompt_with_unseen(
     unseen_messages: list[ResolvedVisibleMessage],
     *,
     partial_reply_kinds: set[_PartialReplyKind] | None,
+    current_sender_id: str | None = None,
 ) -> str:
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:
+        if current_sender_id:
+            return build_prompt_with_thread_history(
+                prompt,
+                None,
+                current_sender=current_sender_id,
+            )
         return prompt
     return build_prompt_with_thread_history(
         prompt,
         unseen_messages,
         header=_build_unseen_messages_header(partial_reply_kinds or set()),
+        current_sender=current_sender_id,
     )
 
 
@@ -296,6 +322,7 @@ def _build_initial_unseen_context(
     current_event_id: str,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
+    current_sender_id: str | None,
 ) -> tuple[str, list[str]]:
     return build_prompt_with_unseen_thread_context(
         prompt,
@@ -304,6 +331,7 @@ def _build_initial_unseen_context(
         current_event_id=current_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
     )
 
 
@@ -316,6 +344,7 @@ def _build_final_unseen_context(
     current_event_id: str,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
+    current_sender_id: str | None,
 ) -> tuple[str, list[str]]:
     return build_prompt_with_unseen_thread_context(
         prompt,
@@ -324,6 +353,7 @@ def _build_final_unseen_context(
         current_event_id=current_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
     )
 
 
@@ -350,6 +380,7 @@ async def _prepare_execution_context_common(
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
+    current_sender_id: str | None,
     config: Config,
     prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str, str | None], int],
@@ -369,6 +400,7 @@ async def _prepare_execution_context_common(
             current_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
+            current_sender_id=current_sender_id,
         )
 
     prepared_scope_history = await prepare_scope_history_fn(
@@ -384,6 +416,7 @@ async def _prepare_execution_context_common(
             current_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
+            current_sender_id=current_sender_id,
         )
     else:
         final_prompt = prompt
@@ -423,6 +456,7 @@ async def prepare_agent_execution_context(
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     compaction_outcomes_collector: list[CompactionOutcome] | None,
+    current_sender_id: str | None = None,
     timing_scope: str | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
@@ -434,6 +468,7 @@ async def prepare_agent_execution_context(
         else build_prompt_with_thread_history(
             prompt,
             thread_history,
+            current_sender=current_sender_id,
         )
     )
     runtime_model = config.resolve_runtime_model(
@@ -472,6 +507,7 @@ async def prepare_agent_execution_context(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender,
+        current_sender_id=current_sender_id,
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=lambda prepared_prompt, replay_fallback_prompt: estimate_preparation_static_tokens(
@@ -499,6 +535,7 @@ async def prepare_bound_team_execution_context(
     reply_to_event_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
+    current_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
@@ -529,6 +566,7 @@ async def prepare_bound_team_execution_context(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=lambda prepared_prompt,

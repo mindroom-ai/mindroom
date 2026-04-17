@@ -1292,6 +1292,7 @@ async def prepare_materialized_team_execution(
     configured_team_name: str | None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    current_sender_id: str | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
     if system_enrichment_items:
@@ -1317,6 +1318,7 @@ async def prepare_materialized_team_execution(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
         compaction_outcomes_collector=compaction_outcomes_collector,
     )
     if prepared_execution.replay_plan is not None:
@@ -1406,6 +1408,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 max_messages=30,
                 max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
                 missing_sender_label="Unknown",
+                current_sender=user_id,
             )
             team = build_materialized_team_instance(
                 requested_agent_names=team_members.requested_agent_names,
@@ -1434,6 +1437,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 configured_team_name=configured_team_name,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                current_sender_id=user_id,
             )
             prompt = prepared_execution.prepared_prompt
             run_metadata = prepared_execution.run_metadata
@@ -1705,6 +1709,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 max_messages=30,
                 max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
                 missing_sender_label="Unknown",
+                current_sender=user_id,
             )
             team = build_materialized_team_instance(
                 requested_agent_names=team_members.requested_agent_names,
@@ -1733,6 +1738,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 configured_team_name=configured_team_name,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                current_sender_id=user_id,
             )
             prepared_prompt = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids

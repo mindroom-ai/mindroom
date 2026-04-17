@@ -988,6 +988,7 @@ async def _prepare_agent_and_prompt(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    current_sender_id: str | None = None,
     timing_scope: str | None = None,
 ) -> tuple[Agent, str, list[str], PreparedHistoryState]:
     """Prepare agent and full prompt for AI processing.
@@ -1050,6 +1051,7 @@ async def _prepare_agent_and_prompt(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        current_sender_id=current_sender_id,
         timing_scope=timing_scope,
     )
     prepared_history = PreparedHistoryState(
@@ -1199,6 +1201,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
+                    current_sender_id=user_id,
                     timing_scope=timing_scope,
                 )
                 if pipeline_timing is not None:
@@ -1524,6 +1527,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
+                    current_sender_id=user_id,
                     timing_scope=timing_scope,
                 )
                 if pipeline_timing is not None:
