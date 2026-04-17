@@ -11,7 +11,7 @@ from agno.models.message import Message, MessageMetrics
 
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
-from mindroom.llm_request_logging import install_llm_request_logging
+from mindroom.llm_request_logging import bind_llm_request_log_context, install_llm_request_logging
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -75,18 +75,56 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
     ]
     assistant_message = Message(role="assistant")
 
-    result = await model.ainvoke(messages=messages, assistant_message=assistant_message, tools=[{"name": "search"}])
+    with bind_llm_request_log_context(
+        session_id="session-123",
+        room_id="!room:example.com",
+        thread_id="$thread:example.com",
+        reply_to_event_id="$reply:example.com",
+        current_turn_prompt="try now",
+        model_prompt="try now\n\nbe explicit",
+        full_prompt="system\n\nuser: try now",
+        source_event_ids=["$reply:example.com", "$coalesced:example.com"],
+        source_event_prompts={"$coalesced:example.com": "older prompt"},
+    ):
+        result = await model.ainvoke(
+            messages=messages,
+            assistant_message=assistant_message,
+            tools=[{"name": "search"}],
+        )
     assert result == {"status": "ok"}
 
-    streamed = [
-        chunk async for chunk in model.ainvoke_stream(messages=messages, assistant_message=assistant_message, tools=[])
-    ]
+    with bind_llm_request_log_context(
+        session_id="session-123",
+        room_id="!room:example.com",
+        thread_id="$thread:example.com",
+        reply_to_event_id="$reply:example.com",
+        current_turn_prompt="try now",
+        model_prompt="try now\n\nbe explicit",
+        full_prompt="system\n\nuser: try now",
+        source_event_ids=["$reply:example.com", "$coalesced:example.com"],
+        source_event_prompts={"$coalesced:example.com": "older prompt"},
+    ):
+        stream = model.ainvoke_stream(
+            messages=messages,
+            assistant_message=assistant_message,
+            tools=[],
+        )
+    streamed = [chunk async for chunk in stream]
     assert streamed == [{"status": "ok"}]
 
     entries = _read_log_entries(tmp_path)
     assert len(entries) == 2
     assert entries[0]["agent_name"] == "assistant"
     assert entries[0]["model_id"] == "test-model"
+    assert entries[0]["session_id"] == "session-123"
+    assert entries[0]["room_id"] == "!room:example.com"
+    assert entries[0]["thread_id"] == "$thread:example.com"
+    assert entries[0]["reply_to_event_id"] == "$reply:example.com"
+    assert entries[0]["current_turn_prompt"] == "try now"
+    assert entries[0]["model_prompt"] == "try now\n\nbe explicit"
+    assert entries[0]["full_prompt"] == "system\n\nuser: try now"
+    assert entries[0]["source_event_ids"] == ["$reply:example.com", "$coalesced:example.com"]
+    assert entries[0]["source_event_prompts"] == {"$coalesced:example.com": "older prompt"}
     assert entries[0]["system_prompt"] == "s" * 600
     assert entries[0]["messages"][0]["role"] == "system"
     assert entries[0]["messages"][0]["content"] == "s" * 600
@@ -105,6 +143,8 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
     assert entries[1]["messages"][0]["created_at"] == 111
     assert entries[1]["messages"][1]["created_at"] == 222
     assert entries[1]["messages"][1]["metrics"]["input_tokens"] == 2
+    assert entries[1]["thread_id"] == "$thread:example.com"
+    assert entries[1]["reply_to_event_id"] == "$reply:example.com"
     assert entries[1]["tools"] == []
     assert entries[1]["tool_count"] == 0
 

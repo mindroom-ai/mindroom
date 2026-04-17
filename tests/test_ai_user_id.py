@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from contextvars import Context
 from copy import deepcopy
@@ -14,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.db.base import SessionType
 from agno.media import File
+from agno.models.message import Message
 from agno.models.metrics import Metrics
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
@@ -39,7 +41,7 @@ from mindroom.ai import (
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -65,6 +67,7 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
@@ -354,6 +357,7 @@ def _response_request(
     reply_to_event_id: str = "$user_msg",
     thread_id: str | None = None,
     prompt: str = "Hello",
+    model_prompt: str | None = None,
     user_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
@@ -363,6 +367,7 @@ def _response_request(
         thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
+        model_prompt=model_prompt,
         user_id=user_id,
     )
 
@@ -753,6 +758,47 @@ async def test_send_skill_command_response_uses_target_agent_storage_for_session
         "started:agent:general:general:!test:localhost:$thread-root:$thread-root",
         "send:Skill response",
     ]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_passes_current_and_model_prompt_to_ai(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should preserve raw and expanded prompt layers separately."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai:
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.send_text = AsyncMock(return_value="$skill-reply")
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["prompt"] == "Use demo skill"
+            assert kwargs["model_prompt"] != "Use demo skill"
+            assert "Use demo skill" in kwargs["model_prompt"]
+            return "Skill response"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
 
 
 @pytest.mark.asyncio
@@ -1232,6 +1278,160 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
         "deliver:Hello!",
         "started:!test:localhost:$thread-root:$thread-root",
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_context(
+    tmp_path: Path,
+) -> None:
+    """Non-streaming AI calls should receive the resolved thread root, not the raw request thread id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["thread_id"] == "$resolved-thread"
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        request = replace(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
+            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+        )
+        await coordinator.process_and_respond(request)
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logging_context(
+    tmp_path: Path,
+) -> None:
+    """Streaming AI calls should receive the resolved thread root, not the raw request thread id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            assert kwargs["thread_id"] == "$resolved-thread"
+
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Hello!"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        request = replace(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
+            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+        )
+        await coordinator.process_and_respond_streaming(request)
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_passes_current_and_model_prompt_to_ai(
+    tmp_path: Path,
+) -> None:
+    """Non-streaming AI calls should preserve raw and expanded prompt layers separately."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["prompt"] == "Hello"
+            assert kwargs["model_prompt"] == "Hello with context"
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        await coordinator.process_and_respond(
+            _response_request(
+                prompt="Hello",
+                model_prompt="Hello with context",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_passes_current_and_model_prompt_to_ai(
+    tmp_path: Path,
+) -> None:
+    """Streaming AI calls should preserve raw and expanded prompt layers separately."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            assert kwargs["prompt"] == "Hello"
+            assert kwargs["model_prompt"] == "Hello with context"
+
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Hello!"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        await coordinator.process_and_respond_streaming(
+            _response_request(
+                prompt="Hello",
+                model_prompt="Hello with context",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -2428,6 +2628,82 @@ class TestUserIdPassthrough:
         assert "Inline media unavailable for this model" in second_call.args[0]
 
     @pytest.mark.asyncio
+    async def test_ai_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
+        """Non-streaming retries should log the actual prompt sent on each attempt."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Recovered response"
+        mock_run_output.tools = None
+        mock_agent.arun = AsyncMock(
+            side_effect=[
+                Exception(
+                    "litellm.BadRequestError: invalid_request_error: "
+                    "document.source.base64.media_type: Input should be 'application/pdf'",
+                ),
+                mock_run_output,
+            ],
+        )
+
+        prepared_prompt = "prepared prompt"
+        logged_contexts: list[dict[str, object]] = []
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        def fake_build_llm_request_log_context(**kwargs: object) -> dict[str, object]:
+            logged_contexts.append(dict(kwargs))
+            return {}
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.build_llm_request_log_context", side_effect=fake_build_llm_request_log_context),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt=prepared_prompt)
+            response = await ai_response(
+                agent_name="general",
+                prompt="raw prompt",
+                model_prompt="expanded prompt",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                media=MediaInputs(files=[document_file]),
+            )
+
+        assert response == "Recovered response"
+        mock_prepare.assert_awaited_once()
+        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert logged_contexts == [
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": prepared_prompt,
+                "metadata": None,
+            },
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
+                "metadata": None,
+            },
+        ]
+
+    @pytest.mark.asyncio
     async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
         """Inline-media retries must use a fresh Agno run_id after an errored run output."""
         mock_agent = MagicMock()
@@ -2526,6 +2802,175 @@ class TestUserIdPassthrough:
         assert list(second_call.kwargs["files"]) == []
         assert "Inline media unavailable for this model" in second_call.args[0]
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
+        """Streaming retries should log the actual prompt sent on each attempt."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(
+                content=(
+                    "litellm.BadRequestError: invalid_request_error: "
+                    "document.source.base64.media_type: Input should be 'application/pdf'"
+                ),
+            )
+
+        async def successful_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Recovered stream")
+
+        mock_agent.arun = MagicMock(side_effect=[failing_stream(), successful_stream()])
+
+        prepared_prompt = "prepared prompt"
+        logged_contexts: list[dict[str, object]] = []
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        def fake_build_llm_request_log_context(**kwargs: object) -> dict[str, object]:
+            logged_contexts.append(dict(kwargs))
+            return {}
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.build_llm_request_log_context", side_effect=fake_build_llm_request_log_context),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt=prepared_prompt)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="raw prompt",
+                    model_prompt="expanded prompt",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    media=MediaInputs(files=[document_file]),
+                )
+            ]
+
+        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+        mock_prepare.assert_awaited_once()
+        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert logged_contexts == [
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": prepared_prompt,
+                "metadata": None,
+            },
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
+                "metadata": None,
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming request logs must keep the bound context until the deferred model call runs."""
+
+        class _DeferredLoggingModel:
+            def __init__(self) -> None:
+                self.id = "test-model"
+                self.system_prompt = None
+                self.temperature = 0.7
+                self.client = None
+                self.async_client = None
+
+            async def ainvoke(self, *_args: object, **_kwargs: object) -> dict[str, str]:
+                return {"status": "ok"}
+
+            async def ainvoke_stream(
+                self,
+                *_args: object,
+                **_kwargs: object,
+            ) -> AsyncIterator[dict[str, str]]:
+                yield {"status": "ok"}
+
+        class _DeferredLoggingAgent:
+            def __init__(self, model: _DeferredLoggingModel) -> None:
+                self.model = model
+                self.name = "GeneralAgent"
+                self.add_history_to_context = False
+                self.db = None
+                self.learning = None
+
+            async def arun(self, prompt: str, **_kwargs: object) -> AsyncIterator[object]:
+                async for _chunk in self.model.ainvoke_stream(
+                    messages=[Message(role="user", content=prompt)],
+                    assistant_message=Message(role="assistant"),
+                    tools=[],
+                ):
+                    pass
+                yield RunContentEvent(content="Deferred stream")
+
+        prepared_prompt = "prepared prompt"
+        model = _DeferredLoggingModel()
+        install_llm_request_logging(
+            model,
+            agent_name="general",
+            debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+            default_log_dir=tmp_path / "unused",
+        )
+        agent = _DeferredLoggingAgent(model)
+        config = _config().model_copy(
+            update={
+                "debug": DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+            },
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="raw prompt",
+                    model_prompt="expanded prompt",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                    room_id="!room:example.com",
+                    thread_id="$thread:example.com",
+                    reply_to_event_id="$reply:example.com",
+                )
+            ]
+
+        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Deferred stream" for chunk in chunks)
+
+        log_files = list(tmp_path.glob("llm-requests-*.jsonl"))
+        assert len(log_files) == 1
+        entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
+        assert len(entries) == 1
+        assert entries[0]["session_id"] == "session1"
+        assert entries[0]["room_id"] == "!room:example.com"
+        assert entries[0]["thread_id"] == "$thread:example.com"
+        assert entries[0]["reply_to_event_id"] == "$reply:example.com"
+        assert entries[0]["current_turn_prompt"] == "raw prompt"
+        assert entries[0]["model_prompt"] == "expanded prompt"
+        assert entries[0]["full_prompt"] == prepared_prompt
+        assert entries[0]["messages"][0]["role"] == "user"
+        assert entries[0]["messages"][0]["content"] == prepared_prompt
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:
