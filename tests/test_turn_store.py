@@ -70,6 +70,49 @@ def test_turn_store_reuses_reserved_response_transaction_id_across_reload(tmp_pa
     assert turn_record.completed is False
 
 
+def test_turn_store_replays_pending_inbound_claims_until_turn_completes(tmp_path: Path) -> None:
+    """Pending inbound claims should survive reload and disappear after terminal completion."""
+    tracking_path = tmp_path / "tracking"
+    deps = TurnStoreDeps(
+        agent_name="agent",
+        tracking_base_path=tracking_path,
+        state_writer=MagicMock(),
+        resolver=MagicMock(),
+        tool_runtime=MagicMock(),
+    )
+    store = TurnStore(deps)
+    event_source = {
+        "type": "m.room.message",
+        "event_id": "$event",
+        "sender": "@user:example.com",
+        "content": {
+            "msgtype": "m.text",
+            "body": "hello",
+        },
+    }
+
+    store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source)
+
+    reloaded_store = TurnStore(deps)
+    pending_replays = reloaded_store.pending_inbound_replays()
+
+    assert len(pending_replays) == 1
+    assert pending_replays[0].room_id == "!room:example.com"
+    assert pending_replays[0].source_event_ids == ("$event",)
+    assert pending_replays[0].event_source == event_source
+    assert pending_replays[0].response_transaction_id is None
+
+    pending_response = reloaded_store.reserve_pending_response(HandledTurnState.from_source_event_id("$event"))
+    pending_after_reservation = reloaded_store.pending_inbound_replays()
+
+    assert len(pending_after_reservation) == 1
+    assert pending_after_reservation[0].response_transaction_id == pending_response.response_transaction_id
+
+    reloaded_store.record_turn(HandledTurnState.from_source_event_id("$event", response_event_id="$response"))
+
+    assert reloaded_store.pending_inbound_replays() == []
+
+
 def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:
     """HandledTurnLedger imports should stay isolated to TurnStore in production code."""
     src_root = Path(__file__).resolve().parents[1] / "src" / "mindroom"

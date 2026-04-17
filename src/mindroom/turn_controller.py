@@ -1214,6 +1214,49 @@ class TurnController:
                 ),
             )
 
+    async def prepare_sync_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
+        """Claim one sync-delivered text event durably before long-running processing."""
+        event_info = EventInfo.from_event(event.source)
+        if event_info.is_edit:
+            return True
+        if not isinstance(event.body, str):
+            return False
+        event_content = event.source.get("content") if isinstance(event.source, dict) else None
+        if isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
+            STREAM_STATUS_PENDING,
+            STREAM_STATUS_STREAMING,
+        }:
+            return False
+
+        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=False)
+        if prechecked_event is None:
+            return False
+        ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+        if await self._should_skip_router_before_shared_ingress_work(
+            room,
+            prechecked_event.event,
+            requester_user_id=prechecked_event.requester_user_id,
+            thread_id=ingress_thread_id,
+        ):
+            self.deps.logger.debug(
+                "skip_router_shared_ingress_work",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                thread_id=ingress_thread_id,
+            )
+            return False
+        if isinstance(event.source, dict):
+            self.deps.turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source)
+        return True
+
+    async def prepare_sync_media_event(self, room: nio.MatrixRoom, event: _MediaDispatchEvent) -> bool:
+        """Claim one sync-delivered media event durably before long-running processing."""
+        if self._precheck_dispatch_event(room, event) is None:
+            return False
+        if isinstance(event.source, dict):
+            self.deps.turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source)
+        return True
+
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one inbound text event."""
         async with self.deps.resolver.turn_thread_cache_scope():

@@ -917,10 +917,18 @@ class MultiAgentOrchestrator:
         self,
         interrupted_threads: list[InterruptedThread],
         config: Config,
+        *,
+        skip_target_event_ids: set[str] | None = None,
     ) -> None:
         """Queue visible Matrix resume relays from the router."""
         if not config.defaults.auto_resume_after_restart or not interrupted_threads:
             return
+        if skip_target_event_ids:
+            interrupted_threads = [
+                thread for thread in interrupted_threads if thread.target_event_id not in skip_target_event_ids
+            ]
+            if not interrupted_threads:
+                return
         router_bot = self._router_bot()
         if router_bot is None or router_bot.client is None:
             logger.warning("Auto-resume after restart skipped because the router client is unavailable")
@@ -938,6 +946,31 @@ class MultiAgentOrchestrator:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
+
+    async def _replay_pending_inbound_turns_after_restart(
+        self,
+        bots: list[AgentBot | TeamBot],
+    ) -> set[str]:
+        """Schedule startup replays for durable inbound claims left incomplete before restart."""
+        replayed_source_event_ids: set[str] = set()
+        replayed_count = 0
+        for bot in bots:
+            if bot.client is None:
+                continue
+            try:
+                bot_replayed_source_event_ids = await bot.replay_pending_inbound_turns()
+            except Exception as exc:
+                logger.warning(
+                    "Could not replay pending inbound turns after restart (non-critical)",
+                    agent_name=bot.agent_name,
+                    error=str(exc),
+                )
+                continue
+            replayed_source_event_ids.update(bot_replayed_source_event_ids)
+            replayed_count += len(bot_replayed_source_event_ids)
+        if replayed_count > 0:
+            logger.info("Scheduled pending inbound turn replays after restart", count=replayed_count)
+        return replayed_source_event_ids
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
@@ -965,7 +998,15 @@ class MultiAgentOrchestrator:
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
         interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
-        await self._auto_resume_after_restart(interrupted_threads, config)
+        replayed_source_event_ids = await self._replay_pending_inbound_turns_after_restart(started_bots)
+        if replayed_source_event_ids:
+            await self._auto_resume_after_restart(
+                interrupted_threads,
+                config,
+                skip_target_event_ids=replayed_source_event_ids,
+            )
+        else:
+            await self._auto_resume_after_restart(interrupted_threads, config)
 
         self.running = True
 

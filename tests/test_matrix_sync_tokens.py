@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -60,6 +61,37 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
 
 def _token_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
     return tmp_path / "sync_tokens" / f"{agent_name}.token"
+
+
+def _message_event(
+    *,
+    room_id: str = "!room:localhost",
+    event_id: str = "$event:localhost",
+    body: str = "hello",
+) -> nio.RoomMessageText:
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": body,
+                "msgtype": "m.text",
+            },
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+        },
+    )
+    event.source = {
+        "type": "m.room.message",
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "room_id": room_id,
+        "content": {
+            "body": body,
+            "msgtype": "m.text",
+        },
+    }
+    return cast("nio.RoomMessageText", event)
 
 
 def test_load_sync_token_returns_none_when_missing(tmp_path: Path) -> None:
@@ -221,3 +253,60 @@ async def test_prepare_for_sync_shutdown_waits_for_pending_event_tasks_before_fl
         await shutdown_task
 
     assert load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"
+
+
+@pytest.mark.asyncio
+async def test_sync_checkpoint_flush_does_not_wait_for_background_message_processing_after_ingress_claim(
+    tmp_path: Path,
+) -> None:
+    """Sync checkpointing should unblock once the inbound turn is durably claimed."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _message_event()
+    gate = asyncio.Event()
+
+    async def slow_background_message(_room: nio.MatrixRoom, _event: nio.RoomMessageText) -> None:
+        await gate.wait()
+
+    try:
+        with (
+            patch.object(bot._turn_controller, "prepare_sync_text_event", AsyncMock(return_value=True)),
+            patch.object(bot, "_on_message", side_effect=slow_background_message),
+        ):
+            callback_task = asyncio.create_task(bot._on_sync_message(room, event))
+            bot._sync_checkpoint.register_event_task(callback_task)
+            bot._sync_checkpoint.note_sync_token("s_claimed")
+            await callback_task
+            flush_task = bot._sync_checkpoint.flush_task
+            assert flush_task is not None
+            await asyncio.gather(flush_task, return_exceptions=True)
+
+        assert load_sync_token(tmp_path, bot.agent_name) == "s_claimed"
+    finally:
+        gate.set()
+        await wait_for_background_tasks(owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+async def test_replay_pending_inbound_turns_schedules_saved_text_message_processing(tmp_path: Path) -> None:
+    """Startup replay should requeue pending inbound text turns from durable claims."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    event = _message_event(event_id="$replay:localhost")
+    bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=event.source)
+    gate = asyncio.Event()
+
+    async def slow_background_message(_room: nio.MatrixRoom, _event: nio.RoomMessageText) -> None:
+        await gate.wait()
+
+    try:
+        with patch.object(bot, "_on_message", side_effect=slow_background_message) as mock_on_message:
+            replayed_source_event_ids = await bot.replay_pending_inbound_turns()
+            await asyncio.sleep(0)
+
+        assert replayed_source_event_ids == {"$replay:localhost"}
+        mock_on_message.assert_awaited_once()
+    finally:
+        gate.set()
+        await wait_for_background_tasks(owner=bot._runtime_view)

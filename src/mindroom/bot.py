@@ -1063,7 +1063,7 @@ class AgentBot:
                 )
 
             add_sync_event_callback(self._on_invite, nio.InviteEvent)
-            add_sync_event_callback(self._on_message, nio.RoomMessageText)
+            add_sync_event_callback(self._on_sync_message, nio.RoomMessageText)
             add_sync_event_callback(self._on_redaction, nio.RedactionEvent)
             add_sync_event_callback(self._on_reaction, nio.ReactionEvent)
 
@@ -1078,7 +1078,7 @@ class AgentBot:
                 nio.RoomMessageAudio,
                 nio.RoomEncryptedAudio,
             ):
-                add_sync_event_callback(self._on_media_message, event_type)
+                add_sync_event_callback(self._on_sync_media_message, event_type)
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1271,6 +1271,15 @@ class AgentBot:
         """Delegate one flushed coalesced batch to the turn engine."""
         await self._turn_controller.handle_coalesced_batch(batch)
 
+    async def _on_sync_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+        """Claim sync-delivered text events durably, then finish processing in the background."""
+        if await self._turn_controller.prepare_sync_text_event(room, event):
+            create_background_task(
+                self._on_message(room, event),
+                name=f"sync_text_dispatch_{self.agent_name}",
+                owner=self._runtime_view,
+            )
+
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
         await self._turn_controller.handle_text_event(room, event)
@@ -1357,6 +1366,75 @@ class AgentBot:
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
         await self._turn_controller.handle_media_event(room, event)
+
+    async def _on_sync_media_message(
+        self,
+        room: nio.MatrixRoom,
+        event: _MediaDispatchEvent,
+    ) -> None:
+        """Claim sync-delivered media events durably, then finish processing in the background."""
+        if await self._turn_controller.prepare_sync_media_event(room, event):
+            create_background_task(
+                self._on_media_message(room, event),
+                name=f"sync_media_dispatch_{self.agent_name}",
+                owner=self._runtime_view,
+            )
+
+    async def replay_pending_inbound_turns(self) -> set[str]:
+        """Schedule durable startup replays for any inbound turns left incomplete."""
+        if self.client is None:
+            return set()
+        replayed_source_event_ids: set[str] = set()
+        own_user_id = self.agent_user.user_id
+        for pending_replay in self._turn_store.pending_inbound_replays():
+            try:
+                replay_event_source = dict(pending_replay.event_source)
+                replay_event_source.setdefault("origin_server_ts", 0)
+                parsed_event = nio.Event.parse_event(replay_event_source)
+            except Exception as exc:
+                self.logger.warning(
+                    "pending_inbound_replay_parse_failed",
+                    anchor_event_id=pending_replay.anchor_event_id,
+                    error=str(exc),
+                )
+                continue
+            room = self.client.rooms.get(
+                pending_replay.room_id,
+                nio.MatrixRoom(pending_replay.room_id, own_user_id),
+            )
+            if isinstance(parsed_event, nio.RoomMessageText):
+                create_background_task(
+                    self._on_message(room, parsed_event),
+                    name=f"startup_replay_text_{self.agent_name}",
+                    owner=self._runtime_view,
+                )
+            elif isinstance(
+                parsed_event,
+                (
+                    nio.RoomMessageImage,
+                    nio.RoomEncryptedImage,
+                    nio.RoomMessageFile,
+                    nio.RoomEncryptedFile,
+                    nio.RoomMessageVideo,
+                    nio.RoomEncryptedVideo,
+                    nio.RoomMessageAudio,
+                    nio.RoomEncryptedAudio,
+                ),
+            ):
+                create_background_task(
+                    self._on_media_message(room, parsed_event),
+                    name=f"startup_replay_media_{self.agent_name}",
+                    owner=self._runtime_view,
+                )
+            else:
+                self.logger.warning(
+                    "pending_inbound_replay_skipped",
+                    anchor_event_id=pending_replay.anchor_event_id,
+                    event_type=type(parsed_event).__name__,
+                )
+                continue
+            replayed_source_event_ids.update(pending_replay.source_event_ids)
+        return replayed_source_event_ids
 
     def _should_queue_follow_up_in_active_response_thread(
         self,

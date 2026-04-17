@@ -1943,7 +1943,7 @@ async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path
 
 @pytest.mark.asyncio
 async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: Path) -> None:
-    """Startup should clean stale streams and queue resumes before sync loops begin."""
+    """Startup should cleanup, replay pending claims, then queue resumes before sync loops begin."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
@@ -1980,6 +1980,10 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     async def _resume(_: list[InterruptedThread], __: Config) -> None:
         call_order.append("resume")
 
+    async def _replay(_: list[object]) -> set[str]:
+        call_order.append("replay")
+        return set()
+
     async def _knowledge(*_args: object, **_kwargs: object) -> None:
         call_order.append("knowledge")
 
@@ -1987,6 +1991,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", side_effect=_cleanup),
+        patch.object(orchestrator, "_replay_pending_inbound_turns_after_restart", side_effect=_replay),
         patch.object(orchestrator, "_auto_resume_after_restart", side_effect=_resume),
         patch.object(orchestrator, "_schedule_knowledge_refresh", side_effect=_knowledge),
         patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
@@ -1994,7 +1999,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     ):
         await orchestrator.start()
 
-    assert call_order == ["wait", "setup", "cleanup", "resume", "knowledge"]
+    assert call_order == ["wait", "setup", "cleanup", "replay", "resume", "knowledge"]
 
 
 @pytest.mark.asyncio
@@ -2033,6 +2038,44 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
     assert mock_auto_resume.await_args.args[1] == interrupted
     assert mock_auto_resume.await_args.kwargs["config"] == config
     assert mock_auto_resume.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_auto_resume_skips_threads_being_replayed(tmp_path: Path) -> None:
+    """Auto-resume should skip interrupted threads already covered by startup replay."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+
+    router_client = AsyncMock(spec=nio.AsyncClient)
+    router_bot = MagicMock()
+    router_bot.agent_name = ROUTER_AGENT_NAME
+    router_bot.client = router_client
+    router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$target",
+            partial_text="Half finished",
+            agent_name="test_agent",
+        ),
+    ]
+
+    with patch(
+        "mindroom.orchestrator.auto_resume_interrupted_threads",
+        new=AsyncMock(return_value=1),
+    ) as mock_auto_resume:
+        await orchestrator._auto_resume_after_restart(
+            interrupted,
+            config,
+            skip_target_event_ids={"$target"},
+        )
+
+    mock_auto_resume.assert_not_awaited()
 
 
 @pytest.mark.asyncio

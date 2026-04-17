@@ -12,7 +12,12 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import constants
 from mindroom.agents import get_agent_session, get_team_session, remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
+from mindroom.handled_turns import (
+    HandledTurnLedger,
+    HandledTurnRecord,
+    HandledTurnState,
+    PendingInboundClaim,
+)
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
@@ -41,6 +46,17 @@ class PendingResponseReservation:
     """Durable delivery state reserved before the first visible reply send."""
 
     response_transaction_id: str
+
+
+@dataclass(frozen=True)
+class PendingInboundReplay:
+    """Durable replay metadata for one not-yet-completed inbound turn."""
+
+    anchor_event_id: str
+    source_event_ids: tuple[str, ...]
+    room_id: str
+    event_source: dict[str, Any]
+    response_transaction_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,9 +154,28 @@ class TurnStore:
             response_transaction_id=self._ledger.reserve_response_transaction_id(handled_turn),
         )
 
+    def claim_pending_inbound(self, *, room_id: str, event_source: dict[str, Any]) -> None:
+        """Persist one replayable inbound claim before the turn enters long-running work."""
+        self._ledger.claim_pending_inbound(room_id=room_id, event_source=event_source)
+
+    def pending_inbound_replays(self) -> list[PendingInboundReplay]:
+        """Return replay metadata for incomplete inbound turns."""
+        return [self._pending_inbound_replay_from_claim(claim) for claim in self._ledger.pending_inbound_claims()]
+
     def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
         """Return the ledger-backed turn record for one source event when available."""
         return self._ledger.get_turn_record(source_event_id)
+
+    @staticmethod
+    def _pending_inbound_replay_from_claim(claim: PendingInboundClaim) -> PendingInboundReplay:
+        """Lift one ledger claim into the runtime-facing replay carrier."""
+        return PendingInboundReplay(
+            anchor_event_id=claim.anchor_event_id,
+            source_event_ids=claim.source_event_ids,
+            room_id=claim.room_id,
+            event_source=claim.event_source,
+            response_transaction_id=claim.response_transaction_id,
+        )
 
     def response_history_scope(
         self,
