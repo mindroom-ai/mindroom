@@ -2354,6 +2354,33 @@ class TestUserIdPassthrough:
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
+    async def test_ai_response_omits_current_sender_for_openai_compat_guidance(self, tmp_path: Path) -> None:
+        """OpenAI-compatible requests should not reinterpret request-body user as a Matrix sender."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                user_id="user-123",
+                include_openai_compat_guidance=True,
+            )
+
+        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
+        assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
         """Streaming replies should build agents against the orchestrator-owned config file."""
         config_path = tmp_path / "custom-config.yaml"
@@ -2383,6 +2410,36 @@ class TestUserIdPassthrough:
             ]
 
         assert mock_prepare.call_args.args[2].config_path == config_path
+        assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_omits_current_sender_for_openai_compat_guidance(self, tmp_path: Path) -> None:
+        """Streaming OpenAI-compatible requests should keep plain role-labeled prompt formatting."""
+        mock_agent = MagicMock()
+
+        async def _empty_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+
+        mock_agent.arun = MagicMock(return_value=_empty_stream())
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            _ = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    user_id="user-123",
+                    include_openai_compat_guidance=True,
+                )
+            ]
+
+        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
