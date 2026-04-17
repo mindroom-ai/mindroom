@@ -87,7 +87,7 @@ async def load_recent_room_thread_ids(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [str(row[0]) for row in rows if row and isinstance(row[0], str)]
+    return [str(row[0]) for row in rows]
 
 
 async def load_thread_cache_state_row(

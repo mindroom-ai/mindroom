@@ -71,6 +71,9 @@ __all__ = [
 ]
 
 
+_STARTUP_PREWARM_THREAD_LIMIT = 20
+
+
 class ConversationCacheProtocol(Protocol):
     """Conversation-data reads available to resolver and related callers."""
 
@@ -554,32 +557,34 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
     ) -> list[str] | None:
         """Return startup-prewarm thread IDs using local recency first and /threads as a top-up."""
-        thread_ids = await self.runtime.event_cache.get_recent_room_thread_ids(room_id, limit=20)
-        if len(thread_ids) >= 20:
+        thread_ids = await self.runtime.event_cache.get_recent_room_thread_ids(
+            room_id,
+            limit=_STARTUP_PREWARM_THREAD_LIMIT,
+        )
+        if len(thread_ids) >= _STARTUP_PREWARM_THREAD_LIMIT:
             return thread_ids
         try:
             thread_roots, _next_batch = await get_room_threads_page(
                 self._require_client(),
                 room_id,
-                limit=20,
+                limit=_STARTUP_PREWARM_THREAD_LIMIT,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if not thread_ids:
-                self.logger.warning(
-                    "startup_thread_prewarm_room_threads_failed",
-                    room_id=room_id,
-                    error=str(exc),
-                )
-                return None
-            return thread_ids
+            self.logger.warning(
+                "startup_thread_prewarm_room_threads_failed",
+                room_id=room_id,
+                error=str(exc),
+                local_thread_count=len(thread_ids),
+            )
+            return thread_ids if thread_ids else None
 
         for thread_root in thread_roots:
             thread_id = thread_root.event_id.strip()
             if thread_id and thread_id not in thread_ids:
                 thread_ids.append(thread_id)
-            if len(thread_ids) >= 20:
+            if len(thread_ids) >= _STARTUP_PREWARM_THREAD_LIMIT:
                 break
         return thread_ids
 

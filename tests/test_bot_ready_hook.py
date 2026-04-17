@@ -596,6 +596,46 @@ async def test_bot_ready_prefers_locally_recent_threads_for_startup_prewarm(tmp_
 
 
 @pytest.mark.asyncio
+async def test_bot_ready_falls_back_to_local_threads_when_threads_api_fails(tmp_path: Path) -> None:
+    """Startup prewarm should still warm local thread IDs when /threads errors but local cache has entries."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
+    bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+    bot.event_cache.get_recent_room_thread_ids.return_value = [
+        "$thread-local-a:localhost",
+        "$thread-local-b:localhost",
+    ]
+    bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm = AsyncMock(
+        return_value=thread_history_result([], is_full_history=False),
+    )
+    bot._conversation_cache.logger = MagicMock()
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch(
+            "mindroom.matrix.conversation_cache.get_room_threads_page",
+            new=AsyncMock(side_effect=RuntimeError("threads_api_unavailable")),
+        ),
+    ):
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert [
+        call.args
+        for call in bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm.await_args_list
+    ] == [
+        ("!room:localhost", "$thread-local-a:localhost"),
+        ("!room:localhost", "$thread-local-b:localhost"),
+    ]
+    bot._conversation_cache.logger.warning.assert_any_call(
+        "startup_thread_prewarm_room_threads_failed",
+        room_id="!room:localhost",
+        error="threads_api_unavailable",
+        local_thread_count=2,
+    )
+
+
+@pytest.mark.asyncio
 async def test_bot_ready_skips_threads_api_when_local_recent_cache_is_sufficient(tmp_path: Path) -> None:
     """Startup prewarm should avoid /threads when local cache already supplies the full prewarm set."""
     bot = _agent_bot(tmp_path)
@@ -817,6 +857,7 @@ async def test_room_thread_listing_failure_releases_claim_for_later_joined_bot(t
         "startup_thread_prewarm_room_threads_failed",
         room_id="!room:localhost",
         error="boom",
+        local_thread_count=0,
     )
     assert [
         call.args
