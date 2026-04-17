@@ -578,7 +578,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error=str(exc),
                 local_thread_count=len(thread_ids),
             )
-            return thread_ids if thread_ids else None
+            return thread_ids or None
 
         for thread_root in thread_roots:
             thread_id = thread_root.event_id.strip()
