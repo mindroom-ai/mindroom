@@ -104,6 +104,9 @@ class CommandHandlerContext:
     requester_user_id_for_event: Callable[[CommandEvent], str]
     build_message_target: Callable[..., MessageTarget]
     record_handled_turn: Callable[[HandledTurnState], None]
+    # Mutating commands use this before the irreversible side effect so
+    # startup replay prefers skipping the source event over rerunning it.
+    mark_command_non_replayable: Callable[[str], None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
     run_skill_command_tool: Callable[..., Awaitable[str]]
@@ -518,6 +521,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
+        # Scheduling mutates durable task state before the later chat reply.
+        context.mark_command_non_replayable(event.event_id)
 
         # Get mentioned agents from the command text
         mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
@@ -540,6 +545,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         )
 
     elif command.type == CommandType.CANCEL_SCHEDULE:
+        # Cancellation is side-effectful even if the later reply never makes it out.
+        context.mark_command_non_replayable(event.event_id)
         cancel_all = command.args.get("cancel_all", False)
 
         if cancel_all:
@@ -558,6 +565,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             )
 
     elif command.type == CommandType.EDIT_SCHEDULE:
+        # Editing a scheduled task must be at-most-once across restart replay.
+        context.mark_command_non_replayable(event.event_id)
         task_id = command.args["task_id"]
         full_text = command.args["full_text"]
         response_text = await edit_scheduled_task(
@@ -659,6 +668,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 elif not spec.user_invocable:
                     response_text = f"❌ Skill '{spec.name}' is not user-invocable."
                 elif spec.dispatch and spec.dispatch.kind == "tool":
+                    # Tool-dispatched skills can mutate external state before replying.
+                    context.mark_command_non_replayable(event.event_id)
                     response_text = await context.run_skill_command_tool(
                         agent_name=target_agent,
                         command_tool=spec.dispatch.tool_name,

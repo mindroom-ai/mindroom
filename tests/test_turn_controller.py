@@ -10,14 +10,18 @@ import pytest
 
 from mindroom import interactive
 from mindroom.bot import AgentBot
+from mindroom.commands.parsing import command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.handled_turns import HandledTurnState
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
+from mindroom.teams import TeamMode
+from mindroom.tool_system.skills import _SkillCommandDispatch, _SkillCommandSpec
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from tests.conftest import (
     bind_runtime_paths,
@@ -384,6 +388,180 @@ async def test_execute_command_skill_reply_reserves_transaction_id(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_schedule_command_marks_startup_owned_turn_handled_before_side_effects(
+    tmp_path: Path,
+) -> None:
+    """Mutating schedule commands should become non-replayable before the scheduler state changes."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"])},
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password="test_password",  # noqa: S106
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.agent_user.user_id)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "!schedule tomorrow remind me", "msgtype": "m.text"},
+            "event_id": "$schedule:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+        },
+    )
+    event.source = {
+        "content": {"body": "!schedule tomorrow remind me", "msgtype": "m.text"},
+        "event_id": "$schedule:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "room_id": room.room_id,
+    }
+    command = command_parser.parse(event.body)
+    assert command is not None
+
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(side_effect=RuntimeError("crash after schedule mutation"))
+    replace_turn_controller_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+        normalizer=bot._inbound_turn_normalizer,
+    )
+    assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
+
+    async def fake_schedule_task(**_kwargs: object) -> tuple[str | None, str]:
+        assert bot._turn_store.is_handled(event.event_id) is True
+        assert bot._turn_store.has_pending_inbound(event.event_id) is False
+        return ("task-1", "Scheduled")
+
+    with (
+        patch("mindroom.commands.handler.schedule_task", new=AsyncMock(side_effect=fake_schedule_task)),
+        pytest.raises(RuntimeError, match="crash after schedule mutation"),
+    ):
+        await bot._turn_controller._execute_command(
+            room,
+            event,
+            requester_user_id="@user:localhost",
+            command=command,
+        )
+
+    assert bot._turn_store.has_pending_inbound(event.event_id) is False
+    assert bot._turn_store.get_turn_record(event.event_id) is not None
+    assert bot._turn_store.pending_inbound_replays() == []
+    assert await bot.replay_pending_inbound_turns() == set()
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_command_marks_startup_owned_turn_handled_before_tool_side_effects(
+    tmp_path: Path,
+) -> None:
+    """Tool-dispatched skill commands should become non-replayable before the tool runs."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"], skills=["demo"])},
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password="test_password",  # noqa: S106
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.agent_user.user_id)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "!skill demo do it", "msgtype": "m.text"},
+            "event_id": "$skill-tool:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+        },
+    )
+    event.source = {
+        "content": {"body": "!skill demo do it", "msgtype": "m.text"},
+        "event_id": "$skill-tool:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "room_id": room.room_id,
+    }
+    command = command_parser.parse(event.body)
+    assert command is not None
+
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(side_effect=RuntimeError("crash after tool side effect"))
+    replace_turn_controller_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+        normalizer=bot._inbound_turn_normalizer,
+    )
+    assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
+
+    async def fake_run_skill_command_tool(**_kwargs: object) -> str:
+        assert bot._turn_store.is_handled(event.event_id) is True
+        assert bot._turn_store.has_pending_inbound(event.event_id) is False
+        return "Tool finished"
+
+    spec = _SkillCommandSpec(
+        name="demo",
+        description="Demo skill",
+        source_path=tmp_path / "skills" / "demo" / "SKILL.md",
+        user_invocable=True,
+        disable_model_invocation=False,
+        dispatch=_SkillCommandDispatch(tool_name="demo_tool"),
+    )
+
+    with (
+        patch("mindroom.commands.handler._resolve_skill_command_agent", return_value=("general", None)),
+        patch("mindroom.commands.handler.resolve_skill_command_spec", return_value=spec),
+        patch(
+            "mindroom.turn_controller._run_skill_command_tool",
+            new=AsyncMock(side_effect=fake_run_skill_command_tool),
+        ),
+        pytest.raises(RuntimeError, match="crash after tool side effect"),
+    ):
+        await bot._turn_controller._execute_command(
+            room,
+            event,
+            requester_user_id="@user:localhost",
+            command=command,
+        )
+
+    assert bot._turn_store.has_pending_inbound(event.event_id) is False
+    assert bot._turn_store.get_turn_record(event.event_id) is not None
+    assert bot._turn_store.pending_inbound_replays() == []
+    assert await bot.replay_pending_inbound_turns() == set()
+
+
+@pytest.mark.asyncio
 async def test_execute_response_action_records_pending_visible_response_event_before_completion(
     tmp_path: Path,
 ) -> None:
@@ -487,6 +665,94 @@ async def test_execute_response_action_records_pending_visible_response_event_be
     assert turn_record is not None
     assert turn_record.response_event_id == "$visible-anchor:localhost"
     assert turn_record.completed is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_response_action_does_not_auto_form_team_from_stale_mentions_in_multi_human_thread(
+    tmp_path: Path,
+) -> None:
+    """Multi-human threads still require a fresh mention before stale thread mentions can form a team."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                "research": AgentConfig(display_name="Research", rooms=["!test:localhost"]),
+                "writer": AgentConfig(display_name="Writer", rooms=["!test:localhost"]),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="General",
+            password="test_password",  # noqa: S106
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:localhost"
+    room.users = {
+        "@mindroom_general:localhost": MagicMock(),
+        "@mindroom_research:localhost": MagicMock(),
+        "@mindroom_writer:localhost": MagicMock(),
+        "@alice:localhost": MagicMock(),
+        "@bob:localhost": MagicMock(),
+    }
+
+    context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=True,
+        thread_id="$thread:localhost",
+        thread_history=[
+            ResolvedVisibleMessage(
+                sender="@alice:localhost",
+                body="Can the team help?",
+                timestamp=1000,
+                event_id="$earlier-mention:localhost",
+                content={
+                    "body": "Can the team help?",
+                    "msgtype": "m.text",
+                    "m.mentions": {
+                        "user_ids": [
+                            "@mindroom_general:localhost",
+                            "@mindroom_research:localhost",
+                            "@mindroom_writer:localhost",
+                        ],
+                    },
+                },
+                thread_id="$thread:localhost",
+                latest_event_id="$earlier-mention:localhost",
+            ),
+            ResolvedVisibleMessage(
+                sender="@bob:localhost",
+                body="I have the same question",
+                timestamp=1001,
+                event_id="$follow-up:localhost",
+                content={"body": "I have the same question", "msgtype": "m.text"},
+                thread_id="$thread:localhost",
+                latest_event_id="$follow-up:localhost",
+            ),
+        ],
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+
+    with patch("mindroom.teams._select_team_mode", new=AsyncMock(return_value=TeamMode.COLLABORATE)):
+        action = await bot._turn_policy.resolve_response_action(
+            context,
+            room,
+            "@bob:localhost",
+            "Any updates?",
+            False,
+        )
+
+    assert action.kind == "skip"
 
 
 @pytest.mark.asyncio

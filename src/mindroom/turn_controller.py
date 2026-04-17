@@ -748,6 +748,7 @@ class TurnController:
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
             record_handled_turn=self.deps.turn_store.record_turn,
+            mark_command_non_replayable=lambda event_id: self._mark_source_events_ignored((event_id,)),
             send_response=send_response,
             send_skill_command_response=send_skill_command_response,
             run_skill_command_tool=run_skill_command_tool,
