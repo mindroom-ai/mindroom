@@ -92,7 +92,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug",)
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "avatars")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -167,6 +167,29 @@ class StaticCompactionConfigSemantics:
     scope_label: str
     effective_enabled: bool
     authored_model: AuthoredOptionalModel
+
+
+class AvatarPromptsConfig(BaseModel):
+    """Optional prompt/style overrides for managed avatar generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    character_style: str | None = Field(default=None, description="Base style for agent and team avatars")
+    room_style: str | None = Field(default=None, description="Base style for room and space avatars")
+    agent_system_prompt: str | None = Field(default=None, description="Prompt template for agent avatars")
+    team_system_prompt: str | None = Field(default=None, description="Prompt template for team avatars")
+    room_system_prompt: str | None = Field(default=None, description="Prompt template for room and space avatars")
+
+
+class AvatarConfig(BaseModel):
+    """Managed avatar generation configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompts: AvatarPromptsConfig | None = Field(
+        default=None,
+        description="Optional prompt/style overrides for managed avatar generation",
+    )
 
 
 def _history_policy_from_limits(
@@ -365,6 +388,7 @@ class Config(BaseModel):
     )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
+    avatars: AvatarConfig = Field(default_factory=AvatarConfig, description="Managed avatar generation settings")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
