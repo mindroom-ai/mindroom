@@ -14,6 +14,7 @@ import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -60,30 +61,39 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
-_STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
-_TOOL_VALIDATION_SNAPSHOT_ENV = "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"
+
+
+def _startup_manifest_path_from_env() -> Path:
+    raw_path = os.environ.get(constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip()
+    if not raw_path:
+        msg = f"{constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV} must be set for sandbox runner startup."
+        raise RuntimeError(msg)
+    return Path(raw_path).expanduser()
+
+
+def _startup_manifest_from_env() -> dict[str, object]:
+    payload = json.loads(_startup_manifest_path_from_env().read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        msg = f"{constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV} must point to a JSON object."
+        raise TypeError(msg)
+    return payload
 
 
 def _startup_runtime_paths_from_env() -> RuntimePaths:
-    """Read the committed sandbox-runner runtime payload from startup env."""
-    raw_payload = os.environ.get(_STARTUP_RUNTIME_PATHS_ENV, "").strip()
-    if not raw_payload:
-        msg = f"{_STARTUP_RUNTIME_PATHS_ENV} must be set for sandbox runner startup."
-        raise RuntimeError(msg)
-    payload = json.loads(raw_payload)
-    if not isinstance(payload, dict):
-        msg = f"{_STARTUP_RUNTIME_PATHS_ENV} must contain a JSON object."
-        raise TypeError(msg)
-    if not isinstance(payload.get("process_env"), dict):
-        msg = f"{_STARTUP_RUNTIME_PATHS_ENV} is missing process_env."
-        raise TypeError(msg)
-    startup_runtime_paths = constants.deserialize_runtime_paths(payload)
+    """Read the committed sandbox-runner runtime payload from the startup manifest."""
+    startup_runtime_paths, _tool_validation_snapshot = constants.deserialize_startup_manifest(
+        _startup_manifest_from_env(),
+    )
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
         return startup_runtime_paths
     process_env = dict(startup_runtime_paths.process_env)
     process_env.update(
-        {key: value for key, value in os.environ.items() if key not in {_RUNNER_TOKEN_ENV, _STARTUP_RUNTIME_PATHS_ENV}},
+        {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {_RUNNER_TOKEN_ENV, constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV}
+        },
     )
     resolved_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=startup_runtime_paths.config_path,
@@ -107,11 +117,17 @@ def _startup_runner_token_from_env() -> str | None:
     return raw_token or None
 
 
-def _upstream_tool_validation_snapshot_from_env() -> dict[str, ToolValidationInfo]:
-    raw_payload = os.environ.get(_TOOL_VALIDATION_SNAPSHOT_ENV, "").strip()
-    if not raw_payload:
+def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str, ToolValidationInfo]:
+    startup_manifest_path = constants.sandbox_startup_manifest_path(runtime_paths.storage_root)
+    if not startup_manifest_path.exists():
         return {}
-    return deserialize_tool_validation_snapshot(json.loads(raw_payload))
+    startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
+        json.loads(startup_manifest_path.read_text(encoding="utf-8")),
+    )
+    if startup_runtime_paths.storage_root != runtime_paths.storage_root:
+        msg = "Sandbox startup manifest storage_root does not match runtime storage_root."
+        raise RuntimeError(msg)
+    return deserialize_tool_validation_snapshot(tool_validation_snapshot)
 
 
 def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
@@ -128,7 +144,7 @@ def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Co
     with runtime_paths.config_path.open() as f:
         data = yaml.safe_load(f) or {}
 
-    tool_validation_snapshot = _upstream_tool_validation_snapshot_from_env()
+    tool_validation_snapshot = _upstream_tool_validation_snapshot(runtime_paths)
     if not tool_validation_snapshot:
         return load_config(runtime_paths)
 

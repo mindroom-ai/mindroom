@@ -14,6 +14,7 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
+    sandbox_startup_manifest_path,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -43,6 +44,17 @@ _TEST_TOOL_VALIDATION_SNAPSHOT = {
         "runtime_loadable": True,
     },
 }
+
+
+def _load_startup_manifest(
+    backend: KubernetesWorkerBackend,
+    *,
+    worker_key: str,
+) -> dict[str, object]:
+    manifest_path = sandbox_startup_manifest_path(
+        backend.storage_root / f"workers/{worker_dir_name(worker_key)}",
+    )
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
 class _FakeApiError(Exception):
@@ -275,8 +287,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # 
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
-    assert "MINDROOM_RUNTIME_PATHS_JSON" in env_names
-    assert "MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON" in env_names
+    assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in env_names
     assert "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON" not in env_names
     assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" in env_names
     assert "VIRTUAL_ENV" in env_names
@@ -285,10 +296,14 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # 
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
-    validation_snapshot = json.loads(env_values["MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"])
+    manifest_path = env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"]
+    assert manifest_path is not None
+    startup_manifest = _load_startup_manifest(backend, worker_key=worker_key)
+    validation_snapshot = startup_manifest["tool_validation_snapshot"]
     assert validation_snapshot == _TEST_TOOL_VALIDATION_SNAPSHOT
     expected_dedicated_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
-    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    assert manifest_path == f"{expected_dedicated_root}/.runtime/startup_manifest.json"
+    committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
@@ -388,10 +403,9 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    deployment = apps_api.created_bodies[0]
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
     state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
     local_credentials_path = runtime_paths.storage_root / state_subpath / ".runtime" / credentials_path.name
 
@@ -432,7 +446,11 @@ def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
-    assert json.loads(env_values["MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON"]) == custom_snapshot
+    assert env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] is not None
+    assert (
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["tool_validation_snapshot"]
+        == custom_snapshot
+    )
 
 
 def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path: Path) -> None:
@@ -455,10 +473,9 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    deployment = apps_api.created_bodies[0]
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
 
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
@@ -501,10 +518,9 @@ def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    deployment = apps_api.created_bodies[0]
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
 
     assert committed_runtime.config_path == config_path.resolve()
 
