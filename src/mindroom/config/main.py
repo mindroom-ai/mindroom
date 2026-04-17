@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections import deque
 from dataclasses import dataclass
@@ -63,7 +62,7 @@ from mindroom.tool_system.metadata import (
     validate_authored_tool_entry_overrides,
 )
 from mindroom.tool_system.plugins import PluginValidationError
-from mindroom.tool_system.worker_routing import agent_state_root_path, unsupported_shared_only_integration_names
+from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
@@ -1684,8 +1683,7 @@ class Config(BaseModel):
         # Check which agents should be in this room
         for agent_name, agent_config in self.agents.items():
             resolved_rooms = set(resolve_room_aliases(agent_config.rooms, runtime_paths))
-            persisted_invited_rooms = self._load_persisted_invited_rooms(agent_name, runtime_paths)
-            if room_id in resolved_rooms or room_id in persisted_invited_rooms:
+            if room_id in resolved_rooms:
                 configured_bots.add(agent_username_localpart(agent_name, runtime_paths))
 
         # Check which teams should be in this room
@@ -1699,33 +1697,6 @@ class Config(BaseModel):
             configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
 
         return configured_bots
-
-    def _load_persisted_invited_rooms(
-        self,
-        agent_name: str,
-        runtime_paths: RuntimePaths,
-    ) -> set[str]:
-        """Return persisted invited rooms for one opted-in agent."""
-        if agent_name not in self.agents:
-            return set()
-        if not self.agents[agent_name].accept_invites:
-            return set()
-
-        path = agent_state_root_path(runtime_paths.storage_root, agent_name) / "invited_rooms.json"
-        if not path.exists():
-            return set()
-
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            logger.warning("failed_to_load_invited_rooms", agent_name=agent_name, path=str(path), exc_info=True)
-            return set()
-
-        if not isinstance(raw, list) or not all(isinstance(room_id, str) for room_id in raw):
-            logger.warning("invalid_invited_rooms_file", agent_name=agent_name, path=str(path))
-            return set()
-        return set(raw)
-
     def save_to_yaml(
         self,
         config_path: Path,

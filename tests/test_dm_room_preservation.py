@@ -15,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
@@ -268,6 +269,41 @@ class TestDMPreservationDuringCleanup:
             # Should only kick from configured room
             assert client.room_kick.call_count == 1
             assert client.room_kick.call_args[0][0] == "!configured:server"
+
+    async def test_cleanup_all_orphaned_bots_preserves_persisted_invited_room(self, tmp_path: Path) -> None:
+        """Persisted ad-hoc invited rooms should not be treated as orphaned during cleanup."""
+        client = AsyncMock()
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "agent": AgentConfig(
+                    display_name="Agent",
+                    role="Test agent",
+                ),
+            },
+        )
+        rp = runtime_paths_for(config)
+        invited_rooms_path = agent_state_root_path(rp.storage_root, "agent") / "invited_rooms.json"
+        invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+        invited_rooms_path.write_text('[\n  "!ad-hoc:server"\n]\n', encoding="utf-8")
+
+        with (
+            patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=["!ad-hoc:server"]),
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=["@mindroom_agent:server"],
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",
+                return_value={"mindroom_agent"},
+            ),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", new=AsyncMock(return_value=False)),
+        ):
+            client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
+            result = await cleanup_all_orphaned_bots(client, config, rp)
+
+        assert result == {}
+        client.room_kick.assert_not_called()
 
     async def test_orphaned_bot_cleanup_skips_root_space(self, tmp_path: Path) -> None:
         """Test that orphaned bot cleanup skips the root space room.
