@@ -6,6 +6,7 @@ codebase.
 """
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -311,6 +312,39 @@ def serialize_startup_manifest(
     }
 
 
+def startup_manifest_json(
+    runtime_paths: RuntimePaths,
+    *,
+    tool_validation_snapshot: Mapping[str, object] | None = None,
+    public_runtime: bool = False,
+) -> str:
+    """Return one deterministic JSON string for sandbox-runner startup state."""
+    return json.dumps(
+        serialize_startup_manifest(
+            runtime_paths,
+            tool_validation_snapshot=tool_validation_snapshot,
+            public_runtime=public_runtime,
+        ),
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def startup_manifest_sha256(
+    runtime_paths: RuntimePaths,
+    *,
+    tool_validation_snapshot: Mapping[str, object] | None = None,
+    public_runtime: bool = False,
+) -> str:
+    """Return one stable content hash for sandbox-runner startup state."""
+    payload = startup_manifest_json(
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
+        public_runtime=public_runtime,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def sandbox_startup_manifest_path(storage_root: Path) -> Path:
     """Return the canonical startup manifest path under one runtime root."""
     return storage_root / SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH
@@ -327,14 +361,10 @@ def write_startup_manifest(
     manifest_path = sandbox_startup_manifest_path(storage_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
-        json.dumps(
-            serialize_startup_manifest(
-                runtime_paths,
-                tool_validation_snapshot=tool_validation_snapshot,
-                public_runtime=public_runtime,
-            ),
-            separators=(",", ":"),
-            sort_keys=True,
+        startup_manifest_json(
+            runtime_paths,
+            tool_validation_snapshot=tool_validation_snapshot,
+            public_runtime=public_runtime,
         ),
         encoding="utf-8",
     )
