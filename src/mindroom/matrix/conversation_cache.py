@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -29,13 +31,14 @@ from mindroom.matrix.client import (
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
     fetch_thread_snapshot,
+    get_room_threads_page,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -529,6 +532,94 @@ class MatrixConversationCache(ConversationCacheProtocol):
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
         )
+
+    async def _refresh_dispatch_thread_snapshot_for_startup_prewarm(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult:
+        """Refresh one strict thread snapshot for advisory startup prewarm without the live read barrier."""
+        fetch_started_at = time.time()
+        return await fetch_dispatch_thread_snapshot(
+            self._require_client(),
+            room_id,
+            thread_id,
+            event_cache=self.runtime.event_cache,
+            runtime_started_at=self.runtime.runtime_started_at,
+            cache_write_guard_started_at=fetch_started_at,
+        )
+
+    async def prewarm_recent_room_threads(
+        self,
+        room_id: str,
+        *,
+        is_shutting_down: Callable[[], bool],
+    ) -> bool:
+        """Warm one room's recent thread roots and report whether the room-level pass finished."""
+        started_at = time.perf_counter()
+        threads_warmed = 0
+        threads_failed = 0
+
+        try:
+            thread_roots, _next_batch = await get_room_threads_page(
+                self._require_client(),
+                room_id,
+                limit=20,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                "startup_thread_prewarm_room_threads_failed",
+                room_id=room_id,
+                error=str(exc),
+            )
+            return False
+
+        for thread_root in thread_roots:
+            if is_shutting_down():
+                return False
+
+            thread_id = thread_root.event_id.strip()
+            if not thread_id:
+                threads_failed += 1
+                self.logger.warning(
+                    "startup_thread_prewarm_thread_failed",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    error="missing_thread_root_event_id",
+                )
+                await asyncio.sleep(0)
+                continue
+
+            try:
+                await self._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                    room_id,
+                    thread_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                threads_failed += 1
+                self.logger.warning(
+                    "startup_thread_prewarm_thread_failed",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    error=str(exc),
+                )
+            else:
+                threads_warmed += 1
+
+            await asyncio.sleep(0)
+
+        self.logger.info(
+            "startup_thread_prewarm_complete",
+            room_id=room_id,
+            threads_warmed=threads_warmed,
+            threads_failed=threads_failed,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+        )
+        return True
 
     async def get_thread_snapshot(
         self,

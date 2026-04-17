@@ -118,11 +118,6 @@ from .response_runner import (
     ResponseRunnerDeps,
     prepare_memory_and_model_context,
 )
-from .runtime_support import (
-    OwnedRuntimeSupport,
-    close_owned_runtime_support,
-    sync_owned_runtime_support,
-)
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -150,6 +145,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
@@ -317,7 +313,7 @@ class AgentBot:
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
-    _standalone_runtime_support: OwnedRuntimeSupport | None
+    _startup_thread_prewarm_task: asyncio.Task[None] | None
     _turn_controller: TurnController
 
     def __init__(
@@ -344,7 +340,6 @@ class AgentBot:
         self._first_sync_done = False
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
-        self._standalone_runtime_support = None
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -352,8 +347,10 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
+            startup_thread_prewarm_registry=None,
         )
         self._deferred_overdue_task_drain_task = None
+        self._startup_thread_prewarm_task = None
         self._init_runtime_components()
 
     def _init_runtime_components(self) -> None:
@@ -587,6 +584,20 @@ class AgentBot:
         self._runtime_view.event_cache_write_coordinator = value
 
     @property
+    def startup_thread_prewarm_registry(self) -> StartupThreadPrewarmRegistry:
+        """Return the shared startup thread-prewarm room-claim registry."""
+        registry = self._runtime_view.startup_thread_prewarm_registry
+        if registry is None:
+            msg = "Startup thread prewarm registry is not initialized for this bot runtime"
+            raise RuntimeError(msg)
+        return registry
+
+    @startup_thread_prewarm_registry.setter
+    def startup_thread_prewarm_registry(self, value: StartupThreadPrewarmRegistry | None) -> None:
+        """Update the shared startup thread-prewarm room-claim registry."""
+        self._runtime_view.startup_thread_prewarm_registry = value
+
+    @property
     def hook_registry(self) -> HookRegistry:
         """Return the currently active hook registry."""
         return self._hook_registry_state.registry
@@ -623,6 +634,73 @@ class AgentBot:
         if self.agent_name in self.config.teams:
             return "team"
         return "agent"
+
+    def _startup_thread_prewarm_enabled(self) -> bool:
+        """Return whether this runtime entity should prewarm recent thread snapshots on startup."""
+        if self.agent_name == ROUTER_AGENT_NAME:
+            return self.config.router.startup_thread_prewarm
+        if self.agent_name in self.config.teams:
+            return self.config.teams[self.agent_name].startup_thread_prewarm
+        return self.config.agents[self.agent_name].startup_thread_prewarm
+
+    def _maybe_start_startup_thread_prewarm(self) -> None:
+        """Start startup thread prewarm once the first sync is ready."""
+        if self.client is None or self._sync_shutting_down or not self._startup_thread_prewarm_enabled():
+            return
+
+        existing_task = self._startup_thread_prewarm_task
+        if existing_task is not None and not existing_task.done():
+            return
+
+        self._startup_thread_prewarm_task = create_background_task(
+            self._run_startup_thread_prewarm(),
+            name=f"startup_thread_prewarm_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
+    async def _get_startup_thread_prewarm_joined_rooms(self) -> list[str]:
+        """Return joined rooms for startup prewarm, failing open on lookup errors."""
+        client = self.client
+        assert client is not None
+        try:
+            joined_rooms = await get_joined_rooms(client)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._conversation_cache.logger.warning(
+                "startup_thread_prewarm_joined_rooms_failed",
+                error=str(exc),
+            )
+            return []
+        return joined_rooms or []
+
+    async def _prewarm_claimed_startup_thread_room(self, room_id: str) -> None:
+        """Prewarm one claimed room and release the claim unless the room-level pass finishes."""
+        try:
+            completed = await self._conversation_cache.prewarm_recent_room_threads(
+                room_id,
+                is_shutting_down=lambda: self._sync_shutting_down,
+            )
+        except asyncio.CancelledError:
+            await self.startup_thread_prewarm_registry.release(room_id)
+            raise
+        if not completed:
+            await self.startup_thread_prewarm_registry.release(room_id)
+
+    async def _run_startup_thread_prewarm(self) -> None:
+        """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
+        try:
+            joined_rooms = await self._get_startup_thread_prewarm_joined_rooms()
+            for room_id in joined_rooms:
+                if self._sync_shutting_down:
+                    return
+                if not await self.startup_thread_prewarm_registry.try_claim(room_id):
+                    continue
+                await self._prewarm_claimed_startup_thread_room(room_id)
+        finally:
+            current_task = asyncio.current_task()
+            if current_task is not None and self._startup_thread_prewarm_task is current_task:
+                self._startup_thread_prewarm_task = None
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
@@ -910,6 +988,7 @@ class AgentBot:
 
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            self._maybe_start_startup_thread_prewarm()
 
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
@@ -929,74 +1008,24 @@ class AgentBot:
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
 
-    async def _initialize_runtime_support_services(self) -> None:
-        """Initialize standalone runtime support services or accept a full injected pair."""
-        binding_state = self._runtime_support_binding_state()
-        if binding_state == "injected":
-            self._runtime_view.mark_runtime_started()
-            return
-        if binding_state == "mixed":
-            msg = self._partial_runtime_support_injection_error()
-            raise RuntimeError(msg)
-        self._runtime_view.mark_runtime_started()
-        support = await sync_owned_runtime_support(
-            self._standalone_runtime_support,
-            db_path=self.config.cache.resolve_db_path(self.runtime_paths),
-            logger=self.logger,
-            background_task_owner=self._runtime_view,
-            init_failure_reason_prefix="standalone_runtime_init_failed",
-            log_db_path_change=False,
-        )
-        self._standalone_runtime_support = support
-        self.event_cache = support.event_cache
-        self.event_cache_write_coordinator = support.event_cache_write_coordinator
-
-    async def _close_runtime_support_services(self) -> None:
-        """Close standalone-owned services and detach any injected shared support."""
-        binding_state = self._runtime_support_binding_state()
-        if binding_state == "mixed":
-            msg = self._partial_runtime_support_injection_error()
-            raise RuntimeError(msg)
-        if binding_state == "injected":
-            return
-        if binding_state == "uninitialized":
-            return
-        support = self._standalone_runtime_support
-        assert support is not None
-        await close_owned_runtime_support(support, logger=self.logger)
-        self.event_cache = None
-        self.event_cache_write_coordinator = None
-        self._standalone_runtime_support = None
-
-    def _runtime_support_binding_state(self) -> Literal["uninitialized", "standalone", "injected", "mixed"]:
-        """Classify whether runtime support is local, injected, or inconsistently mixed."""
-        runtime_event_cache = self._runtime_view.event_cache
-        runtime_coordinator = self._runtime_view.event_cache_write_coordinator
-        support = self._standalone_runtime_support
-        if support is None:
-            if runtime_event_cache is None and runtime_coordinator is None:
-                return "uninitialized"
-            if runtime_event_cache is not None and runtime_coordinator is not None:
-                return "injected"
-            return "mixed"
-        uses_standalone_event_cache = runtime_event_cache is support.event_cache
-        uses_standalone_coordinator = runtime_coordinator is support.event_cache_write_coordinator
-        if uses_standalone_event_cache and uses_standalone_coordinator:
-            return "standalone"
-        if not uses_standalone_event_cache and not uses_standalone_coordinator:
-            return "injected"
-        return "mixed"
-
     @staticmethod
-    def _partial_runtime_support_injection_error() -> str:
-        """Return the shared error text for invalid mixed runtime support injection."""
-        return "Runtime support services must be injected all together or not at all; partial injection is unsupported"
+    def _runtime_support_injection_error() -> str:
+        """Return the shared error text for missing runtime support injection."""
+        return (
+            "Runtime support services must be injected before startup; "
+            "AgentBot no longer supports standalone runtime support"
+        )
 
     def _validate_runtime_support_injection_contract_for_startup(self) -> None:
-        """Reject mixed runtime support injection before startup side effects begin."""
-        if self._runtime_support_binding_state() != "mixed":
+        """Reject startup unless the full injected runtime-support bundle is present."""
+        runtime = self._runtime_view
+        if (
+            runtime.event_cache is not None
+            and runtime.event_cache_write_coordinator is not None
+            and runtime.startup_thread_prewarm_registry is not None
+        ):
             return
-        raise PermanentMatrixStartupError(self._partial_runtime_support_injection_error())
+        raise PermanentMatrixStartupError(self._runtime_support_injection_error())
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
@@ -1009,7 +1038,7 @@ class AgentBot:
         )
         try:
             self._restore_saved_sync_token()
-            await self._initialize_runtime_support_services()
+            self._runtime_view.mark_runtime_started()
             await self._set_avatar_if_available()
             await self._set_presence_with_model_info()
             interactive.init_persistence(self.runtime_paths.storage_root)
@@ -1066,10 +1095,6 @@ class AgentBot:
         except Exception:
             client = self.client
             self.running = False
-            try:
-                await self._close_runtime_support_services()
-            except Exception:
-                self.logger.warning("Failed to clean up runtime support after startup failure", exc_info=True)
             self.client = None
             if client is not None:
                 try:
@@ -1152,7 +1177,6 @@ class AgentBot:
 
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
-            await self._close_runtime_support_services()
             await self.client.close()
         self.logger.info("Stopped agent bot")
 
@@ -1248,9 +1272,22 @@ class AgentBot:
 
         await asyncio.gather(drain_task, return_exceptions=True)
 
+    async def _cancel_startup_thread_prewarm(self) -> None:
+        """Cancel the startup thread prewarm task if it is still running."""
+        prewarm_task = self._startup_thread_prewarm_task
+        self._startup_thread_prewarm_task = None
+        if prewarm_task is None:
+            return
+
+        if not prewarm_task.done():
+            prewarm_task.cancel()
+
+        await asyncio.gather(prewarm_task, return_exceptions=True)
+
     async def prepare_for_sync_shutdown(self) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
+        await self._cancel_startup_thread_prewarm()
         await self._coalescing_gate.drain_all()
         self._persist_sync_token()
         if self.agent_name != ROUTER_AGENT_NAME:

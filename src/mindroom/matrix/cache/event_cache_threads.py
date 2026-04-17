@@ -245,6 +245,48 @@ async def replace_thread_locked(
     )
 
 
+def _thread_cache_state_changed_after(
+    cache_state_row: tuple[float | None, float | None, str | None, float | None, str | None] | None,
+    *,
+    fetch_started_at: float,
+) -> bool:
+    """Return whether this thread or room cache state changed after one fetch began."""
+    if cache_state_row is None:
+        return False
+    validated_at, invalidated_at, _invalidation_reason, room_invalidated_at, _room_invalidation_reason = cache_state_row
+    return any(
+        timestamp is not None and timestamp > fetch_started_at
+        for timestamp in (validated_at, invalidated_at, room_invalidated_at)
+    )
+
+
+async def replace_thread_locked_if_not_newer(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    thread_id: str,
+    events: list[dict[str, Any]],
+    fetch_started_at: float,
+    validated_at: float,
+) -> bool:
+    """Replace one thread snapshot only when nothing newer touched this room after the fetch began."""
+    cache_state_row = await load_thread_cache_state_row(
+        db,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    if _thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at):
+        return False
+    await replace_thread_locked(
+        db,
+        room_id=room_id,
+        thread_id=thread_id,
+        events=events,
+        validated_at=validated_at,
+    )
+    return True
+
+
 async def invalidate_thread_locked(
     db: aiosqlite.Connection,
     *,

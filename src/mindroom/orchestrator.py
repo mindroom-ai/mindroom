@@ -271,6 +271,7 @@ class MultiAgentOrchestrator:
         """Bind the current runtime support services to one managed bot."""
         bot.event_cache = self._runtime_support.event_cache
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
+        bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
 
     def _rebind_runtime_support_services(self) -> None:
         """Rebind the current runtime support services to every managed bot."""

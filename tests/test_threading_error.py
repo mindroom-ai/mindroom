@@ -12,7 +12,6 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
@@ -30,7 +29,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
-from mindroom.matrix.cache.thread_cache_helpers import thread_cache_state_is_usable
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
@@ -62,12 +60,17 @@ from mindroom.matrix.thread_membership import (
     snapshot_thread_membership_access,
 )
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.runtime_support import (
+    OwnedRuntimeSupport,
+    StartupThreadPrewarmRegistry,
+    close_owned_runtime_support,
+    sync_owned_runtime_support,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_generate_response_mock,
     make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -293,6 +296,32 @@ def _install_runtime_write_coordinator(bot: AgentBot) -> _EventCacheWriteCoordin
     )
     bot.event_cache_write_coordinator = coordinator
     return coordinator
+
+
+async def _bind_owned_runtime_support(
+    bot: AgentBot,
+    *,
+    db_path: Path | None = None,
+) -> OwnedRuntimeSupport:
+    """Build one real injected runtime-support bundle for a bot test."""
+    support = await sync_owned_runtime_support(
+        None,
+        db_path=bot.config.cache.resolve_db_path(bot.runtime_paths) if db_path is None else db_path,
+        logger=bot.logger,
+        background_task_owner=bot._runtime_view,
+        init_failure_reason_prefix="test_runtime_init_failed",
+        log_db_path_change=False,
+    )
+    bot.event_cache = support.event_cache
+    bot.event_cache_write_coordinator = support.event_cache_write_coordinator
+    bot.startup_thread_prewarm_registry = support.startup_thread_prewarm_registry
+    bot._runtime_view.mark_runtime_started()
+    return support
+
+
+async def _close_bound_runtime_support(bot: AgentBot, support: OwnedRuntimeSupport) -> None:
+    """Close one test-owned runtime-support bundle."""
+    await close_owned_runtime_support(support, logger=bot.logger)
 
 
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
@@ -1043,6 +1072,7 @@ class TestThreadingBehavior:
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
         bot.event_cache = _runtime_event_cache()
         bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
+        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
 
         # Initialize components that depend on client
 
@@ -1065,66 +1095,73 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_start_and_stop_manage_persistent_event_cache(self, bot: AgentBot) -> None:
-        """Startup should wire standalone runtime support services onto the live runtime."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
+        """Startup and stop should leave injected runtime support owned by its external lifecycle."""
+        support = await _bind_owned_runtime_support(bot)
         start_client = _make_client_mock(user_id="@mindroom_general:localhost")
         start_client.add_event_callback = MagicMock()
         start_client.add_response_callback = MagicMock()
         start_client.close = AsyncMock()
 
-        with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
-            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            patch("mindroom.bot.interactive.init_persistence"),
-            patch("mindroom.bot.wait_for_background_tasks", AsyncMock()),
-        ):
-            await bot.start()
-            assert bot.client is start_client
+        try:
+            with (
+                patch.object(bot, "ensure_user_account", AsyncMock()),
+                patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
+                patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+                patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+                patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+                patch("mindroom.bot.interactive.init_persistence"),
+                patch("mindroom.bot.wait_for_background_tasks", AsyncMock()),
+            ):
+                await bot.start()
+                assert bot.client is start_client
 
-            await bot.stop(reason="test")
+                await bot.stop(reason="test")
 
-        assert bot._standalone_runtime_support is None
-        assert bot._runtime_view.event_cache is None
-        assert bot._runtime_view.event_cache_write_coordinator is None
+            await support.event_cache.store_event(
+                "$post-stop-event",
+                "!test:localhost",
+                {
+                    "event_id": "$post-stop-event",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "type": "m.room.message",
+                    "content": {"body": "still open", "msgtype": "m.text"},
+                },
+            )
+            cached_event = await support.event_cache.get_event("!test:localhost", "$post-stop-event")
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+        assert bot.event_cache is support.event_cache
+        assert bot.event_cache_write_coordinator is support.event_cache_write_coordinator
+        assert bot.startup_thread_prewarm_registry is support.startup_thread_prewarm_registry
+        assert cached_event is not None
+        assert cached_event["event_id"] == "$post-stop-event"
         start_client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_standalone_runtime_support_uses_shared_sync_flow(self, bot: AgentBot) -> None:
-        """Standalone startup should delegate ownership lifecycle to the shared sync helper."""
+    async def test_start_requires_injected_runtime_support(self, bot: AgentBot) -> None:
+        """Agent startup should fail fast when no injected runtime-support bundle is present."""
         bot.event_cache = None
         bot.event_cache_write_coordinator = None
-        synced_support = SimpleNamespace(
-            event_cache=make_event_cache_mock(),
-            event_cache_write_coordinator=make_event_cache_write_coordinator_mock(owner=bot._runtime_view),
-        )
+        bot.startup_thread_prewarm_registry = None
 
-        with patch(
-            "mindroom.bot.sync_owned_runtime_support",
-            new=AsyncMock(return_value=synced_support),
-            create=True,
-        ) as sync_owned_runtime_support:
-            await bot._initialize_runtime_support_services()
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()) as ensure_user_account,
+            patch("mindroom.bot.login_agent_user", AsyncMock()) as login_agent_user,
+            pytest.raises(
+                PermanentMatrixStartupError,
+                match="Runtime support services must be injected before startup",
+            ),
+        ):
+            await bot.start()
 
-        sync_owned_runtime_support.assert_awaited_once()
-        assert sync_owned_runtime_support.await_args.args == (None,)
-        assert sync_owned_runtime_support.await_args.kwargs == {
-            "db_path": bot.config.cache.resolve_db_path(bot.runtime_paths),
-            "logger": bot.logger,
-            "background_task_owner": bot._runtime_view,
-            "init_failure_reason_prefix": "standalone_runtime_init_failed",
-            "log_db_path_change": False,
-        }
-        assert bot._standalone_runtime_support is synced_support
-        assert bot._runtime_view.event_cache is synced_support.event_cache
-        assert bot._runtime_view.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
+        ensure_user_account.assert_not_awaited()
+        login_agent_user.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_injected_shared_event_cache_stays_open_for_other_bots(self, bot: AgentBot, tmp_path: Path) -> None:
-        """A non-owned injected cache should stay open until its explicit owner closes it."""
+        """Stopping one bot must not close shared injected runtime support used by another bot."""
         other_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
             password=TEST_PASSWORD,
@@ -1145,11 +1182,16 @@ class TestThreadingBehavior:
             logger=MagicMock(),
             background_task_owner=object(),
         )
+        shared_registry = StartupThreadPrewarmRegistry()
         await shared_cache.initialize()
         bot.event_cache = shared_cache
         bot.event_cache_write_coordinator = shared_coordinator
+        bot.startup_thread_prewarm_registry = shared_registry
         other_bot.event_cache = shared_cache
         other_bot.event_cache_write_coordinator = shared_coordinator
+        other_bot.startup_thread_prewarm_registry = shared_registry
+        bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
+        bot.client.close = AsyncMock()
 
         try:
             await shared_cache.store_event(
@@ -1163,44 +1205,45 @@ class TestThreadingBehavior:
                     "content": {"body": "shared cache", "msgtype": "m.text"},
                 },
             )
-            await bot._close_runtime_support_services()
-            assert bot._standalone_runtime_support is None
-            assert bot.event_cache is shared_cache
-            assert other_bot.event_cache is shared_cache
+            with (
+                patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+                patch.object(bot, "prepare_for_sync_shutdown", AsyncMock()),
+                patch("mindroom.bot.wait_for_background_tasks", AsyncMock()),
+            ):
+                await bot.stop(reason="test")
 
             cached_event = await other_bot.event_cache.get_event("!test:localhost", "$shared-event")
         finally:
-            await other_bot._close_runtime_support_services()
             await shared_cache.close()
 
+        assert bot.event_cache is shared_cache
+        assert other_bot.event_cache is shared_cache
         assert cached_event is not None
         assert cached_event["event_id"] == "$shared-event"
+        bot.client.close.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_partial_runtime_support_injection_fails_fast(self, bot: AgentBot) -> None:
-        """Standalone runtime ownership requires all support services to be injected together."""
-        bot.event_cache_write_coordinator = None
-        bot.event_cache = _runtime_event_cache()
+    def test_partial_runtime_support_injection_fails_fast(self, bot: AgentBot) -> None:
+        """Startup validation should require the full injected runtime-support bundle."""
+        bot.startup_thread_prewarm_registry = None
 
         with pytest.raises(
-            RuntimeError,
-            match="Runtime support services must be injected all together or not at all",
+            PermanentMatrixStartupError,
+            match="Runtime support services must be injected before startup",
         ):
-            await bot._initialize_runtime_support_services()
+            bot._validate_runtime_support_injection_contract_for_startup()
 
     @pytest.mark.asyncio
     async def test_try_start_partial_runtime_support_injection_fails_before_login(self, bot: AgentBot) -> None:
-        """Mixed runtime support injection should stop startup before any login side effects."""
+        """Partial runtime-support injection should stop startup before any login side effects."""
         bot.client = None
-        bot.event_cache_write_coordinator = None
-        bot.event_cache = _runtime_event_cache()
+        bot.startup_thread_prewarm_registry = None
 
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()) as ensure_user_account,
             patch("mindroom.bot.login_agent_user", AsyncMock()) as login_agent_user,
             pytest.raises(
                 PermanentMatrixStartupError,
-                match="Runtime support services must be injected all together or not at all",
+                match="Runtime support services must be injected before startup",
             ),
         ):
             await bot.try_start()
@@ -1210,58 +1253,9 @@ class TestThreadingBehavior:
         assert bot.client is None
 
     @pytest.mark.asyncio
-    async def test_standalone_runtime_support_degrades_when_event_cache_init_fails(self, bot: AgentBot) -> None:
-        """Standalone startup should keep running without cache when SQLite init fails."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-
-        with patch("mindroom.runtime_support._EventCache.initialize", AsyncMock(side_effect=RuntimeError("boom"))):
-            await bot._initialize_runtime_support_services()
-
-        assert bot._standalone_runtime_support is not None
-        assert bot._runtime_view.event_cache is bot._standalone_runtime_support.event_cache
-        assert (
-            bot._runtime_view.event_cache_write_coordinator
-            is bot._standalone_runtime_support.event_cache_write_coordinator
-        )
-        assert bot.event_cache.is_initialized is False
-
-    @pytest.mark.asyncio
-    async def test_start_keeps_running_when_runtime_support_init_fails(self, bot: AgentBot) -> None:
-        """Startup should keep the logged-in client when cache init degrades to no-cache."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-        start_client = _make_client_mock(user_id="@mindroom_general:localhost")
-        start_client.add_event_callback = MagicMock()
-        start_client.add_response_callback = MagicMock()
-        start_client.close = AsyncMock()
-
-        with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
-            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
-            patch(
-                "mindroom.runtime_support._EventCache.initialize",
-                AsyncMock(side_effect=RuntimeError("cache init failed")),
-            ),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            patch("mindroom.bot.interactive.init_persistence"),
-        ):
-            await bot.start()
-
-        assert bot.client is start_client
-        assert bot.running is True
-        assert bot.event_cache.is_initialized is False
-        start_client.close.assert_not_awaited()
-        await bot.stop(reason="test")
-        start_client.close.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_start_resets_running_flag_when_agent_started_hooks_fail(self, bot: AgentBot) -> None:
         """Startup cleanup should clear running state if EVENT_AGENT_STARTED emission fails."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
+        support = await _bind_owned_runtime_support(bot)
         start_client = _make_client_mock(user_id="@mindroom_general:localhost")
         start_client.add_event_callback = MagicMock()
         start_client.add_response_callback = MagicMock()
@@ -1269,93 +1263,28 @@ class TestThreadingBehavior:
         bot.hook_registry = MagicMock()
         bot.hook_registry.has_hooks.side_effect = lambda event_name: event_name == EVENT_AGENT_STARTED
 
-        with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
-            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
-            patch.object(bot, "_initialize_runtime_support_services", AsyncMock()),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-            patch("mindroom.bot.interactive.init_persistence"),
-            patch("mindroom.bot.emit", AsyncMock(side_effect=RuntimeError("hook boom"))),
-            pytest.raises(RuntimeError, match="hook boom"),
-        ):
-            await bot.start()
+        try:
+            with (
+                patch.object(bot, "ensure_user_account", AsyncMock()),
+                patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
+                patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+                patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+                patch("mindroom.bot.interactive.init_persistence"),
+                patch("mindroom.bot.emit", AsyncMock(side_effect=RuntimeError("hook boom"))),
+                pytest.raises(RuntimeError, match="hook boom"),
+            ):
+                await bot.start()
+        finally:
+            await _close_bound_runtime_support(bot, support)
 
         start_client.close.assert_awaited_once()
         assert bot.running is False
         assert bot.client is None
 
     @pytest.mark.asyncio
-    async def test_standalone_runtime_support_rebuilds_after_close_when_db_path_changes(
-        self,
-        bot: AgentBot,
-        tmp_path: Path,
-    ) -> None:
-        """Standalone restart should rebuild support from the latest configured cache path."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-        bot.config.cache.db_path = str(tmp_path / "event-cache-first.db")
-
-        await bot._initialize_runtime_support_services()
-        first_support = bot._standalone_runtime_support
-        assert first_support is not None
-        assert first_support.event_cache.db_path == tmp_path / "event-cache-first.db"
-        await bot._close_runtime_support_services()
-
-        assert bot._standalone_runtime_support is None
-        assert bot._runtime_view.event_cache is None
-        assert bot._runtime_view.event_cache_write_coordinator is None
-
-        bot.config.cache.db_path = str(tmp_path / "event-cache-second.db")
-        await bot._initialize_runtime_support_services()
-        second_support = bot._standalone_runtime_support
-        assert second_support is not None
-        assert second_support is not first_support
-        assert second_support.event_cache.db_path == tmp_path / "event-cache-second.db"
-
-        await bot._close_runtime_support_services()
-
-    @pytest.mark.asyncio
-    async def test_standalone_runtime_support_refreshes_runtime_started_at_on_same_instance_restart(
-        self,
-        bot: AgentBot,
-        tmp_path: Path,
-    ) -> None:
-        """Same-instance restart should advance runtime freshness so old thread cache rows are rejected."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-        bot.config.cache.db_path = str(tmp_path / "event-cache-runtime-refresh.db")
-
-        with patch("mindroom.bot_runtime_view.time.time", side_effect=[100.0, 200.0]):
-            await bot._initialize_runtime_support_services()
-            first_runtime_started_at = bot._runtime_view.runtime_started_at
-            await bot._close_runtime_support_services()
-            await bot._initialize_runtime_support_services()
-            second_runtime_started_at = bot._runtime_view.runtime_started_at
-
-        assert first_runtime_started_at == 100.0
-        assert second_runtime_started_at == 200.0
-        assert second_runtime_started_at > first_runtime_started_at
-        assert not thread_cache_state_is_usable(
-            ThreadCacheState(
-                validated_at=150.0,
-                invalidated_at=None,
-                invalidation_reason=None,
-                room_invalidated_at=None,
-                room_invalidation_reason=None,
-            ),
-            runtime_started_at=second_runtime_started_at,
-            now=201.0,
-        )
-
-        await bot._close_runtime_support_services()
-
-    @pytest.mark.asyncio
     async def test_sync_response_caches_timeline_events_for_point_lookups(self, bot: AgentBot) -> None:
         """Sync-response handling should persist timeline events into SQLite-backed lookups."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-        await bot._initialize_runtime_support_services()
+        support = await _bind_owned_runtime_support(bot)
         assert bot.event_cache
 
         try:
@@ -1385,7 +1314,7 @@ class TestThreadingBehavior:
             await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
             cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
-            await bot._close_runtime_support_services()
+            await _close_bound_runtime_support(bot, support)
 
         assert cached_event is not None
         assert cached_event["event_id"] == "$thread_msg:localhost"
@@ -1547,9 +1476,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_appends_edits_via_cached_thread_lookup(self, bot: AgentBot) -> None:
         """Sync timeline writes should append edits using cached thread membership when m.new_content lacks it."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-        await bot._initialize_runtime_support_services()
+        support = await _bind_owned_runtime_support(bot)
         assert bot.event_cache
 
         try:
@@ -1615,7 +1542,7 @@ class TestThreadingBehavior:
                 "$thread_edit:localhost",
             )
         finally:
-            await bot._close_runtime_support_services()
+            await _close_bound_runtime_support(bot, support)
 
         assert cached_thread_events is not None
         assert [event["event_id"] for event in cached_thread_events] == [
@@ -2073,9 +2000,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_live_redaction_callback_removes_persisted_lookup_event(self, bot: AgentBot) -> None:
         """Live redaction callbacks should remove point-lookup cache entries."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-        await bot._initialize_runtime_support_services()
+        support = await _bind_owned_runtime_support(bot)
         assert bot.event_cache
 
         try:
@@ -2113,16 +2038,14 @@ class TestThreadingBehavior:
             await bot._on_redaction(room, redaction_event)
             cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
         finally:
-            await bot._close_runtime_support_services()
+            await _close_bound_runtime_support(bot, support)
 
         assert cached_event is None
 
     @pytest.mark.asyncio
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:
         """A sync batch that contains both a message and its redaction must leave no cached lookup entry."""
-        bot.event_cache = None
-        bot.event_cache_write_coordinator = None
-        await bot._initialize_runtime_support_services()
+        support = await _bind_owned_runtime_support(bot)
         assert bot.event_cache
 
         try:
@@ -2183,7 +2106,7 @@ class TestThreadingBehavior:
                 "$thread_root:localhost",
             )
         finally:
-            await bot._close_runtime_support_services()
+            await _close_bound_runtime_support(bot, support)
 
         assert cached_event is None
         assert cached_thread_events is not None
@@ -3507,6 +3430,67 @@ class TestThreadingBehavior:
         assert [message.body for message in cached_history] == ["Root", "Edited reply"]
         assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         restarted_client.room_messages.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_guarded_thread_replace_skips_stale_prewarm_write_after_newer_live_update(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A guarded prewarm write must not overwrite a newer thread snapshot written after the fetch began."""
+        event_cache = _EventCache(tmp_path / "event_cache.db")
+        await event_cache.initialize()
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        old_root_event = _text_event(
+            event_id=thread_id,
+            body="Old root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        old_reply_event = _text_event(
+            event_id="$reply_old:localhost",
+            body="Old reply",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            thread_id=thread_id,
+        )
+        new_root_event = _text_event(
+            event_id=thread_id,
+            body="New root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        new_reply_event = _text_event(
+            event_id="$reply_new:localhost",
+            body="New reply",
+            sender="@agent:localhost",
+            server_timestamp=3000,
+            thread_id=thread_id,
+        )
+
+        try:
+            prewarm_fetch_started_at = time.time()
+            await event_cache.replace_thread(
+                room_id,
+                thread_id,
+                [new_root_event.source, new_reply_event.source],
+                validated_at=prewarm_fetch_started_at + 1,
+            )
+
+            replaced = await event_cache.replace_thread_if_not_newer(
+                room_id,
+                thread_id,
+                [old_root_event.source, old_reply_event.source],
+                fetch_started_at=prewarm_fetch_started_at,
+                validated_at=prewarm_fetch_started_at + 2,
+            )
+            cached_history = await event_cache.get_thread_events(room_id, thread_id)
+        finally:
+            await event_cache.close()
+
+        assert replaced is False
+        assert cached_history is not None
+        assert [event["event_id"] for event in cached_history] == [thread_id, "$reply_new:localhost"]
 
     @pytest.mark.asyncio
     async def test_lookup_miss_sync_plain_edit_invalidates_room_cache_state(

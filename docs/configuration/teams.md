@@ -65,6 +65,9 @@ teams:
     # Model for team coordination (default: "default")
     model: sonnet
 
+    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
+    startup_thread_prewarm: true
+
     # Team-scoped replay controls (optional; inherit from defaults when omitted)
     num_history_runs: 8
     num_history_messages: null
@@ -88,6 +91,7 @@ teams:
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
 | `model` | No | `default` | Model used for team coordination and synthesis |
+| `startup_thread_prewarm` | No | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
@@ -97,6 +101,8 @@ Team YAML keys follow the same naming rules as agents: alphanumeric characters a
 
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
+
+Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
 ## When to Use Each Mode
 

@@ -20,6 +20,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -431,6 +432,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             rooms=["!test:localhost"],
             enable_streaming=False,
         )
+        install_runtime_cache_support(bot)
         await bot.start()
 
         test_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="", encrypted=False)

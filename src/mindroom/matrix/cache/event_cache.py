@@ -398,6 +398,17 @@ class ConversationEventCache(Protocol):
     ) -> None:
         """Atomically replace one cached thread snapshot."""
 
+    async def replace_thread_if_not_newer(
+        self,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        *,
+        fetch_started_at: float,
+        validated_at: float | None = None,
+    ) -> bool:
+        """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
+
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
 
@@ -620,6 +631,32 @@ class _EventCache:
                 thread_id=thread_id,
                 events=events,
                 validated_at=time.time() if validated_at is None else validated_at,
+            ),
+        )
+
+    async def replace_thread_if_not_newer(
+        self,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        *,
+        fetch_started_at: float,
+        validated_at: float | None = None,
+    ) -> bool:
+        """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
+        return bool(
+            await self._write_operation(
+                room_id,
+                operation="replace_thread_if_not_newer",
+                disabled_result=False,
+                writer=lambda db: event_cache_threads.replace_thread_locked_if_not_newer(
+                    db,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    events=events,
+                    fetch_started_at=fetch_started_at,
+                    validated_at=time.time() if validated_at is None else validated_at,
+                ),
             ),
         )
 

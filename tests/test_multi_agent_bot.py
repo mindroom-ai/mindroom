@@ -94,6 +94,7 @@ from mindroom.orchestrator import (
 )
 from mindroom.response_runner import ResponseRequest, ResponseRunner, _merge_response_extra_content
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
+from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -153,9 +154,10 @@ def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
 
 
 def _install_runtime_cache_support(bot: AgentBot | TeamBot) -> None:
-    """Attach one required cache runtime double to a bot test instance."""
+    """Attach the full injected runtime-support bundle to a bot test instance."""
     bot.event_cache = make_event_cache_mock()
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
+    bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
 
 
 def _empty_full_thread_history() -> ThreadHistoryResult:
@@ -922,6 +924,7 @@ class TestAgentBot:
         config = mock_load_config.return_value
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         await bot.start()
 
         assert bot.running
@@ -960,6 +963,7 @@ class TestAgentBot:
         mock_ensure_user.return_value = None
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
         await bot.start()
         await bot.sync_forever()
 
@@ -4480,7 +4484,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """AgentBot construction should not build standalone cache support before startup."""
+        """AgentBot construction should not resolve cache paths before injected startup support is bound."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -9026,6 +9030,7 @@ class TestMultiAgentOrchestrator:
         synced_support = SimpleNamespace(
             event_cache=make_event_cache_mock(),
             event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
+            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         )
 
         with patch(

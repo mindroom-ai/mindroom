@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -13,12 +14,34 @@ if TYPE_CHECKING:
     import structlog
 
 
+class StartupThreadPrewarmRegistry:
+    """Track one startup-wave claim set for room-level thread prewarm."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._claimed_room_ids: set[str] = set()
+
+    async def try_claim(self, room_id: str) -> bool:
+        """Claim one room for this startup wave unless another bot already did."""
+        async with self._lock:
+            if room_id in self._claimed_room_ids:
+                return False
+            self._claimed_room_ids.add(room_id)
+            return True
+
+    async def release(self, room_id: str) -> None:
+        """Release one room claim so another bot may retry during the same startup wave."""
+        async with self._lock:
+            self._claimed_room_ids.discard(room_id)
+
+
 @dataclass(slots=True)
 class OwnedRuntimeSupport:
     """Concrete event-cache services owned by one runtime lifecycle."""
 
     event_cache: _EventCache
     event_cache_write_coordinator: _EventCacheWriteCoordinator
+    startup_thread_prewarm_registry: StartupThreadPrewarmRegistry
 
 
 def build_owned_runtime_support(
@@ -34,6 +57,7 @@ def build_owned_runtime_support(
             logger=logger,
             background_task_owner=background_task_owner,
         ),
+        startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
     )
 
 

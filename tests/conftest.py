@@ -30,6 +30,7 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.turn_controller import TurnController
 from mindroom.turn_policy import TurnPolicy
 from mindroom.turn_store import TurnStore
@@ -272,6 +273,8 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
         bot.event_cache = make_event_cache_mock()
     if bot._runtime_view.event_cache_write_coordinator is None:
         bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
+    if bot._runtime_view.startup_thread_prewarm_registry is None:
+        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
     sync_bot_runtime_state(bot)
     return bot
 
