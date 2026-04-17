@@ -433,7 +433,6 @@ describe('Knowledge', () => {
             startup_behavior: 'blocking',
             lfs: false,
             sync_timeout_seconds: 3600,
-            stale_lock_recovery: true,
             skip_hidden: false,
             include_patterns: ['docs/**', 'knowledge/**'],
             exclude_patterns: ['docs/private/**'],
@@ -441,6 +440,8 @@ describe('Knowledge', () => {
         })
       );
     });
+    const savedConfig = mockUpdateKnowledgeBase.mock.lastCall?.[1] as KnowledgeBaseConfig;
+    expect(savedConfig.git).not.toHaveProperty('stale_lock_recovery');
   });
 
   it('saves advanced git settings from base settings', async () => {
@@ -457,7 +458,6 @@ describe('Knowledge', () => {
             startup_behavior: 'background',
             lfs: true,
             sync_timeout_seconds: 1800,
-            stale_lock_recovery: false,
           },
         },
       },
@@ -483,6 +483,9 @@ describe('Knowledge', () => {
 
     render(<Knowledge />);
     await screen.findByText('Active: docs');
+    expect(
+      screen.queryByRole('checkbox', { name: 'Recover Stale Git Locks' })
+    ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('combobox', { name: 'Startup Behavior' }));
     fireEvent.click(screen.getByRole('option', { name: 'Blocking' }));
@@ -490,7 +493,6 @@ describe('Knowledge', () => {
     fireEvent.change(screen.getByLabelText('Sync Timeout (seconds)'), {
       target: { value: '900' },
     });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Recover Stale Git Locks' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }));
     await waitFor(() => {
@@ -504,10 +506,11 @@ describe('Knowledge', () => {
             startup_behavior: 'blocking',
             lfs: false,
             sync_timeout_seconds: 900,
-            stale_lock_recovery: true,
           }),
         })
       );
     });
+    const savedConfig = mockUpdateKnowledgeBase.mock.lastCall?.[1] as KnowledgeBaseConfig;
+    expect(savedConfig.git).not.toHaveProperty('stale_lock_recovery');
   });
 });

@@ -335,7 +335,6 @@ knowledge_bases:
       startup_behavior: background # Optional: defer large syncs to the background loop
       lfs: false                   # Optional: enable Git LFS support
       sync_timeout_seconds: 3600   # Optional: abort a hung git command after this many seconds
-      stale_lock_recovery: true    # Optional: recover stale .git/index.lock files
       skip_hidden: true
       include_patterns: ["docs/**"]  # Optional: root-anchored glob filters
       exclude_patterns: []

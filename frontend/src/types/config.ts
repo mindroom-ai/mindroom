@@ -70,7 +70,6 @@ export interface KnowledgeGitConfig {
   lfs?: boolean;
   startup_behavior?: 'blocking' | 'background';
   sync_timeout_seconds?: number;
-  stale_lock_recovery?: boolean;
   skip_hidden?: boolean;
   include_patterns?: string[];
   exclude_patterns?: string[];

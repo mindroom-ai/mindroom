@@ -576,10 +576,6 @@ class KnowledgeManager:
             return None
         return float(git_config.sync_timeout_seconds)
 
-    def _git_stale_lock_recovery_enabled(self) -> bool:
-        git_config = self._git_config()
-        return bool(git_config is None or git_config.stale_lock_recovery)
-
     def _git_background_startup_enabled(self) -> bool:
         return (
             self._git_config() is not None
@@ -619,87 +615,6 @@ class KnowledgeManager:
 
         return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
 
-    @staticmethod
-    def _git_process_ids_for_repo(repo_root: Path) -> tuple[int, ...] | None:
-        proc_root = Path("/proc")
-        if not proc_root.is_dir():
-            return None
-
-        resolved_repo_root = repo_root.resolve()
-        current_pid = os.getpid()
-        matching_pids: list[int] = []
-        for entry in proc_root.iterdir():
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            if pid == current_pid:
-                continue
-
-            try:
-                comm = (entry / "comm").read_text(encoding="utf-8").strip()
-            except OSError:
-                continue
-            if comm != "git":
-                continue
-
-            cwd_link = entry / "cwd"
-            try:
-                cwd = cwd_link.readlink().resolve()
-            except OSError:
-                continue
-
-            try:
-                cwd.relative_to(resolved_repo_root)
-            except ValueError:
-                continue
-
-            matching_pids.append(pid)
-
-        return tuple(sorted(matching_pids))
-
-    def _clear_stale_git_index_lock(self, repo_root: Path, details: str) -> bool:
-        if not self._git_stale_lock_recovery_enabled():
-            return False
-        normalized_details = details.lower()
-        lock_path = repo_root / ".git" / "index.lock"
-        has_index_lock_error = "index.lock" in normalized_details and (
-            "another git process seems to be running" in normalized_details or "file exists" in normalized_details
-        )
-        if not has_index_lock_error or not lock_path.is_file():
-            return False
-
-        git_pids = self._git_process_ids_for_repo(repo_root)
-        if git_pids is None:
-            logger.warning(
-                "knowledge_git_lock_recovery_skipped",
-                base_id=self.base_id,
-                repo_root=str(repo_root),
-                lock_path=str(lock_path),
-            )
-            return False
-        if git_pids:
-            logger.warning(
-                "knowledge_git_lock_preserved",
-                base_id=self.base_id,
-                repo_root=str(repo_root),
-                lock_path=str(lock_path),
-                git_pids=list(git_pids),
-            )
-            return False
-
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            return False
-
-        logger.warning(
-            "knowledge_git_lock_removed",
-            base_id=self.base_id,
-            repo_root=str(repo_root),
-            lock_path=str(lock_path),
-        )
-        return True
-
     async def _run_git(
         self,
         args: list[str],
@@ -708,52 +623,45 @@ class KnowledgeManager:
         env: dict[str, str] | None = None,
     ) -> str:
         repo_root = cwd or self._knowledge_source_path()
-        for attempt in range(2):
-            process = await asyncio.create_subprocess_exec(
-                "git",
-                *args,
-                cwd=str(repo_root),
-                env=None if env is None else {**os.environ, **env},
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                timeout_seconds = self._git_sync_timeout_seconds()
-                if timeout_seconds is None:
-                    stdout, stderr = await process.communicate()
-                else:
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-            except asyncio.CancelledError:
-                with suppress(ProcessLookupError):
-                    process.kill()
-                with suppress(ProcessLookupError):
-                    await process.wait()
-                raise
-            except TimeoutError as exc:
-                with suppress(ProcessLookupError):
-                    process.kill()
-                with suppress(ProcessLookupError):
-                    await process.wait()
-                command = " ".join(["git", *(_redact_url_credentials(arg) for arg in args)])
-                msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
-                raise RuntimeError(msg) from exc
-
-            if process.returncode == 0:
-                return stdout.decode("utf-8", errors="replace")
-
-            stdout_text = stdout.decode("utf-8", errors="replace").strip()
-            stderr_text = stderr.decode("utf-8", errors="replace").strip()
-            details = _redact_credentials_in_text(stderr_text or stdout_text)
-            if attempt == 0 and self._clear_stale_git_index_lock(repo_root, details):
-                continue
-
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(repo_root),
+            env=None if env is None else {**os.environ, **env},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            timeout_seconds = self._git_sync_timeout_seconds()
+            if timeout_seconds is None:
+                stdout, stderr = await process.communicate()
+            else:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            with suppress(ProcessLookupError):
+                await process.wait()
+            raise
+        except TimeoutError as exc:
+            with suppress(ProcessLookupError):
+                process.kill()
+            with suppress(ProcessLookupError):
+                await process.wait()
             command = " ".join(["git", *(_redact_url_credentials(arg) for arg in args)])
-            msg = f"Git command failed with exit code {process.returncode}: {command}"
-            if details:
-                msg = f"{msg}\n{details}"
-            raise RuntimeError(msg)
+            msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
+            raise RuntimeError(msg) from exc
 
-        msg = "Git command retry loop exited unexpectedly"
+        if process.returncode == 0:
+            return stdout.decode("utf-8", errors="replace")
+
+        stdout_text = stdout.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        details = _redact_credentials_in_text(stderr_text or stdout_text)
+        command = " ".join(["git", *(_redact_url_credentials(arg) for arg in args)])
+        msg = f"Git command failed with exit code {process.returncode}: {command}"
+        if details:
+            msg = f"{msg}\n{details}"
         raise RuntimeError(msg)
 
     async def _ensure_git_lfs_available(self, *, cwd: Path) -> None:
@@ -1138,6 +1046,7 @@ class KnowledgeManager:
             }
         else:
             sync_result = await self.sync_indexed_files()
+            await asyncio.to_thread(self._save_persisted_indexing_settings)
             result = {
                 **git_result,
                 "startup_mode": startup_mode,

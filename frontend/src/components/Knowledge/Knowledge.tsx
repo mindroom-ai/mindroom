@@ -71,7 +71,6 @@ const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
   startup_behavior: 'blocking',
   lfs: false,
   sync_timeout_seconds: 3600,
-  stale_lock_recovery: true,
   skip_hidden: true,
 };
 
@@ -136,7 +135,6 @@ function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
       typeof gitConfig.sync_timeout_seconds === 'number' && gitConfig.sync_timeout_seconds >= 5
         ? gitConfig.sync_timeout_seconds
         : DEFAULT_GIT_SETTINGS.sync_timeout_seconds,
-    stale_lock_recovery: gitConfig.stale_lock_recovery ?? DEFAULT_GIT_SETTINGS.stale_lock_recovery,
     skip_hidden: gitConfig.skip_hidden ?? true,
     include_patterns:
       gitConfig.include_patterns && gitConfig.include_patterns.length > 0
@@ -1155,23 +1153,6 @@ export function Knowledge() {
                         aria-label="Enable Git LFS"
                         checked={settings.git.lfs ?? false}
                         onCheckedChange={checked => updateGitSettings({ lfs: checked === true })}
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between rounded-md border p-3">
-                      <div className="space-y-1">
-                        <p className="text-sm font-medium">Recover Stale Git Locks</p>
-                        <p className="text-xs text-muted-foreground">
-                          Remove a stale <code>.git/index.lock</code> only when the runtime can
-                          confirm the repo is idle.
-                        </p>
-                      </div>
-                      <Checkbox
-                        aria-label="Recover Stale Git Locks"
-                        checked={settings.git.stale_lock_recovery ?? true}
-                        onCheckedChange={checked =>
-                          updateGitSettings({ stale_lock_recovery: checked === true })
-                        }
                       />
                     </div>
 

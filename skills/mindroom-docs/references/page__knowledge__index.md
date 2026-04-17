@@ -183,7 +183,6 @@ knowledge_bases:
 | `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync                           |
 | `startup_behavior`      | string | `blocking` | `blocking` waits for startup sync, `background` defers sync to the background loop |
 | `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                   |
-| `stale_lock_recovery`   | bool   | `true`     | Remove stale `.git/index.lock` files when no live git process owns the repo        |
 | `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                               |
 | `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                             |
 | `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                             |

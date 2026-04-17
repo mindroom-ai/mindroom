@@ -34,10 +34,6 @@ class KnowledgeGitConfig(BaseModel):
         ge=5,
         description="Maximum time allowed for one Git sync command before it is aborted",
     )
-    stale_lock_recovery: bool = Field(
-        default=True,
-        description="Remove stale .git/index.lock files when no active git process is using the repo",
-    )
     skip_hidden: bool = Field(
         default=True,
         description="Skip hidden files/folders (paths with components starting with '.') during indexing",
