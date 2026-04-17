@@ -1148,6 +1148,11 @@ class KnowledgeManager:
         finally:
             self._git_syncing = False
 
+        self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
+        self._git_last_successful_sync_at = datetime.now(tz=UTC)
+        self._git_last_successful_commit = current_head
+        self._git_last_error = None
+
         if index_changes:
             for relative_path in sorted(removed_files):
                 await self.remove_file(relative_path)
@@ -1155,12 +1160,8 @@ class KnowledgeManager:
             for relative_path in sorted(changed_files):
                 await self.index_file(relative_path, upsert=True)
 
-        self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
         if index_changes:
             self._git_initial_sync_complete = True
-        self._git_last_successful_sync_at = datetime.now(tz=UTC)
-        self._git_last_successful_commit = current_head
-        self._git_last_error = None
 
         if updated:
             logger.info(

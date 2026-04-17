@@ -3159,6 +3159,9 @@ async def test_sync_git_repository_does_not_record_indexing_failures_as_git_erro
         await manager.sync_git_repository()
 
     assert manager._git_last_error is None
+    assert manager._git_last_successful_commit == "abc123"
+    assert manager._git_last_successful_sync_at is not None
+    assert manager._git_initial_sync_complete is False
 
 
 @pytest.mark.asyncio
@@ -3294,7 +3297,7 @@ async def test_run_git_preserves_index_lock_and_does_not_retry(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
-    with pytest.raises(RuntimeError, match="index.lock"):
+    with pytest.raises(RuntimeError, match=r"index\.lock"):
         await dummy_manager._run_git(["checkout", "main"], cwd=repo_root)
 
     assert recorded_cwds == [str(repo_root)]
