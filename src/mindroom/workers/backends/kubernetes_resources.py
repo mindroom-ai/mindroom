@@ -642,22 +642,14 @@ class KubernetesResourceManager:
         dedicated_root: Path,
         local_dedicated_root: Path,
     ) -> str:
-        target_path = constants.sandbox_startup_manifest_path(local_dedicated_root)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=dedicated_root,
         )
-        target_path.write_text(
-            json.dumps(
-                constants.serialize_startup_manifest(
-                    startup_runtime_paths,
-                    tool_validation_snapshot=self.tool_validation_snapshot,
-                ),
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        constants.write_startup_manifest(
+            local_dedicated_root,
+            startup_runtime_paths,
+            tool_validation_snapshot=self.tool_validation_snapshot,
         )
         return str(constants.sandbox_startup_manifest_path(dedicated_root))
 

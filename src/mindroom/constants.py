@@ -6,6 +6,7 @@ codebase.
 """
 
 import fnmatch
+import json
 import os
 import re
 import shutil
@@ -313,6 +314,31 @@ def serialize_startup_manifest(
 def sandbox_startup_manifest_path(storage_root: Path) -> Path:
     """Return the canonical startup manifest path under one runtime root."""
     return storage_root / SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH
+
+
+def write_startup_manifest(
+    storage_root: Path,
+    runtime_paths: RuntimePaths,
+    *,
+    tool_validation_snapshot: Mapping[str, object] | None = None,
+    public_runtime: bool = False,
+) -> Path:
+    """Write one sandbox-runner startup manifest and return its path."""
+    manifest_path = sandbox_startup_manifest_path(storage_root)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            serialize_startup_manifest(
+                runtime_paths,
+                tool_validation_snapshot=tool_validation_snapshot,
+                public_runtime=public_runtime,
+            ),
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
 
 
 def _is_json_object(value: object) -> TypeGuard[dict[str, object]]:

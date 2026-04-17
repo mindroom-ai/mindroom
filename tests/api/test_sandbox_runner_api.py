@@ -27,7 +27,6 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
-    sandbox_startup_manifest_path,
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
@@ -134,21 +133,12 @@ def _write_startup_manifest(
     public_runtime: bool = False,
     tool_validation_snapshot: dict[str, object] | None = None,
 ) -> Path:
-    manifest_path = sandbox_startup_manifest_path(runtime_paths.storage_root)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps(
-            sandbox_runner_module.constants.serialize_startup_manifest(
-                runtime_paths,
-                tool_validation_snapshot=tool_validation_snapshot,
-                public_runtime=public_runtime,
-            ),
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    return sandbox_runner_module.constants.write_startup_manifest(
+        runtime_paths.storage_root,
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
+        public_runtime=public_runtime,
     )
-    return manifest_path
 
 
 def _set_startup_manifest(
