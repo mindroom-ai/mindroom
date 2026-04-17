@@ -1235,6 +1235,79 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
 
 @pytest.mark.asyncio
+async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_context(
+    tmp_path: Path,
+) -> None:
+    """Non-streaming AI calls should receive the resolved thread root, not the raw request thread id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["thread_id"] == "$resolved-thread"
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        request = replace(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
+            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+        )
+        await coordinator.process_and_respond(request)
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logging_context(
+    tmp_path: Path,
+) -> None:
+    """Streaming AI calls should receive the resolved thread root, not the raw request thread id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            assert kwargs["thread_id"] == "$resolved-thread"
+
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Hello!"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        request = replace(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
+            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+        )
+        await coordinator.process_and_respond_streaming(request)
+
+
+@pytest.mark.asyncio
 async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_exception(
     tmp_path: Path,
 ) -> None:

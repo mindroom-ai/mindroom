@@ -104,14 +104,12 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
         source_event_ids=["$reply:example.com", "$coalesced:example.com"],
         source_event_prompts={"$coalesced:example.com": "older prompt"},
     ):
-        streamed = [
-            chunk
-            async for chunk in model.ainvoke_stream(
-                messages=messages,
-                assistant_message=assistant_message,
-                tools=[],
-            )
-        ]
+        stream = model.ainvoke_stream(
+            messages=messages,
+            assistant_message=assistant_message,
+            tools=[],
+        )
+    streamed = [chunk async for chunk in stream]
     assert streamed == [{"status": "ok"}]
 
     entries = _read_log_entries(tmp_path)

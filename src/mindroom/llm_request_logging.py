@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
 
     from agno.models.base import Model
     from agno.models.response import ModelResponse
@@ -154,6 +154,11 @@ def _normalized_string_list(values: object) -> list[str]:
     return normalized
 
 
+def _snapshot_request_log_context() -> dict[str, JSONValue]:
+    """Return one detached copy of the currently bound request log context."""
+    return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
+
+
 def build_llm_request_log_context(
     *,
     session_id: str,
@@ -228,16 +233,17 @@ async def write_llm_request_log(
     tools: list[dict[str, JSONValue]] | None,
     log_dir: str | None,
     default_log_dir: Path,
+    request_context: dict[str, JSONValue] | None = None,
 ) -> None:
     """Persist one request record for an LLM invocation."""
     now = datetime.now().astimezone()
-    request_context = _REQUEST_CONTEXT.get() or {}
+    resolved_request_context = request_context if request_context is not None else _snapshot_request_log_context()
     await asyncio.to_thread(
         _write_jsonl_line,
         _daily_log_path(log_dir, default_log_dir, now),
         {
             "timestamp": now.isoformat(),
-            **request_context,
+            **resolved_request_context,
             "agent_name": agent_name,
             "model_id": model.id,
             "system_prompt": _system_prompt(messages, model),
@@ -247,6 +253,30 @@ async def write_llm_request_log(
             "tool_count": len(tools or []),
             "model_params": _model_params(model),
         },
+    )
+
+
+async def _write_llm_request_log_if_present(
+    *,
+    model: Model,
+    agent_name: str,
+    kwargs: dict[str, object],
+    log_dir: str | None,
+    default_log_dir: Path,
+    request_context: dict[str, JSONValue],
+) -> None:
+    """Write one request log entry when provider kwargs include API request messages."""
+    messages = _request_messages(kwargs.get("messages"))
+    if messages is None:
+        return
+    await write_llm_request_log(
+        model=model,
+        agent_name=agent_name,
+        messages=messages,
+        tools=_request_tools(kwargs.get("tools")),
+        log_dir=log_dir,
+        default_log_dir=default_log_dir,
+        request_context=request_context,
     )
 
 
@@ -267,32 +297,38 @@ def install_llm_request_logging(
     original_ainvoke = model.ainvoke
     original_ainvoke_stream = model.ainvoke_stream
 
-    async def _logged_ainvoke(*args: object, **kwargs: object) -> ModelResponse:
-        messages = _request_messages(kwargs.get("messages"))
-        if messages is not None:
-            await write_llm_request_log(
-                model=model,
-                agent_name=agent_name,
-                messages=messages,
-                tools=_request_tools(kwargs.get("tools")),
-                log_dir=debug_config.llm_request_log_dir,
-                default_log_dir=default_log_dir,
-            )
-        return await original_ainvoke(*args, **kwargs)
+    def _logged_ainvoke(*args: object, **kwargs: object) -> Coroutine[object, object, ModelResponse]:
+        request_context = _snapshot_request_log_context()
 
-    async def _logged_ainvoke_stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        messages = _request_messages(kwargs.get("messages"))
-        if messages is not None:
-            await write_llm_request_log(
+        async def _invoke() -> ModelResponse:
+            await _write_llm_request_log_if_present(
                 model=model,
                 agent_name=agent_name,
-                messages=messages,
-                tools=_request_tools(kwargs.get("tools")),
+                kwargs=kwargs,
                 log_dir=debug_config.llm_request_log_dir,
                 default_log_dir=default_log_dir,
+                request_context=request_context,
             )
-        async for chunk in original_ainvoke_stream(*args, **kwargs):
-            yield chunk
+            return await original_ainvoke(*args, **kwargs)
+
+        return _invoke()
+
+    def _logged_ainvoke_stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+        request_context = _snapshot_request_log_context()
+
+        async def _stream() -> AsyncIterator[ModelResponse]:
+            await _write_llm_request_log_if_present(
+                model=model,
+                agent_name=agent_name,
+                kwargs=kwargs,
+                log_dir=debug_config.llm_request_log_dir,
+                default_log_dir=default_log_dir,
+                request_context=request_context,
+            )
+            async for chunk in original_ainvoke_stream(*args, **kwargs):
+                yield chunk
+
+        return _stream()
 
     model_dict["ainvoke"] = _logged_ainvoke
     model_dict["ainvoke_stream"] = _logged_ainvoke_stream
