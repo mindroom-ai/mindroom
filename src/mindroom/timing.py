@@ -152,6 +152,31 @@ def get_dispatch_pipeline_timing(source: object) -> DispatchPipelineTiming | Non
     return None
 
 
+def emit_timing_event(event_name: str, **event_data: object) -> None:
+    """Emit one structured timing event when timing instrumentation is enabled."""
+    if not _is_enabled():
+        return
+    scope = event_data.pop("timing_scope", None)
+    if not isinstance(scope, str) or not scope:
+        scope = timing_scope.get()
+    filtered_event_data = {key: value for key, value in event_data.items() if value is not None}
+    if scope:
+        filtered_event_data["timing_scope"] = scope
+    logger.info(event_name, **filtered_event_data)
+
+
+def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
+    """Emit one elapsed timing event relative to a previously recorded start time."""
+    if not _is_enabled():
+        return
+    emit_timing_event(
+        "timing_elapsed",
+        label=label,
+        duration_ms=round((time.monotonic() - start) * 1000, 1),
+        **event_data,
+    )
+
+
 def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:  # noqa: C901
     """Decorator that logs elapsed time for sync/async functions.
 
