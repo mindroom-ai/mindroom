@@ -89,7 +89,7 @@ agents:
       bridge_telegram: room
       "!abc123:example.com": room
 
-    # Participate in room-level startup prewarm for joined rooms (default: true)
+    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
     startup_thread_prewarm: true
 
     # Tools to run in the sandbox proxy instead of the main process (optional, inherits from defaults)

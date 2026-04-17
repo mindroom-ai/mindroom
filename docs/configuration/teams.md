@@ -65,7 +65,7 @@ teams:
     # Model for team coordination (default: "default")
     model: sonnet
 
-    # Participate in room-level startup prewarm for joined rooms (default: true)
+    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
     startup_thread_prewarm: true
 
     # Team-scoped replay controls (optional; inherit from defaults when omitted)
