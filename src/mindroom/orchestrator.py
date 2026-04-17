@@ -917,18 +917,10 @@ class MultiAgentOrchestrator:
         self,
         interrupted_threads: list[InterruptedThread],
         config: Config,
-        *,
-        skip_target_event_ids: set[str] | None = None,
     ) -> None:
         """Queue visible Matrix resume relays from the router."""
         if not config.defaults.auto_resume_after_restart or not interrupted_threads:
             return
-        if skip_target_event_ids:
-            interrupted_threads = [
-                thread for thread in interrupted_threads if thread.target_event_id not in skip_target_event_ids
-            ]
-            if not interrupted_threads:
-                return
         router_bot = self._router_bot()
         if router_bot is None or router_bot.client is None:
             logger.warning("Auto-resume after restart skipped because the router client is unavailable")
@@ -950,6 +942,8 @@ class MultiAgentOrchestrator:
     async def _replay_pending_inbound_turns_after_restart(
         self,
         bots: list[AgentBot | TeamBot],
+        *,
+        interrupted_target_event_ids: set[str] | None = None,
     ) -> set[str]:
         """Schedule startup replays for durable inbound claims left incomplete before restart."""
         replayed_source_event_ids: set[str] = set()
@@ -958,7 +952,9 @@ class MultiAgentOrchestrator:
             if bot.client is None:
                 continue
             try:
-                bot_replayed_source_event_ids = await bot.replay_pending_inbound_turns()
+                bot_replayed_source_event_ids = await bot.replay_pending_inbound_turns(
+                    interrupted_target_event_ids=interrupted_target_event_ids,
+                )
             except Exception as exc:
                 logger.warning(
                     "Could not replay pending inbound turns after restart (non-critical)",
@@ -998,15 +994,18 @@ class MultiAgentOrchestrator:
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
         interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
-        replayed_source_event_ids = await self._replay_pending_inbound_turns_after_restart(started_bots)
-        if replayed_source_event_ids:
-            await self._auto_resume_after_restart(
-                interrupted_threads,
-                config,
-                skip_target_event_ids=replayed_source_event_ids,
-            )
-        else:
-            await self._auto_resume_after_restart(interrupted_threads, config)
+        interrupted_target_event_ids = {
+            thread.target_event_id for thread in interrupted_threads if thread.target_event_id
+        }
+        # Restart recovery is deliberately split by durable anchor:
+        # pending-inbound replay owns text/media source events that never reached
+        # a visible bot reply, while stale-stream cleanup/auto-resume owns turns
+        # that already have an interrupted bot response event.
+        await self._replay_pending_inbound_turns_after_restart(
+            started_bots,
+            interrupted_target_event_ids=interrupted_target_event_ids,
+        )
+        await self._auto_resume_after_restart(interrupted_threads, config)
 
         self.running = True
 

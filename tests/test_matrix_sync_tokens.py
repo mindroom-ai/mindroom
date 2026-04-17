@@ -16,7 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.edit_regenerator import EditHandlingResult
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -187,6 +187,47 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         await bot.start()
 
     assert client.next_batch == "s_saved"
+
+
+@pytest.mark.asyncio
+async def test_bot_start_tracks_only_message_and_media_callbacks_for_sync_checkpointing(
+    tmp_path: Path,
+) -> None:
+    """Startup catch-up checkpointing should only track text/media ingress callbacks."""
+    bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    tracked_callbacks: dict[str, set[bool]] = {}
+
+    def capture_wrapper(
+        callback: object,
+        *,
+        owner: object | None = None,
+        register_sync_event_task: object | None = None,
+    ) -> object:
+        del owner
+        callback_name = callback.__name__
+        tracked_callbacks.setdefault(callback_name, set()).add(register_sync_event_task is not None)
+
+        async def noop_wrapper(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        return noop_wrapper
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+        patch("mindroom.bot._create_task_wrapper", side_effect=capture_wrapper),
+    ):
+        await bot.start()
+
+    assert tracked_callbacks["_on_sync_message"] == {True}
+    assert tracked_callbacks["_on_sync_media_message"] == {True}
+    assert tracked_callbacks["_on_invite"] == {False}
+    assert tracked_callbacks["_on_redaction"] == {False}
+    assert tracked_callbacks["_on_reaction"] == {False}
 
 
 def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
@@ -399,6 +440,35 @@ async def test_replay_pending_inbound_turns_schedules_saved_text_message_process
     finally:
         gate.set()
         await wait_for_background_tasks(owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+async def test_replay_pending_inbound_turns_skips_events_with_interrupted_visible_reply_anchor(
+    tmp_path: Path,
+) -> None:
+    """Pending inbox replay should defer to stale-stream recovery once a visible reply exists."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    event = _message_event(event_id="$replay-skip:localhost")
+    bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=event.source)
+    bot._turn_store.record_turn_record(
+        HandledTurnRecord(
+            anchor_event_id=event.event_id,
+            source_event_ids=(event.event_id,),
+            response_event_id="$response-anchor:localhost",
+            completed=False,
+        ),
+    )
+
+    with patch.object(bot, "_on_message", AsyncMock()) as mock_on_message:
+        replayed_source_event_ids = await bot.replay_pending_inbound_turns(
+            interrupted_target_event_ids={"$response-anchor:localhost"},
+        )
+        await asyncio.sleep(0)
+
+    assert replayed_source_event_ids == set()
+    mock_on_message.assert_not_awaited()
+    assert bot._turn_store.pending_inbound_replays() == []
 
 
 @pytest.mark.asyncio

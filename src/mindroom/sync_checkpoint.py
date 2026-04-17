@@ -14,7 +14,13 @@ if TYPE_CHECKING:
 
 @dataclass
 class SyncCheckpointCoordinator:
-    """Persist sync tokens only after tracked sync event work settles."""
+    """Persist sync tokens only after tracked startup-catchup ingress work settles.
+
+    Intentionally narrow scope:
+    only sync-delivered text/media ingress claims should register tasks here.
+    Reactions, redactions, invites, and already-started replies are handled by
+    their own restart flows and must not delay checkpoint persistence.
+    """
 
     agent_name: str
     persist_sync_token: Callable[[str], None]
@@ -29,7 +35,7 @@ class SyncCheckpointCoordinator:
         return self._flush_task
 
     def register_event_task(self, task: asyncio.Task[Any]) -> None:
-        """Track one sync-delivered event callback task until it settles."""
+        """Track one startup-catchup ingress task until it settles."""
         self._pending_event_tasks.add(task)
         task.add_done_callback(self._pending_event_tasks.discard)
 

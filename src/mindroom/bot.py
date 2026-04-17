@@ -1046,23 +1046,38 @@ class AgentBot:
             assert client is not None
             matrix_client = client
 
-            # Register event callbacks - wrap them to run as background tasks
-            # This ensures the sync loop is never blocked, allowing stop reactions to work
+            # Register event callbacks - wrap them to run as background tasks so
+            # the sync loop is never blocked by event processing.
+            #
+            # Important restart-safety boundary:
+            # only inbound text/media sync events participate in startup catch-up
+            # checkpointing. Other sync callbacks are intentionally out of scope
+            # here. Reactions, invites, redactions, and any already-started reply
+            # recovery are handled by their own flows and must not delay
+            # next_batch persistence or shutdown.
             def add_sync_event_callback(
                 callback: Callable[..., Awaitable[None]],
                 event_type: type[Any],
+                *,
+                track_startup_catchup: bool = False,
             ) -> None:
                 matrix_client.add_event_callback(
                     _create_task_wrapper(
                         callback,
                         owner=self._runtime_view,
-                        register_sync_event_task=self._sync_checkpoint.register_event_task,
+                        register_sync_event_task=(
+                            self._sync_checkpoint.register_event_task if track_startup_catchup else None
+                        ),
                     ),
                     event_type,
                 )
 
             add_sync_event_callback(self._on_invite, nio.InviteEvent)
-            add_sync_event_callback(self._on_sync_message, nio.RoomMessageText)
+            add_sync_event_callback(
+                self._on_sync_message,
+                nio.RoomMessageText,
+                track_startup_catchup=True,
+            )
             add_sync_event_callback(self._on_redaction, nio.RedactionEvent)
             add_sync_event_callback(self._on_reaction, nio.ReactionEvent)
 
@@ -1077,7 +1092,11 @@ class AgentBot:
                 nio.RoomMessageAudio,
                 nio.RoomEncryptedAudio,
             ):
-                add_sync_event_callback(self._on_sync_media_message, event_type)
+                add_sync_event_callback(
+                    self._on_sync_media_message,
+                    event_type,
+                    track_startup_catchup=True,
+                )
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1379,13 +1398,32 @@ class AgentBot:
                 owner=self._runtime_view,
             )
 
-    async def replay_pending_inbound_turns(self) -> set[str]:
-        """Schedule durable startup replays for any inbound turns left incomplete."""
+    async def replay_pending_inbound_turns(
+        self,
+        *,
+        interrupted_target_event_ids: set[str] | None = None,
+    ) -> set[str]:
+        """Schedule startup replays for pending inbound turns without visible recovery anchors.
+
+        This replay path is intentionally limited to source events that never
+        reached a visible bot reply. Once a turn has a durable bot response
+        event, stale-stream cleanup and auto-resume own restart recovery instead
+        of the inbound inbox.
+        """
         if self.client is None:
             return set()
         replayed_source_event_ids: set[str] = set()
+        interrupted_target_event_ids = interrupted_target_event_ids or set()
+        skipped_source_event_ids: set[str] = set()
         own_user_id = self.agent_user.user_id
         for pending_replay in self._turn_store.pending_inbound_replays():
+            turn_record = self._turn_store.get_turn_record(pending_replay.event_id)
+            if turn_record is not None and (
+                turn_record.response_event_id in interrupted_target_event_ids
+                or turn_record.visible_echo_event_id in interrupted_target_event_ids
+            ):
+                skipped_source_event_ids.update(turn_record.source_event_ids)
+                continue
             try:
                 replay_event_source = dict(pending_replay.event_source)
                 replay_event_source.setdefault("origin_server_ts", 0)
@@ -1433,6 +1471,12 @@ class AgentBot:
                 )
                 continue
             replayed_source_event_ids.add(pending_replay.event_id)
+        if skipped_source_event_ids:
+            self._turn_store.clear_inbound_records(tuple(skipped_source_event_ids))
+            self.logger.info(
+                "pending_inbound_replay_skipped_for_visible_anchor",
+                count=len(skipped_source_event_ids),
+            )
         return replayed_source_event_ids
 
     def _should_queue_follow_up_in_active_response_thread(

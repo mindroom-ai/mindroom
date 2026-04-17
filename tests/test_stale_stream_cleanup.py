@@ -1980,7 +1980,12 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     async def _resume(_: list[InterruptedThread], __: Config) -> None:
         call_order.append("resume")
 
-    async def _replay(_: list[object]) -> set[str]:
+    async def _replay(
+        _: list[object],
+        *,
+        interrupted_target_event_ids: set[str] | None = None,
+    ) -> set[str]:
+        assert interrupted_target_event_ids == {"$target"}
         call_order.append("replay")
         return set()
 
@@ -2041,41 +2046,62 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_auto_resume_skips_threads_being_replayed(tmp_path: Path) -> None:
-    """Auto-resume should skip interrupted threads already covered by startup replay."""
+async def test_orchestrator_passes_interrupted_target_event_ids_to_pending_replay(tmp_path: Path) -> None:
+    """Startup replay should filter out turns already owned by stale-stream recovery."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.config = config
 
-    router_client = AsyncMock(spec=nio.AsyncClient)
+    captured_target_event_ids: list[set[str] | None] = []
+
+    async def _replay(
+        _bots: list[object],
+        *,
+        interrupted_target_event_ids: set[str] | None = None,
+    ) -> set[str]:
+        captured_target_event_ids.append(interrupted_target_event_ids)
+        return set()
+
     router_bot = MagicMock()
     router_bot.agent_name = ROUTER_AGENT_NAME
-    router_bot.client = router_client
+    router_bot.try_start = AsyncMock(return_value=True)
+    router_bot.running = True
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
-    interrupted = [
-        InterruptedThread(
-            room_id=ROOM_ID,
-            thread_id="$thread-root",
-            target_event_id="$target",
-            partial_text="Half finished",
-            agent_name="test_agent",
+    with (
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_cleanup_stale_streams_after_restart",
+            new=AsyncMock(
+                return_value=[
+                    InterruptedThread(
+                        room_id=ROOM_ID,
+                        thread_id="$thread-root",
+                        target_event_id="$target",
+                        partial_text="Half finished",
+                        agent_name="test_agent",
+                    ),
+                ],
+            ),
         ),
-    ]
+        patch.object(
+            orchestrator,
+            "_replay_pending_inbound_turns_after_restart",
+            side_effect=_replay,
+        ),
+        patch.object(orchestrator, "_auto_resume_after_restart", new=AsyncMock()),
+        patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+    ):
+        await orchestrator.start()
 
-    with patch(
-        "mindroom.orchestrator.auto_resume_interrupted_threads",
-        new=AsyncMock(return_value=1),
-    ) as mock_auto_resume:
-        await orchestrator._auto_resume_after_restart(
-            interrupted,
-            config,
-            skip_target_event_ids={"$target"},
-        )
-
-    mock_auto_resume.assert_not_awaited()
+    assert captured_target_event_ids == [{"$target"}]
 
 
 @pytest.mark.asyncio
