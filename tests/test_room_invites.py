@@ -588,3 +588,35 @@ def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -
 
     assert bot._load_invited_rooms() == set()
     assert bot._invited_rooms == set()
+
+
+def test_invited_rooms_property_tracks_room_lifecycle_state(tmp_path: Path) -> None:
+    """Bot invite state should forward directly to the room lifecycle owner."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    bot._room_lifecycle.invited_rooms = {"!replacement:localhost"}
+
+    assert bot._invited_rooms == {"!replacement:localhost"}

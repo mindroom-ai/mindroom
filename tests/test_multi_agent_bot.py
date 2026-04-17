@@ -5439,8 +5439,8 @@ class TestAgentBot:
 
         bot._send_response = AsyncMock(side_effect=fake_send_response)
         with (
-            patch("mindroom.bot._generate_welcome_message", return_value="Welcome"),
-            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=[])),
+            patch("mindroom.bot_room_lifecycle._generate_welcome_message", return_value="Welcome"),
+            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=[])),
             patch("mindroom.bot.restore_scheduled_tasks", new=AsyncMock(return_value=0)),
             patch("mindroom.bot.config_confirmation.restore_pending_changes", new=AsyncMock(return_value=0)),
         ):
