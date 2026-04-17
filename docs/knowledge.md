@@ -200,17 +200,21 @@ knowledge_bases:
 | `branch` | string | `main` | Branch to track |
 | `poll_interval_seconds` | int | `300` | How often to check for updates (minimum: 5) |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
-| `lfs` | bool | `false` | Enable Git LFS support and run `git lfs pull` after sync |
+| `lfs` | bool | `false` | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom |
 | `startup_behavior` | string | `blocking` | `blocking` waits for startup sync, `background` defers sync to the background loop |
 | `sync_timeout_seconds` | int | `3600` | Abort one Git command if it exceeds this timeout |
 | `skip_hidden` | bool | `true` | Skip files/folders starting with `.` |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns to include |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns to exclude |
 
+When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows.
+Bundled container images already include it.
+
 ### Sync Behavior
 
 - On startup, the repo is cloned (or fetched if it already exists)
-- When `startup_behavior: background`, manager initialization loads the existing index immediately and lets repo sync continue in the background
+- When `startup_behavior: background`, manager initialization loads the existing index immediately and lets resume/incremental repo sync continue in the background
+- Required full reindexes still run blocking before the manager is exposed
 - Request-scoped private knowledge roots do not keep background startup alive between requests, so they effectively fall back to on-access blocking sync behavior even if `startup_behavior: background` is configured
 - Every `poll_interval_seconds`, MindRoom runs `git fetch` + `git reset --hard origin/<branch>`
 - When `lfs: true`, MindRoom also runs `git lfs pull origin <branch>` after sync

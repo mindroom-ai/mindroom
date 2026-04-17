@@ -952,11 +952,11 @@ class KnowledgeManager:
     async def initialize(self) -> None:
         """Initialize and index all existing knowledge files."""
         git_config = self._git_config()
-        if git_config is not None and not self._git_background_startup_enabled():
+        if git_config is not None:
             await self.sync_git_repository(index_changes=False)
 
         indexed_count = await self.reindex_all()
-        if git_config is not None and not self._git_background_startup_enabled():
+        if git_config is not None:
             self._git_initial_sync_complete = True
         logger.info(
             "Knowledge base initialized",
@@ -1521,7 +1521,7 @@ async def _create_knowledge_manager_for_target(
     startup_mode: Literal["full_reindex", "resume", "incremental"] = (
         "full_reindex" if reindex_on_create else manager._startup_index_mode()
     )
-    background_git_startup = manager._git_background_startup_enabled()
+    background_git_startup = manager._git_background_startup_enabled() and startup_mode != "full_reindex"
     if background_git_startup:
         sync_result = await manager.prepare_background_git_startup(startup_mode)
         logger.info(

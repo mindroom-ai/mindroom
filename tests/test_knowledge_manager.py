@@ -2654,11 +2654,11 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
 
 
 @pytest.mark.asyncio
-async def test_initialize_shared_knowledge_managers_finishes_pending_background_startup_when_reuse_becomes_blocking(
+async def test_initialize_shared_knowledge_managers_full_reindex_stays_blocking_even_when_background_startup_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reused shared managers should finish deferred startup immediately when background mode is disabled."""
+    """Shared git managers should sync the checkout before a required blocking full reindex."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -2666,8 +2666,14 @@ async def test_initialize_shared_knowledge_managers_finishes_pending_background_
     config = _make_git_config(tmp_path / "knowledge", startup_behavior="background")
     runtime_paths = runtime_paths_for(config)
 
+    prepare_background_git_startup = AsyncMock()
     start_git_sync = AsyncMock(return_value=None)
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    reindex_all = AsyncMock(return_value=0)
+    monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
     monkeypatch.setattr(KnowledgeManager, "_start_git_sync", start_git_sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", reindex_all)
 
     try:
         managers = await initialize_shared_knowledge_managers(
@@ -2677,29 +2683,12 @@ async def test_initialize_shared_knowledge_managers_finishes_pending_background_
             reindex_on_create=True,
         )
         manager = managers["research"]
-        assert manager._git_background_startup_mode == "full_reindex"
 
-        finish_pending_background_git_startup = AsyncMock(return_value={"indexed_count": 0})
-        sync_manager_without_full_reindex = AsyncMock(
-            return_value={"updated": False, "changed_count": 0, "removed_count": 0},
-        )
-        monkeypatch.setattr(manager, "finish_pending_background_git_startup", finish_pending_background_git_startup)
-        monkeypatch.setattr(
-            "mindroom.knowledge.manager._sync_manager_without_full_reindex",
-            sync_manager_without_full_reindex,
-        )
-
-        blocking_config = _make_git_config(tmp_path / "knowledge", startup_behavior="blocking")
-        blocking_managers = await initialize_shared_knowledge_managers(
-            blocking_config,
-            runtime_paths_for(blocking_config),
-            start_watchers=False,
-            reindex_on_create=False,
-        )
-
-        assert blocking_managers["research"] is manager
-        finish_pending_background_git_startup.assert_awaited_once_with()
-        sync_manager_without_full_reindex.assert_not_awaited()
+        assert manager._git_background_startup_mode is None
+        sync_git_repository.assert_awaited_once_with(index_changes=False)
+        reindex_all.assert_awaited_once_with()
+        prepare_background_git_startup.assert_not_awaited()
+        start_git_sync.assert_awaited_once_with()
     finally:
         await shutdown_shared_knowledge_managers()
 
