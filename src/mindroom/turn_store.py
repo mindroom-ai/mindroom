@@ -5,7 +5,7 @@ from __future__ import annotations
 import typing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
@@ -42,11 +42,14 @@ class LoadedTurnRecord:
     requires_backfill: bool
 
 
-@dataclass(frozen=True)
-class PendingResponseReservation:
-    """Durable delivery state reserved before the first visible reply send."""
+type OwnedVisibleSendLane = Literal["response", "visible_echo"]
 
-    response_transaction_id: str
+
+@dataclass(frozen=True)
+class OwnedVisibleSendReservation:
+    """Durable delivery state reserved before one owned visible send."""
+
+    transaction_id: str
 
 
 @dataclass(frozen=True)
@@ -146,11 +149,13 @@ class TurnStore:
         """Return the first visible echo already tracked for one or more source events."""
         return self._ledger.visible_echo_event_id_for_sources(source_event_ids)
 
-    def reserve_pending_response(self, handled_turn: HandledTurnState) -> PendingResponseReservation:
-        """Reserve durable delivery state for the first visible reply send."""
-        return PendingResponseReservation(
-            response_transaction_id=self._ledger.reserve_response_transaction_id(handled_turn),
-        )
+    def reserve_pending_response(self, handled_turn: HandledTurnState) -> OwnedVisibleSendReservation:
+        """Reserve durable delivery state for the primary visible reply send."""
+        return self._reserve_owned_visible_send(handled_turn, lane="response")
+
+    def reserve_visible_echo(self, handled_turn: HandledTurnState) -> OwnedVisibleSendReservation:
+        """Reserve durable delivery state for a visible echo send."""
+        return self._reserve_owned_visible_send(handled_turn, lane="visible_echo")
 
     def claim_pending_inbound(self, *, room_id: str, event_source: dict[str, Any]) -> bool:
         """Persist one replayable inbound claim before the turn enters long-running work."""
@@ -245,6 +250,20 @@ class TurnStore:
         if handled_turn.source_event_prompts:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
         return metadata
+
+    def _reserve_owned_visible_send(
+        self,
+        handled_turn: HandledTurnState,
+        *,
+        lane: OwnedVisibleSendLane,
+    ) -> OwnedVisibleSendReservation:
+        """Reserve one stable outbound transaction id for the requested visible-send lane."""
+        transaction_id = (
+            self._ledger.reserve_response_transaction_id(handled_turn)
+            if lane == "response"
+            else self._ledger.reserve_visible_echo_transaction_id(handled_turn)
+        )
+        return OwnedVisibleSendReservation(transaction_id=transaction_id)
 
     def load_turn(
         self,

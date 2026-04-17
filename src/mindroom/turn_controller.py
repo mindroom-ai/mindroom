@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import nio
 
@@ -117,6 +117,7 @@ type _MediaDispatchEvent = (
 type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
 type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
+type OwnedVisibleSendLane = Literal["response", "visible_echo"]
 
 
 class _EditRegenerator(Protocol):
@@ -188,20 +189,28 @@ class TurnController:
         handled_turn: HandledTurnState,
         target: MessageTarget,
         response_text: str,
+        lane: OwnedVisibleSendLane = "response",
         skip_mentions: bool = False,
         extra_content: dict[str, Any] | None = None,
     ) -> str | None:
-        """Reserve a stable tx-id before the first visible reply for one owned turn."""
-        pending_response = self.deps.turn_store.reserve_pending_response(handled_turn)
-        return await self.deps.delivery_gateway.send_text(
+        """Reserve a stable tx-id before one owned visible send."""
+        reservation = (
+            self.deps.turn_store.reserve_pending_response(handled_turn)
+            if lane == "response"
+            else self.deps.turn_store.reserve_visible_echo(handled_turn)
+        )
+        event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text=response_text,
-                transaction_id=pending_response.response_transaction_id,
+                transaction_id=reservation.transaction_id,
                 skip_mentions=skip_mentions,
                 extra_content=extra_content,
             ),
         )
+        if event_id is not None and lane == "visible_echo":
+            self.deps.turn_store.record_visible_echo(handled_turn.anchor_event_id, event_id)
+        return event_id
 
     def _schedule_edit_retry(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Retry one replayable edit after a short delay while its inbound claim is still owned."""
@@ -550,16 +559,13 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        visible_echo_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                target=target,
-                response_text=text,
-                skip_mentions=True,
-            ),
+        return await self._send_owned_visible_reply(
+            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            target=target,
+            response_text=text,
+            lane="visible_echo",
+            skip_mentions=True,
         )
-        if visible_echo_event_id is not None:
-            self.deps.turn_store.record_visible_echo(event.event_id, visible_echo_event_id)
-        return visible_echo_event_id
 
     async def _prepare_dispatch(
         self,
@@ -639,7 +645,7 @@ class TurnController:
             if reserved_command_response_transaction_id is None:
                 reserved_command_response_transaction_id = self.deps.turn_store.reserve_pending_response(
                     command_handled_turn,
-                ).response_transaction_id
+                ).transaction_id
             return reserved_command_response_transaction_id
 
         async def send_skill_command_response(
@@ -1063,7 +1069,7 @@ class TurnController:
                 SendTextRequest(
                     target=dispatch.target,
                     response_text=action.rejection_message,
-                    transaction_id=pending_response.response_transaction_id,
+                    transaction_id=pending_response.transaction_id,
                 ),
             )
             self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
@@ -1096,7 +1102,7 @@ class TurnController:
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
                 error=error,
-                response_transaction_id=pending_response.response_transaction_id,
+                response_transaction_id=pending_response.transaction_id,
             )
             if response_event_id is not None:
                 self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
@@ -1191,7 +1197,7 @@ class TurnController:
                         response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
-                        response_transaction_id=pending_response.response_transaction_id,
+                        response_transaction_id=pending_response.transaction_id,
                         matrix_run_metadata=matrix_run_metadata,
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
@@ -1212,7 +1218,7 @@ class TurnController:
                         response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
-                        response_transaction_id=pending_response.response_transaction_id,
+                        response_transaction_id=pending_response.transaction_id,
                         matrix_run_metadata=matrix_run_metadata,
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
@@ -1226,7 +1232,7 @@ class TurnController:
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
                 error=failure,
-                response_transaction_id=pending_response.response_transaction_id,
+                response_transaction_id=pending_response.transaction_id,
             )
             if response_event_id is not None:
                 self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))

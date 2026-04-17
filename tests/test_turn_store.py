@@ -62,11 +62,37 @@ def test_turn_store_reuses_reserved_response_transaction_id_across_reload(tmp_pa
     reloaded_store = TurnStore(deps)
     second = reloaded_store.reserve_pending_response(HandledTurnState.from_source_event_id("$event"))
 
-    assert first.response_transaction_id == second.response_transaction_id
+    assert first.transaction_id == second.transaction_id
     assert reloaded_store.is_handled("$event") is False
     turn_record = reloaded_store.get_turn_record("$event")
     assert turn_record is not None
-    assert turn_record.response_transaction_id == first.response_transaction_id
+    assert turn_record.response_transaction_id == first.transaction_id
+    assert turn_record.completed is False
+
+
+def test_turn_store_reuses_reserved_visible_echo_transaction_id_across_reload(tmp_path: Path) -> None:
+    """Pending visible-echo transaction IDs should survive reload without marking the turn handled."""
+    tracking_path = tmp_path / "tracking"
+    deps = TurnStoreDeps(
+        agent_name="agent",
+        tracking_base_path=tracking_path,
+        state_writer=MagicMock(),
+        resolver=MagicMock(),
+        tool_runtime=MagicMock(),
+    )
+    store = TurnStore(deps)
+
+    first = store.reserve_visible_echo(HandledTurnState.from_source_event_id("$event"))
+
+    reloaded_store = TurnStore(deps)
+    second = reloaded_store.reserve_visible_echo(HandledTurnState.from_source_event_id("$event"))
+
+    assert first.transaction_id == second.transaction_id
+    assert reloaded_store.is_handled("$event") is False
+    turn_record = reloaded_store.get_turn_record("$event")
+    assert turn_record is not None
+    assert turn_record.visible_echo_transaction_id == first.transaction_id
+    assert turn_record.visible_echo_event_id is None
     assert turn_record.completed is False
 
 

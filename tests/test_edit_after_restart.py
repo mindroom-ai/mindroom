@@ -339,8 +339,8 @@ async def test_replayed_message_reuses_pending_response_transaction_id(tmp_path:
     )
 
     request = bot._response_runner.generate_response.await_args.args[0]
-    assert request.response_transaction_id == pending_response.response_transaction_id
+    assert request.response_transaction_id == pending_response.transaction_id
     turn_record = bot._turn_store.get_turn_record(message_event.event_id)
     assert turn_record is not None
     assert turn_record.response_event_id == "$response:example.com"
-    assert turn_record.response_transaction_id == pending_response.response_transaction_id
+    assert turn_record.response_transaction_id == pending_response.transaction_id

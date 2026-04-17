@@ -1111,6 +1111,49 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
 
 
 @pytest.mark.asyncio
+async def test_router_visible_voice_echo_reuses_txid_after_restart_before_echo_event_id_is_persisted(
+    tmp_path: Path,
+) -> None:
+    """A restarted bot should reuse the reserved voice-echo tx-id if the echo event id was never persisted."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$voice_echo")
+    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+    with patch.object(bot._turn_store, "record_visible_echo", new=MagicMock()):
+        first_event_id = await bot._turn_controller._maybe_send_visible_voice_echo(
+            room,
+            event,
+            text=f"{VOICE_PREFIX}@home turn on the lights",
+            thread_id="$voice_event",
+        )
+
+    assert first_event_id == "$voice_echo"
+    first_request = bot._delivery_gateway.send_text.await_args.args[0]
+    assert first_request.transaction_id is not None
+    first_turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert first_turn_record is not None
+    assert first_turn_record.visible_echo_event_id is None
+
+    restarted_bot, restarted_room, restarted_event = _make_visible_router_echo_scenario(tmp_path)
+    wrap_extracted_collaborators(restarted_bot, "_delivery_gateway")
+    restarted_bot._delivery_gateway.send_text = AsyncMock(return_value="$voice_echo")
+    replace_turn_controller_deps(restarted_bot, delivery_gateway=restarted_bot._delivery_gateway)
+
+    second_event_id = await restarted_bot._turn_controller._maybe_send_visible_voice_echo(
+        restarted_room,
+        restarted_event,
+        text=f"{VOICE_PREFIX}@home turn on the lights",
+        thread_id="$voice_event",
+    )
+
+    assert second_event_id == "$voice_echo"
+    second_request = restarted_bot._delivery_gateway.send_text.await_args.args[0]
+    assert second_request.transaction_id == first_request.transaction_id
+    assert restarted_bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+
+
+@pytest.mark.asyncio
 async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(tmp_path) -> None:  # noqa: ANN001
     """Router should route normalized audio like any other synthetic text input."""
     agent_user = MagicMock()
