@@ -2908,19 +2908,21 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
 
 
 @pytest.mark.asyncio
-async def test_sync_git_repository_once_pulls_lfs_when_head_unchanged(
+async def test_sync_git_repository_once_skips_repeated_lfs_pull_for_already_hydrated_unchanged_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LFS-enabled repos should hydrate the worktree even when the tracked commit is unchanged."""
+    """Unchanged LFS heads should hydrate once, then reuse the persisted hydration marker."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
+    config = _make_git_config(tmp_path / "knowledge", lfs=True)
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
     manager = KnowledgeManager(
         base_id="research",
-        config=_make_git_config(tmp_path / "knowledge", lfs=True),
-        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+        config=config,
+        runtime_paths=runtime_paths,
     )
 
     git_calls: list[list[str]] = []
@@ -2951,6 +2953,31 @@ async def test_sync_git_repository_once_pulls_lfs_when_head_unchanged(
     assert changed_files == set()
     assert removed_files == set()
     assert ["lfs", "pull", "origin", "main"] in git_calls
+
+    hydrated_manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    repeated_git_calls: list[list[str]] = []
+
+    async def _fake_run_git_second(args: list[str], **_: object) -> str:
+        repeated_git_calls.append(args)
+        return ""
+
+    monkeypatch.setattr(hydrated_manager, "_ensure_git_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(hydrated_manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(hydrated_manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(hydrated_manager, "_run_git", _fake_run_git_second)
+
+    changed_files, removed_files, updated = await hydrated_manager._sync_git_repository_once(
+        hydrated_manager._git_config(),
+    )
+
+    assert updated is False
+    assert changed_files == set()
+    assert removed_files == set()
+    assert ["lfs", "pull", "origin", "main"] not in repeated_git_calls
 
 
 @pytest.mark.asyncio

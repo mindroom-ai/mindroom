@@ -196,7 +196,7 @@ When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` fl
 - Required full reindexes still run blocking before the manager is exposed
 - Request-scoped private knowledge roots do not keep background startup alive between requests, so they effectively fall back to on-access blocking sync behavior even if `startup_behavior: background` is configured
 - Every `poll_interval_seconds`, MindRoom runs `git fetch` + `git reset --hard origin/<branch>`
-- When `lfs: true`, MindRoom also runs `git lfs pull origin <branch>` after sync
+- When `lfs: true`, MindRoom runs `git lfs pull origin <branch>` when a checkout is first hydrated or when sync advances to a new Git head
 - Local uncommitted changes in the checkout folder are discarded on each sync
 - Only changed files are re-indexed (not the entire repo each time)
 - Deleted files are automatically removed from the index

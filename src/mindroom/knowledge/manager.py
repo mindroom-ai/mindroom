@@ -370,6 +370,7 @@ class KnowledgeManager:
     _base_storage_path: Path = field(init=False)
     _index_failures_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
+    _git_lfs_hydrated_head_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
     _indexed_files: set[str] = field(default_factory=set, init=False)
     _indexed_signatures: dict[str, tuple[int, int] | None] = field(default_factory=dict, init=False)
@@ -414,6 +415,7 @@ class KnowledgeManager:
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._index_failures_path = self._base_storage_path / "index_failures.json"
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
+        self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         self._git_repo_present = (self.knowledge_path / ".git").is_dir()
 
         vector_db = ChromaDb(
@@ -511,6 +513,16 @@ class KnowledgeManager:
 
     def _save_persisted_indexing_settings(self) -> None:
         self._save_persisted_indexing_state(_INDEXING_STATUS_COMPLETE)
+
+    def _load_git_lfs_hydrated_head(self) -> str | None:
+        try:
+            hydrated_head = self._git_lfs_hydrated_head_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return hydrated_head or None
+
+    def _save_git_lfs_hydrated_head(self, head: str) -> None:
+        self._git_lfs_hydrated_head_path.write_text(head, encoding="utf-8")
 
     def _has_existing_index(self) -> bool:
         vector_db = self._knowledge.vector_db
@@ -685,13 +697,28 @@ class KnowledgeManager:
         await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
         self._git_lfs_repository_ready = True
 
-    async def _hydrate_git_lfs_worktree(self, git_config: KnowledgeGitConfig, *, repo_root: Path | None = None) -> None:
+    async def _hydrate_git_lfs_worktree(
+        self,
+        git_config: KnowledgeGitConfig,
+        *,
+        repo_root: Path | None = None,
+        current_head: str | None = None,
+    ) -> None:
         if not git_config.lfs:
             return
+        resolved_head = current_head or await self._git_rev_parse("HEAD")
+        if resolved_head is not None:
+            hydrated_head = await asyncio.to_thread(self._load_git_lfs_hydrated_head)
+            if hydrated_head == resolved_head:
+                return
         await self._run_git(
             ["lfs", "pull", "origin", git_config.branch],
             cwd=repo_root or self._knowledge_source_path(),
         )
+        if resolved_head is None:
+            resolved_head = await self._git_rev_parse("HEAD")
+        if resolved_head is not None:
+            await asyncio.to_thread(self._save_git_lfs_hydrated_head, resolved_head)
 
     async def _git_rev_parse(self, ref: str) -> str | None:
         try:
@@ -771,13 +798,13 @@ class KnowledgeManager:
             raise RuntimeError(msg)
 
         if before_head == remote_head:
-            await self._hydrate_git_lfs_worktree(git_config)
+            await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
             return set(), set(), False
 
         await self._run_git(["checkout", git_config.branch])
         # Force-align the local checkout with remote to tolerate local dirty state.
         await self._run_git(["reset", "--hard", remote_ref])
-        await self._hydrate_git_lfs_worktree(git_config)
+        await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
 
         after_files = await self._git_list_tracked_files()
         if before_head is None:
