@@ -69,6 +69,7 @@ class HomeAssistantTools(Toolkit):
         return load_scoped_credentials(
             "homeassistant",
             credentials_manager=self._creds_manager,
+            allowed_shared_services=frozenset({"homeassistant"}),
             worker_target=self._worker_target,
         )
 

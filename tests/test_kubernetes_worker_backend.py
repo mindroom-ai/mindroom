@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.constants import deserialize_runtime_paths, resolve_primary_runtime_paths
+from mindroom.constants import (
+    DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+    deserialize_runtime_paths,
+    resolve_primary_runtime_paths,
+)
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -190,6 +194,7 @@ def _backend(
     owner_deployment_name: str | None = None,
     runtime_paths: RuntimePaths | None = None,
     tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = _KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -224,6 +229,7 @@ def _backend(
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=resolved_runtime_paths.storage_root,
         tool_validation_snapshot=tool_validation_snapshot or deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT),
+        worker_grantable_credentials=worker_grantable_credentials,
     )
     apps_api = _FakeAppsApi()
     core_api = _FakeCoreApi()
@@ -340,7 +346,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # 
 
 
 def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_path: Path) -> None:
-    """Dedicated worker startup payloads should preserve non-secret runtime settings only."""
+    """Dedicated worker startup payloads should keep worker control env while denying ambient provider and arbitrary runtime env."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -357,9 +363,13 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_NAMESPACE=alpha1234\n"
             "MATRIX_HOMESERVER=http://dotenv-hs\n"
             "MATRIX_SERVER_NAME=alpha.example\n"
+            "CUSTOMER_ID=tenant-123\n"
+            "ACCOUNT_ID=account-456\n"
             f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n"
             "GOOGLE_CLOUD_PROJECT=demo-project\n"
             "GOOGLE_CLOUD_LOCATION=us-central1\n"
+            "OPENAI_BASE_URL=http://example.invalid/v1\n"
+            "CUSTOM_API_TOKEN=custom-secret\n"
             "ANTHROPIC_API_KEY=sk-secret\n"
         ),
         encoding="utf-8",
@@ -383,20 +393,22 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
     state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
-    expected_worker_root = Path(env_values["MINDROOM_STORAGE_PATH"])
-    expected_credentials_path = expected_worker_root / ".runtime" / credentials_path.name
     local_credentials_path = runtime_paths.storage_root / state_subpath / ".runtime" / credentials_path.name
 
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
-    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == str(expected_credentials_path)
-    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
-    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
+    assert committed_runtime.env_value("CUSTOMER_ID") == "tenant-123"
+    assert committed_runtime.env_value("ACCOUNT_ID") == "account-456"
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
+    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") is None
+    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") is None
+    assert committed_runtime.env_value("OPENAI_BASE_URL") is None
+    assert committed_runtime.env_value("CUSTOM_API_TOKEN") is None
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
-    assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+    assert not local_credentials_path.exists()
 
 
 def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
@@ -451,8 +463,8 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
 
-def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_paths_differ(tmp_path: Path) -> None:
-    """Dedicated workers should copy ADC into the local shared storage root even when pod mount paths differ."""
+def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Path) -> None:
+    """Dedicated workers should reject google_vertex_adc instead of accepting a non-working grant."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -469,25 +481,12 @@ def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_
         storage_path=local_storage_root,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
     )
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        storage_mount_path="/app/worker",
-    )
-
-    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-
-    deployment = apps_api.created_bodies[0]
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
-    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
-    local_adc_copy = local_storage_root / state_subpath / ".runtime" / credentials_path.name
-
-    assert (
-        committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS")
-        == f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
-    )
-    assert local_adc_copy.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+    with pytest.raises(WorkerBackendError, match="google_vertex_adc"):
+        _backend(
+            runtime_paths=runtime_paths,
+            storage_mount_path="/app/worker",
+            worker_grantable_credentials=frozenset({"google_vertex_adc"}),
+        )
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
@@ -800,21 +799,19 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers()
     assert "/app/worker/.shared_credentials" not in mount_paths
 
 
-def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unscoped dedicated workers should mirror shared UI credentials into their shared layer."""
     backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, bool]] = []
+    sync_calls: list[tuple[str, frozenset[str] | None]] = []
 
     def _record_sync(
         worker_key: str,
         *,
-        include_ui_credentials: bool,
+        allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
         del credentials_manager
-        sync_calls.append((worker_key, include_ui_credentials))
+        sync_calls.append((worker_key, allowed_services))
 
     monkeypatch.setattr(
         "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
@@ -823,24 +820,24 @@ def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:unscoped:general"), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:unscoped:general", True)]
+    assert sync_calls == [("v1:tenant-123:unscoped:general", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
 
 
-def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
+def test_kubernetes_backend_mirrors_shared_credentials_for_scoped_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scoped dedicated workers should mirror only env-backed shared credentials."""
+    """Scoped dedicated workers should use the same allowlisted shared-credential sync path."""
     backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, bool]] = []
+    sync_calls: list[tuple[str, frozenset[str] | None]] = []
 
     def _record_sync(
         worker_key: str,
         *,
-        include_ui_credentials: bool,
+        allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
         del credentials_manager
-        sync_calls.append((worker_key, include_ui_credentials))
+        sync_calls.append((worker_key, allowed_services))
 
     monkeypatch.setattr(
         "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
@@ -849,7 +846,61 @@ def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", False)]
+    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
+
+
+def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated workers should use the config-authored worker credential allowlist."""
+    backend, _apps_api, _core_api = _backend(
+        worker_grantable_credentials=frozenset({"openai", "google_oauth_client"}),
+    )
+    sync_calls: list[frozenset[str] | None] = []
+
+    def _record_sync(
+        worker_key: str,
+        *,
+        allowed_services: frozenset[str] | None = None,
+        credentials_manager: object | None = None,
+    ) -> None:
+        del worker_key, credentials_manager
+        sync_calls.append(allowed_services)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+        _record_sync,
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+
+    assert sync_calls == [frozenset({"openai", "google_oauth_client"})]
+
+
+def test_kubernetes_backend_uses_empty_worker_grantable_credentials_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated workers should pass through an explicit deny-all worker credential allowlist."""
+    backend, _apps_api, _core_api = _backend(worker_grantable_credentials=frozenset())
+    sync_calls: list[frozenset[str] | None] = []
+
+    def _record_sync(
+        worker_key: str,
+        *,
+        allowed_services: frozenset[str] | None = None,
+        credentials_manager: object | None = None,
+    ) -> None:
+        del worker_key, credentials_manager
+        sync_calls.append(allowed_services)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+        _record_sync,
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+
+    assert sync_calls == [frozenset()]
 
 
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:

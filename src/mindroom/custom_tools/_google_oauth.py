@@ -73,6 +73,7 @@ class ScopedGoogleOAuthMixin:
         return load_scoped_credentials(
             "google",
             credentials_manager=self._creds_manager,
+            allowed_shared_services=frozenset({"google"}),
             worker_target=self._worker_target,
         )
 

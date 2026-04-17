@@ -461,6 +461,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
+        allowed_shared_services: frozenset[str] | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -471,6 +472,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             runtime_overrides,
             shared_storage_root_path,
             worker_tools_override,
+            allowed_shared_services,
             worker_target,
         )
         if name == "browser":
@@ -513,6 +515,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
+        allowed_shared_services: frozenset[str] | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -523,6 +526,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             runtime_overrides,
             shared_storage_root_path,
             worker_tools_override,
+            allowed_shared_services,
             worker_target,
         )
         if name == "stale_tool":
@@ -1419,6 +1423,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
+        allowed_shared_services: frozenset[str] | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -1428,6 +1433,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             runtime_overrides,
             shared_storage_root_path,
             worker_tools_override,
+            allowed_shared_services,
         )
         credentials = load_scoped_credentials(
             tool_name,

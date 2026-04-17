@@ -564,6 +564,7 @@ def _build_tool_instance(
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     shared_storage_root_path: Path | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
@@ -590,6 +591,7 @@ def _build_tool_instance(
             tool_name,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
         )
         if resolved_credentials_manager is not None
         else {}
@@ -648,6 +650,7 @@ def get_tool_by_name(
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     shared_storage_root_path: Path | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
@@ -668,6 +671,7 @@ def get_tool_by_name(
         worker_tools_override=worker_tools_override,
         runtime_overrides=runtime_overrides,
         shared_storage_root_path=shared_storage_root_path,
+        allowed_shared_services=allowed_shared_services,
         worker_target=worker_target,
     )
 

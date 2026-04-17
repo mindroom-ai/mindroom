@@ -25,7 +25,6 @@ from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runti
 from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
 from mindroom.api.config_lifecycle import raise_for_config_load_result as raise_api_config_load_result
 from mindroom.api.config_lifecycle import read_app_committed_config as read_api_app_committed_config
-from mindroom.api.config_lifecycle import read_app_committed_runtime_config as read_api_app_committed_runtime_config
 from mindroom.api.config_lifecycle import read_committed_config as read_api_committed_config
 from mindroom.api.config_lifecycle import read_raw_config_source as read_api_raw_config_source
 from mindroom.api.config_lifecycle import replace_committed_config as replace_api_committed_config
@@ -153,6 +152,7 @@ def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
     runtime_config: Config | None = None,
+    worker_grantable_credentials: frozenset[str] | None = None,
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -172,12 +172,15 @@ def _cleanup_workers_once(
             runtime_paths,
             runtime_config=runtime_config,
         )
+        if worker_grantable_credentials is None:
+            worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
     worker_manager = get_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        worker_grantable_credentials=worker_grantable_credentials,
     )
     cleaned_workers = worker_manager.cleanup_idle_workers()
     if cleaned_workers:
@@ -211,18 +214,20 @@ async def _worker_cleanup_loop(
         except TimeoutError:
             try:
                 try:
-                    runtime_config, runtime_paths = read_api_app_committed_runtime_config(api_app)
+                    runtime_config, runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
                 except HTTPException:
                     runtime_config = None
                     runtime_paths = _app_runtime_paths(api_app)
-                if runtime_config is None:
-                    await asyncio.to_thread(_cleanup_workers_once, runtime_paths)
-                else:
-                    await asyncio.to_thread(
-                        _cleanup_workers_once,
-                        runtime_paths,
-                        runtime_config=runtime_config,
-                    )
+                await asyncio.to_thread(
+                    _cleanup_workers_once,
+                    runtime_paths,
+                    runtime_config=runtime_config,
+                    worker_grantable_credentials=(
+                        runtime_config.get_worker_grantable_credentials()
+                        if runtime_config is not None
+                        else constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+                    ),
+                )
             except Exception:
                 logger.exception("Background worker cleanup failed")
 

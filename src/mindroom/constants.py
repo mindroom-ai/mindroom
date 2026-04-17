@@ -41,6 +41,7 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "POD_NAMESPACE",
     },
 )
+_ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset({"ACCOUNT_ID", "CUSTOMER_ID", "POD_NAMESPACE"})
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
         "MINDROOM_LOCAL_CLIENT_ID",
@@ -267,6 +268,14 @@ def _is_public_runtime_startup_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
+def _is_isolated_runtime_public_env_name(name: str) -> bool:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
+        return False
+    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+
+
 def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = {
@@ -351,14 +360,55 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def _is_execution_runtime_process_env_name(name: str) -> bool:
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
-        return False
-    return (
-        _is_public_runtime_startup_env_name(name)
-        or name in PROVIDER_ENV_KEYS.values()
-        or name in VERTEXAI_CLAUDE_ENV_KEYS
+def _is_known_worker_credential_env_name(name: str) -> bool:
+    return name in {
+        *PROVIDER_ENV_KEYS.values(),
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GITHUB_TOKEN",
+        *VERTEXAI_CLAUDE_ENV_KEYS,
+    }
+
+
+def _is_execution_runtime_process_env_name(
+    name: str,
+) -> bool:
+    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES and (
+        _is_public_runtime_startup_env_name(name) or _is_known_worker_credential_env_name(name)
     )
+
+
+def _is_allowed_execution_runtime_env_file_name(
+    name: str,
+) -> bool:
+    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
+
+
+def _execution_runtime_env_layers(
+    runtime_paths: RuntimePaths,
+) -> tuple[dict[str, str], dict[str, str]]:
+    env_file_values = {
+        key: value
+        for key, value in runtime_paths.env_file_values.items()
+        if _is_allowed_execution_runtime_env_file_name(key)
+    }
+    process_env = {
+        key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)
+    }
+    return process_env, env_file_values
+
+
+def _sandbox_execution_runtime_env_layers(
+    runtime_paths: RuntimePaths,
+) -> tuple[dict[str, str], dict[str, str]]:
+    env_file_values = {
+        key: value for key, value in runtime_paths.env_file_values.items() if _is_isolated_runtime_public_env_name(key)
+    }
+    process_env = {
+        key: value for key, value in runtime_paths.process_env.items() if _is_isolated_runtime_public_env_name(key)
+    }
+    return process_env, env_file_values
 
 
 def _shell_extra_env_patterns(extra_env_passthrough: str | None) -> tuple[str, ...]:
@@ -391,7 +441,9 @@ def shell_extra_env_values(
     return cast("Mapping[str, str]", MappingProxyType(selected_env))
 
 
-def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+def execution_runtime_env_values(
+    runtime_paths: RuntimePaths,
+) -> Mapping[str, str]:
     """Return the runtime env that execution tools may observe.
 
     This intentionally differs from ``runtime_env_values()``:
@@ -399,17 +451,35 @@ def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, st
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
     """
-    merged_env = {
-        key: value
-        for key, value in runtime_paths.env_file_values.items()
-        if key not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
-    }
-    merged_env.update(
-        {key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)},
-    )
+    process_env, env_file_values = _execution_runtime_env_layers(runtime_paths)
+    merged_env = dict(env_file_values)
+    merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def sandbox_execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+    """Return the stricter env visible to sandbox-proxied python execution."""
+    process_env, env_file_values = _sandbox_execution_runtime_env_layers(runtime_paths)
+    merged_env = dict(env_file_values)
+    merged_env.update(process_env)
+    merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
+    merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
+    return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
+    """Return one runtime view filtered for isolated worker execution."""
+    process_env, env_file_values = _sandbox_execution_runtime_env_layers(runtime_paths)
+    return RuntimePaths(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=runtime_paths.storage_root,
+        process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
+        env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
+    )
 
 
 def shell_execution_runtime_env_values(
@@ -426,6 +496,23 @@ def shell_execution_runtime_env_values(
         ),
     )
     merged_env.update(execution_runtime_env_values(runtime_paths))
+    return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def sandbox_shell_execution_runtime_env_values(
+    runtime_paths: RuntimePaths,
+    *,
+    extra_env_passthrough: str | None = None,
+    process_env: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Return the stricter env visible to sandbox-proxied shell execution."""
+    merged_env = dict(
+        shell_extra_env_values(
+            extra_env_passthrough=extra_env_passthrough,
+            process_env=process_env,
+        ),
+    )
+    merged_env.update(sandbox_execution_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
@@ -654,6 +741,12 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "ollama": "OLLAMA_HOST",
 }
+# Dedicated workers start with no mirrored/shared credentials by default.
+# Any service exposure into an isolated worker runtime must be explicitly authored.
+DEFAULT_WORKER_GRANTABLE_CREDENTIALS = frozenset()
+# Some credentials are intentionally unsupported in isolated workers because they rely on
+# host-local files or ambient env that the sandbox contract now denies by default.
+UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset({"google_vertex_adc"})
 VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 _CHROMADB_PY314_PATCHED = False

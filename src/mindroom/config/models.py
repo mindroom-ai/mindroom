@@ -7,6 +7,8 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
+from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.credentials import validate_service_name
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
@@ -340,6 +342,23 @@ class DefaultsConfig(BaseModel):
         default=None,
         description="Default worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
     )
+    worker_grantable_credentials: list[str] | None = Field(
+        default=None,
+        description=(
+            "Credential service names to make available inside isolated workers "
+            "(None = deny by default). Use built-in names such as openai, anthropic, "
+            "google, google_oauth_client, github_private, and ollama, or custom shared "
+            "credential service names saved through the dashboard or API. This setting "
+            "only affects tools that actually run inside isolated workers. It never "
+            "injects provider env vars such as OPENAI_API_KEY. For worker-routed tools, "
+            "it only controls which shared credentials MindRoom may load inside isolated "
+            "workers, and it does "
+            "not affect local shared-only integrations such as gmail, google_calendar, "
+            "google_sheets, and homeassistant because those stay in the main runtime. "
+            "google_vertex_adc is intentionally unsupported in isolated workers and must "
+            "stay in the main runtime."
+        ),
+    )
     allow_self_config: bool = Field(
         default=False,
         description="Default setting for allowing agents to modify their own configuration",
@@ -401,6 +420,26 @@ class DefaultsConfig(BaseModel):
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each default tool appears at most once."""
         return validate_unique_tool_entries(tools, scope_name="default")
+
+    @field_validator("worker_grantable_credentials")
+    @classmethod
+    def validate_worker_grantable_credentials(
+        cls,
+        services: list[str] | None,
+    ) -> list[str] | None:
+        """Normalize configured worker-grantable credential service names."""
+        if services is None:
+            return None
+        normalized_services = [validate_service_name(service) for service in services]
+        unsupported_services = sorted(set(normalized_services) & UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS)
+        if unsupported_services:
+            msg = (
+                "worker_grantable_credentials does not support "
+                f"{', '.join(unsupported_services)}. These credentials must stay in the main runtime, "
+                "not isolated workers."
+            )
+            raise ValueError(msg)
+        return normalized_services
 
 
 class EmbedderConfig(BaseModel):

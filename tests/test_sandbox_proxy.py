@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 
 import pytest
@@ -547,6 +548,95 @@ def test_shell_subprocess_env_path_passthrough_without_prepend(
     assert shell_tool_module._shell_subprocess_env(runtime_env)["PATH"] == "/usr/local/bin:/usr/bin"
 
 
+def test_shell_subprocess_env_prefers_explicit_base_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shell subprocess env should come from the explicit request snapshot, not live runner state."""
+    monkeypatch.setenv("PATH", "/runner/bin")
+    monkeypatch.setenv("HOME", "/runner-home")
+
+    env = shell_tool_module._shell_subprocess_env(
+        {},
+        base_process_env={"PATH": "/request/bin", "HOME": "/request-home"},
+    )
+
+    assert env["PATH"] == "/request/bin"
+    assert env["HOME"] == "/request-home"
+
+
+def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Isolated execution should not inherit provider env or arbitrary runtime `.env` values by default."""
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "MINDROOM_NAMESPACE=alpha1234\nTEST_EXECUTION_ENV=visible-in-shell\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    class _FakeConfig:
+        def get_worker_grantable_credentials(self) -> frozenset[str]:
+            return frozenset()
+
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "get_tool_runtime_context",
+        lambda: SimpleNamespace(config=_FakeConfig()),
+    )
+
+    execution_env = sandbox_proxy_module._execution_env_payload("python", runtime_paths=runtime_paths)
+
+    assert execution_env is not None
+    assert execution_env["MINDROOM_NAMESPACE"] == "alpha1234"
+    assert "TEST_EXECUTION_ENV" not in execution_env
+    assert "OPENAI_API_KEY" not in execution_env
+    assert "OPENAI_BASE_URL" not in execution_env
+    assert "CUSTOM_API_TOKEN" not in execution_env
+
+
+def test_execution_env_payload_keeps_provider_env_denied_even_with_worker_credential_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Isolated execution should not reintroduce provider env just because credentials are mirrored."""
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    class _FakeConfig:
+        def get_worker_grantable_credentials(self) -> frozenset[str]:
+            return frozenset({"openai"})
+
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "get_tool_runtime_context",
+        lambda: SimpleNamespace(config=_FakeConfig()),
+    )
+
+    execution_env = sandbox_proxy_module._execution_env_payload("python", runtime_paths=runtime_paths)
+
+    assert execution_env is not None
+    assert "OPENAI_API_KEY" not in execution_env
+    assert "OPENAI_BASE_URL" not in execution_env
+
+
 @pytest.mark.asyncio
 async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
     """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
@@ -743,7 +833,7 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     assert result == "sandbox-result"
     assert captured["json"]["extra_env_passthrough"] == "GITEA_*"
     assert captured["json"]["tool_init_overrides"]["shell_path_prepend"] == "/opt/custom/bin"
-    assert captured["json"]["execution_env"]["TEST_EXECUTION_ENV"] == "visible-in-shell"
+    assert "TEST_EXECUTION_ENV" not in captured["json"]["execution_env"]
     assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"  # noqa: S105
     assert "CI_JOB_TOKEN" not in captured["json"]["execution_env"]
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
@@ -944,12 +1034,14 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_token: str | None,
         storage_root: Path | None = None,
         kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        worker_grantable_credentials: frozenset[str] | None = None,
     ) -> str:
         captured["runtime_paths"] = runtime_paths_arg
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
         captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
+        captured["worker_grantable_credentials"] = worker_grantable_credentials
         return "manager"
 
     monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
@@ -972,6 +1064,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert manager == "manager"
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
+    assert captured["worker_grantable_credentials"] is None
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1079,6 +1172,79 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
     lease_url, lease_payload = captured_calls[0]
     assert lease_url.endswith("/api/sandbox-runner/leases")
     assert lease_payload["credential_overrides"] == {"api_key": "worker-key"}
+
+
+def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-routed leases must not expose shared credentials outside worker_grantable_credentials."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    fake_credentials = FakeCredentialsManager({"openai": {"api_key": "shared-key", "_source": "ui"}})
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+        credential_policy={"calculator.add": ("openai",)},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda _url, _json: {"ok": True, "result": "proxied"},
+        ),
+    )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        credentials_manager=fake_credentials,
+        worker_tools_override=["calculator"],
+        worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="@alice:example.org",
+        client=object(),
+        config=Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    worker_scope="user",
+                ),
+            },
+            models={},
+        ),
+        runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+
+    with tool_runtime_context(runtime_context):
+        result = entrypoint(1, 2)
+
+    assert result == "proxied"
+    assert len(captured_calls) == 1
+    execute_url, execute_payload = captured_calls[0]
+    assert execute_url.endswith("/api/sandbox-runner/execute")
+    assert "lease_id" not in execute_payload
 
 
 def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1426,8 +1592,9 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            worker_grantable_credentials: frozenset[str],
         ) -> Self:
-            del runtime_paths, auth_token, storage_root
+            del runtime_paths, auth_token, storage_root, worker_grantable_credentials
             captured_snapshots.append(tool_validation_snapshot)
             return cls()
 
@@ -1546,8 +1713,9 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            worker_grantable_credentials: frozenset[str],
         ) -> Self:
-            del runtime_paths, auth_token, storage_root, tool_validation_snapshot
+            del runtime_paths, auth_token, storage_root, tool_validation_snapshot, worker_grantable_credentials
             return cls()
 
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:

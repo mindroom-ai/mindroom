@@ -93,7 +93,12 @@ Important behavior and constraints:
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
 - Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
-- Credentials are mirrored into the worker's scratch space rather than mounting the shared credentials directory into agent-isolated pods.
+- Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
+- Dedicated workers start with no shared credentials by default.
+- Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.
+- `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
+- Dedicated worker runtime env stays deny-by-default for provider and arbitrary `.env` values, while basic runtime plumbing such as `PATH`, `VIRTUAL_ENV`, and linker vars is set separately.
+- This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements

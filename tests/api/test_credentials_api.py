@@ -13,10 +13,15 @@ from mindroom.api import credentials as credentials_api
 from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 
 
-def _config_with_worker_scope(worker_scope: str | None) -> Config:
+def _config_with_worker_scope(
+    worker_scope: str | None,
+    *,
+    worker_grantable_credentials: list[str] | None = None,
+) -> Config:
     config = Config.model_validate(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
@@ -29,7 +34,10 @@ def _config_with_worker_scope(worker_scope: str | None) -> Config:
                     "rooms": ["lobby"],
                 },
             },
-            "defaults": {"markdown": True},
+            "defaults": {
+                "markdown": True,
+                "worker_grantable_credentials": worker_grantable_credentials,
+            },
         },
     )
     config.agents["general"].worker_scope = worker_scope
@@ -350,46 +358,81 @@ class TestCredentialsAPI:
         assert response.status_code == 404
         assert response.json()["detail"] == "Unknown agent: missing"
 
-    def test_shared_agent_name_does_not_merge_global_ui_credentials(
+    def test_shared_agent_name_hides_non_allowlisted_shared_credentials(
         self,
         client: TestClient,
-        mock_credentials_manager: MagicMock,
     ) -> None:
-        """Shared worker scope should not inherit UI-saved global credentials."""
+        """Shared worker scope should not expose shared credentials outside the worker allowlist."""
         config = _config_with_worker_scope("shared")
-        worker_manager = MagicMock()
-        worker_manager.load_credentials.return_value = None
-        mock_credentials_manager.for_worker.return_value = worker_manager
-        mock_credentials_manager.load_credentials.return_value = {
-            "api_key": "sk-global-ui",
-            "_source": "ui",
-        }
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials("openai", {"api_key": "sk-global-ui", "_source": "ui"})
+
         _publish_committed_runtime_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
         assert response.json()["has_key"] is False
 
-    def test_shared_agent_name_still_merges_env_credentials(
+    def test_shared_agent_name_merges_allowlisted_shared_credentials(
         self,
         client: TestClient,
-        mock_credentials_manager: MagicMock,
     ) -> None:
-        """Shared worker scope should still see env-backed base credentials."""
-        config = _config_with_worker_scope("shared")
-        worker_manager = MagicMock()
-        worker_manager.load_credentials.return_value = None
-        mock_credentials_manager.for_worker.return_value = worker_manager
-        mock_credentials_manager.load_credentials.return_value = {
-            "api_key": "sk-global-env",
-            "_source": "env",
-        }
+        """Shared worker scope should inherit allowlisted shared credentials regardless of source."""
+        config = _config_with_worker_scope("shared", worker_grantable_credentials=["openai"])
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials("openai", {"api_key": "sk-global-ui", "_source": "ui"})
+
         _publish_committed_runtime_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
         assert response.json()["has_key"] is True
-        assert response.json()["source"] == "env"
+        assert response.json()["source"] == "ui"
+
+    def test_shared_agent_name_local_shared_credentials_bypass_worker_allowlist(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Shared-scope local integrations should stay visible without worker mirroring allowlists."""
+        config = _config_with_worker_scope("shared")
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": "http://homeassistant.local:8123",
+                "access_token": "ha-token",
+                "_source": "ui",
+            },
+        )
+        manager.save_credentials(
+            "google",
+            {
+                "token": "token-value",
+                "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+                "_source": "ui",
+            },
+        )
+
+        _publish_committed_runtime_config(client.app, config)
+
+        list_response = client.get("/api/credentials/list?agent_name=general")
+        ha_status_response = client.get("/api/credentials/homeassistant/status?agent_name=general")
+        google_status_response = client.get("/api/credentials/google/status?agent_name=general")
+
+        assert list_response.status_code == 200
+        assert "homeassistant" in list_response.json()
+        assert "google" in list_response.json()
+
+        assert ha_status_response.status_code == 200
+        assert ha_status_response.json()["has_credentials"] is True
+        assert set(ha_status_response.json()["key_names"]) == {"instance_url", "access_token"}
+
+        assert google_status_response.status_code == 200
+        assert google_status_response.json()["has_credentials"] is True
+        assert set(google_status_response.json()["key_names"]) == {"token", "scopes"}
 
     def test_rejects_raw_source_worker_key_query_param(
         self,

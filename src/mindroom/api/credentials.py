@@ -20,13 +20,16 @@ from mindroom.api import config_lifecycle
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
-    merge_scoped_credentials,
+    list_worker_grantable_shared_services,
+    load_worker_grantable_shared_credentials,
     validate_service_name,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    local_shared_credential_allowlist,
     require_worker_key_for_scope,
+    service_uses_local_shared_credentials,
     unsupported_shared_only_integration_message,
     unsupported_shared_only_integration_names,
 )
@@ -78,6 +81,7 @@ class RequestCredentialsTarget:
     worker_scope: WorkerScope | None
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
+    allowed_shared_services: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +343,7 @@ def resolve_request_credentials_target(
             worker_scope=None,
             agent_name=None,
             execution_identity=None,
+            allowed_shared_services=None,
         )
 
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
@@ -357,6 +362,7 @@ def resolve_request_credentials_target(
             worker_scope=None,
             agent_name=None,
             execution_identity=None,
+            allowed_shared_services=None,
         )
     execution_scope = scope_request.requested_execution_scope
     if execution_scope is None:
@@ -367,6 +373,7 @@ def resolve_request_credentials_target(
             worker_scope=None,
             agent_name=scope_request.agent_name,
             execution_identity=None,
+            allowed_shared_services=None,
         )
 
     scope_label = _dashboard_scope_label(
@@ -415,6 +422,7 @@ def resolve_request_credentials_target(
         worker_scope=execution_scope,
         agent_name=scope_request.agent_name,
         execution_identity=execution_identity,
+        allowed_shared_services=config.get_worker_grantable_credentials(),
     )
 
 
@@ -423,11 +431,21 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
     if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
 
-    return merge_scoped_credentials(
+    shared_manager = target.base_manager.shared_manager()
+    local_allowlist = local_shared_credential_allowlist(service, target.worker_scope)
+    allowed_shared_services = local_allowlist or target.allowed_shared_services or frozenset()
+    shared_credentials = load_worker_grantable_shared_credentials(
         service,
-        base_manager=target.base_manager,
-        worker_manager=target.target_manager,
+        shared_manager=shared_manager,
+        allowed_services=allowed_shared_services,
     )
+    worker_credentials = target.target_manager.load_credentials(service)
+    if not shared_credentials and not isinstance(worker_credentials, dict):
+        return None
+    merged_credentials = dict(shared_credentials or {})
+    if isinstance(worker_credentials, dict):
+        merged_credentials.update(worker_credentials)
+    return merged_credentials or None
 
 
 class SetApiKeyRequest(BaseModel):
@@ -462,13 +480,20 @@ async def list_services(
     if target.worker_scope is None:
         return target.target_manager.list_services()
     worker_services = set(target.target_manager.list_services())
-    env_services = {
-        service
-        for service in target.base_manager.list_services()
-        if (credentials := target.base_manager.load_credentials(service)) is not None
-        and credentials.get("_source") == "env"
-    }
-    services = worker_services | env_services
+    shared_manager = target.base_manager.shared_manager()
+    shared_services = set(
+        list_worker_grantable_shared_services(
+            shared_manager=shared_manager,
+            allowed_services=target.allowed_shared_services or frozenset(),
+        ),
+    )
+    if target.worker_scope == "shared":
+        shared_services |= {
+            service
+            for service in shared_manager.list_services()
+            if service_uses_local_shared_credentials(service, target.worker_scope)
+        }
+    services = worker_services | shared_services
     services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
     return sorted(services)
 

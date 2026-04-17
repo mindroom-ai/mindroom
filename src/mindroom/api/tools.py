@@ -18,11 +18,16 @@ from mindroom.api.credentials import (
 )
 from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials import (
+    get_runtime_credentials_manager,
+    load_scoped_credentials,
+    load_worker_grantable_shared_credentials,
+)
 from mindroom.tool_system.metadata import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     build_worker_target_from_runtime_env,
+    local_shared_credential_allowlist,
     unsupported_shared_only_integration_names,
 )
 
@@ -50,6 +55,18 @@ class _ResolvedToolAvailabilityContext:
     status_authoritative: bool
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
+    allowed_shared_services: frozenset[str] | None
+
+
+def _effective_allowed_shared_services(
+    service: str,
+    context: _ResolvedToolAvailabilityContext,
+) -> frozenset[str] | None:
+    """Return the worker allowlist that applies to one dashboard credential lookup."""
+    local_allowlist = local_shared_credential_allowlist(service, context.execution_scope)
+    if local_allowlist is not None:
+        return local_allowlist
+    return context.allowed_shared_services
 
 
 def _check_homeassistant_configured(tool_name: str, ha_creds: dict[str, Any] | None) -> bool:
@@ -127,23 +144,27 @@ def _annotate_execution_scope_support(
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
 
 
-def _load_env_shared_preview_credentials(
+def _load_shared_preview_credentials(
     service: str,
     *,
     credentials_manager: CredentialsManager,
+    allowed_shared_services: frozenset[str] | None,
 ) -> dict[str, Any] | None:
-    """Return only env-backed shared credentials for non-authoritative dashboard previews.
+    """Return the shared credentials visible to non-authoritative dashboard previews.
 
     Dashboard users are not the same trusted requester identity as live Matrix senders.
-    For isolated scopes we can still report capabilities and shared env-backed availability,
+    For isolated scopes we can still report capabilities and allowlisted shared availability,
     but we must not pretend to inspect requester-owned scoped credential state.
     """
-    shared_credentials = credentials_manager.shared_manager().load_credentials(service)
-    if not isinstance(shared_credentials, Mapping):
-        return None
-    if shared_credentials.get("_source") != "env":
-        return None
-    return dict(shared_credentials)
+    shared_manager = credentials_manager.shared_manager()
+    if allowed_shared_services is None:
+        shared_credentials = shared_manager.load_credentials(service)
+        return dict(shared_credentials) if isinstance(shared_credentials, Mapping) else None
+    return load_worker_grantable_shared_credentials(
+        service,
+        shared_manager=shared_manager,
+        allowed_services=allowed_shared_services,
+    )
 
 
 def _resolve_tool_availability_context(
@@ -193,6 +214,7 @@ def _resolve_tool_availability_context(
         status_authoritative=status_authoritative,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
+        allowed_shared_services=(config.get_worker_grantable_credentials() if execution_scope is not None else None),
     )
 
 
@@ -210,16 +232,19 @@ def _update_tools_statuses(
 
     def get_credentials(service: str) -> dict[str, Any] | None:
         if service not in credentials_cache:
+            allowed_shared_services = _effective_allowed_shared_services(service, context)
             if context.status_authoritative:
                 credentials_cache[service] = load_scoped_credentials(
                     service,
                     credentials_manager=context.credentials_manager,
                     worker_target=context.worker_target,
+                    allowed_shared_services=allowed_shared_services,
                 )
             else:
-                credentials_cache[service] = _load_env_shared_preview_credentials(
+                credentials_cache[service] = _load_shared_preview_credentials(
                     service,
                     credentials_manager=context.credentials_manager,
+                    allowed_shared_services=allowed_shared_services,
                 )
         return credentials_cache[service]
 

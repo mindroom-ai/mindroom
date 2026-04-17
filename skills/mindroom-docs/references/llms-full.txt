@@ -984,6 +984,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_first_threshold: 5  # Default: 5 (first automatic thread summary)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -992,6 +993,17 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+
+`defaults.worker_grantable_credentials` is a list of credential service names.
+Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+If a tool runs inside an isolated worker, only the services listed here are available to that worker.
+Leave this unset to keep isolated workers deny-by-default for shared credentials.
+This setting never injects provider env vars such as `OPENAI_API_KEY`.
+For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers.
+This setting also does not control local shared-only integrations that stay in the main runtime, such as `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
+`google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
+Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
 
 # Auto-compaction is destructive inside the active session.
 # It rewrites the stored session summary and removes compacted raw runs from
@@ -2362,17 +2374,17 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ### What It Does
 
-`shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`. `run_shell_command()` expects a list of arguments, not a shell-parsed string. If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit. If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle. Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it. MindRoom keeps up to 16 backgrounded shell processes per runner and automatically sweeps finished handle records after roughly 10 minutes. Unlike upstream Agno's simple shell wrapper, MindRoom also injects the committed runtime env, supports explicit env passthrough patterns, and supports PATH prepends. MindRoom marks `shell` as worker-routed by default, so it usually executes in the sandboxed worker runtime.
+`shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`. `run_shell_command()` expects a list of arguments, not a shell-parsed string. If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit. If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle. Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it. MindRoom keeps up to 16 backgrounded shell processes per runner and automatically sweeps finished handle records after roughly 10 minutes. Unlike upstream Agno's simple shell wrapper, MindRoom injects the stricter sandbox runtime env for proxied execution, supports explicit exported-process-env passthrough patterns, and supports PATH prepends. MindRoom marks `shell` as worker-routed by default, so it usually executes in the sandboxed worker runtime.
 
 ### Configuration
 
-| Option                     | Type      | Required | Default | Notes                                                                                                                          |
-| -------------------------- | --------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `base_dir`                 | `text`    | `no`     | `null`  | Runtime-managed working directory when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
-| `enable_run_shell_command` | `boolean` | `no`     | `true`  | Enable `run_shell_command()` and the companion handle APIs.                                                                    |
-| `all`                      | `boolean` | `no`     | `false` | Enable all shell functions.                                                                                                    |
-| `extra_env_passthrough`    | `text`    | `no`     | `null`  | Extra env var names or glob patterns exposed to shell execution in addition to MindRoom's committed runtime env.               |
-| `shell_path_prepend`       | `text`    | `no`     | `null`  | Extra PATH entries prepended for shell subprocesses only.                                                                      |
+| Option                     | Type      | Required | Default | Notes                                                                                                                                                                                    |
+| -------------------------- | --------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base_dir`                 | `text`    | `no`     | `null`  | Runtime-managed working directory when an agent workspace exists. This field is not normally authored inline in `config.yaml`.                                                           |
+| `enable_run_shell_command` | `boolean` | `no`     | `true`  | Enable `run_shell_command()` and the companion handle APIs.                                                                                                                              |
+| `all`                      | `boolean` | `no`     | `false` | Enable all shell functions.                                                                                                                                                              |
+| `extra_env_passthrough`    | `text`    | `no`     | `null`  | Extra exported process env var names or glob patterns exposed to shell execution in addition to MindRoom's sandbox runtime env. This does not re-expose filtered runtime `.env` entries. |
+| `shell_path_prepend`       | `text`    | `no`     | `null`  | Extra PATH entries prepended for shell subprocesses only.                                                                                                                                |
 
 ### Example
 
@@ -2399,7 +2411,7 @@ kill_shell_command("shell:abcd1234")
 
 ### Notes
 
-- `extra_env_passthrough` only affects `shell`, and MindRoom excludes known sensitive names and secret-suffixed env vars even when a glob would otherwise match them.
+- `extra_env_passthrough` only affects `shell`, matches exported process env, and MindRoom excludes known sensitive names and secret-suffixed env vars even when a glob would otherwise match them.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
@@ -5613,7 +5625,7 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ## Common Setup Notes
 
-`gmail` is the only tool on this page with `auth_provider="google"`. It uses the shared Google Services integration instead of standalone per-tool credentials. `gmail` is also a shared-only integration, so it is supported only for unscoped agents or agents with `worker_scope: shared`. MindRoom enforces that restriction both at config-validation time and again during tool construction. On this branch, `src/mindroom/api/integrations.py` only exposes Spotify routes, while Google OAuth lives in `src/mindroom/api/google_integration.py`, so the rest of the tools on this page rely on ordinary stored tool credentials or SDK environment variables rather than a dedicated MindRoom OAuth flow. Password fields should be stored through the dashboard or credential store instead of inline YAML. Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice. Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`. The generic-looking `email` tool is not a fully configurable SMTP client on this branch. Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
+`gmail` is the only tool on this page with `auth_provider="google"`. It uses the shared Google Services integration instead of standalone per-tool credentials. `gmail` is also a shared-only integration, so it is supported only for unscoped agents or agents with `worker_scope: shared`. Like `google_calendar`, `google_sheets`, and `homeassistant`, `gmail` stays local even when other tools are routed through the sandbox proxy. MindRoom enforces that restriction both at config-validation time and again during tool construction. On this branch, `src/mindroom/api/integrations.py` only exposes Spotify routes, while Google OAuth lives in `src/mindroom/api/google_integration.py`, so the rest of the tools on this page rely on ordinary stored tool credentials or SDK environment variables rather than a dedicated MindRoom OAuth flow. Password fields should be stored through the dashboard or credential store instead of inline YAML. Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice. Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`. The generic-looking `email` tool is not a fully configurable SMTP client on this branch. Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
 
 ## \[`gmail`\]
 
@@ -5658,6 +5670,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 - Connect Google once through the shared Google Services integration rather than storing a Gmail-specific API key.
 - The Google integration on this branch requests Gmail read, modify, and compose scopes alongside Calendar, Sheets, Drive, and profile scopes.
+- `gmail` is both shared-only and local-only on this branch, so `worker_scope=user` and `worker_scope=user_agent` are unsupported and the tool is never proxied through sandbox workers.
 - The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus Google OAuth is the verified setup path.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
@@ -11758,7 +11771,7 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 ## Shell env and PATH
 
-The `shell` tool still receives the committed runtime env as explicit execution context when it runs through the sandbox proxy. Additional process env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for the variables you want shell execution to inherit.
+When `shell` runs through the sandbox proxy, it receives the stricter sandbox runtime env rather than the main process's ordinary committed runtime `.env`. Additional env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` does not re-expose config-adjacent `.env` entries that the sandbox contract filtered out.
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
@@ -11973,7 +11986,12 @@ Important behavior and constraints:
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
 - Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
-- Credentials are mirrored into the worker's scratch space rather than mounting the shared credentials directory into agent-isolated pods.
+- Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
+- Dedicated workers start with no shared credentials by default.
+- Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.
+- `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
+- Dedicated worker runtime env stays deny-by-default for provider and arbitrary `.env` values, while basic runtime plumbing such as `PATH`, `VIRTUAL_ENV`, and linker vars is set separately.
+- This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements

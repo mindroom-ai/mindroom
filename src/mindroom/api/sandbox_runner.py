@@ -79,6 +79,8 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
         msg = f"{_STARTUP_RUNTIME_PATHS_ENV} is missing process_env."
         raise TypeError(msg)
     startup_runtime_paths = constants.deserialize_runtime_paths(payload)
+    if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
+        return startup_runtime_paths
     process_env = dict(startup_runtime_paths.process_env)
     process_env.update(
         {key: value for key, value in os.environ.items() if key not in {_RUNNER_TOKEN_ENV, _STARTUP_RUNTIME_PATHS_ENV}},
@@ -457,6 +459,7 @@ def _resolve_entrypoint(
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
+            allowed_shared_services=(config.get_worker_grantable_credentials() if worker_scope is not None else None),
             worker_target=worker_target,
         )
     except (ToolConfigOverrideError, ToolInitOverrideError) as exc:
@@ -519,7 +522,11 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
-    with tool_execution_identity(execution_identity):
+    with (
+        tool_execution_identity(
+            execution_identity,
+        ),
+    ):
         toolkit, entrypoint = _resolve_entrypoint(
             runtime_paths=effective_runtime_paths,
             config=config,

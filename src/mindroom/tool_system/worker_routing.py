@@ -33,6 +33,15 @@ SHARED_ONLY_INTEGRATION_NAMES = frozenset(
         "google_sheets",
     },
 )
+LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
+    {
+        "homeassistant",
+        "gmail",
+        "google_calendar",
+        "google_sheets",
+    },
+)
+LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset({"google", "homeassistant"})
 
 
 @runtime_checkable
@@ -341,6 +350,26 @@ def unsupported_shared_only_integration_names(
             configured_mcp_server_ids=configured_mcp_server_ids,
         )
     ]
+
+
+def tool_stays_local(name: str) -> bool:
+    """Return whether one integration tool always stays in the primary runtime."""
+    return name in LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES
+
+
+def service_uses_local_shared_credentials(service: str, worker_scope: WorkerScope | None) -> bool:
+    """Return whether one scoped service reads shared credentials locally instead of worker mirrors."""
+    return worker_scope == "shared" and service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
+
+
+def local_shared_credential_allowlist(
+    service: str,
+    worker_scope: WorkerScope | None,
+) -> frozenset[str] | None:
+    """Return the explicit shared-service allowlist for one local-only scoped integration."""
+    if service_uses_local_shared_credentials(service, worker_scope):
+        return frozenset({service})
+    return None
 
 
 def unsupported_shared_only_integration_message(

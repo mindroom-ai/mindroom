@@ -253,6 +253,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_first_threshold: 5  # Default: 5 (first automatic thread summary)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -261,6 +262,17 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+
+`defaults.worker_grantable_credentials` is a list of credential service names.
+Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+If a tool runs inside an isolated worker, only the services listed here are available to that worker.
+Leave this unset to keep isolated workers deny-by-default for shared credentials.
+This setting never injects provider env vars such as `OPENAI_API_KEY`.
+For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers.
+This setting also does not control local shared-only integrations that stay in the main runtime, such as `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
+`google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
+Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
 
 # Auto-compaction is destructive inside the active session.
 # It rewrites the stored session summary and removes compacted raw runs from

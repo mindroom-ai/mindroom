@@ -319,7 +319,10 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("OPENAI_API_KEY=dotenv-secret\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=dotenv-secret\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
+        encoding="utf-8",
+    )
     payload_runtime = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -335,6 +338,103 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     assert startup_runtime.env_value("OPENAI_API_KEY") == "dotenv-secret"
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+
+
+def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should trust the committed startup payload instead of ambient runner env."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=dotenv-secret\nOPENAI_BASE_URL=http://example.invalid/v1\nCUSTOM_API_TOKEN=custom-secret\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+        },
+    )
+    payload = serialize_runtime_paths(payload_runtime)
+    payload["env_file_values"] = {"MINDROOM_NAMESPACE": "alpha1234"}
+    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(payload))
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
+    monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
+    effective_runtime = sandbox_exec_module.runtime_paths_with_execution_env(startup_runtime, execution_env)
+
+    assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
+    assert startup_runtime.env_value("OPENAI_API_KEY") is None
+    assert startup_runtime.env_value("OPENAI_BASE_URL") is None
+    assert startup_runtime.env_value("CUSTOM_API_TOKEN") is None
+    assert startup_runtime.env_value("TEST_EXECUTION_ENV") is None
+    assert "OPENAI_API_KEY" not in execution_env
+    assert "OPENAI_BASE_URL" not in execution_env
+    assert "CUSTOM_API_TOKEN" not in execution_env
+    assert "TEST_EXECUTION_ENV" not in execution_env
+    assert effective_runtime.env_value("OPENAI_BASE_URL") is None
+    assert effective_runtime.env_value("TEST_EXECUTION_ENV") is None
+
+
+@pytest.mark.asyncio
+async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated-worker in-process shell should not observe ambient runner env."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+        },
+    )
+    payload = serialize_runtime_paths(payload_runtime)
+    payload["env_file_values"] = {"MINDROOM_NAMESPACE": "alpha1234"}
+    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(payload))
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
+    monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[
+                [
+                    "bash",
+                    "-lc",
+                    "printf '%s' \"$OPENAI_BASE_URL|$TEST_EXECUTION_ENV|$MINDROOM_SANDBOX_PROXY_TOKEN|$MINDROOM_NAMESPACE\"",
+                ],
+            ],
+            kwargs={},
+        ),
+        startup_runtime,
+        sandbox_runner_module._runtime_config_or_empty(startup_runtime),
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True
+    assert response.result == "|||alpha1234"
 
 
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:

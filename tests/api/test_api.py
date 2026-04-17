@@ -23,6 +23,7 @@ from mindroom.api import config_lifecycle, google_integration, main
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
@@ -42,7 +43,11 @@ def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None)
     )
 
 
-def _config_with_worker_scope(worker_scope: str | None) -> Config:
+def _config_with_worker_scope(
+    worker_scope: str | None,
+    *,
+    worker_grantable_credentials: list[str] | None = None,
+) -> Config:
     config = Config.model_validate(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
@@ -55,7 +60,10 @@ def _config_with_worker_scope(worker_scope: str | None) -> Config:
                     "rooms": ["lobby"],
                 },
             },
-            "defaults": {"markdown": True},
+            "defaults": {
+                "markdown": True,
+                "worker_grantable_credentials": worker_grantable_credentials,
+            },
         },
     )
     config.agents["general"].worker_scope = worker_scope
@@ -745,7 +753,18 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
     cleanup_paths: list[Path] = []
 
-    def _fake_cleanup(runtime_paths: constants.RuntimePaths) -> int:
+    class _FakeRuntimeConfig:
+        def get_worker_grantable_credentials(self) -> frozenset[str]:
+            return constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+
+    def _fake_cleanup(
+        runtime_paths: constants.RuntimePaths,
+        *,
+        runtime_config: object | None = None,
+        worker_grantable_credentials: frozenset[str] | None = None,
+    ) -> int:
+        del runtime_config
+        assert worker_grantable_credentials == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
@@ -753,13 +772,23 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
             stop_event.set()
         return 0
 
-    async def _fake_to_thread(func: Callable[..., int], *args: object) -> int:
-        return func(*args)
+    async def _fake_to_thread(func: Callable[..., int], *args: object, **kwargs: object) -> int:
+        return func(*args, **kwargs)
+
+    def _read_current_runtime_config(
+        api_app: FastAPI,
+    ) -> tuple[_FakeRuntimeConfig, constants.RuntimePaths]:
+        return _FakeRuntimeConfig(), main._app_runtime_paths(api_app)
 
     main.initialize_api_app(main.app, first_runtime)
     monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
     monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
     monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
+    monkeypatch.setattr(
+        main.config_lifecycle,
+        "read_app_committed_runtime_config",
+        _read_current_runtime_config,
+    )
 
     await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
 
@@ -951,7 +980,13 @@ def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.
     """Background worker cleanup should no-op when no backend is configured."""
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: False)
 
-    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
+    assert (
+        main._cleanup_workers_once(
+            main._app_runtime_paths(main.app),
+            worker_grantable_credentials=constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+        )
+        == 0
+    )
 
 
 def test_worker_cleanup_once_skips_kubernetes_without_committed_runtime_config(
@@ -1005,8 +1040,16 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
 
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
+    assert (
+        main._cleanup_workers_once(
+            runtime_paths,
+            runtime_config=runtime_config,
+            worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
+        )
+        == 1
+    )
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
 
 
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1052,6 +1095,7 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.json()["workers"][0]["worker_key"] == "worker-key"
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["worker_grantable_credentials"] == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 
 
 def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1349,10 +1393,12 @@ def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
     assert response.json()["detail"] == "Unknown agent: missing"
 
 
-def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
-    """Supported scoped tools should report runtime env credentials as available."""
-    config = _config_with_worker_scope("shared")
+def test_get_tools_marks_allowlisted_shared_ui_scoped_tools_available(test_client: TestClient) -> None:
+    """Scoped tool preview should reflect allowlisted shared credentials regardless of source."""
+    config = _config_with_worker_scope("user", worker_grantable_credentials=["weather"])
     runtime_paths = main._app_runtime_paths(main.app)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("weather", {"WEATHER_API_KEY": "secret", "_source": "ui"})
     tools = [
         {
             "name": "weather",
@@ -1373,10 +1419,6 @@ def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClie
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
-        patch(
-            "mindroom.api.tools._load_env_shared_preview_credentials",
-            return_value={"WEATHER_API_KEY": "secret", "_source": "env"},
-        ),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
 
@@ -1386,6 +1428,100 @@ def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClie
     assert tool["name"] == "weather"
     assert tool["status"] == "available"
     assert tool["dashboard_configuration_supported"] is False
+
+
+def test_get_tools_hides_non_allowlisted_shared_scoped_credentials(test_client: TestClient) -> None:
+    """Scoped tool preview should not claim non-allowlisted shared credentials are worker-visible."""
+    config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("weather", {"WEATHER_API_KEY": "secret", "_source": "ui"})
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [
+                {
+                    "name": "WEATHER_API_KEY",
+                    "required": True,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "weather"
+    assert tool["status"] == "requires_config"
+    assert tool["dashboard_configuration_supported"] is False
+
+
+def test_get_tools_shared_scope_local_only_integrations_ignore_worker_allowlist(test_client: TestClient) -> None:
+    """Shared-scope local integrations should reflect shared credentials without worker mirroring config."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google",
+        {
+            "token": "token-value",
+            "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+            "_source": "ui",
+        },
+    )
+    manager.save_credentials(
+        "homeassistant",
+        {
+            "instance_url": "http://homeassistant.local:8123",
+            "access_token": "ha-token",
+            "_source": "ui",
+        },
+    )
+    tools = [
+        {
+            "name": "gmail",
+            "display_name": "Gmail",
+            "description": "Mailbox access",
+            "category": "email",
+            "status": "requires_config",
+            "setup_type": "special",
+            "auth_provider": "google",
+            "config_fields": [],
+        },
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "Home automation",
+            "category": "home",
+            "status": "requires_config",
+            "setup_type": "special",
+            "auth_provider": None,
+            "config_fields": [],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is True
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert tools_by_name["gmail"]["status"] == "available"
+    assert tools_by_name["homeassistant"]["status"] == "available"
 
 
 def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
@@ -1466,6 +1602,7 @@ def test_get_tools_uses_one_runtime_snapshot(
             status_authoritative=True,
             credentials_manager=MagicMock(),
             worker_target=None,
+            allowed_shared_services=None,
         )
 
     with (

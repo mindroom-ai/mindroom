@@ -135,7 +135,7 @@ If the command exits within `timeout`, the tool returns the last `tail` lines of
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
 Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it.
 MindRoom keeps up to 16 backgrounded shell processes per runner and automatically sweeps finished handle records after roughly 10 minutes.
-Unlike upstream Agno's simple shell wrapper, MindRoom also injects the committed runtime env, supports explicit env passthrough patterns, and supports PATH prepends.
+Unlike upstream Agno's simple shell wrapper, MindRoom injects the stricter sandbox runtime env for proxied execution, supports explicit exported-process-env passthrough patterns, and supports PATH prepends.
 MindRoom marks `shell` as worker-routed by default, so it usually executes in the sandboxed worker runtime.
 
 ### Configuration
@@ -145,7 +145,7 @@ MindRoom marks `shell` as worker-routed by default, so it usually executes in th
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working directory when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
 | `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()` and the companion handle APIs. |
 | `all` | `boolean` | `no` | `false` | Enable all shell functions. |
-| `extra_env_passthrough` | `text` | `no` | `null` | Extra env var names or glob patterns exposed to shell execution in addition to MindRoom's committed runtime env. |
+| `extra_env_passthrough` | `text` | `no` | `null` | Extra exported process env var names or glob patterns exposed to shell execution in addition to MindRoom's sandbox runtime env. This does not re-expose filtered runtime `.env` entries. |
 | `shell_path_prepend` | `text` | `no` | `null` | Extra PATH entries prepended for shell subprocesses only. |
 
 ### Example
@@ -173,7 +173,7 @@ kill_shell_command("shell:abcd1234")
 
 ### Notes
 
-- `extra_env_passthrough` only affects `shell`, and MindRoom excludes known sensitive names and secret-suffixed env vars even when a glob would otherwise match them.
+- `extra_env_passthrough` only affects `shell`, matches exported process env, and MindRoom excludes known sensitive names and secret-suffixed env vars even when a glob would otherwise match them.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.

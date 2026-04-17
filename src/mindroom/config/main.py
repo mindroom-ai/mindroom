@@ -38,6 +38,7 @@ from mindroom.config.models import (
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
+    DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_config_relative_path,
@@ -1105,6 +1106,13 @@ class Config(BaseModel):
             ensure_tool_registry_loaded(runtime_paths, self)
             return default_worker_routed_tools(self.get_agent_tools(agent_name))
         return self.expand_tool_names(list(configured))
+
+    def get_worker_grantable_credentials(self) -> frozenset[str]:
+        """Return shared credential service names allowed inside isolated workers."""
+        configured = self.defaults.worker_grantable_credentials
+        if configured is None:
+            return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+        return frozenset(configured)
 
     def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.

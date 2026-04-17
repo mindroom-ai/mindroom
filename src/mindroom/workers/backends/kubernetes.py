@@ -6,8 +6,9 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name
+from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -39,11 +40,20 @@ class KubernetesWorkerBackend:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
+        worker_grantable_credentials: frozenset[str],
     ) -> None:
+        unsupported_services = sorted(worker_grantable_credentials & UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS)
+        if unsupported_services:
+            msg = (
+                "Dedicated workers do not support "
+                f"{', '.join(unsupported_services)}. Keep these credentials in the primary runtime."
+            )
+            raise WorkerBackendError(msg)
         self.runtime_paths = runtime_paths
         self.config = config
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
+        self.worker_grantable_credentials = worker_grantable_credentials
         self.idle_timeout_seconds = config.idle_timeout_seconds
         self._resources = resources.KubernetesResourceManager(
             runtime_paths=runtime_paths,
@@ -51,6 +61,7 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=self.storage_root,
             tool_validation_snapshot=tool_validation_snapshot,
+            worker_grantable_credentials=worker_grantable_credentials,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -63,6 +74,7 @@ class KubernetesWorkerBackend:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
+        worker_grantable_credentials: frozenset[str],
     ) -> KubernetesWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
         return cls(
@@ -71,6 +83,7 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=storage_root,
             tool_validation_snapshot=tool_validation_snapshot,
+            worker_grantable_credentials=worker_grantable_credentials,
         )
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
@@ -104,7 +117,7 @@ class KubernetesWorkerBackend:
 
             sync_shared_credentials_to_worker(
                 worker_key,
-                include_ui_credentials=is_unscoped_worker_key(worker_key),
+                allowed_services=self.worker_grantable_credentials,
                 credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
             )
             self._resources.apply_service(worker_id)
