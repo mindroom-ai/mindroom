@@ -1296,8 +1296,9 @@ class TestAgentBot:
             mock_stream_agent_response.assert_called_once()
             stream_kwargs = mock_stream_agent_response.call_args.kwargs
             assert stream_kwargs["agent_name"] == "calculator"
-            assert stream_kwargs["prompt"].endswith(f"{mention_id}: What's 2+2?")
-            assert stream_kwargs["prompt"].startswith("[")
+            assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert stream_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert stream_kwargs["model_prompt"].startswith("[")
             assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
@@ -1320,8 +1321,9 @@ class TestAgentBot:
             mock_ai_response.assert_called_once()
             ai_kwargs = mock_ai_response.call_args.kwargs
             assert ai_kwargs["agent_name"] == "calculator"
-            assert ai_kwargs["prompt"].endswith(f"{mention_id}: What's 2+2?")
-            assert ai_kwargs["prompt"].startswith("[")
+            assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert ai_kwargs["model_prompt"].endswith(f"{mention_id}: What's 2+2?")
+            assert ai_kwargs["model_prompt"].startswith("[")
             assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
@@ -1381,7 +1383,8 @@ class TestAgentBot:
             )
 
         assert delivery.event_id == "$response"
-        model_prompt = mock_ai.call_args.kwargs["prompt"]
+        assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
+        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
         assert "thread_id: none" in model_prompt
@@ -1428,7 +1431,8 @@ class TestAgentBot:
             )
 
         assert delivery.event_id == "$response"
-        model_prompt = mock_ai.call_args.kwargs["prompt"]
+        assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
+        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
         assert "thread_id: none" in model_prompt
@@ -1484,7 +1488,8 @@ class TestAgentBot:
                 )
 
         assert delivery.event_id == "$response"
-        model_prompt = mock_stream_agent_response.call_args.kwargs["prompt"]
+        assert mock_stream_agent_response.call_args.kwargs["prompt"] == "Please reply in thread"
+        model_prompt = mock_stream_agent_response.call_args.kwargs["model_prompt"]
         assert "[Matrix metadata for tool calls]" in model_prompt
         assert "room_id: !test:localhost" in model_prompt
         assert "thread_id: none" in model_prompt
@@ -3032,8 +3037,9 @@ class TestAgentBot:
             await asyncio.gather(*scheduled_tasks)
 
         assert mock_ai.call_args.kwargs["show_tool_calls"] is True
-        assert mock_ai.call_args.kwargs["prompt"].startswith("[")
-        assert mock_ai.call_args.kwargs["prompt"].endswith("Use research skill")
+        assert mock_ai.call_args.kwargs["prompt"] == "Use research skill"
+        assert mock_ai.call_args.kwargs["model_prompt"].startswith("[")
+        assert mock_ai.call_args.kwargs["model_prompt"].endswith("Use research skill")
 
     @pytest.mark.asyncio
     async def test_skill_command_room_mode_uses_room_level_session_id(

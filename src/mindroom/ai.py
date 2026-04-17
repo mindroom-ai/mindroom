@@ -1015,6 +1015,17 @@ def _assert_agent_target(agent_name: str, config: Config) -> None:
         raise ValueError(msg)
 
 
+def _prompt_current_sender_id(
+    user_id: str | None,
+    *,
+    include_openai_compat_guidance: bool,
+) -> str | None:
+    """Return the sender label to embed in prompt history, if any."""
+    if include_openai_compat_guidance:
+        return None
+    return user_id
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     agent_name: str,
@@ -1255,7 +1266,10 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=user_id,
+                    current_sender_id=_prompt_current_sender_id(
+                        user_id,
+                        include_openai_compat_guidance=include_openai_compat_guidance,
+                    ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                 )
@@ -1601,7 +1615,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=user_id,
+                    current_sender_id=_prompt_current_sender_id(
+                        user_id,
+                        include_openai_compat_guidance=include_openai_compat_guidance,
+                    ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                 )
