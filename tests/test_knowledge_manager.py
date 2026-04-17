@@ -2520,7 +2520,13 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
         },
     )
     start_git_sync = AsyncMock(return_value=None)
-    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    sync_events: list[str] = []
+
+    async def _track_sync_repository() -> dict[str, int | bool]:
+        sync_events.append("sync")
+        return {"updated": False, "changed_count": 0, "removed_count": 0}
+
+    sync_git_repository = AsyncMock(side_effect=_track_sync_repository)
 
     monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
     monkeypatch.setattr(KnowledgeManager, "_start_git_sync", start_git_sync)
@@ -2534,7 +2540,11 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
             reindex_on_create=False,
         )
         manager = managers["research"]
-        stop_git_sync = AsyncMock(return_value=None)
+
+        async def _track_stop_git_sync() -> None:
+            sync_events.append("stop")
+
+        stop_git_sync = AsyncMock(side_effect=_track_stop_git_sync)
         monkeypatch.setattr(manager, "_stop_git_sync", stop_git_sync)
 
         blocking_config = _make_git_config(tmp_path / "knowledge", startup_behavior="blocking")
@@ -2547,6 +2557,7 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
 
         assert blocking_managers["research"] is manager
         stop_git_sync.assert_awaited_once_with()
+        assert sync_events == ["stop", "sync"]
     finally:
         await shutdown_shared_knowledge_managers()
 
