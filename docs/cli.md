@@ -176,6 +176,8 @@ Generate and sync managed avatar assets.
 Generate missing managed avatar files in the workspace.
 In a source checkout, generated files are written under `./avatars/`.
 In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
+Existing managed files are skipped by default.
+Use `--force` to overwrite them after changing avatar prompts or styles.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -207,6 +209,8 @@ In containerized deployments, generated overrides are written under the persiste
 ## avatars sync
 
 Sync configured room and root-space avatars to Matrix using the initialized router account.
+Existing Matrix avatars are skipped by default.
+Use `--force` to replace them.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

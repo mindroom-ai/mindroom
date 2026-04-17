@@ -105,7 +105,7 @@ Generate and sync managed avatar assets.
 
 ## avatars generate
 
-Generate missing managed avatar files in the workspace. In a source checkout, generated files are written under `./avatars/`. In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
+Generate missing managed avatar files in the workspace. In a source checkout, generated files are written under `./avatars/`. In containerized deployments, generated overrides are written under the persistent MindRoom storage path. Existing managed files are skipped by default. Use `--force` to overwrite them after changing avatar prompts or styles.
 
 ```
  Usage: root avatars generate [OPTIONS]
@@ -113,13 +113,14 @@ Generate missing managed avatar files in the workspace. In a source checkout, ge
  Generate missing managed avatar files in the workspace.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --force            Overwrite existing managed workspace avatar files.                  │
+│ --help   -h        Show this message and exit.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars sync
 
-Sync configured room and root-space avatars to Matrix using the initialized router account.
+Sync configured room and root-space avatars to Matrix using the initialized router account. Existing Matrix avatars are skipped by default. Use `--force` to replace them.
 
 ```
  Usage: root avatars sync [OPTIONS]
@@ -128,7 +129,8 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
  account.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --force            Replace existing Matrix room and root-space avatars.                │
+│ --help   -h        Show this message and exit.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
