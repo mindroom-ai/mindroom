@@ -3017,6 +3017,130 @@ async def test_sync_git_repository_once_pulls_lfs_after_reset(
 
 
 @pytest.mark.asyncio
+async def test_ensure_git_lfs_available_raises_clear_runtime_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing Git LFS should raise the runtime-image guidance instead of a raw git failure."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", lfs=True),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        if args == ["lfs", "version"]:
+            msg = "git: 'lfs' is not a git command"
+            raise RuntimeError(msg)
+        return ""
+
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    with pytest.raises(RuntimeError, match="Git LFS is required for this knowledge base"):
+        await manager._ensure_git_lfs_available(cwd=manager.knowledge_path)
+
+
+@pytest.mark.asyncio
+async def test_ensure_git_lfs_repository_ready_installs_once_per_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repo-local LFS setup should only run once per manager checkout."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", lfs=True),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    git_calls: list[list[str]] = []
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        git_calls.append(args)
+        return ""
+
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    await manager._ensure_git_lfs_repository_ready(manager.knowledge_path)
+    await manager._ensure_git_lfs_repository_ready(manager.knowledge_path)
+
+    assert git_calls == [["lfs", "version"], ["lfs", "install", "--local"]]
+
+
+@pytest.mark.asyncio
+async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initial LFS clones should skip smudging until the explicit hydrate step runs."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", lfs=True),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    clone_envs: list[dict[str, str] | None] = []
+
+    async def _fake_run_git(
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = cwd
+        if args[0] == "clone":
+            clone_envs.append(env)
+        return ""
+
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    cloned = await manager._ensure_git_repository(manager._git_config())
+
+    assert cloned is True
+    assert clone_envs == [{"GIT_LFS_SKIP_SMUDGE": "1"}]
+
+
+@pytest.mark.asyncio
+async def test_sync_git_repository_does_not_record_indexing_failures_as_git_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Indexing failures after git sync should not overwrite git status with a fake git error."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    async def _sync_once(_git_config: object) -> tuple[set[str], set[str], bool]:
+        return {"docs/updated.md"}, set(), True
+
+    monkeypatch.setattr(manager, "_sync_git_repository_once", _sync_once)
+    monkeypatch.setattr(manager, "_git_rev_parse", AsyncMock(return_value="abc123"))
+    manager.index_file = AsyncMock(side_effect=RuntimeError("index blew up"))
+
+    with pytest.raises(RuntimeError, match="index blew up"):
+        await manager.sync_git_repository()
+
+    assert manager._git_last_error is None
+
+
+@pytest.mark.asyncio
 async def test_run_git_redacts_credentials_in_error_message(
     dummy_manager: KnowledgeManager,
     monkeypatch: pytest.MonkeyPatch,
@@ -3054,6 +3178,65 @@ async def test_run_git_redacts_credentials_in_error_message(
     message = str(exc_info.value)
     assert "secret-token" not in message
     assert "x-access-token:***@github.com/example/private.git" in message
+
+
+@pytest.mark.asyncio
+async def test_run_git_timeout_kills_subprocess_and_raises_runtime_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timed out git commands should terminate the child process and raise a redacted runtime error."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge", sync_timeout_seconds=5),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    class _HangingProcess:
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.kill_called = False
+            self.wait_called = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            return b"", b""
+
+        def kill(self) -> None:
+            self.kill_called = True
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            self.returncode = -9
+            return -9
+
+    process = _HangingProcess()
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _HangingProcess:
+        _ = args, kwargs
+        return process
+
+    async def _fake_wait_for(awaitable: object, **kwargs: float) -> tuple[bytes, bytes]:
+        _ = kwargs["timeout"]
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "wait_for", _fake_wait_for)
+    monkeypatch.setattr(manager, "_git_sync_timeout_seconds", lambda: 1.0)
+
+    with pytest.raises(RuntimeError, match=r"Git command timed out after 1s: git fetch origin main"):
+        await manager._run_git(["fetch", "origin", "main"])
+
+    assert process.kill_called is True
+    assert process.wait_called is True
 
 
 @pytest.mark.asyncio

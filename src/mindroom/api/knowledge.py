@@ -335,8 +335,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
 
     if config.knowledge_bases[base_id].git is not None:
         result = await manager.finish_pending_background_git_startup(force_full_reindex=True)
-        if result is None:
-            raise HTTPException(status_code=500, detail="Knowledge manager did not run git reindex")
+        assert result is not None
         indexed_count = int(result["indexed_count"])
     else:
         indexed_count = await manager.reindex_all()

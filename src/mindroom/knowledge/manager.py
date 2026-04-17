@@ -364,6 +364,7 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
+    git_background_startup_allowed: bool = field(default=True, repr=False)
     _settings: tuple[str, ...] = field(init=False)
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)
@@ -390,8 +391,8 @@ class KnowledgeManager:
         default=None,
         init=False,
     )
-    _git_background_startup_allowed: bool = field(default=True, init=False)
     _git_lfs_checked: bool = field(default=False, init=False)
+    _git_lfs_repository_ready: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -583,7 +584,7 @@ class KnowledgeManager:
         return (
             self._git_config() is not None
             and self._git_startup_behavior() == "background"
-            and self._git_background_startup_allowed
+            and self.git_background_startup_allowed
         )
 
     def _skip_hidden_paths(self) -> bool:
@@ -678,10 +679,11 @@ class KnowledgeManager:
         self._git_lfs_checked = True
 
     async def _ensure_git_lfs_repository_ready(self, repo_root: Path) -> None:
-        if not self._git_uses_lfs():
+        if not self._git_uses_lfs() or self._git_lfs_repository_ready:
             return
         await self._ensure_git_lfs_available(cwd=repo_root)
         await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
+        self._git_lfs_repository_ready = True
 
     async def _hydrate_git_lfs_worktree(self, git_config: KnowledgeGitConfig, *, repo_root: Path | None = None) -> None:
         if not git_config.lfs:
@@ -1107,43 +1109,43 @@ class KnowledgeManager:
         try:
             async with self._git_sync_lock:
                 changed_files, removed_files, updated = await self._sync_git_repository_once(git_config)
-
-            if index_changes:
-                for relative_path in sorted(removed_files):
-                    await self.remove_file(relative_path)
-
-                for relative_path in sorted(changed_files):
-                    await self.index_file(relative_path, upsert=True)
-
             current_head = await self._git_rev_parse("HEAD")
-            self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
-            if index_changes:
-                self._git_initial_sync_complete = True
-            self._git_last_successful_sync_at = datetime.now(tz=UTC)
-            self._git_last_successful_commit = current_head
-            self._git_last_error = None
-
-            if updated:
-                logger.info(
-                    "Knowledge Git repository synchronized",
-                    base_id=self.base_id,
-                    repo_url=_redact_url_credentials(git_config.repo_url),
-                    branch=git_config.branch,
-                    changed_count=len(changed_files),
-                    removed_count=len(removed_files),
-                    commit=current_head,
-                )
-            return {
-                "updated": updated,
-                "changed_count": len(changed_files),
-                "removed_count": len(removed_files),
-            }
         except Exception as exc:
             self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
             self._git_last_error = _redact_credentials_in_text(str(exc))
             raise
         finally:
             self._git_syncing = False
+
+        if index_changes:
+            for relative_path in sorted(removed_files):
+                await self.remove_file(relative_path)
+
+            for relative_path in sorted(changed_files):
+                await self.index_file(relative_path, upsert=True)
+
+        self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
+        if index_changes:
+            self._git_initial_sync_complete = True
+        self._git_last_successful_sync_at = datetime.now(tz=UTC)
+        self._git_last_successful_commit = current_head
+        self._git_last_error = None
+
+        if updated:
+            logger.info(
+                "Knowledge Git repository synchronized",
+                base_id=self.base_id,
+                repo_url=_redact_url_credentials(git_config.repo_url),
+                branch=git_config.branch,
+                changed_count=len(changed_files),
+                removed_count=len(removed_files),
+                commit=current_head,
+            )
+        return {
+            "updated": updated,
+            "changed_count": len(changed_files),
+            "removed_count": len(removed_files),
+        }
 
     async def _git_sync_loop(self) -> None:
         """Poll the configured Git repository and keep the knowledge folder up to date."""
@@ -1403,8 +1405,6 @@ async def _sync_manager_without_full_reindex(
     manager: KnowledgeManager,
 ) -> dict[str, Any]:
     if manager._git_config() is not None:
-        if manager._git_background_startup_enabled():
-            return await manager.prepare_background_git_startup("incremental")
         return await manager.sync_git_repository()
     return await manager.sync_indexed_files()
 
@@ -1413,8 +1413,6 @@ async def _resume_manager_without_full_reindex(
     manager: KnowledgeManager,
 ) -> dict[str, Any]:
     if manager._git_config() is not None:
-        if manager._git_background_startup_enabled():
-            return await manager.prepare_background_git_startup("resume")
         git_result = await manager.sync_git_repository(index_changes=False)
         sync_result = await manager.sync_indexed_files()
         return {
@@ -1469,6 +1467,41 @@ def _lookup_shared_manager_for_target(
     return manager
 
 
+def _shared_manager_runtime_mode(
+    manager: KnowledgeManager,
+    *,
+    target: _ResolvedKnowledgeManagerTarget,
+) -> Literal["watch", "git_sync", "on_access"]:
+    if target.binding.start_background_watchers:
+        return "watch"
+    if manager._git_background_startup_enabled():
+        return "git_sync"
+    return "on_access"
+
+
+async def _reconcile_shared_manager_runtime(
+    manager: KnowledgeManager,
+    *,
+    target: _ResolvedKnowledgeManagerTarget,
+) -> None:
+    runtime_mode = _shared_manager_runtime_mode(manager, target=target)
+
+    if runtime_mode != "watch" and manager._watch_task is not None:
+        await manager.stop_watcher()
+    elif runtime_mode == "on_access":
+        await manager._stop_git_sync()
+
+    if manager._git_background_startup_mode is not None and runtime_mode == "on_access":
+        await manager.finish_pending_background_git_startup()
+    elif target.binding.incremental_sync_on_access and runtime_mode == "on_access":
+        await _sync_manager_without_full_reindex(manager)
+
+    if runtime_mode == "watch":
+        await manager.start_watcher()
+    elif runtime_mode == "git_sync":
+        await manager._start_git_sync()
+
+
 async def _create_knowledge_manager_for_target(
     *,
     target: _ResolvedKnowledgeManagerTarget,
@@ -1483,8 +1516,8 @@ async def _create_knowledge_manager_for_target(
         runtime_paths=runtime_paths,
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
+        git_background_startup_allowed=not binding.request_scoped,
     )
-    manager._git_background_startup_allowed = not binding.request_scoped
     startup_mode: Literal["full_reindex", "resume", "incremental"] = (
         "full_reindex" if reindex_on_create else manager._startup_index_mode()
     )
@@ -1579,19 +1612,7 @@ async def _ensure_shared_knowledge_manager_for_target(
                 target.binding.storage_root,
                 target.binding.knowledge_path,
             )
-            background_git_startup_enabled = existing._git_background_startup_enabled()
-            if not target.binding.start_background_watchers and existing._watch_task is not None:
-                await existing.stop_watcher()
-            elif not target.binding.start_background_watchers and not background_git_startup_enabled:
-                await existing._stop_git_sync()
-            if existing._git_background_startup_mode is not None and not background_git_startup_enabled:
-                await existing.finish_pending_background_git_startup()
-            elif target.binding.incremental_sync_on_access and not background_git_startup_enabled:
-                await _sync_manager_without_full_reindex(existing)
-            if target.binding.start_background_watchers:
-                await existing.start_watcher()
-            elif background_git_startup_enabled:
-                await existing._start_git_sync()
+            await _reconcile_shared_manager_runtime(existing, target=target)
             return existing
 
         manager = await _create_knowledge_manager_for_target(

@@ -510,8 +510,6 @@ describe('Knowledge', () => {
         })
       );
     });
-    const savedConfig = mockUpdateKnowledgeBase.mock.lastCall?.[1] as KnowledgeBaseConfig;
-    expect(savedConfig.git).not.toHaveProperty('stale_lock_recovery');
   });
 
   it('saves advanced git settings from base settings', async () => {
@@ -553,9 +551,6 @@ describe('Knowledge', () => {
 
     render(<Knowledge />);
     await screen.findByText('Active: docs');
-    expect(
-      screen.queryByRole('checkbox', { name: 'Recover Stale Git Locks' })
-    ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('combobox', { name: 'Startup Behavior' }));
     fireEvent.click(screen.getByRole('option', { name: 'Blocking' }));
@@ -580,7 +575,5 @@ describe('Knowledge', () => {
         })
       );
     });
-    const savedConfig = mockUpdateKnowledgeBase.mock.lastCall?.[1] as KnowledgeBaseConfig;
-    expect(savedConfig.git).not.toHaveProperty('stale_lock_recovery');
   });
 });

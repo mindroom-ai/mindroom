@@ -211,6 +211,7 @@ knowledge_bases:
 
 - On startup, the repo is cloned (or fetched if it already exists)
 - When `startup_behavior: background`, manager initialization loads the existing index immediately and lets repo sync continue in the background
+- Request-scoped private knowledge roots do not keep background startup alive between requests, so they effectively fall back to on-access blocking sync behavior even if `startup_behavior: background` is configured
 - Every `poll_interval_seconds`, MindRoom runs `git fetch` + `git reset --hard origin/<branch>`
 - When `lfs: true`, MindRoom also runs `git lfs pull origin <branch>` after sync
 - Local uncommitted changes in the checkout folder are discarded on each sync
