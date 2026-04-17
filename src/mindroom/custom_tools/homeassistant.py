@@ -26,7 +26,6 @@ class HomeAssistantTools(Toolkit):
         self,
         *,
         credentials_manager: CredentialsManager | None = None,
-        allowed_shared_services: frozenset[str] | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
     ) -> None:
         """Initialize Home Assistant tools."""
@@ -45,7 +44,6 @@ class HomeAssistantTools(Toolkit):
             msg = "HomeAssistantTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
         self._creds_manager = credentials_manager
-        self._allowed_shared_services = allowed_shared_services
         self._worker_target = worker_target
 
         # Initialize the toolkit with all available methods
@@ -71,7 +69,7 @@ class HomeAssistantTools(Toolkit):
         return load_scoped_credentials(
             "homeassistant",
             credentials_manager=self._creds_manager,
-            allowed_shared_services=self._allowed_shared_services,
+            allowed_shared_services=frozenset({"homeassistant"}),
             worker_target=self._worker_target,
         )
 

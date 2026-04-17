@@ -98,12 +98,12 @@ def test_google_wrapper_build_credentials_uses_scope_urls_for_default_scopes(
 
 
 @pytest.mark.parametrize("tool_name", ["gmail", "google_calendar", "google_sheets"])
-def test_google_wrappers_keep_allowlisted_shared_credentials_on_internal_reload(
+def test_google_wrappers_keep_shared_credentials_on_internal_reload_with_default_worker_allowlist(
     tool_name: str,
     runtime_paths: RuntimePaths,
     tmp_path: Path,
 ) -> None:
-    """Shared-scope Google wrappers should keep allowlisted shared credentials on reload."""
+    """Shared-scope Google wrappers should keep shared credentials without worker mirroring config."""
     credentials_manager = CredentialsManager(base_path=tmp_path / "credentials")
     credentials_manager.save_credentials(
         "google",
@@ -122,7 +122,6 @@ def test_google_wrappers_keep_allowlisted_shared_credentials_on_internal_reload(
         tool_name,
         runtime_paths,
         credentials_manager=credentials_manager,
-        allowed_shared_services=frozenset({"google"}),
         worker_target=resolve_worker_target(
             "shared",
             "general",

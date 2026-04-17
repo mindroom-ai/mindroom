@@ -92,12 +92,12 @@ class TestHomeAssistantTools:
         assert tool._worker_target.worker_scope == "shared"
         assert tool._worker_target.routing_agent_name == "general"
 
-    def test_shared_scope_allowlisted_credentials_survive_local_reload(
+    def test_shared_scope_credentials_survive_local_reload_with_default_worker_allowlist(
         self,
         runtime_paths: RuntimePaths,
         tmp_path: Path,
     ) -> None:
-        """Shared-scope local tools should keep allowlisted shared credentials on internal reload."""
+        """Shared-scope local tools should keep shared credentials without worker mirroring config."""
         credentials_manager = CredentialsManager(base_path=tmp_path / "credentials")
         credentials_manager.save_credentials(
             "homeassistant",
@@ -112,7 +112,6 @@ class TestHomeAssistantTools:
             "homeassistant",
             runtime_paths,
             credentials_manager=credentials_manager,
-            allowed_shared_services=frozenset({"homeassistant"}),
             worker_target=resolve_worker_target(
                 "shared",
                 "general",
