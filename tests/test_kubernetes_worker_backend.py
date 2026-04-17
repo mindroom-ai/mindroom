@@ -15,6 +15,7 @@ from mindroom.constants import (
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
     sandbox_startup_manifest_path,
+    startup_manifest_sha256,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -25,6 +26,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes_resources import ANNOTATION_STARTUP_MANIFEST_HASH
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 
@@ -338,7 +340,12 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # 
             "blockOwnerDeletion": False,
         },
     ]
-    assert "annotations" not in deployment["spec"]["template"]["metadata"]
+    assert deployment["spec"]["template"]["metadata"]["annotations"] == {
+        ANNOTATION_STARTUP_MANIFEST_HASH: startup_manifest_sha256(
+            committed_runtime,
+            tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
+        ),
+    }
     assert deployment["spec"]["template"]["spec"]["securityContext"] == {
         "runAsUser": 1000,
         "runAsGroup": 1000,
@@ -358,6 +365,54 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # 
         "periodSeconds": 5,
         "failureThreshold": 60,
     }
+
+
+def test_kubernetes_backend_recreates_worker_when_startup_manifest_changes(tmp_path: Path) -> None:
+    """Changing startup state should force a worker Deployment recreate."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        owner_deployment_name="mindroom-demo",
+        tool_validation_snapshot=initial_snapshot,
+    )
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    initial_deployment = apps_api.created_bodies[0]
+    initial_manifest_hash = initial_deployment["spec"]["template"]["metadata"]["annotations"][
+        ANNOTATION_STARTUP_MANIFEST_HASH
+    ]
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        owner_deployment_name="mindroom-demo",
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+
+    updated_backend.ensure_worker(WorkerSpec(worker_key), now=20.0)
+
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert len(apps_api.created_bodies) == 2
+    updated_deployment = apps_api.created_bodies[1]
+    updated_manifest_hash = updated_deployment["spec"]["template"]["metadata"]["annotations"][
+        ANNOTATION_STARTUP_MANIFEST_HASH
+    ]
+    assert updated_manifest_hash != initial_manifest_hash
 
 
 def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_path: Path) -> None:

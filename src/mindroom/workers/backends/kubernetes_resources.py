@@ -40,6 +40,7 @@ ANNOTATION_FAILURE_REASON = "mindroom.ai/failure-reason"
 ANNOTATION_WORKER_KEY = "mindroom.ai/worker-key"
 ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
+ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
 ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
@@ -506,7 +507,15 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
-        template_metadata = {"labels": worker_labels}
+        startup_manifest_path, startup_manifest_hash = self._write_startup_manifest(
+            worker_key=worker_key,
+            dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
+            local_dedicated_root=(self.storage_root / state_subpath).resolve(),
+        )
+        template_metadata = {
+            "labels": worker_labels,
+            "annotations": {ANNOTATION_STARTUP_MANIFEST_HASH: startup_manifest_hash},
+        }
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "securityContext": {
@@ -524,7 +533,7 @@ class KubernetesResourceManager:
                     "imagePullPolicy": self.config.image_pull_policy,
                     "command": ["/app/run-sandbox-runner.sh"],
                     "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
-                    "env": self._worker_env(worker_key, state_subpath),
+                    "env": self._worker_env(worker_key, state_subpath, startup_manifest_path=startup_manifest_path),
                     "volumeMounts": self._volume_mounts(worker_key, state_subpath, private_agent_names),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
@@ -583,15 +592,15 @@ class KubernetesResourceManager:
             },
         }
 
-    def _worker_env(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
+    def _worker_env(
+        self,
+        worker_key: str,
+        state_subpath: str,
+        *,
+        startup_manifest_path: str,
+    ) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
-        local_dedicated_root = (self.storage_root / state_subpath).resolve()
         venv_path = f"{dedicated_root}/venv"
-        startup_manifest_path = self._write_startup_manifest(
-            worker_key=worker_key,
-            dedicated_root=Path(dedicated_root),
-            local_dedicated_root=local_dedicated_root,
-        )
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
@@ -641,7 +650,7 @@ class KubernetesResourceManager:
         worker_key: str,
         dedicated_root: Path,
         local_dedicated_root: Path,
-    ) -> str:
+    ) -> tuple[str, str]:
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=dedicated_root,
@@ -651,7 +660,13 @@ class KubernetesResourceManager:
             startup_runtime_paths,
             tool_validation_snapshot=self.tool_validation_snapshot,
         )
-        return str(constants.sandbox_startup_manifest_path(dedicated_root))
+        return (
+            str(constants.sandbox_startup_manifest_path(dedicated_root)),
+            constants.startup_manifest_sha256(
+                startup_runtime_paths,
+                tool_validation_snapshot=self.tool_validation_snapshot,
+            ),
+        )
 
     def _worker_runtime_paths(
         self,
