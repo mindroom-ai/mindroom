@@ -247,7 +247,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
-  worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to mirror into isolated workers, e.g. [openai, github_private])
+  worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_first_threshold: 5  # Default: 5 (first automatic thread summary)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -257,15 +257,15 @@ defaults:
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
 
-`defaults.worker_grantable_credentials` accepts credential service names, not a closed provider enum.
-Common built-in examples include `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`.
-Allowlisted shared credentials are mirrored into the worker shared credential layer regardless of whether they came from env sync or were saved through the credentials API/UI.
-`google_vertex_adc` is intentionally not allowed here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep that auth path in the main runtime instead.
-This setting does not inject provider env into sandbox-proxied `python` or `shell` execution.
+`defaults.worker_grantable_credentials` is a list of credential service names.
+Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+If a tool runs inside an isolated worker, only the services listed here are available to that worker.
+Leave this unset to keep isolated workers deny-by-default for shared credentials.
+This setting does not add provider env vars to sandbox-proxied `python` or `shell`.
 This setting also does not control local shared-only integrations that stay in the main runtime, such as `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
-Those tools keep reading shared credentials directly because nothing is being mirrored into an isolated worker for them.
-Sandbox-proxied execution uses a narrower env contract than direct local execution: ordinary runtime `.env` values and provider env stay deny-by-default unless they are explicitly passed through by the tool/runtime.
-Some credential types may still require worker-specific tool support beyond mirroring.
+Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
+`google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
+Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
 
 # Auto-compaction is destructive inside the active session.
 # It rewrites the stored session summary and removes compacted raw runs from

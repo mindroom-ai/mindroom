@@ -345,12 +345,16 @@ class DefaultsConfig(BaseModel):
     worker_grantable_credentials: list[str] | None = Field(
         default=None,
         description=(
-            "Credential service names to mirror into isolated workers' shared credential layer "
-            "(None = deny by default). Common built-in examples include openai, anthropic, "
-            "google, google_oauth_client, github_private, and ollama. "
-            "Allowlisted shared credentials are mirrored regardless of whether they came from env sync or were saved through the credentials API/UI, but they are mirrored only and are not injected as env vars. Sandbox-proxied python and shell execution use a deny-by-default env contract, and some credentials may still require worker-specific tool support beyond mirroring."
-            " This setting does not affect local shared-only integrations such as gmail, google_calendar, google_sheets, and homeassistant because those stay in the main runtime."
-            " google_vertex_adc is intentionally unsupported in isolated workers and must stay in the main runtime."
+            "Credential service names to make available inside isolated workers "
+            "(None = deny by default). Use built-in names such as openai, anthropic, "
+            "google, google_oauth_client, github_private, and ollama, or custom shared "
+            "credential service names saved through the dashboard or API. This setting "
+            "only affects tools that actually run inside isolated workers. It does not "
+            "inject provider env vars into sandbox-proxied python or shell, and it does "
+            "not affect local shared-only integrations such as gmail, google_calendar, "
+            "google_sheets, and homeassistant because those stay in the main runtime. "
+            "google_vertex_adc is intentionally unsupported in isolated workers and must "
+            "stay in the main runtime."
         ),
     )
     allow_self_config: bool = Field(
