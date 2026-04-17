@@ -114,10 +114,12 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 ## Dynamic Team Formation
 
 When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
+In threads with multiple human participants, stale thread context does not auto-form a team.
+A fresh explicit `@mention` in the current message is required before agents respond.
 
 1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
-2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier
-3. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded
+2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
+3. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
 4. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
 
 ### Mode Selection

@@ -6797,6 +6797,105 @@ class TestAgentBot:
         mock_has_active_response.assert_called_once_with(target)
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_requires_explicit_mention_in_multi_human_thread_even_after_prior_team_mentions(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Untargeted follow-ups in a multi-human thread must not reuse stale thread mentions to form a team."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "synth": AgentConfig(
+                        display_name="Synthesis",
+                        rooms=["!room:localhost"],
+                    ),
+                    "reasoner": AgentConfig(
+                        display_name="Reasoner",
+                        rooms=["!room:localhost"],
+                    ),
+                    "critic": AgentConfig(
+                        display_name="Critic",
+                        rooms=["!room:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = config.get_ids(runtime_paths)
+        bot_user = AgentMatrixUser(
+            agent_name="synth",
+            user_id=ids["synth"].full_id,
+            display_name="Synthesis",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            ids["synth"].full_id: MagicMock(),
+            ids["reasoner"].full_id: MagicMock(),
+            ids["critic"].full_id: MagicMock(),
+            "@bas:localhost": MagicMock(),
+            "@maciej:localhost": MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[
+                ResolvedVisibleMessage(
+                    sender="@bas:localhost",
+                    body="Team, please assess this",
+                    timestamp=1,
+                    event_id="$m1",
+                    content={
+                        "body": "Team, please assess this",
+                        "m.mentions": {
+                            "user_ids": [
+                                ids["synth"].full_id,
+                                ids["reasoner"].full_id,
+                                ids["critic"].full_id,
+                            ],
+                        },
+                    },
+                    thread_id="$thread",
+                    latest_event_id="$m1",
+                ),
+                ResolvedVisibleMessage(
+                    sender="@maciej:localhost",
+                    body="I fixed two issues",
+                    timestamp=2,
+                    event_id="$m2",
+                    content={"body": "I fixed two issues"},
+                    thread_id="$thread",
+                    latest_event_id="$m2",
+                ),
+            ],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        with (
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new=AsyncMock(side_effect=AssertionError("team formation should be skipped")),
+            ) as mock_decide_team_formation,
+            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+        ):
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@bas:localhost",
+                "I fixed two issues",
+                False,
+            )
+
+        assert action.kind == "skip"
+        mock_decide_team_formation.assert_not_awaited()
+        mock_should_respond.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
         self,
         mock_agent_user: AgentMatrixUser,
