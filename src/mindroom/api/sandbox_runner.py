@@ -118,7 +118,7 @@ def _startup_runner_token_from_env() -> str | None:
 
 
 def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str, ToolValidationInfo]:
-    startup_manifest_path = runtime_paths.storage_root / ".runtime" / "startup_manifest.json"
+    startup_manifest_path = constants.sandbox_startup_manifest_path(runtime_paths.storage_root)
     if not startup_manifest_path.exists():
         return {}
     startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(

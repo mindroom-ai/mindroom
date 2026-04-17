@@ -14,6 +14,7 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
+    sandbox_startup_manifest_path,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -50,8 +51,8 @@ def _load_startup_manifest(
     *,
     worker_key: str,
 ) -> dict[str, object]:
-    manifest_path = (
-        backend.storage_root / f"workers/{worker_dir_name(worker_key)}" / ".runtime" / "startup_manifest.json"
+    manifest_path = sandbox_startup_manifest_path(
+        backend.storage_root / f"workers/{worker_dir_name(worker_key)}",
     )
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 

@@ -642,9 +642,8 @@ class KubernetesResourceManager:
         dedicated_root: Path,
         local_dedicated_root: Path,
     ) -> str:
-        runtime_dir = local_dedicated_root / ".runtime"
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        target_path = runtime_dir / "startup_manifest.json"
+        target_path = constants.sandbox_startup_manifest_path(local_dedicated_root)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=dedicated_root,
@@ -660,7 +659,7 @@ class KubernetesResourceManager:
             ),
             encoding="utf-8",
         )
-        return str(dedicated_root / ".runtime" / target_path.name)
+        return str(constants.sandbox_startup_manifest_path(dedicated_root))
 
     def _worker_runtime_paths(
         self,

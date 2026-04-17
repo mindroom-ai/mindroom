@@ -27,6 +27,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
+    sandbox_startup_manifest_path,
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
@@ -133,16 +134,18 @@ def _write_startup_manifest(
     public_runtime: bool = False,
     tool_validation_snapshot: dict[str, object] | None = None,
 ) -> Path:
-    manifest_path = runtime_paths.storage_root / ".runtime" / "startup_manifest.json"
+    manifest_path = sandbox_startup_manifest_path(runtime_paths.storage_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_payload = {
-        "runtime_paths": (
-            serialize_public_runtime_paths(runtime_paths) if public_runtime else serialize_runtime_paths(runtime_paths)
-        ),
-        "tool_validation_snapshot": tool_validation_snapshot or {},
-    }
     manifest_path.write_text(
-        json.dumps(manifest_payload, separators=(",", ":"), sort_keys=True),
+        json.dumps(
+            sandbox_runner_module.constants.serialize_startup_manifest(
+                runtime_paths,
+                tool_validation_snapshot=tool_validation_snapshot,
+                public_runtime=public_runtime,
+            ),
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     return manifest_path
@@ -154,9 +157,6 @@ def _set_startup_manifest(
     manifest_path: Path,
 ) -> None:
     monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
-    monkeypatch.delenv("MINDROOM_RUNTIME_PATHS_JSON", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_PATH", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_TOOL_VALIDATION_SNAPSHOT_JSON", raising=False)
 
 
 def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
