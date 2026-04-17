@@ -696,6 +696,7 @@ agents:
     model: default
     rooms:
       - lobby
+    accept_invites: true
     tools: []
     instructions:
       - Be helpful and conversational
@@ -708,6 +709,7 @@ agents:
     memory_backend: file
     rooms:
       - personal
+    accept_invites: true
     context_files:
       - SOUL.md
       - AGENTS.md
@@ -857,6 +859,7 @@ agents:
     model: default
     rooms:
       - lobby
+    accept_invites: true
 
 router:
   model: default

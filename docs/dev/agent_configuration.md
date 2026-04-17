@@ -140,6 +140,7 @@ agents:
     rooms:
       - lobby
       - dev
+    accept_invites: true  # Optional: accept direct room invites and auto-join invited rooms
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
     memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
@@ -164,6 +165,7 @@ agents:
 - **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior
 - **rooms**: List of room aliases where this agent should be active
+- **accept_invites**: Whether this agent accepts direct Matrix room invites and auto-joins invited rooms (default: `true`)
 - **markdown**: Per-agent override for markdown formatting (default: inherits from `defaults.markdown`; `null` means inherit)
 - **learning**: Enable Agno Learning for this agent (default: inherits from `defaults.learning`, which defaults to `true`)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)

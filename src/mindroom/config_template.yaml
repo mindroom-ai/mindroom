@@ -16,6 +16,7 @@ agents:
     model: default
     rooms:
       - lobby
+    accept_invites: true  # Accept direct room invites and auto-join invited rooms
     tools: []
     # Tools can be plain strings or single-key dicts with per-agent config overrides:
     # tools:
