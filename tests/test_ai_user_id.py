@@ -2501,6 +2501,58 @@ class TestUserIdPassthrough:
         assert "Inline media unavailable for this model" in second_call.args[0]
 
     @pytest.mark.asyncio
+    async def test_ai_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
+        """Non-streaming retries should log the actual prompt sent on each attempt."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Recovered response"
+        mock_run_output.tools = None
+        mock_agent.arun = AsyncMock(
+            side_effect=[
+                Exception(
+                    "litellm.BadRequestError: invalid_request_error: "
+                    "document.source.base64.media_type: Input should be 'application/pdf'",
+                ),
+                mock_run_output,
+            ],
+        )
+
+        prepared_prompt = "prepared prompt"
+        logged_prompts: list[str] = []
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        def fake_build_llm_request_log_context(**kwargs: object) -> dict[str, object]:
+            logged_prompts.append(cast("str", kwargs["full_prompt"]))
+            return {}
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.build_llm_request_log_context", side_effect=fake_build_llm_request_log_context),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt=prepared_prompt)
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                media=MediaInputs(files=[document_file]),
+            )
+
+        assert response == "Recovered response"
+        assert logged_prompts == [prepared_prompt, append_inline_media_fallback_prompt(prepared_prompt)]
+
+    @pytest.mark.asyncio
     async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
         """Inline-media retries must use a fresh Agno run_id after an errored run output."""
         mock_agent = MagicMock()
@@ -2599,6 +2651,61 @@ class TestUserIdPassthrough:
         assert list(second_call.kwargs["files"]) == []
         assert "Inline media unavailable for this model" in second_call.args[0]
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
+        """Streaming retries should log the actual prompt sent on each attempt."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(
+                content=(
+                    "litellm.BadRequestError: invalid_request_error: "
+                    "document.source.base64.media_type: Input should be 'application/pdf'"
+                ),
+            )
+
+        async def successful_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Recovered stream")
+
+        mock_agent.arun = MagicMock(side_effect=[failing_stream(), successful_stream()])
+
+        prepared_prompt = "prepared prompt"
+        logged_prompts: list[str] = []
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        def fake_build_llm_request_log_context(**kwargs: object) -> dict[str, object]:
+            logged_prompts.append(cast("str", kwargs["full_prompt"]))
+            return {}
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.build_llm_request_log_context", side_effect=fake_build_llm_request_log_context),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt=prepared_prompt)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    media=MediaInputs(files=[document_file]),
+                )
+            ]
+
+        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+        assert logged_prompts == [prepared_prompt, append_inline_media_fallback_prompt(prepared_prompt)]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:

@@ -909,6 +909,29 @@ def _track_model_request_metrics(
         state.first_token_latency = float(event.time_to_first_token)
 
 
+def _attempt_request_log_context(
+    *,
+    session_id: str,
+    room_id: str | None,
+    thread_id: str | None,
+    reply_to_event_id: str | None,
+    prompt: str,
+    attempt_prompt: str,
+    metadata: dict[str, object] | None,
+) -> dict[str, object]:
+    """Build request-log context for the exact prompt used by one provider attempt."""
+    return build_llm_request_log_context(
+        session_id=session_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        reply_to_event_id=reply_to_event_id,
+        prompt=prompt,
+        model_prompt=None,
+        full_prompt=attempt_prompt,
+        metadata=metadata,
+    )
+
+
 async def cached_agent_run(
     agent: Agent,
     full_prompt: str,
@@ -1220,16 +1243,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
-            request_log_context = build_llm_request_log_context(
-                session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-                prompt=prompt,
-                model_prompt=None,
-                full_prompt=full_prompt,
-                metadata=metadata,
-            )
 
             response: RunOutput | None = None
             attempt_prompt = full_prompt
@@ -1242,7 +1255,17 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     try:
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
-                        with bind_llm_request_log_context(**request_log_context):
+                        with bind_llm_request_log_context(
+                            **_attempt_request_log_context(
+                                session_id=session_id,
+                                room_id=room_id,
+                                thread_id=thread_id,
+                                reply_to_event_id=reply_to_event_id,
+                                prompt=prompt,
+                                attempt_prompt=attempt_prompt,
+                                metadata=metadata,
+                            ),
+                        ):
                             response = await _run_cached_agent_attempt(
                                 agent,
                                 attempt_prompt,
@@ -1559,16 +1582,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
-            request_log_context = build_llm_request_log_context(
-                session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-                prompt=prompt,
-                model_prompt=None,
-                full_prompt=full_prompt,
-                metadata=metadata,
-            )
 
             attempt_prompt = full_prompt
             attempt_media_inputs = media_inputs
@@ -1583,7 +1596,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
-                        with bind_llm_request_log_context(**request_log_context):
+                        with bind_llm_request_log_context(
+                            **_attempt_request_log_context(
+                                session_id=session_id,
+                                room_id=room_id,
+                                thread_id=thread_id,
+                                reply_to_event_id=reply_to_event_id,
+                                prompt=prompt,
+                                attempt_prompt=attempt_prompt,
+                                metadata=metadata,
+                            ),
+                        ):
                             stream_generator = agent.arun(
                                 attempt_prompt,
                                 session_id=session_id,
