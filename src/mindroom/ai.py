@@ -933,6 +933,23 @@ def _attempt_request_log_context(
     )
 
 
+async def _stream_with_request_log_context[StreamEventT](
+    stream_generator: AsyncIterator[StreamEventT],
+    *,
+    request_context: dict[str, object],
+) -> AsyncIterator[StreamEventT]:
+    """Advance one async stream with request-log context bound per item pull."""
+    with bind_llm_request_log_context(**request_context):
+        stream_iterator = stream_generator.__aiter__()
+    while True:
+        try:
+            with bind_llm_request_log_context(**request_context):
+                event = await stream_iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        yield event
+
+
 async def cached_agent_run(
     agent: Agent,
     full_prompt: str,
@@ -1602,18 +1619,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
-                        with bind_llm_request_log_context(
-                            **_attempt_request_log_context(
-                                session_id=session_id,
-                                room_id=room_id,
-                                thread_id=thread_id,
-                                reply_to_event_id=reply_to_event_id,
-                                prompt=prompt,
-                                model_prompt=model_prompt,
-                                attempt_prompt=attempt_prompt,
-                                metadata=metadata,
-                            ),
-                        ):
+                        request_context = _attempt_request_log_context(
+                            session_id=session_id,
+                            room_id=room_id,
+                            thread_id=thread_id,
+                            reply_to_event_id=reply_to_event_id,
+                            prompt=prompt,
+                            model_prompt=model_prompt,
+                            attempt_prompt=attempt_prompt,
+                            metadata=metadata,
+                        )
+                        with bind_llm_request_log_context(**request_context):
                             stream_generator = agent.arun(
                                 attempt_prompt,
                                 session_id=session_id,
@@ -1627,6 +1643,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 stream_events=True,
                                 metadata=metadata,
                             )
+                        stream_generator = _stream_with_request_log_context(
+                            stream_generator,
+                            request_context=request_context,
+                        )
                         async for stream_chunk in _process_stream_events(
                             stream_generator,
                             state=state,

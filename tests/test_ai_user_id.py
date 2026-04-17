@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from contextvars import Context
 from copy import deepcopy
@@ -14,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.db.base import SessionType
 from agno.media import File
+from agno.models.message import Message
 from agno.models.metrics import Metrics
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
@@ -39,7 +41,7 @@ from mindroom.ai import (
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -65,6 +67,7 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
@@ -2878,6 +2881,96 @@ class TestUserIdPassthrough:
                 "metadata": None,
             },
         ]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming request logs must keep the bound context until the deferred model call runs."""
+
+        class _DeferredLoggingModel:
+            def __init__(self) -> None:
+                self.id = "test-model"
+                self.system_prompt = None
+                self.temperature = 0.7
+                self.client = None
+                self.async_client = None
+
+            async def ainvoke(self, *_args: object, **_kwargs: object) -> dict[str, str]:
+                return {"status": "ok"}
+
+            async def ainvoke_stream(
+                self,
+                *_args: object,
+                **_kwargs: object,
+            ) -> AsyncIterator[dict[str, str]]:
+                yield {"status": "ok"}
+
+        class _DeferredLoggingAgent:
+            def __init__(self, model: _DeferredLoggingModel) -> None:
+                self.model = model
+                self.name = "GeneralAgent"
+                self.add_history_to_context = False
+                self.db = None
+                self.learning = None
+
+            async def arun(self, prompt: str, **_kwargs: object) -> AsyncIterator[object]:
+                async for _chunk in self.model.ainvoke_stream(
+                    messages=[Message(role="user", content=prompt)],
+                    assistant_message=Message(role="assistant"),
+                    tools=[],
+                ):
+                    pass
+                yield RunContentEvent(content="Deferred stream")
+
+        prepared_prompt = "prepared prompt"
+        model = _DeferredLoggingModel()
+        install_llm_request_logging(
+            model,
+            agent_name="general",
+            debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+            default_log_dir=tmp_path / "unused",
+        )
+        agent = _DeferredLoggingAgent(model)
+        config = _config().model_copy(
+            update={
+                "debug": DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+            },
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="raw prompt",
+                    model_prompt="expanded prompt",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                    room_id="!room:example.com",
+                    thread_id="$thread:example.com",
+                    reply_to_event_id="$reply:example.com",
+                )
+            ]
+
+        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Deferred stream" for chunk in chunks)
+
+        log_files = list(tmp_path.glob("llm-requests-*.jsonl"))
+        assert len(log_files) == 1
+        entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
+        assert len(entries) == 1
+        assert entries[0]["session_id"] == "session1"
+        assert entries[0]["room_id"] == "!room:example.com"
+        assert entries[0]["thread_id"] == "$thread:example.com"
+        assert entries[0]["reply_to_event_id"] == "$reply:example.com"
+        assert entries[0]["current_turn_prompt"] == "raw prompt"
+        assert entries[0]["model_prompt"] == "expanded prompt"
+        assert entries[0]["full_prompt"] == prepared_prompt
+        assert entries[0]["messages"][0]["role"] == "user"
+        assert entries[0]["messages"][0]["content"] == prepared_prompt
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:
