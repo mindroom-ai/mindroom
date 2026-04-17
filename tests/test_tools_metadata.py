@@ -2,16 +2,22 @@
 
 import inspect
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
+from typing import Never
 
 import pytest
 from agno.tools import Toolkit
+
+import mindroom.tool_system.metadata as metadata_module
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import (
+    _PLUGIN_MODULE_PREFIX,
     _TOOL_REGISTRY,
     AUTHORED_OVERRIDE_INHERIT,
     TOOL_METADATA,
@@ -20,6 +26,9 @@ from mindroom.tool_system.metadata import (
     ToolCategory,
     ToolConfigOverrideError,
     ToolManagedInitArg,
+    _capture_tool_registry_snapshot,
+    _execute_validation_plugin_module,
+    _restore_tool_registry_snapshot,
     deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
     export_tools_metadata,
@@ -105,6 +114,64 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
         _restore_builtin_tool_metadata_state()
+
+
+def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plugin validation should snapshot sys.modules before iterating over it."""
+
+    class SnapshotOnlyModules(dict[str, ModuleType]):
+        def items(self) -> Never:
+            msg = "live sys.modules.items() should not be used"
+            raise RuntimeError(msg)
+
+        def copy(self) -> dict[str, ModuleType]:
+            return dict(self)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    module_path = plugin_root / "tools.py"
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
+    monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
+
+    snapshot = _capture_tool_registry_snapshot()
+    assert isinstance(snapshot.plugin_modules, dict)
+
+    module_name = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
+    assert module_name
+    assert "demo" in module_name
+    assert "__validation__" in module_name
+
+
+def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restoring registry state should snapshot sys.modules before iterating over it."""
+
+    class SnapshotOnlyModules(dict[str, ModuleType]):
+        def __iter__(self) -> Never:
+            msg = "live sys.modules iteration should not be used"
+            raise RuntimeError(msg)
+
+        def copy(self) -> dict[str, ModuleType]:
+            return dict(self)
+
+    snapshot = _capture_tool_registry_snapshot()
+    leaked_module_name = f"{_PLUGIN_MODULE_PREFIX}leaked"
+    assert leaked_module_name not in snapshot.plugin_modules
+
+    leaked_module = ModuleType(leaked_module_name)
+    leaked_module.__file__ = str(tmp_path / "leaked.py")
+
+    snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
+    snapshot_modules[leaked_module_name] = leaked_module
+    monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
+
+    _restore_tool_registry_snapshot(snapshot)
+
+    assert leaked_module_name not in metadata_module.sys.modules
 
 
 def test_tool_metadata_consistency() -> None:

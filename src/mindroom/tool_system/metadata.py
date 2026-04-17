@@ -919,6 +919,7 @@ def ensure_tool_registry_loaded(
 
 def _capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
     """Capture the mutable tool/plugin registry state for transactional restoration."""
+    loaded_modules = sys.modules.copy()
     return _ToolRegistrySnapshot(
         registry=_TOOL_REGISTRY.copy(),
         metadata=TOOL_METADATA.copy(),
@@ -930,7 +931,7 @@ def _capture_tool_registry_snapshot() -> _ToolRegistrySnapshot:
         },
         plugin_modules={
             module_name: module
-            for module_name, module in sys.modules.items()
+            for module_name, module in loaded_modules.items()
             if module_name.startswith(_PLUGIN_MODULE_PREFIX)
         },
     )
@@ -955,7 +956,7 @@ def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
             for module_name, registrations in snapshot.plugin_tool_metadata_by_module.items()
         },
     )
-    for module_name in tuple(sys.modules):
+    for module_name in tuple(sys.modules.copy()):
         if module_name.startswith(_PLUGIN_MODULE_PREFIX) and module_name not in snapshot.plugin_modules:
             sys.modules.pop(module_name, None)
     sys.modules.update(snapshot.plugin_modules)
@@ -990,9 +991,10 @@ def _execute_validation_plugin_module(
         raise ToolMetadataValidationError(msg)
 
     previous_module = sys.modules.get(validation_module_name)
+    loaded_modules = sys.modules.copy()
     previous_modules_within_root = {
         module_name: loaded_module
-        for module_name, loaded_module in sys.modules.items()
+        for module_name, loaded_module in loaded_modules.items()
         if _module_origin_within_root(loaded_module, plugin_root)
     }
     module = importlib_util.module_from_spec(spec)
@@ -1007,7 +1009,7 @@ def _execute_validation_plugin_module(
         msg = f"Plugin validation module execution failed for {module_path}: {exc}"
         raise ToolMetadataValidationError(msg) from exc
     finally:
-        for loaded_module_name, loaded_module in list(sys.modules.items()):
+        for loaded_module_name, loaded_module in sys.modules.copy().items():
             if loaded_module_name not in previous_modules_within_root and _module_origin_within_root(
                 loaded_module,
                 plugin_root,
