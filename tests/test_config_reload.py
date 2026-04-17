@@ -574,7 +574,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         left_rooms[user_id].append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
@@ -609,7 +609,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
             return ["room1", "room2", "room3"]  # router is in all initial rooms
         return []
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
+    monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create agent1 bot with initial config
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
@@ -658,7 +658,7 @@ async def test_router_updates_rooms_on_config_reload(
         left_rooms.append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
@@ -685,7 +685,7 @@ async def test_router_updates_rooms_on_config_reload(
         # Router is currently in initial config rooms
         return ["room1", "room2", "room3"]
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
+    monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Get initial router rooms
     initial_router_rooms = initial_config.get_all_configured_rooms()
@@ -745,7 +745,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
         joined_rooms[user_id].append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(
@@ -770,7 +770,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
         return []  # New agent has no rooms initially
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
+    monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create agent3 bot (new agent in updated config)
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
@@ -819,7 +819,7 @@ async def test_team_room_changes_on_config_reload(
         left_rooms[user_id].append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
@@ -848,7 +848,7 @@ async def test_team_room_changes_on_config_reload(
             return ["room3"]  # team1 is currently only in room3
         return []
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
+    monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create team1 bot with updated config
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
@@ -1029,7 +1029,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         update_room_membership(client.user_id, room_id, "leave")
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
@@ -1060,7 +1060,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
                 rooms.append(room_id)
         return rooms
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
+    monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Apply config updates for each bot
     bots_config = {

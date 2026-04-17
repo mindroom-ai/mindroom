@@ -85,8 +85,8 @@ class TestScheduledTaskRestoration:
         self._install_runtime_support(router_bot)
 
         with (
-            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
-            patch("mindroom.bot_room_lifecycle.join_room", new_callable=AsyncMock, return_value=True) as mock_join,
+            patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
+            patch("mindroom.bot.join_room", new_callable=AsyncMock, return_value=True) as mock_join,
             patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
             patch(
                 "mindroom.bot.config_confirmation.restore_pending_changes",
@@ -147,8 +147,8 @@ class TestScheduledTaskRestoration:
         self._install_runtime_support(regular_bot)
 
         with (
-            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
-            patch("mindroom.bot_room_lifecycle.join_room", new_callable=AsyncMock, return_value=True) as mock_join,
+            patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
+            patch("mindroom.bot.join_room", new_callable=AsyncMock, return_value=True) as mock_join,
             patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
         ):
             await regular_bot.join_configured_rooms()
@@ -180,8 +180,8 @@ class TestScheduledTaskRestoration:
         self._install_runtime_support(router_bot)
 
         with (
-            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
-            patch("mindroom.bot_room_lifecycle.join_room", new_callable=AsyncMock) as mock_join,
+            patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
+            patch("mindroom.bot.join_room", new_callable=AsyncMock) as mock_join,
             patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
             patch(
                 "mindroom.bot.config_confirmation.restore_pending_changes",
@@ -440,8 +440,8 @@ class TestScheduledTaskRestoration:
             self._install_runtime_support(bot)
 
             with (
-                patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
-                patch("mindroom.bot_room_lifecycle.join_room", new_callable=AsyncMock, return_value=True),
+                patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
+                patch("mindroom.bot.join_room", new_callable=AsyncMock, return_value=True),
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
                 patch(
                     "mindroom.bot.config_confirmation.restore_pending_changes",

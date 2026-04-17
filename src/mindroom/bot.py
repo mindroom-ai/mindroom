@@ -312,6 +312,7 @@ class AgentBot:
     _startup_thread_prewarm_task: asyncio.Task[None] | None
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
+    _invited_rooms: set[str]
 
     def __init__(
         self,
@@ -354,53 +355,15 @@ class AgentBot:
                 agent_user=self.agent_user,
                 runtime=self._runtime_view,
                 runtime_paths=self.runtime_paths,
-                get_logger=self._room_lifecycle_logger,
-                get_configured_rooms=self._room_lifecycle_configured_rooms,
-                send_response=self._room_lifecycle_send_response,
-                on_configured_room_joined=self._post_join_room_setup,
-                on_router_invite_joined=self._room_lifecycle_send_router_welcome_if_empty,
+                get_logger=lambda: self.logger,
+                get_configured_rooms=lambda: self.rooms,
+                send_response=lambda *args, **kwargs: self._send_response(*args, **kwargs),
+                on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
+                on_router_invite_joined=lambda room_id: self._send_welcome_message_if_empty(room_id),
             ),
         )
+        self._invited_rooms = self._room_lifecycle.invited_rooms
         self._init_runtime_components()
-
-    def _room_lifecycle_logger(self) -> structlog.stdlib.BoundLogger:
-        """Return the current logger used by the room lifecycle helper."""
-        return self.logger
-
-    def _room_lifecycle_configured_rooms(self) -> Sequence[str]:
-        """Return the current configured room list for the room lifecycle helper."""
-        return self.rooms
-
-    async def _room_lifecycle_send_response(
-        self,
-        room_id: str,
-        reply_to_event_id: str | None,
-        response_text: str,
-        thread_id: str | None,
-        reply_to_event: nio.RoomMessageText | None = None,
-        skip_mentions: bool = False,
-        tool_trace: list[ToolTraceEntry] | None = None,
-        extra_content: dict[str, Any] | None = None,
-        thread_mode_override: Literal["thread", "room"] | None = None,
-        target: MessageTarget | None = None,
-    ) -> str | None:
-        """Forward room lifecycle replies through the current bot send-response seam."""
-        return await self._send_response(
-            room_id=room_id,
-            reply_to_event_id=reply_to_event_id,
-            response_text=response_text,
-            thread_id=thread_id,
-            reply_to_event=reply_to_event,
-            skip_mentions=skip_mentions,
-            tool_trace=tool_trace,
-            extra_content=extra_content,
-            thread_mode_override=thread_mode_override,
-            target=target,
-        )
-
-    async def _room_lifecycle_send_router_welcome_if_empty(self, room_id: str) -> None:
-        """Forward router invite welcomes through the current bot welcome seam."""
-        await self._send_welcome_message_if_empty(room_id)
 
     def _init_runtime_components(self) -> None:
         """Initialize runtime-only helpers that depend on bound instance methods."""
@@ -849,11 +812,6 @@ class AgentBot:
             execution_identity=None,
             hook_registry=self.hook_registry,
         )
-
-    @property
-    def _invited_rooms(self) -> set[str]:
-        """Return the invite state owned by the room lifecycle helper."""
-        return self._room_lifecycle.invited_rooms
 
     def _should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
