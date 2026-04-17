@@ -354,6 +354,7 @@ def _response_request(
     reply_to_event_id: str = "$user_msg",
     thread_id: str | None = None,
     prompt: str = "Hello",
+    model_prompt: str | None = None,
     user_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
@@ -363,6 +364,7 @@ def _response_request(
         thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
+        model_prompt=model_prompt,
         user_id=user_id,
     )
 
@@ -753,6 +755,47 @@ async def test_send_skill_command_response_uses_target_agent_storage_for_session
         "started:agent:general:general:!test:localhost:$thread-root:$thread-root",
         "send:Skill response",
     ]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_passes_current_and_model_prompt_to_ai(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should preserve raw and expanded prompt layers separately."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai:
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.send_text = AsyncMock(return_value="$skill-reply")
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["prompt"] == "Use demo skill"
+            assert kwargs["model_prompt"] != "Use demo skill"
+            assert "Use demo skill" in kwargs["model_prompt"]
+            return "Skill response"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
 
 
 @pytest.mark.asyncio
@@ -1305,6 +1348,87 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
             target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
         )
         await coordinator.process_and_respond_streaming(request)
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_passes_current_and_model_prompt_to_ai(
+    tmp_path: Path,
+) -> None:
+    """Non-streaming AI calls should preserve raw and expanded prompt layers separately."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["prompt"] == "Hello"
+            assert kwargs["model_prompt"] == "Hello with context"
+            return "Hello!"
+
+        mock_ai.side_effect = fake_ai_response
+
+        await coordinator.process_and_respond(
+            _response_request(
+                prompt="Hello",
+                model_prompt="Hello with context",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_passes_current_and_model_prompt_to_ai(
+    tmp_path: Path,
+) -> None:
+    """Streaming AI calls should preserve raw and expanded prompt layers separately."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            assert kwargs["prompt"] == "Hello"
+            assert kwargs["model_prompt"] == "Hello with context"
+
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Hello!"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        await coordinator.process_and_respond_streaming(
+            _response_request(
+                prompt="Hello",
+                model_prompt="Hello with context",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -2524,7 +2648,7 @@ class TestUserIdPassthrough:
         )
 
         prepared_prompt = "prepared prompt"
-        logged_prompts: list[str] = []
+        logged_contexts: list[dict[str, object]] = []
         document_file = File(
             filepath=str(tmp_path / "report.pdf"),
             filename="report.pdf",
@@ -2532,7 +2656,7 @@ class TestUserIdPassthrough:
         )
 
         def fake_build_llm_request_log_context(**kwargs: object) -> dict[str, object]:
-            logged_prompts.append(cast("str", kwargs["full_prompt"]))
+            logged_contexts.append(dict(kwargs))
             return {}
 
         with (
@@ -2542,7 +2666,8 @@ class TestUserIdPassthrough:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt=prepared_prompt)
             response = await ai_response(
                 agent_name="general",
-                prompt="test",
+                prompt="raw prompt",
+                model_prompt="expanded prompt",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
@@ -2550,7 +2675,30 @@ class TestUserIdPassthrough:
             )
 
         assert response == "Recovered response"
-        assert logged_prompts == [prepared_prompt, append_inline_media_fallback_prompt(prepared_prompt)]
+        mock_prepare.assert_awaited_once()
+        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert logged_contexts == [
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": prepared_prompt,
+                "metadata": None,
+            },
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
+                "metadata": None,
+            },
+        ]
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -2676,7 +2824,7 @@ class TestUserIdPassthrough:
         mock_agent.arun = MagicMock(side_effect=[failing_stream(), successful_stream()])
 
         prepared_prompt = "prepared prompt"
-        logged_prompts: list[str] = []
+        logged_contexts: list[dict[str, object]] = []
         document_file = File(
             filepath=str(tmp_path / "report.pdf"),
             filename="report.pdf",
@@ -2684,7 +2832,7 @@ class TestUserIdPassthrough:
         )
 
         def fake_build_llm_request_log_context(**kwargs: object) -> dict[str, object]:
-            logged_prompts.append(cast("str", kwargs["full_prompt"]))
+            logged_contexts.append(dict(kwargs))
             return {}
 
         with (
@@ -2696,7 +2844,8 @@ class TestUserIdPassthrough:
                 chunk
                 async for chunk in stream_agent_response(
                     agent_name="general",
-                    prompt="test",
+                    prompt="raw prompt",
+                    model_prompt="expanded prompt",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
                     config=_config(),
@@ -2705,7 +2854,30 @@ class TestUserIdPassthrough:
             ]
 
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
-        assert logged_prompts == [prepared_prompt, append_inline_media_fallback_prompt(prepared_prompt)]
+        mock_prepare.assert_awaited_once()
+        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert logged_contexts == [
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": prepared_prompt,
+                "metadata": None,
+            },
+            {
+                "session_id": "session1",
+                "room_id": None,
+                "thread_id": None,
+                "reply_to_event_id": None,
+                "prompt": "raw prompt",
+                "model_prompt": "expanded prompt",
+                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
+                "metadata": None,
+            },
+        ]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:

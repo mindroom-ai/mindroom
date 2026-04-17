@@ -916,6 +916,7 @@ def _attempt_request_log_context(
     thread_id: str | None,
     reply_to_event_id: str | None,
     prompt: str,
+    model_prompt: str | None,
     attempt_prompt: str,
     metadata: dict[str, object] | None,
 ) -> dict[str, object]:
@@ -926,7 +927,7 @@ def _attempt_request_log_context(
         thread_id=thread_id,
         reply_to_event_id=reply_to_event_id,
         prompt=prompt,
-        model_prompt=None,
+        model_prompt=model_prompt,
         full_prompt=attempt_prompt,
         metadata=metadata,
     )
@@ -1116,6 +1117,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     runtime_paths: RuntimePaths,
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    model_prompt: str | None = None,
     thread_id: str | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
@@ -1145,6 +1147,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
+        model_prompt: Optional model-facing prompt after caller-side prompt shaping
         thread_id: Optional resolved Matrix thread target for the request
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
@@ -1213,7 +1216,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     pipeline_timing.mark("ai_prepare_start")
                 agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
                     agent_name,
-                    prompt,
+                    model_prompt or prompt,
                     runtime_paths,
                     config,
                     session_id,
@@ -1262,6 +1265,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 thread_id=thread_id,
                                 reply_to_event_id=reply_to_event_id,
                                 prompt=prompt,
+                                model_prompt=model_prompt,
                                 attempt_prompt=attempt_prompt,
                                 metadata=metadata,
                             ),
@@ -1455,6 +1459,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     runtime_paths: RuntimePaths,
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    model_prompt: str | None = None,
     thread_id: str | None = None,
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
@@ -1483,6 +1488,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
+        model_prompt: Optional model-facing prompt after caller-side prompt shaping
         thread_id: Optional resolved Matrix thread target for the request
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
@@ -1551,7 +1557,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     pipeline_timing.mark("ai_prepare_start")
                 agent, full_prompt, unseen_event_ids, _prepared_history = await _prepare_agent_and_prompt(
                     agent_name,
-                    prompt,
+                    model_prompt or prompt,
                     runtime_paths,
                     config,
                     session_id,
@@ -1603,6 +1609,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 thread_id=thread_id,
                                 reply_to_event_id=reply_to_event_id,
                                 prompt=prompt,
+                                model_prompt=model_prompt,
                                 attempt_prompt=attempt_prompt,
                                 metadata=metadata,
                             ),

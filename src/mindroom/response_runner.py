@@ -1490,11 +1490,12 @@ class ResponseRunner:
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
                 agent_name=self.deps.agent_name,
-                prompt=runtime.model_prompt,
+                prompt=request.prompt,
                 session_id=runtime.session_id,
                 runtime_paths=self.deps.runtime_paths,
                 config=self.deps.runtime.config,
                 thread_history=request.thread_history,
+                model_prompt=runtime.model_prompt,
                 thread_id=runtime.resolved_target.resolved_thread_id,
                 room_id=request.room_id,
                 knowledge=knowledge,
@@ -1545,11 +1546,12 @@ class ResponseRunner:
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
             agent_name=self.deps.agent_name,
-            prompt=runtime.model_prompt,
+            prompt=request.prompt,
             session_id=runtime.session_id,
             runtime_paths=self.deps.runtime_paths,
             config=self.deps.runtime.config,
             thread_history=request.thread_history,
+            model_prompt=runtime.model_prompt,
             thread_id=runtime.resolved_target.resolved_thread_id,
             room_id=request.room_id,
             knowledge=knowledge,
@@ -1994,11 +1996,12 @@ class ResponseRunner:
                 )
                 return await ai_response(
                     agent_name=agent_name,
-                    prompt=model_prompt,
+                    prompt=memory_prompt,
                     session_id=session_id,
                     runtime_paths=self.deps.runtime_paths,
                     config=self.deps.runtime.config,
                     thread_history=thread_history,
+                    model_prompt=model_prompt,
                     thread_id=resolved_target.resolved_thread_id,
                     room_id=room_id,
                     knowledge=knowledge,
