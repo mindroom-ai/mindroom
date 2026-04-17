@@ -348,7 +348,7 @@ class DefaultsConfig(BaseModel):
             "Credential service names to mirror into isolated workers' shared credential layer "
             "(None = deny by default). Common built-in examples include openai, anthropic, "
             "google, google_oauth_client, github_private, and ollama. "
-            "Custom service names are also valid, but they are mirrored only and are not injected as env vars. Sandbox-proxied python and shell execution use a deny-by-default env contract, and some credentials may still require worker-specific tool support beyond mirroring."
+            "Allowlisted shared credentials are mirrored regardless of whether they came from env sync or were saved through the credentials API/UI, but they are mirrored only and are not injected as env vars. Sandbox-proxied python and shell execution use a deny-by-default env contract, and some credentials may still require worker-specific tool support beyond mirroring."
             " google_vertex_adc is intentionally unsupported in isolated workers and must stay in the main runtime."
         ),
     )

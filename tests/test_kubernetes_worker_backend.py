@@ -802,17 +802,16 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers()
 def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unscoped dedicated workers should mirror shared UI credentials into their shared layer."""
     backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, bool, frozenset[str] | None]] = []
+    sync_calls: list[tuple[str, frozenset[str] | None]] = []
 
     def _record_sync(
         worker_key: str,
         *,
-        include_ui_credentials: bool,
         allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
         del credentials_manager
-        sync_calls.append((worker_key, include_ui_credentials, allowed_services))
+        sync_calls.append((worker_key, allowed_services))
 
     monkeypatch.setattr(
         "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
@@ -821,25 +820,24 @@ def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(mon
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:unscoped:general"), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:unscoped:general", True, DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
+    assert sync_calls == [("v1:tenant-123:unscoped:general", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
 
 
-def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
+def test_kubernetes_backend_mirrors_shared_credentials_for_scoped_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scoped dedicated workers should mirror only env-backed shared credentials."""
+    """Scoped dedicated workers should use the same allowlisted shared-credential sync path."""
     backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, bool, frozenset[str] | None]] = []
+    sync_calls: list[tuple[str, frozenset[str] | None]] = []
 
     def _record_sync(
         worker_key: str,
         *,
-        include_ui_credentials: bool,
         allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
         del credentials_manager
-        sync_calls.append((worker_key, include_ui_credentials, allowed_services))
+        sync_calls.append((worker_key, allowed_services))
 
     monkeypatch.setattr(
         "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
@@ -848,7 +846,7 @@ def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", False, DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
+    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
 
 
 def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
@@ -863,11 +861,10 @@ def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
     def _record_sync(
         worker_key: str,
         *,
-        include_ui_credentials: bool,
         allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
-        del worker_key, include_ui_credentials, credentials_manager
+        del worker_key, credentials_manager
         sync_calls.append(allowed_services)
 
     monkeypatch.setattr(
@@ -890,11 +887,10 @@ def test_kubernetes_backend_uses_empty_worker_grantable_credentials_allowlist(
     def _record_sync(
         worker_key: str,
         *,
-        include_ui_credentials: bool,
         allowed_services: frozenset[str] | None = None,
         credentials_manager: object | None = None,
     ) -> None:
-        del worker_key, include_ui_credentials, credentials_manager
+        del worker_key, credentials_manager
         sync_calls.append(allowed_services)
 
     monkeypatch.setattr(

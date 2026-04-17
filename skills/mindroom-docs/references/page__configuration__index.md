@@ -258,8 +258,8 @@ defaults:
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
 
 `defaults.worker_grantable_credentials` accepts credential service names, not a closed provider enum.
-Common built-in env-synced examples include `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`.
-Custom credential service names stored through the credentials API or UI are also valid and will be mirrored into the worker shared credential layer.
+Common built-in examples include `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`.
+Allowlisted shared credentials are mirrored into the worker shared credential layer regardless of whether they came from env sync or were saved through the credentials API/UI.
 `google_vertex_adc` is intentionally not allowed here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep that auth path in the main runtime instead.
 This setting does not inject provider env into sandbox-proxied `python` or `shell` execution.
 Sandbox-proxied execution uses a narrower env contract than direct local execution: ordinary runtime `.env` values and provider env stay deny-by-default unless they are explicitly passed through by the tool/runtime.

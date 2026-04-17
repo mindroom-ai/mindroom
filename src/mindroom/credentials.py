@@ -356,10 +356,10 @@ def merge_scoped_credentials(
     base_manager: CredentialsManager,
     worker_manager: CredentialsManager | None,
 ) -> dict[str, Any] | None:
-    """Merge env-backed shared credentials with worker-scoped overrides."""
+    """Merge shared credentials with worker-scoped overrides."""
     shared_credentials = base_manager.load_credentials(service)
     merged_credentials: dict[str, Any] = {}
-    if isinstance(shared_credentials, Mapping) and shared_credentials.get("_source") == "env":
+    if isinstance(shared_credentials, Mapping):
         merged_credentials.update(shared_credentials)
 
     if worker_manager is not None:
@@ -373,16 +373,14 @@ def merge_scoped_credentials(
 def sync_shared_credentials_to_worker(
     worker_key: str,
     *,
-    include_ui_credentials: bool = False,
     allowed_services: frozenset[str],
     credentials_manager: CredentialsManager,
 ) -> None:
     """Sync shared credentials into one worker's dedicated shared-credential mirror.
 
-    The worker's override store remains separate. Env-backed shared credentials are always
-    copied; UI-backed shared credentials and legacy untagged shared credentials are copied
-    only when explicitly requested. Only ``allowed_services`` may be mirrored into the
-    worker's shared credential layer.
+    The worker's override store remains separate. Only ``allowed_services`` may be
+    mirrored into the worker's shared credential layer, regardless of whether the
+    shared credential originated from env sync or the dashboard/API.
     """
     manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
@@ -392,7 +390,6 @@ def sync_shared_credentials_to_worker(
     logger.debug(
         "Starting worker shared credential sync",
         worker_key=worker_key,
-        include_ui_credentials=include_ui_credentials,
         allowed_services=sorted(allowed_services),
     )
 
@@ -408,8 +405,6 @@ def sync_shared_credentials_to_worker(
         if not isinstance(shared_credentials, Mapping):
             continue
         source = shared_credentials.get("_source")
-        if source != "env" and not include_ui_credentials:
-            continue
         if source not in {"env", "ui", None}:
             continue
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name
+from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -117,7 +117,6 @@ class KubernetesWorkerBackend:
 
             sync_shared_credentials_to_worker(
                 worker_key,
-                include_ui_credentials=is_unscoped_worker_key(worker_key),
                 allowed_services=self.worker_grantable_credentials,
                 credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
             )

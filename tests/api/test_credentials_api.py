@@ -350,12 +350,12 @@ class TestCredentialsAPI:
         assert response.status_code == 404
         assert response.json()["detail"] == "Unknown agent: missing"
 
-    def test_shared_agent_name_does_not_merge_global_ui_credentials(
+    def test_shared_agent_name_merges_global_ui_credentials(
         self,
         client: TestClient,
         mock_credentials_manager: MagicMock,
     ) -> None:
-        """Shared worker scope should not inherit UI-saved global credentials."""
+        """Shared worker scope should inherit shared credentials regardless of source."""
         config = _config_with_worker_scope("shared")
         worker_manager = MagicMock()
         worker_manager.load_credentials.return_value = None
@@ -368,7 +368,8 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
-        assert response.json()["has_key"] is False
+        assert response.json()["has_key"] is True
+        assert response.json()["source"] == "ui"
 
     def test_shared_agent_name_still_merges_env_credentials(
         self,

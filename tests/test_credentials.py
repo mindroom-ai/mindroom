@@ -233,11 +233,11 @@ class TestCredentialsManager:
         assert shared_credentials is None
         assert worker_credentials == {"token": "worker-token", "_source": "ui"}
 
-    def test_load_scoped_credentials_shared_scope_does_not_fall_back_to_global_ui(
+    def test_load_scoped_credentials_shared_scope_inherits_shared_ui_credentials(
         self,
         temp_credentials_dir: Path,
     ) -> None:
-        """Shared worker scope should not inherit UI-saved global credentials."""
+        """Shared worker scope should inherit allowlisted shared credentials regardless of source."""
         manager = CredentialsManager(temp_credentials_dir)
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -258,7 +258,7 @@ class TestCredentialsManager:
             worker_target=_worker_target("shared", "general", execution_identity),
         )
 
-        assert loaded_credentials is None
+        assert loaded_credentials == {"api_key": "global-ui-key", "_source": "ui"}
 
     def test_load_scoped_credentials_shared_scope_keeps_env_fallback(
         self,
@@ -306,10 +306,9 @@ class TestCredentialsManager:
         )
         worker_key = "v1:tenant-123:user:@alice:example.org"
         worker_manager = base_manager.for_worker(worker_key)
-        base_manager.save_credentials("openweather", {"api_key": "env-key", "_source": "env", "base": "yes"})
+        base_manager.save_credentials("openweather", {"api_key": "shared-ui-key", "_source": "ui", "base": "yes"})
         sync_shared_credentials_to_worker(
             worker_key,
-            include_ui_credentials=False,
             allowed_services=frozenset({"openweather"}),
             credentials_manager=base_manager,
         )
@@ -357,7 +356,6 @@ class TestCredentialsManager:
         base_manager.save_credentials("openai", {"api_key": "shared-ui-key", "_source": "ui"})
         sync_shared_credentials_to_worker(
             worker_key,
-            include_ui_credentials=True,
             allowed_services=frozenset({"openai"}),
             credentials_manager=base_manager,
         )
@@ -404,7 +402,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             worker_key,
-            include_ui_credentials=True,
             allowed_services=frozenset({"google"}),
             credentials_manager=base_manager,
         )
@@ -417,7 +414,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             worker_key,
-            include_ui_credentials=True,
             allowed_services=frozenset({"google"}),
             credentials_manager=base_manager,
         )
@@ -434,17 +430,16 @@ class TestCredentialsManager:
             "_source": "ui",
         }
 
-    def test_sync_shared_credentials_to_worker_copies_env_backed_credentials(
+    def test_sync_shared_credentials_to_worker_copies_allowlisted_shared_credentials(
         self,
         temp_credentials_dir: Path,
     ) -> None:
-        """Dedicated workers should mirror shared env-backed credentials into their shared layer."""
+        """Dedicated workers should mirror allowlisted shared credentials into their shared layer."""
         manager = CredentialsManager(temp_credentials_dir)
         manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
 
         sync_shared_credentials_to_worker(
             "worker-a",
-            include_ui_credentials=False,
             allowed_services=frozenset({"google"}),
             credentials_manager=manager,
         )
@@ -464,7 +459,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "worker-a",
-            include_ui_credentials=True,
             allowed_services=frozenset(),
             credentials_manager=manager,
         )
@@ -485,7 +479,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "worker-a",
-            include_ui_credentials=False,
             allowed_services=frozenset({"openai", "google_oauth_client"}),
             credentials_manager=manager,
         )
@@ -512,7 +505,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "worker-a",
-            include_ui_credentials=True,
             allowed_services=frozenset({"openai"}),
             credentials_manager=manager,
         )
@@ -534,7 +526,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "worker-a",
-            include_ui_credentials=False,
             allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=manager,
         )
@@ -555,7 +546,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "v1:tenant-123:unscoped:general",
-            include_ui_credentials=True,
             allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=manager,
         )
@@ -576,7 +566,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "worker-a",
-            include_ui_credentials=False,
             allowed_services=frozenset({"google"}),
             credentials_manager=manager,
         )
@@ -597,7 +586,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "v1:tenant-123:unscoped:general",
-            include_ui_credentials=True,
             allowed_services=frozenset({"openai"}),
             credentials_manager=manager,
         )
@@ -621,7 +609,6 @@ class TestCredentialsManager:
 
         sync_shared_credentials_to_worker(
             "v1:tenant-123:unscoped:general",
-            include_ui_credentials=True,
             allowed_services=frozenset({"spotify"}),
             credentials_manager=manager,
         )
@@ -639,9 +626,9 @@ class TestCredentialsManager:
         self,
         temp_credentials_dir: Path,
     ) -> None:
-        """Worker-scoped credentials should overlay env-backed shared credentials."""
+        """Worker-scoped credentials should overlay shared credentials regardless of source."""
         manager = CredentialsManager(temp_credentials_dir)
-        manager.save_credentials("google", {"api_key": "env-key", "_source": "env", "shared_only": "yes"})
+        manager.save_credentials("google", {"api_key": "shared-ui-key", "_source": "ui", "shared_only": "yes"})
         worker_manager = manager.for_worker("worker-a")
         worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
 
