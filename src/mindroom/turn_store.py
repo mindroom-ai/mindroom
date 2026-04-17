@@ -160,13 +160,16 @@ class TurnStore:
         """Return replay metadata for incomplete inbound turns."""
         return self._pending_inbound.pending_replays()
 
-    def mark_inbound_started(self, source_event_ids: typing.Sequence[str]) -> None:
-        """Mark one or more claimed inbound events as no longer safe to auto-replay."""
-        self._pending_inbound.mark_started(source_event_ids)
-
     def clear_inbound_records(self, source_event_ids: typing.Sequence[str]) -> None:
-        """Delete any pending or started inbound claims for the provided source events."""
+        """Delete any replayable inbound claims for the provided source events."""
         self._pending_inbound.remove(source_event_ids)
+
+    def record_ignored_inbound(self, source_event_ids: typing.Sequence[str]) -> None:
+        """Mark one or more owned inbound events as terminally ignored."""
+        normalized_source_event_ids = tuple(source_event_ids)
+        if not normalized_source_event_ids:
+            return
+        self.record_turn(HandledTurnState.create(normalized_source_event_ids))
 
     def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
         """Return the ledger-backed turn record for one source event when available."""

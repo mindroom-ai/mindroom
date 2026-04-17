@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Literal, TypedDict
+from typing import Any, TypedDict
 
 from mindroom.logging_config import get_logger
 
@@ -25,7 +25,6 @@ class _SerializedPendingInboundRecord(TypedDict):
     timestamp: float
     room_id: str
     event_source: dict[str, Any]
-    state: Literal["pending", "started"]
 
 
 @dataclass(frozen=True)
@@ -62,7 +61,7 @@ class PendingInboundStore:
         if event_id is None:
             msg = "Cannot claim a pending inbound event without an event_id"
             raise ValueError(msg)
-        record = _serialized_record(room_id=room_id, event_source=event_source, state="pending")
+        record = _serialized_record(room_id=room_id, event_source=event_source)
         with self._thread_lock, self._file_lock(exclusive=True):
             self._records = self._read_records_locked()
             if event_id in self._records:
@@ -76,34 +75,6 @@ class PendingInboundStore:
             room_id=record["room_id"],
         )
         return True
-
-    def mark_started(self, event_ids: typing.Sequence[str]) -> None:
-        """Mark claimed inbound events as ambiguous to replay after execution begins."""
-        normalized_event_ids = _normalize_event_ids(event_ids)
-        if not normalized_event_ids:
-            return
-        changed = False
-        with self._thread_lock, self._file_lock(exclusive=True):
-            self._records = self._read_records_locked()
-            for event_id in normalized_event_ids:
-                existing_record = self._records.get(event_id)
-                if existing_record is None or existing_record["state"] == "started":
-                    continue
-                self._records[event_id] = {
-                    "timestamp": existing_record["timestamp"],
-                    "room_id": existing_record["room_id"],
-                    "event_source": dict(existing_record["event_source"]),
-                    "state": "started",
-                }
-                changed = True
-            if changed:
-                self._save_records_locked()
-        if changed:
-            logger.debug(
-                "pending_inbound_started",
-                agent=self.agent_name,
-                event_ids=list(normalized_event_ids),
-            )
 
     def remove(self, event_ids: typing.Sequence[str]) -> None:
         """Delete any tracked inbound claims for the provided source events."""
@@ -126,7 +97,7 @@ class PendingInboundStore:
             )
 
     def pending_replays(self) -> list[PendingInboundReplay]:
-        """Return pending inbound events that are still safe to replay."""
+        """Return inbound events that are still safe to replay."""
         with self._thread_lock, self._file_lock(exclusive=False):
             self._records = self._read_records_locked(repair_corrupt_file=False)
             replays = [
@@ -139,7 +110,6 @@ class PendingInboundStore:
                     ),
                 )
                 for event_id, record in self._records.items()
-                if record["state"] == "pending"
             ]
         return [replay for _timestamp, replay in sorted(replays, key=lambda item: (item[0], item[1].event_id))]
 
@@ -171,7 +141,7 @@ class PendingInboundStore:
                 temp_path.unlink()
 
     def _cleanup_old_records(self, max_events: int = 10000, max_age_days: int = 30) -> None:
-        """Drop stale claims so abandoned started entries do not grow unbounded forever."""
+        """Drop stale replayable claims so the restart inbox stays bounded."""
         current_time = time.time()
         max_age_seconds = max_age_days * 24 * 60 * 60
         with self._thread_lock, self._file_lock(exclusive=True):
@@ -328,7 +298,6 @@ def _serialized_record(
     *,
     room_id: str,
     event_source: dict[str, Any],
-    state: Literal["pending", "started"],
 ) -> _SerializedPendingInboundRecord:
     """Return one normalized serialized pending inbound record."""
     normalized_room_id = _normalized_room_id(room_id)
@@ -342,7 +311,6 @@ def _serialized_record(
         "timestamp": time.time(),
         "room_id": normalized_room_id,
         "event_source": dict(event_source),
-        "state": state,
     }
 
 
@@ -352,15 +320,16 @@ def _normalize_serialized_record(
     """Normalize one on-disk pending inbound record into the current schema."""
     room_id = _normalized_room_id(raw_record.get("room_id"))
     event_source = raw_record.get("event_source")
-    state = raw_record.get("state")
     timestamp = raw_record.get("timestamp")
-    if room_id is None or not isinstance(event_source, dict) or state not in {"pending", "started"}:
+    legacy_state = raw_record.get("state")
+    if room_id is None or not isinstance(event_source, dict):
+        return None
+    if legacy_state is not None and legacy_state not in {"pending", "started"}:
         return None
     return {
         "timestamp": float(timestamp) if isinstance(timestamp, int | float) else 0.0,
         "room_id": room_id,
         "event_source": dict(event_source),
-        "state": state,
     }
 
 

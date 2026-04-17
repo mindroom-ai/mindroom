@@ -1739,7 +1739,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
     newer_mock.assert_called_once()
     assert list(newer_mock.call_args.args[2]) == []
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$img1")
+    assert bot._turn_store.is_handled("$img1")
 
 
 @pytest.mark.asyncio

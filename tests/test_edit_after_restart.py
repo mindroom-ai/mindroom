@@ -25,17 +25,17 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> None:
-    """Test that the bot correctly handles an edit event that gets redelivered after restart.
+async def test_bot_skips_duplicate_edit_after_restart_once_it_was_terminally_processed(tmp_path: Path) -> None:
+    """A completed edit event should not regenerate twice after restart.
 
     Scenario:
     1. User sends message
     2. Bot responds
     3. User edits message
-    4. Bot starts regenerating
+    4. Bot regenerates the response
     5. Bot crashes/restarts
     6. Matrix server redelivers the edit event
-    7. Bot should regenerate (not skip as "already seen")
+    7. Bot should skip the duplicate edit event
     """
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -90,8 +90,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
         ),
     )
 
-    # Also mark the edit event as "seen" (simulating it was delivered before restart)
-    # With the correct implementation, edits should still be processed
+    # Mark the edit event as already terminally handled before restart.
     edit_event_id = "$edit:example.com"
     bot._turn_store.record_turn(HandledTurnState.create([edit_event_id]))
 
@@ -139,12 +138,8 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
     ):
-        # Process the redelivered edit event
         await bot._on_message(room, edit_event)
-
-        # The bot SHOULD handle the edit (regenerate the response)
-        # even though we've "seen" this edit event before
-        mock_handle_edit.assert_called_once()
+        mock_handle_edit.assert_not_called()
 
 
 @pytest.mark.asyncio

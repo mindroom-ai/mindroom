@@ -338,6 +338,44 @@ async def test_sync_checkpoint_flush_does_not_wait_for_background_message_proces
 
 
 @pytest.mark.asyncio
+async def test_pending_inbound_event_stays_replayable_while_dispatch_is_still_in_progress(tmp_path: Path) -> None:
+    """Checkpointed inbound events must stay replayable until they reach a durable terminal outcome."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _message_event(event_id="$in-flight:localhost")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_prepare_dispatch(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        await release.wait()
+
+    assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
+
+    dispatch_task: asyncio.Task[None] | None = None
+    try:
+        with patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            side_effect=blocked_prepare_dispatch,
+        ):
+            dispatch_task = asyncio.create_task(
+                bot._turn_controller._dispatch_text_message(
+                    room,
+                    event,
+                    requester_user_id="@user:localhost",
+                ),
+            )
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert [replay.event_id for replay in bot._turn_store.pending_inbound_replays()] == ["$in-flight:localhost"]
+    finally:
+        release.set()
+        if dispatch_task is not None:
+            await dispatch_task
+
+
+@pytest.mark.asyncio
 async def test_replay_pending_inbound_turns_schedules_saved_text_message_processing(tmp_path: Path) -> None:
     """Startup replay should requeue pending inbound text turns from durable claims."""
     bot = _agent_bot(tmp_path)
@@ -410,3 +448,21 @@ async def test_prepare_sync_text_event_records_edit_for_replay(tmp_path: Path) -
     assert should_process is True
     pending_replays = bot._turn_store.pending_inbound_replays()
     assert [replay.event_source["event_id"] for replay in pending_replays] == ["$edit:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_edit_with_no_durable_regeneration_outcome_stays_replayable(tmp_path: Path) -> None:
+    """Edits must not drop their replay record when regeneration produced no durable outcome."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _edit_event(event_id="$edit-pending:localhost")
+    assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
+
+    with (
+        patch.object(bot._edit_regenerator, "handle_message_edit", new=AsyncMock(return_value=None)),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await bot._on_message(room, event)
+
+    assert [replay.event_id for replay in bot._turn_store.pending_inbound_replays()] == ["$edit-pending:localhost"]

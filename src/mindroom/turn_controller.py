@@ -126,8 +126,8 @@ class _EditRegenerator(Protocol):
         event: nio.RoomMessageText,
         event_info: EventInfo,
         requester_user_id: str,
-    ) -> None:
-        """Regenerate the owned response for one edited user turn."""
+    ) -> HandledTurnState | None:
+        """Regenerate the owned response for one edited user turn when possible."""
 
 
 @dataclass(frozen=True)
@@ -237,8 +237,6 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent | _InboundMediaEvent,
-        *,
-        is_edit: bool = False,
     ) -> str | None:
         """Run shared early-exit checks for inbound text and media events."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -251,7 +249,7 @@ class TurnController:
         if requester_user_id == self.deps.matrix_id.full_id and source_kind != "hook_dispatch":
             return None
 
-        if not is_edit and self.deps.turn_store.is_handled(event.event_id):
+        if self.deps.turn_store.is_handled(event.event_id):
             return None
 
         if not is_authorized_sender(
@@ -274,11 +272,9 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         event: T,
-        *,
-        is_edit: bool = False,
     ) -> _PrecheckedEvent[T] | None:
         """Return a typed prechecked event for turn dispatch."""
-        requester_user_id = self._precheck_event(room, event, is_edit=is_edit)
+        requester_user_id = self._precheck_event(room, event)
         if requester_user_id is None:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
@@ -287,13 +283,9 @@ class TurnController:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
 
-    def _mark_inbound_events_started(self, source_event_ids: Sequence[str]) -> None:
-        """Mark one or more claimed inbound events as no longer safe to replay."""
-        self.deps.turn_store.mark_inbound_started(source_event_ids)
-
-    def _clear_inbound_records(self, source_event_ids: Sequence[str]) -> None:
-        """Delete any non-terminal inbound state for the provided source events."""
-        self.deps.turn_store.clear_inbound_records(source_event_ids)
+    def _mark_source_events_ignored(self, source_event_ids: Sequence[str]) -> None:
+        """Mark one or more owned source events as terminally ignored."""
+        self.deps.turn_store.record_ignored_inbound(source_event_ids)
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -569,6 +561,7 @@ class TurnController:
                 event_label=event_label,
                 user_id=requester_user_id,
             )
+            self._mark_source_events_ignored(handled_turn.source_event_ids)
             return None
 
         return PreparedDispatch(
@@ -1224,7 +1217,6 @@ class TurnController:
 
     async def prepare_sync_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
         """Claim one sync-delivered text event durably before long-running processing."""
-        event_info = EventInfo.from_event(event.source)
         if not isinstance(event.body, str):
             return False
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1234,7 +1226,7 @@ class TurnController:
         }:
             return False
 
-        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
+        prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return False
         ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
@@ -1285,7 +1277,7 @@ class TurnController:
         }:
             return
 
-        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
+        prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return
         if await self._should_skip_router_before_shared_ingress_work(
@@ -1322,14 +1314,14 @@ class TurnController:
         )
 
         if event_info.is_edit:
-            self._mark_inbound_events_started((event.event_id,))
-            await self.deps.edit_regenerator.handle_message_edit(
+            edit_outcome = await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
                 event_info,
                 prechecked_event.requester_user_id,
             )
-            self._clear_inbound_records((event.event_id,))
+            if edit_outcome is not None:
+                self._mark_source_events_responded(edit_outcome)
             return
 
         prepared_event = await self._resolve_text_event_with_ingress_timing(
@@ -1345,6 +1337,7 @@ class TurnController:
             event_id=prepared_event.event_id,
             envelope=envelope,
         ):
+            self._mark_source_events_ignored((prepared_event.event_id,))
             return
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
         if should_handle_interactive_text_response(envelope):
@@ -1356,7 +1349,6 @@ class TurnController:
                 resolved_thread_id=coalescing_thread_id,
             )
             if selection is not None:
-                self._mark_inbound_events_started((prepared_event.event_id,))
                 await self.handle_interactive_selection(
                     room,
                     selection=selection,
@@ -1427,7 +1419,6 @@ class TurnController:
                 dispatch_timing.mark("dispatch_start")
             dispatch_started_at = time.monotonic()
             handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
-            self._mark_inbound_events_started(handled_turn.source_event_ids)
 
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
@@ -1455,6 +1446,8 @@ class TurnController:
                         command=command,
                         source_envelope=dispatch.envelope,
                     )
+                else:
+                    self._mark_source_events_ignored(handled_turn.source_event_ids)
                 return
             if self._has_newer_unresponded_in_thread(
                 event,
@@ -1467,6 +1460,7 @@ class TurnController:
                 event_id=event.event_id,
                 envelope=dispatch.envelope,
             ):
+                self._mark_source_events_ignored(handled_turn.source_event_ids)
                 return
             content = event.source.get("content") if isinstance(event.source, dict) else None
             message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
@@ -1505,6 +1499,10 @@ class TurnController:
                     router_outcome = self._router_handled_turn_outcome(handled_turn)
                     if router_outcome is not None:
                         self._mark_source_events_responded(router_outcome)
+                    else:
+                        self._mark_source_events_ignored(handled_turn.source_event_ids)
+                else:
+                    self._mark_source_events_ignored(handled_turn.source_event_ids)
                 return
             if plan.kind == "route":
                 route_event = plan.router_event or event
@@ -1659,7 +1657,6 @@ class TurnController:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
         if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
-            self._mark_inbound_events_started((event.event_id,))
             await self._on_audio_media_message(
                 room,
                 _PrecheckedEvent(
@@ -1737,7 +1734,6 @@ class TurnController:
         event = prechecked_event.event
         if not is_v2_sidecar_text_preview(event.source):
             return False
-        self._mark_inbound_events_started((event.event_id,))
 
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
@@ -1756,6 +1752,7 @@ class TurnController:
             event_id=prepared_text_event.event_id,
             envelope=envelope,
         ):
+            self._mark_source_events_ignored((event.event_id,))
             return True
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_text_event)
         if should_handle_interactive_text_response(envelope):

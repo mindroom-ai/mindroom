@@ -71,7 +71,7 @@ def test_turn_store_reuses_reserved_response_transaction_id_across_reload(tmp_pa
 
 
 def test_turn_store_replays_pending_inbound_claims_until_turn_completes(tmp_path: Path) -> None:
-    """Pending inbound claims should replay until execution starts, then disappear."""
+    """Pending inbound claims should replay until a terminal handled-turn outcome exists."""
     tracking_path = tmp_path / "tracking"
     deps = TurnStoreDeps(
         agent_name="agent",
@@ -101,10 +101,8 @@ def test_turn_store_replays_pending_inbound_claims_until_turn_completes(tmp_path
     assert pending_replays[0].event_id == "$event"
     assert pending_replays[0].event_source == event_source
 
-    reloaded_store.mark_inbound_started(["$event"])
-
-    assert reloaded_store.pending_inbound_replays() == []
     assert reloaded_store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source) is False
+    assert [replay.event_id for replay in reloaded_store.pending_inbound_replays()] == ["$event"]
 
     reloaded_store.record_turn(HandledTurnState.from_source_event_id("$event", response_event_id="$response"))
 

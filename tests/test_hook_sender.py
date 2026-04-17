@@ -1386,6 +1386,7 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._turn_policy.plan_turn = AsyncMock()
+    assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
 
     await bot._turn_controller._dispatch_text_message(
         room,
@@ -1393,6 +1394,8 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     )
 
     bot._turn_policy.plan_turn.assert_not_awaited()
+    bot._turn_store._pending_inbound._load_records()
+    assert bot._turn_store._pending_inbound._records == {}
 
 
 @pytest.mark.asyncio
@@ -1633,6 +1636,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
     bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._turn_controller._dispatch_text_message = AsyncMock()
+    assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=sidecar_event.source) is True
 
     with patch.object(
         interactive,
@@ -1651,6 +1655,8 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
     assert handled is True
     mock_handle_text_response.assert_not_awaited()
     bot._turn_controller._dispatch_text_message.assert_not_awaited()
+    bot._turn_store._pending_inbound._load_records()
+    assert bot._turn_store._pending_inbound._records == {}
 
 
 @pytest.mark.asyncio
