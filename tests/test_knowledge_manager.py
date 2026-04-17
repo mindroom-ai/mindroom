@@ -1876,11 +1876,11 @@ async def test_initialize_shared_knowledge_managers_refreshes_shared_managers_on
 
 
 @pytest.mark.asyncio
-async def test_initialize_shared_knowledge_managers_stops_existing_watchers_when_reuse_disables_them(
+async def test_initialize_shared_knowledge_managers_preserves_existing_watchers_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reused shared managers should tear down an active file watcher when a later caller disables it."""
+    """Later non-owner callers should not tear down an active shared-manager watcher by default."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -1922,8 +1922,119 @@ async def test_initialize_shared_knowledge_managers_stops_existing_watchers_when
         )
 
         assert reused_managers["docs"] is manager
+        stop_watcher.assert_not_awaited()
+        assert manager._watch_task is not None
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_runtime_owner_can_disable_existing_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime owner should still be able to reconcile shared managers down to on-access mode."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    async def _watch_loop_until_stopped(manager: KnowledgeManager) -> None:
+        await manager._watch_stop_event.wait()
+
+    monkeypatch.setattr(KnowledgeManager, "_watch_loop", _watch_loop_until_stopped)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=True)},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=True,
+            reindex_on_create=False,
+            reconcile_existing_runtime=True,
+        )
+        manager = managers["docs"]
+        original_stop_watcher = manager.stop_watcher
+        stop_watcher = AsyncMock(side_effect=original_stop_watcher)
+        monkeypatch.setattr(manager, "stop_watcher", stop_watcher)
+
+        reused_managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=False,
+            reindex_on_create=False,
+            reconcile_existing_runtime=True,
+        )
+
+        assert reused_managers["docs"] is manager
         stop_watcher.assert_awaited_once_with()
         assert manager._watch_task is None
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_refreshes_when_previous_watcher_task_is_done(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finished watcher tasks should not suppress the on-access refresh path for later callers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    async def _watch_loop_returns_immediately(_manager: KnowledgeManager) -> None:
+        return None
+
+    monkeypatch.setattr(KnowledgeManager, "_watch_loop", _watch_loop_returns_immediately)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=True)},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=True,
+            reindex_on_create=False,
+            reconcile_existing_runtime=True,
+        )
+        manager = managers["docs"]
+        await asyncio.sleep(0)
+        assert manager._watch_task is not None
+        assert manager._watch_task.done() is True
+
+        sync_indexed_files = AsyncMock(return_value={"loaded_count": 1, "indexed_count": 0, "removed_count": 0})
+        monkeypatch.setattr(manager, "sync_indexed_files", sync_indexed_files)
+
+        reused_managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+
+        assert reused_managers["docs"] is manager
+        sync_indexed_files.assert_awaited_once_with()
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -2585,11 +2696,11 @@ async def test_initialize_shared_knowledge_managers_background_git_startup_defer
 
 
 @pytest.mark.asyncio
-async def test_initialize_shared_knowledge_managers_stops_background_git_sync_when_startup_becomes_blocking(
+async def test_initialize_shared_knowledge_managers_preserves_background_git_sync_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reused shared managers should stop the deferred git loop when startup_behavior switches off."""
+    """Later non-owner callers should not tear down active shared-manager git sync by default."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -2606,7 +2717,15 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
             "git_deferred": True,
         },
     )
-    start_git_sync = AsyncMock(return_value=None)
+    start_git_sync_calls = 0
+
+    async def _track_start_git_sync(manager: KnowledgeManager) -> None:
+        nonlocal start_git_sync_calls
+        start_git_sync_calls += 1
+        if manager._git_sync_task is None:
+            manager._git_sync_stop_event = asyncio.Event()
+            manager._git_sync_task = asyncio.create_task(manager._git_sync_stop_event.wait())
+
     sync_events: list[str] = []
 
     async def _track_sync_repository() -> dict[str, int | bool]:
@@ -2616,7 +2735,7 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
     sync_git_repository = AsyncMock(side_effect=_track_sync_repository)
 
     monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
-    monkeypatch.setattr(KnowledgeManager, "_start_git_sync", start_git_sync)
+    monkeypatch.setattr(KnowledgeManager, "_start_git_sync", _track_start_git_sync)
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
 
     try:
@@ -2627,11 +2746,8 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
             reindex_on_create=False,
         )
         manager = managers["research"]
-
-        async def _track_stop_git_sync() -> None:
-            sync_events.append("stop")
-
-        stop_git_sync = AsyncMock(side_effect=_track_stop_git_sync)
+        original_stop_git_sync = manager._stop_git_sync
+        stop_git_sync = AsyncMock(side_effect=original_stop_git_sync)
         monkeypatch.setattr(manager, "_stop_git_sync", stop_git_sync)
 
         blocking_config = _make_git_config(tmp_path / "knowledge", startup_behavior="blocking")
@@ -2643,13 +2759,93 @@ async def test_initialize_shared_knowledge_managers_stops_background_git_sync_wh
         )
 
         assert blocking_managers["research"] is manager
+        stop_git_sync.assert_not_awaited()
+        sync_git_repository.assert_not_awaited()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+    prepare_background_git_startup.assert_awaited_once_with("resume")
+    assert start_git_sync_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_runtime_owner_stops_background_git_sync_when_startup_becomes_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime owner should still be able to reconcile shared git sync down to blocking mode."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge", startup_behavior="background")
+    runtime_paths = runtime_paths_for(config)
+
+    prepare_background_git_startup = AsyncMock(
+        return_value={
+            "startup_mode": "resume",
+            "loaded_count": 0,
+            "indexed_count": 0,
+            "removed_count": 0,
+            "git_deferred": True,
+        },
+    )
+    start_git_sync_calls = 0
+
+    async def _track_start_git_sync(manager: KnowledgeManager) -> None:
+        nonlocal start_git_sync_calls
+        start_git_sync_calls += 1
+        if manager._git_sync_task is None:
+            manager._git_sync_stop_event = asyncio.Event()
+            manager._git_sync_task = asyncio.create_task(manager._git_sync_stop_event.wait())
+
+    sync_events: list[str] = []
+
+    async def _track_sync_repository() -> dict[str, int | bool]:
+        sync_events.append("sync")
+        return {"updated": False, "changed_count": 0, "removed_count": 0}
+
+    sync_git_repository = AsyncMock(side_effect=_track_sync_repository)
+
+    monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
+    monkeypatch.setattr(KnowledgeManager, "_start_git_sync", _track_start_git_sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths,
+            start_watchers=False,
+            reindex_on_create=False,
+            reconcile_existing_runtime=True,
+        )
+        manager = managers["research"]
+        original_stop_git_sync = manager._stop_git_sync
+
+        async def _track_stop_git_sync() -> None:
+            sync_events.append("stop")
+            await original_stop_git_sync()
+
+        stop_git_sync = AsyncMock(side_effect=_track_stop_git_sync)
+        monkeypatch.setattr(manager, "_stop_git_sync", stop_git_sync)
+
+        blocking_config = _make_git_config(tmp_path / "knowledge", startup_behavior="blocking")
+        blocking_managers = await initialize_shared_knowledge_managers(
+            blocking_config,
+            runtime_paths_for(blocking_config),
+            start_watchers=False,
+            reindex_on_create=False,
+            reconcile_existing_runtime=True,
+        )
+
+        assert blocking_managers["research"] is manager
         stop_git_sync.assert_awaited_once_with()
         assert sync_events == ["stop", "sync"]
     finally:
         await shutdown_shared_knowledge_managers()
 
     prepare_background_git_startup.assert_awaited_once_with("resume")
-    start_git_sync.assert_awaited_once()
+    assert start_git_sync_calls == 1
     sync_git_repository.assert_awaited_once_with()
 
 
@@ -2743,11 +2939,12 @@ async def test_initialize_shared_knowledge_managers_resumes_partial_git_index_wi
     monkeypatch.setattr(KnowledgeManager, "_reset_collection", _unexpected_reset_collection)
 
     try:
-        await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+        managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
 
         assert git_calls == [False]
         assert sync_calls == 1
         assert initialize_calls == 0
+        assert managers["research"].get_status()["git"]["initial_sync_complete"] is True
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -2978,6 +3175,108 @@ async def test_sync_git_repository_once_skips_repeated_lfs_pull_for_already_hydr
     assert changed_files == set()
     assert removed_files == set()
     assert ["lfs", "pull", "origin", "main"] not in repeated_git_calls
+
+
+@pytest.mark.asyncio
+async def test_sync_git_repository_once_reindexes_local_tracked_changes_when_head_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracked local dirty files should be reset and reindexed even when the remote head is unchanged."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    git_calls: list[list[str]] = []
+
+    async def _fake_ensure_git_repository(_git_config: object) -> bool:
+        return False
+
+    async def _fake_git_rev_parse(ref: str) -> str | None:
+        if ref in {"HEAD", "origin/main"}:
+            return "same"
+        return None
+
+    list_tracked_files_results = iter([{"doc.md"}, {"doc.md"}])
+
+    async def _fake_git_list_tracked_files() -> set[str]:
+        return next(list_tracked_files_results)
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        git_calls.append(args)
+        if args == ["diff", "--name-only", "--no-renames", "HEAD"]:
+            return "doc.md\n"
+        return ""
+
+    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    changed_files, removed_files, updated = await manager._sync_git_repository_once(manager._git_config())
+
+    assert updated is True
+    assert changed_files == {"doc.md"}
+    assert removed_files == set()
+    assert ["checkout", "main"] in git_calls
+    assert ["reset", "--hard", "origin/main"] in git_calls
+
+
+@pytest.mark.asyncio
+async def test_sync_git_repository_once_restores_locally_deleted_tracked_files_when_head_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracked local deletions should be restored and reindexed even when the remote head is unchanged."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    git_calls: list[list[str]] = []
+
+    async def _fake_ensure_git_repository(_git_config: object) -> bool:
+        return False
+
+    async def _fake_git_rev_parse(ref: str) -> str | None:
+        if ref in {"HEAD", "origin/main"}:
+            return "same"
+        return None
+
+    list_tracked_files_results = iter([{"doc.md"}, {"doc.md"}])
+
+    async def _fake_git_list_tracked_files() -> set[str]:
+        return next(list_tracked_files_results)
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        git_calls.append(args)
+        if args == ["diff", "--name-only", "--no-renames", "HEAD"]:
+            return "doc.md\n"
+        return ""
+
+    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    changed_files, removed_files, updated = await manager._sync_git_repository_once(manager._git_config())
+
+    assert updated is True
+    assert changed_files == {"doc.md"}
+    assert removed_files == set()
+    assert ["checkout", "main"] in git_calls
+    assert ["reset", "--hard", "origin/main"] in git_calls
 
 
 @pytest.mark.asyncio

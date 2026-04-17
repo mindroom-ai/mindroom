@@ -343,6 +343,7 @@ class MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             start_watchers=start_watcher,
             reindex_on_create=False,
+            reconcile_existing_runtime=True,
         )
 
     async def _cancel_knowledge_refresh_task(self) -> None:

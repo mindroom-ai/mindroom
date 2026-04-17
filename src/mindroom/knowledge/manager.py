@@ -735,6 +735,10 @@ class KnowledgeManager:
         raw_paths = [entry for entry in output.split("\x00") if entry]
         return {path for path in raw_paths if self._include_relative_path(path)}
 
+    async def _git_dirty_tracked_files(self) -> set[str]:
+        output = await self._run_git(["diff", "--name-only", "--no-renames", "HEAD"])
+        return {path for path in output.splitlines() if self._include_relative_path(path)}
+
     async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
         runtime_paths = self.runtime_paths
         knowledge_root = self._knowledge_source_path()
@@ -793,6 +797,7 @@ class KnowledgeManager:
 
         before_head = await self._git_rev_parse("HEAD")
         before_files = await self._git_list_tracked_files()
+        dirty_tracked_files = set() if before_head is None else await self._git_dirty_tracked_files()
 
         await self._run_git(["fetch", "origin", git_config.branch])
         remote_ref = f"origin/{git_config.branch}"
@@ -802,8 +807,16 @@ class KnowledgeManager:
             raise RuntimeError(msg)
 
         if before_head == remote_head:
+            if not dirty_tracked_files:
+                await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
+                return set(), set(), False
+
+            await self._run_git(["checkout", git_config.branch])
+            await self._run_git(["reset", "--hard", remote_ref])
             await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
-            return set(), set(), False
+            after_files = await self._git_list_tracked_files()
+            changed_files = {path for path in dirty_tracked_files if path in after_files}
+            return changed_files, set(), True
 
         await self._run_git(["checkout", git_config.branch])
         # Force-align the local checkout with remote to tolerate local dirty state.
@@ -818,7 +831,11 @@ class KnowledgeManager:
             changed_paths = {path for path in diff_output.splitlines() if self._include_relative_path(path)}
 
         removed_files = before_files - after_files
-        changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
+        changed_files = (
+            {path for path in changed_paths if path in after_files}
+            | (after_files - before_files)
+            | {path for path in dirty_tracked_files if path in after_files}
+        )
         return changed_files, removed_files, True
 
     def list_files(self) -> list[Path]:
@@ -1062,8 +1079,8 @@ class KnowledgeManager:
 
     async def prepare_background_git_startup(
         self,
-        startup_mode: Literal["full_reindex", "resume", "incremental"],
-    ) -> dict[str, int | str | bool]:
+        startup_mode: Literal["resume", "incremental"],
+    ) -> dict[str, Any]:
         """Record startup state and defer Git sync/index refresh to the background loop."""
         await self.load_indexed_files()
         self._git_background_startup_mode = startup_mode
@@ -1072,7 +1089,7 @@ class KnowledgeManager:
         return {
             "startup_mode": startup_mode,
             "loaded_count": len(self._indexed_files),
-            "indexed_count": len(self._indexed_files),
+            "indexed_count": 0,
             "removed_count": 0,
             "git_deferred": True,
         }
@@ -1447,6 +1464,7 @@ async def _resume_manager_without_full_reindex(
     if manager._git_config() is not None:
         git_result = await manager.sync_git_repository(index_changes=False)
         sync_result = await manager.sync_indexed_files()
+        manager._git_initial_sync_complete = True
         return {
             "git_updated": git_result["updated"],
             "git_changed_count": git_result["changed_count"],
@@ -1511,6 +1529,22 @@ def _shared_manager_runtime_mode(
     return "on_access"
 
 
+def _task_is_running(task: asyncio.Task[object] | None) -> bool:
+    return task is not None and not task.done()
+
+
+def _shared_manager_has_background_runtime(manager: KnowledgeManager) -> bool:
+    return _task_is_running(manager._watch_task) or _task_is_running(manager._git_sync_task)
+
+
+def _shared_manager_background_runtime_mode(manager: KnowledgeManager) -> Literal["watch", "git_sync"] | None:
+    if _task_is_running(manager._watch_task):
+        return "watch"
+    if _task_is_running(manager._git_sync_task):
+        return "git_sync"
+    return None
+
+
 async def _reconcile_shared_manager_runtime(
     manager: KnowledgeManager,
     *,
@@ -1553,8 +1587,7 @@ async def _create_knowledge_manager_for_target(
     startup_mode: Literal["full_reindex", "resume", "incremental"] = (
         "full_reindex" if reindex_on_create else manager._startup_index_mode()
     )
-    background_git_startup = manager._git_background_startup_enabled() and startup_mode != "full_reindex"
-    if background_git_startup:
+    if startup_mode != "full_reindex" and manager._git_background_startup_enabled():
         sync_result = await manager.prepare_background_git_startup(startup_mode)
         logger.info(
             "Knowledge manager initialized with background git sync",
@@ -1615,6 +1648,7 @@ async def _ensure_shared_knowledge_manager_for_target(
     config: Config,
     runtime_paths: RuntimePaths,
     reindex_on_create: bool,
+    reconcile_existing_runtime: bool,
 ) -> KnowledgeManager:
     if target.binding.request_scoped:
         msg = f"Shared knowledge manager target '{target.key.base_id}' must not be request-scoped"
@@ -1628,6 +1662,9 @@ async def _ensure_shared_knowledge_manager_for_target(
                 target.binding.storage_root,
                 target.binding.knowledge_path,
             ):
+                preserved_runtime_mode = (
+                    _shared_manager_background_runtime_mode(existing) if not reconcile_existing_runtime else None
+                )
                 await existing.stop_watcher()
                 manager = await _create_knowledge_manager_for_target(
                     target=target,
@@ -1635,6 +1672,10 @@ async def _ensure_shared_knowledge_manager_for_target(
                     runtime_paths=runtime_paths,
                     reindex_on_create=True,
                 )
+                if preserved_runtime_mode == "watch":
+                    await manager.start_watcher()
+                elif preserved_runtime_mode == "git_sync":
+                    await manager._start_git_sync()
                 _shared_knowledge_managers[target.key.base_id] = manager
                 return manager
 
@@ -1644,7 +1685,13 @@ async def _ensure_shared_knowledge_manager_for_target(
                 target.binding.storage_root,
                 target.binding.knowledge_path,
             )
-            await _reconcile_shared_manager_runtime(existing, target=target)
+            if reconcile_existing_runtime:
+                await _reconcile_shared_manager_runtime(existing, target=target)
+            elif not _shared_manager_has_background_runtime(existing):
+                if existing._git_background_startup_mode is not None:
+                    await existing.finish_pending_background_git_startup()
+                elif target.binding.incremental_sync_on_access:
+                    await _sync_manager_without_full_reindex(existing)
             return existing
 
         manager = await _create_knowledge_manager_for_target(
@@ -1717,6 +1764,7 @@ async def ensure_agent_knowledge_managers(
             config=config,
             runtime_paths=runtime_paths,
             reindex_on_create=reindex_on_create,
+            reconcile_existing_runtime=False,
         )
     return managers
 
@@ -1726,6 +1774,7 @@ async def initialize_shared_knowledge_managers(
     runtime_paths: RuntimePaths,
     start_watchers: bool = False,
     reindex_on_create: bool = True,
+    reconcile_existing_runtime: bool = False,
 ) -> dict[str, KnowledgeManager]:
     """Initialize process-global shared knowledge managers for configured shared bases only."""
     configured_base_ids = set(config.knowledge_bases)
@@ -1746,6 +1795,7 @@ async def initialize_shared_knowledge_managers(
             config=config,
             runtime_paths=runtime_paths,
             reindex_on_create=reindex_on_create,
+            reconcile_existing_runtime=reconcile_existing_runtime,
         )
 
     for base_id in [candidate for candidate in list(_shared_knowledge_managers) if candidate not in managers]:
