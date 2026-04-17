@@ -250,6 +250,7 @@ class TestThreadHistory:
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[{"event_id": "$thread_root"}],
+            fetch_started_at=None,
         )
 
     @pytest.mark.asyncio

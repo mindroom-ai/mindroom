@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache import _EventCache, _EventCacheWriteCoordinator
@@ -14,54 +14,25 @@ if TYPE_CHECKING:
     import structlog
 
 
-@dataclass(slots=True)
-class StartupThreadPrewarmRoomState:
-    """Track one room's in-flight startup prewarm and last successful warm time."""
-
-    running: bool = False
-    warmed_at: float | None = None
-
-
-@dataclass(slots=True)
 class StartupThreadPrewarmRegistry:
-    """Track startup thread-prewarm claims and freshness per room."""
+    """Track one startup-wave claim set for room-level thread prewarm."""
 
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _states: dict[str, StartupThreadPrewarmRoomState] = field(default_factory=dict)
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._claimed_room_ids: set[str] = set()
 
-    async def try_claim(self, room_id: str, *, runtime_started_at: float) -> bool:
-        """Claim one room when its last successful warm predates this bot start."""
+    async def try_claim(self, room_id: str) -> bool:
+        """Claim one room for this startup wave unless another bot already did."""
         async with self._lock:
-            state = self._states.get(room_id)
-            if state is None:
-                self._states[room_id] = StartupThreadPrewarmRoomState(running=True)
-                return True
-            if state.running:
+            if room_id in self._claimed_room_ids:
                 return False
-            if state.warmed_at is not None and state.warmed_at >= runtime_started_at:
-                return False
-            state.running = True
+            self._claimed_room_ids.add(room_id)
             return True
 
-    async def mark_done(self, room_id: str, *, warmed_at: float) -> None:
-        """Mark one room's startup prewarm as finished at one concrete time."""
-        async with self._lock:
-            state = self._states.get(room_id)
-            if state is None:
-                self._states[room_id] = StartupThreadPrewarmRoomState(warmed_at=warmed_at)
-                return
-            state.running = False
-            state.warmed_at = warmed_at
-
     async def release(self, room_id: str) -> None:
-        """Release an in-flight room claim so another bot may retry later."""
+        """Release one room claim so another bot may retry during the same startup wave."""
         async with self._lock:
-            state = self._states.get(room_id)
-            if state is None or not state.running:
-                return
-            state.running = False
-            if state.warmed_at is None:
-                self._states.pop(room_id, None)
+            self._claimed_room_ids.discard(room_id)
 
 
 @dataclass(slots=True)

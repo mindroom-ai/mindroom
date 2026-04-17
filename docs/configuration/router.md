@@ -13,7 +13,7 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
-  # Participate in room-level startup prewarm for rooms the router joins (default: true)
+  # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
   startup_thread_prewarm: true
 ```
 
@@ -22,10 +22,9 @@ The router has two configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
-| `startup_thread_prewarm` | bool | `true` | When enabled, the router may prewarm recent thread snapshots for rooms it has joined after first sync, which can reduce cold-cache latency for early thread replies after startup |
+| `startup_thread_prewarm` | bool | `true` | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 
-Startup thread prewarm is a background, best-effort cache warmup.
-It may run again after later bot starts or restarts when fresh thread snapshots are needed for that runtime.
+Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
 ## How Routing Works
 

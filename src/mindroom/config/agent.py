@@ -225,7 +225,7 @@ class AgentConfig(BaseModel):
         default=True,
         description=(
             "Whether this bot participates in room-level startup prewarming of recent thread snapshots "
-            "for rooms it joins after first sync"
+            "for rooms already joined when first sync completes"
         ),
     )
     room_thread_modes: dict[str, Literal["thread", "room"]] = Field(
@@ -396,7 +396,7 @@ class TeamConfig(BaseModel):
         default=True,
         description=(
             "Whether this bot participates in room-level startup prewarming of recent thread snapshots "
-            "for rooms it joins after first sync"
+            "for rooms already joined when first sync completes"
         ),
     )
     compaction: CompactionOverrideConfig | None = Field(

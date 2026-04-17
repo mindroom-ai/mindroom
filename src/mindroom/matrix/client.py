@@ -1615,21 +1615,13 @@ async def refresh_thread_history_from_source(
                 return stale_history
         raise
     if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
-        if cache_write_guard_started_at is None:
-            await _store_thread_history_cache(
-                event_cache,
-                room_id=room_id,
-                thread_id=thread_id,
-                event_sources=fetch_result.event_sources,
-            )
-        else:
-            await _store_thread_history_cache(
-                event_cache,
-                room_id=room_id,
-                thread_id=thread_id,
-                event_sources=fetch_result.event_sources,
-                fetch_started_at=cache_write_guard_started_at,
-            )
+        await _store_thread_history_cache(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_sources=fetch_result.event_sources,
+            fetch_started_at=cache_write_guard_started_at,
+        )
     return _thread_history_result(
         fetch_result.history,
         is_full_history=hydrate_sidecars,
@@ -1673,7 +1665,6 @@ async def _store_thread_history_cache(
             error=str(exc),
         )
         return False
-    return True
 
 
 def _thread_history_fetch_is_cacheable(
