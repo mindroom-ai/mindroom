@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
+import nio
 import pytest
 
 import mindroom.authorization
@@ -81,6 +83,22 @@ def get_effective_sender_id_for_reply_permissions(
 
 def _config(**kwargs: object) -> Config:
     return _bind_runtime_paths(Config(**kwargs))
+
+
+async def get_available_agents_for_sender_authoritative(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+) -> list[mindroom.authorization.MatrixID]:
+    """Run authoritative room-agent resolution with the test config's bound runtime context."""
+    return await mindroom.authorization.get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        sender_id,
+        config,
+        _runtime_paths_for(config),
+    )
 
 
 @pytest.fixture
@@ -208,6 +226,43 @@ def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
 
     # Non-configured team should be blocked
     assert not is_authorized_sender("@mindroom_unknown_team:example.com", mock_config_with_restrictions, "!test:server")
+
+
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_refreshes_empty_cached_room() -> None:
+    """Authoritative agent lookup should recover from empty cached room membership."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.users = {"@mindroom_router:example.com": MagicMock()}
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_router:example.com": {"display_name": "Router"},
+                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    available = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == ["assistant"]
+    client.joined_members.assert_awaited_once_with("!test:server")
 
 
 def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:

@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
-from mindroom.authorization import get_available_agents_for_sender
+from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
@@ -206,9 +206,10 @@ def _normalized_response_event_id(raw_response_event_id: str | None) -> str | No
     return raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
 
 
-def _resolve_skill_command_agent(  # noqa: C901
+async def _resolve_skill_command_agent(  # noqa: C901
     skill_name: str,
     *,
+    client: nio.AsyncClient,
     config: Config,
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID],
@@ -226,7 +227,13 @@ def _resolve_skill_command_agent(  # noqa: C901
     if len(unique_mentions) > 1:
         return None, f"❌ Multiple agents mentioned: {', '.join(unique_mentions)}. Mention only one."
 
-    agents_in_room = get_available_agents_for_sender(room, requester_user_id, config, runtime_paths)
+    agents_in_room = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        requester_user_id,
+        config,
+        runtime_paths,
+    )
     candidate_names: list[str] = []
     for mid in agents_in_room:
         name = mid.agent_name(config, runtime_paths)
@@ -641,8 +648,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 context.config,
                 context.runtime_paths,
             )
-            target_agent, error = _resolve_skill_command_agent(
+            target_agent, error = await _resolve_skill_command_agent(
                 skill_name,
+                client=context.client,
                 config=context.config,
                 room=room,
                 mentioned_agents=mentioned_agents,

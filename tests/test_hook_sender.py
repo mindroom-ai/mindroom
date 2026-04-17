@@ -1826,7 +1826,7 @@ async def test_hook_dispatch_skill_tool_command_builds_full_tool_runtime_context
     )
 
     with (
-        patch("mindroom.commands.handler._resolve_skill_command_agent", return_value=("code", None)),
+        patch("mindroom.commands.handler._resolve_skill_command_agent", new=AsyncMock(return_value=("code", None))),
         patch("mindroom.commands.handler.resolve_skill_command_spec", return_value=spec),
         patch(
             "mindroom.turn_controller._run_skill_command_tool",

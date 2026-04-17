@@ -5563,7 +5563,7 @@ class TestAgentBot:
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -5704,7 +5704,7 @@ class TestAgentBot:
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
@@ -6086,7 +6086,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender",
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
                 return_value=[
                     config.get_ids(runtime_paths_for(config))["calculator"],
                     config.get_ids(runtime_paths_for(config))["general"],
@@ -6164,7 +6164,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender",
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
                 return_value=[config.get_ids(runtime_paths_for(config))["calculator"]],
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
@@ -6239,7 +6239,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.get_available_agents_for_sender", return_value=[]),
+            patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative", return_value=[]),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
                 new_callable=AsyncMock,

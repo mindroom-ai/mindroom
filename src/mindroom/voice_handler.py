@@ -15,7 +15,7 @@ from agno.media import Audio
 
 from mindroom.ai import get_model_instance
 from mindroom.attachments import register_audio_attachment
-from mindroom.authorization import get_available_agents_for_sender
+from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.connections import connection_api_key, resolve_connection
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -294,7 +294,8 @@ async def _handle_voice_message(
 
         logger.info("voice_transcription_received", transcription=transcription)
 
-        available_agent_names, available_team_names = _get_available_entities_for_sender(
+        available_agent_names, available_team_names = await _get_available_entities_for_sender(
+            client,
             room,
             event.sender,
             config,
@@ -497,7 +498,8 @@ Output the formatted message only, no explanation:"""
         return transcription
 
 
-def _get_available_entities_for_sender(
+async def _get_available_entities_for_sender(
+    client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
@@ -507,7 +509,13 @@ def _get_available_entities_for_sender(
     available_agent_names: list[str] = []
     available_team_names: list[str] = []
 
-    for matrix_id in get_available_agents_for_sender(room, sender_id, config, runtime_paths):
+    for matrix_id in await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        sender_id,
+        config,
+        runtime_paths,
+    ):
         name = matrix_id.agent_name(config, runtime_paths)
         if name is None:
             continue

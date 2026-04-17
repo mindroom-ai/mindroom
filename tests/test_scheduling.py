@@ -11,6 +11,9 @@ import nio
 import pytest
 
 from mindroom import scheduling
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import (
     _SCHEDULED_TASK_EVENT_TYPE,
@@ -30,7 +33,7 @@ from mindroom.scheduling import (
     save_edited_scheduled_task,
     schedule_task,
 )
-from tests.conftest import make_event_cache_mock
+from tests.conftest import bind_runtime_paths, make_event_cache_mock
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -1406,7 +1409,7 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
 
     with (
         patch(
-            "mindroom.scheduling.get_available_agents_for_sender",
+            "mindroom.scheduling.get_available_agents_for_sender_authoritative",
             return_value=[],
         ),
         patch(
@@ -1435,7 +1438,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
     with (
         patch(
-            "mindroom.scheduling.get_available_agents_for_sender",
+            "mindroom.scheduling.get_available_agents_for_sender_authoritative",
             return_value=[],
         ),
         patch(
@@ -1454,3 +1457,63 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
     assert task_id is None
     assert "No agents" in message
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_refreshes_room_membership_when_cached_room_has_no_agents() -> None:
+    """Scheduling should recover from empty cached room membership via joined_members."""
+    client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="Test assistant",
+                    rooms=["!test:server"],
+                ),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        _runtime_paths(),
+    )
+    room.users = {f"@mindroom_router:{config.get_domain(_runtime_paths())}": MagicMock()}
+    runtime = _scheduling_runtime(client=client, config=config, room=room)
+    parse_result = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="check logs",
+        description="check logs",
+        room_id="!test:server",
+        thread_id=None,
+    )
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                f"@mindroom_router:{config.get_domain(_runtime_paths())}": {"display_name": "Router"},
+                f"@mindroom_assistant:{config.get_domain(_runtime_paths())}": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    with (
+        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=parse_result)),
+        patch("mindroom.scheduling._validate_agent_mentions") as mock_validate,
+        patch("mindroom.scheduling._save_pending_scheduled_task", new=AsyncMock(return_value=None)),
+        patch("mindroom.scheduling.uuid.uuid4", return_value="task12345"),
+    ):
+        mock_validate.return_value = scheduling._AgentValidationResult(True, [], [])
+        task_id, message = await schedule_task(
+            runtime=runtime,
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by=f"@alice:{config.get_domain(_runtime_paths())}",
+            full_text="in 5 minutes check logs",
+        )
+
+    assert task_id == "task1234"
+    assert "Scheduled" in message
+    client.joined_members.assert_awaited_once_with("!test:server")

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
     get_available_agents_for_sender,
+    get_available_agents_for_sender_authoritative,
     is_sender_allowed_for_agent_reply,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
@@ -254,6 +255,28 @@ class TurnPolicy:
             in materializable_agent_names
         ]
 
+    async def available_agents_for_sender(
+        self,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+    ) -> list[MatrixID]:
+        """Return sender-visible room agents, refreshing membership when a client is available."""
+        client = self.deps.runtime.client
+        if client is None:
+            return get_available_agents_for_sender(
+                room,
+                requester_user_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            )
+        return await get_available_agents_for_sender_authoritative(
+            client,
+            room,
+            requester_user_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+
     def response_owner_for_team_resolution(
         self,
         form_team: TeamResolution,
@@ -364,12 +387,7 @@ class TurnPolicy:
             self.deps.runtime_paths,
         )
         if available_agents_in_room is None:
-            available_agents_in_room = get_available_agents_for_sender(
-                room,
-                requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            )
+            available_agents_in_room = await self.available_agents_for_sender(room, requester_user_id)
         if materializable_agent_names is None:
             materializable_agent_names = self.materializable_agent_names()
         return await decide_team_formation(
@@ -413,12 +431,7 @@ class TurnPolicy:
             ):
                 self.deps.logger.info("Skipping routing: thread already requires explicit agent targeting")
                 return DispatchPlan(kind="ignore", ignore_reason="router")
-            available_agents = get_available_agents_for_sender(
-                room,
-                requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            )
+            available_agents = await self.available_agents_for_sender(room, requester_user_id)
             if len(available_agents) == 1:
                 self.deps.logger.info("Skipping routing: only one agent present")
                 return DispatchPlan(kind="ignore", ignore_reason="router")
@@ -490,12 +503,7 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        available_agents_in_room = get_available_agents_for_sender(
-            room,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
+        available_agents_in_room = await self.available_agents_for_sender(room, requester_user_id)
         materializable_agent_names = self.materializable_agent_names()
         responder_pool = self.filter_materializable_agents(
             available_agents_in_room,
@@ -526,6 +534,7 @@ class TurnPolicy:
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
+            available_agents_in_room=available_agents_in_room,
         ):
             if self._should_queue_follow_up_in_active_response_thread(
                 context=context,
