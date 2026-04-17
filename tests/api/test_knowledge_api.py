@@ -474,28 +474,6 @@ def test_reindex_finishes_pending_background_startup_for_git_bases(
     manager.reindex_all.assert_not_awaited()
 
 
-def test_reindex_git_base_falls_back_when_background_startup_is_already_complete(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Git-backed manual reindex should fall back to sync + full rebuild once startup is already complete."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    manager = MagicMock()
-    manager.finish_pending_background_git_startup = AsyncMock(return_value=None)
-    manager.sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
-    manager.reindex_all = AsyncMock(return_value=7)
-    _publish_committed_runtime_config(test_client.app, config)
-
-    with patch("mindroom.api.knowledge._ensure_manager", new=AsyncMock(return_value=manager)):
-        response = test_client.post("/api/knowledge/bases/research/reindex")
-
-    assert response.status_code == 200
-    assert response.json()["indexed_count"] == 7
-    manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
-    manager.sync_git_repository.assert_awaited_once_with(index_changes=False)
-    manager.reindex_all.assert_awaited_once_with()
-
-
 def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClient) -> None:
     """Knowledge routes should surface malformed runtime config as 422, not generic 500s."""
     runtime_paths = main._app_runtime_paths(test_client.app)

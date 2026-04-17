@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.ollama import OllamaEmbedder
@@ -589,6 +589,12 @@ class KnowledgeManager:
         git_config = self._git_config()
         return git_config.startup_behavior if git_config is not None else "blocking"
 
+    def _clear_git_initial_sync_complete(self) -> None:
+        self._git_initial_sync_complete = False
+
+    def _mark_git_initial_sync_complete(self) -> None:
+        self._git_initial_sync_complete = True
+
     def _git_sync_timeout_seconds(self) -> float | None:
         git_config = self._git_config()
         if git_config is None:
@@ -1005,7 +1011,7 @@ class KnowledgeManager:
 
         indexed_count = await self.reindex_all()
         if git_config is not None:
-            self._git_initial_sync_complete = True
+            self._mark_git_initial_sync_complete()
         logger.info(
             "Knowledge base initialized",
             base_id=self.base_id,
@@ -1085,7 +1091,7 @@ class KnowledgeManager:
         await self.load_indexed_files()
         self._git_background_startup_mode = startup_mode
         self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
-        self._git_initial_sync_complete = False
+        self._clear_git_initial_sync_complete()
         return {
             "startup_mode": startup_mode,
             "loaded_count": len(self._indexed_files),
@@ -1093,6 +1099,20 @@ class KnowledgeManager:
             "removed_count": 0,
             "git_deferred": True,
         }
+
+    @overload
+    async def finish_pending_background_git_startup(
+        self,
+        *,
+        force_full_reindex: Literal[True],
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def finish_pending_background_git_startup(
+        self,
+        *,
+        force_full_reindex: Literal[False] = False,
+    ) -> dict[str, Any] | None: ...
 
     async def finish_pending_background_git_startup(
         self,
@@ -1102,6 +1122,9 @@ class KnowledgeManager:
         """Finish deferred Git startup work immediately when a caller cannot wait for the poll loop."""
         git_config = self._git_config()
         if git_config is None:
+            if force_full_reindex:
+                msg = f"Knowledge base '{self.base_id}' is not Git-backed"
+                raise RuntimeError(msg)
             return None
 
         async with self._git_startup_lock:
@@ -1127,7 +1150,7 @@ class KnowledgeManager:
                     **sync_result,
                 }
             self._git_background_startup_mode = None
-            self._git_initial_sync_complete = True
+            self._mark_git_initial_sync_complete()
             return result
 
     async def ensure_git_checkout_ready(self) -> None:
@@ -1178,7 +1201,7 @@ class KnowledgeManager:
                 await self.index_file(relative_path, upsert=True)
 
         if index_changes:
-            self._git_initial_sync_complete = True
+            self._mark_git_initial_sync_complete()
 
         if updated:
             logger.info(
@@ -1464,7 +1487,7 @@ async def _resume_manager_without_full_reindex(
     if manager._git_config() is not None:
         git_result = await manager.sync_git_repository(index_changes=False)
         sync_result = await manager.sync_indexed_files()
-        manager._git_initial_sync_complete = True
+        manager._mark_git_initial_sync_complete()
         return {
             "git_updated": git_result["updated"],
             "git_changed_count": git_result["changed_count"],
@@ -1545,6 +1568,16 @@ def _shared_manager_background_runtime_mode(manager: KnowledgeManager) -> Litera
     return None
 
 
+async def _start_shared_manager_runtime_mode(
+    manager: KnowledgeManager,
+    runtime_mode: Literal["watch", "git_sync"] | None,
+) -> None:
+    if runtime_mode == "watch":
+        await manager.start_watcher()
+    elif runtime_mode == "git_sync":
+        await manager._start_git_sync()
+
+
 async def _reconcile_shared_manager_runtime(
     manager: KnowledgeManager,
     *,
@@ -1574,6 +1607,7 @@ async def _create_knowledge_manager_for_target(
     config: Config,
     runtime_paths: RuntimePaths,
     reindex_on_create: bool,
+    start_runtime: bool = True,
 ) -> KnowledgeManager:
     binding = target.binding
     manager = KnowledgeManager(
@@ -1635,10 +1669,12 @@ async def _create_knowledge_manager_for_target(
             )
         logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
 
-    if binding.start_background_watchers:
-        await manager.start_watcher()
-    elif manager._git_background_startup_enabled():
-        await manager._start_git_sync()
+    if start_runtime:
+        desired_runtime_mode = _shared_manager_runtime_mode(manager, target=target)
+        await _start_shared_manager_runtime_mode(
+            manager,
+            None if desired_runtime_mode == "on_access" else desired_runtime_mode,
+        )
     return manager
 
 
@@ -1671,11 +1707,9 @@ async def _ensure_shared_knowledge_manager_for_target(
                     config=config,
                     runtime_paths=runtime_paths,
                     reindex_on_create=True,
+                    start_runtime=reconcile_existing_runtime,
                 )
-                if preserved_runtime_mode == "watch":
-                    await manager.start_watcher()
-                elif preserved_runtime_mode == "git_sync":
-                    await manager._start_git_sync()
+                await _start_shared_manager_runtime_mode(manager, preserved_runtime_mode)
                 _shared_knowledge_managers[target.key.base_id] = manager
                 return manager
 
