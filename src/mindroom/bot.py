@@ -1043,28 +1043,29 @@ class AgentBot:
             interactive.init_persistence(self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
+            matrix_client = client
 
             # Register event callbacks - wrap them to run as background tasks
             # This ensures the sync loop is never blocked, allowing stop reactions to work
-            client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
-                nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view),
-                nio.RoomMessageText,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
-                nio.RedactionEvent,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
-                nio.ReactionEvent,
-            )
+            def add_sync_event_callback(
+                callback: Callable[..., Awaitable[None]],
+                event_type: type[Any],
+            ) -> None:
+                matrix_client.add_event_callback(
+                    _create_task_wrapper(
+                        callback,
+                        owner=self._runtime_view,
+                        register_sync_event_task=self._register_sync_event_task,
+                    ),
+                    event_type,
+                )
+
+            add_sync_event_callback(self._on_invite, nio.InviteEvent)
+            add_sync_event_callback(self._on_message, nio.RoomMessageText)
+            add_sync_event_callback(self._on_redaction, nio.RedactionEvent)
+            add_sync_event_callback(self._on_reaction, nio.ReactionEvent)
 
             # Register media callbacks on all agents (each agent handles its own routing)
-            media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
             for event_type in (
                 nio.RoomMessageImage,
                 nio.RoomEncryptedImage,
@@ -1075,7 +1076,7 @@ class AgentBot:
                 nio.RoomMessageAudio,
                 nio.RoomEncryptedAudio,
             ):
-                client.add_event_callback(media_callback, event_type)
+                add_sync_event_callback(self._on_media_message, event_type)
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
