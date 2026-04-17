@@ -1240,6 +1240,66 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
 
 
 @pytest.mark.asyncio
+async def test_worker_scoped_git_private_knowledge_ignores_background_startup_without_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Request-scoped Git knowledge must refresh on access because no background loop is started."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": _mind_private_agent(
+                watch=False,
+                template_dir=str(template_dir),
+                knowledge_path="kb_repo",
+                git=KnowledgeGitConfig(
+                    repo_url="https://github.com/example/memory.git",
+                    branch="main",
+                    poll_interval_seconds=30,
+                    startup_behavior="background",
+                ),
+            ),
+        },
+        models={},
+    )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+    prepare_background_git_startup = AsyncMock()
+    start_watcher = AsyncMock()
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+    monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
+    monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config, runtime_paths_for(config), execution_identity=identity)
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+    sync_git_repository.assert_awaited_once_with(index_changes=False)
+    sync_indexed_files.assert_awaited_once_with()
+    prepare_background_git_startup.assert_not_awaited()
+    start_watcher.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_git_knowledge_starts_background_sync_when_watch_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2565,7 +2625,7 @@ async def test_run_git_retries_after_removing_stale_index_lock(
                 (
                     f"fatal: Unable to create '{lock_path}': File exists.\n"
                     "Another git process seems to be running in this repository."
-                ).encode("utf-8"),
+                ).encode(),
             )
 
     class _SuccessfulProcess:
@@ -2614,7 +2674,7 @@ async def test_run_git_preserves_index_lock_when_git_process_still_active(
                 (
                     f"fatal: Unable to create '{lock_path}': File exists.\n"
                     "Another git process seems to be running in this repository."
-                ).encode("utf-8"),
+                ).encode(),
             )
 
     async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
@@ -2623,6 +2683,44 @@ async def test_run_git_preserves_index_lock_when_git_process_still_active(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(dummy_manager, "_git_process_ids_for_repo", lambda _repo_root: (4321,))
+
+    with pytest.raises(RuntimeError, match="index.lock"):
+        await dummy_manager._run_git(["checkout", "main"], cwd=repo_root)
+
+    assert lock_path.exists() is True
+
+
+@pytest.mark.asyncio
+async def test_run_git_preserves_index_lock_when_process_inspection_is_unavailable(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Lock recovery must not guess when the runtime cannot inspect live git processes."""
+    repo_root = tmp_path / "repo"
+    git_dir = repo_root / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = git_dir / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (
+                b"",
+                (
+                    f"fatal: Unable to create '{lock_path}': File exists.\n"
+                    "Another git process seems to be running in this repository."
+                ).encode(),
+            )
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(dummy_manager, "_git_process_ids_for_repo", lambda _repo_root: None)
 
     with pytest.raises(RuntimeError, match="index.lock"):
         await dummy_manager._run_git(["checkout", "main"], cwd=repo_root)

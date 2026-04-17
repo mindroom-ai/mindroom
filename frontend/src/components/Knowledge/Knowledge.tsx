@@ -18,6 +18,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { FolderOpen, GitBranch, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 
@@ -61,6 +68,10 @@ const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
   repo_url: '',
   branch: 'main',
   poll_interval_seconds: 300,
+  startup_behavior: 'blocking',
+  lfs: false,
+  sync_timeout_seconds: 3600,
+  stale_lock_recovery: true,
   skip_hidden: true,
 };
 
@@ -119,6 +130,13 @@ function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
         ? gitConfig.poll_interval_seconds
         : DEFAULT_GIT_SETTINGS.poll_interval_seconds,
     credentials_service: gitConfig.credentials_service?.trim() || undefined,
+    startup_behavior: gitConfig.startup_behavior === 'background' ? 'background' : 'blocking',
+    lfs: gitConfig.lfs ?? DEFAULT_GIT_SETTINGS.lfs,
+    sync_timeout_seconds:
+      typeof gitConfig.sync_timeout_seconds === 'number' && gitConfig.sync_timeout_seconds >= 5
+        ? gitConfig.sync_timeout_seconds
+        : DEFAULT_GIT_SETTINGS.sync_timeout_seconds,
+    stale_lock_recovery: gitConfig.stale_lock_recovery ?? DEFAULT_GIT_SETTINGS.stale_lock_recovery,
     skip_hidden: gitConfig.skip_hidden ?? true,
     include_patterns:
       gitConfig.include_patterns && gitConfig.include_patterns.length > 0
@@ -1053,6 +1071,35 @@ export function Knowledge() {
                     <div className="space-y-2">
                       <label
                         className="text-sm font-medium"
+                        htmlFor="knowledge-git-startup-behavior"
+                      >
+                        Startup Behavior
+                      </label>
+                      <Select
+                        value={settings.git.startup_behavior ?? 'blocking'}
+                        onValueChange={value =>
+                          updateGitSettings({
+                            startup_behavior: value === 'background' ? 'background' : 'blocking',
+                          })
+                        }
+                      >
+                        <SelectTrigger id="knowledge-git-startup-behavior">
+                          <SelectValue placeholder="Select startup behavior" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="blocking">Blocking</SelectItem>
+                          <SelectItem value="background">Background</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Blocking waits for the initial sync. Background serves the current index and
+                        syncs later.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
                         htmlFor="knowledge-git-credentials-service"
                       >
                         Credentials Service (optional)
@@ -1070,6 +1117,62 @@ export function Knowledge() {
                       <p className="text-xs text-muted-foreground">
                         Service name in Credentials tab for private HTTPS repos.
                       </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-sync-timeout-seconds"
+                      >
+                        Sync Timeout (seconds)
+                      </label>
+                      <Input
+                        id="knowledge-git-sync-timeout-seconds"
+                        type="number"
+                        min={5}
+                        value={settings.git.sync_timeout_seconds ?? 3600}
+                        onChange={event => {
+                          const nextValue = Number.parseInt(event.target.value, 10);
+                          updateGitSettings({
+                            sync_timeout_seconds:
+                              Number.isNaN(nextValue) || nextValue < 5 ? 5 : nextValue,
+                          });
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Abort a hung Git command after this many seconds.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium">Enable Git LFS</p>
+                        <p className="text-xs text-muted-foreground">
+                          Pull Git LFS objects after each sync for repositories with large files.
+                        </p>
+                      </div>
+                      <Checkbox
+                        aria-label="Enable Git LFS"
+                        checked={settings.git.lfs ?? false}
+                        onCheckedChange={checked => updateGitSettings({ lfs: checked === true })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium">Recover Stale Git Locks</p>
+                        <p className="text-xs text-muted-foreground">
+                          Remove a stale <code>.git/index.lock</code> only when the runtime can
+                          confirm the repo is idle.
+                        </p>
+                      </div>
+                      <Checkbox
+                        aria-label="Recover Stale Git Locks"
+                        checked={settings.git.stale_lock_recovery ?? true}
+                        onCheckedChange={checked =>
+                          updateGitSettings({ stale_lock_recovery: checked === true })
+                        }
+                      />
                     </div>
 
                     <div className="flex items-center justify-between rounded-md border p-3">

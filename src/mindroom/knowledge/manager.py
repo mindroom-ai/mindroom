@@ -614,10 +614,10 @@ class KnowledgeManager:
         return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
 
     @staticmethod
-    def _git_process_ids_for_repo(repo_root: Path) -> tuple[int, ...]:
+    def _git_process_ids_for_repo(repo_root: Path) -> tuple[int, ...] | None:
         proc_root = Path("/proc")
         if not proc_root.is_dir():
-            return ()
+            return None
 
         resolved_repo_root = repo_root.resolve()
         current_pid = os.getpid()
@@ -638,7 +638,7 @@ class KnowledgeManager:
 
             cwd_link = entry / "cwd"
             try:
-                cwd = Path(os.readlink(cwd_link)).resolve()
+                cwd = cwd_link.readlink().resolve()
             except OSError:
                 continue
 
@@ -655,16 +655,22 @@ class KnowledgeManager:
         if not self._git_stale_lock_recovery_enabled():
             return False
         normalized_details = details.lower()
-        if "index.lock" not in normalized_details:
-            return False
-        if "another git process seems to be running" not in normalized_details and "file exists" not in normalized_details:
-            return False
-
         lock_path = repo_root / ".git" / "index.lock"
-        if not lock_path.is_file():
+        has_index_lock_error = "index.lock" in normalized_details and (
+            "another git process seems to be running" in normalized_details or "file exists" in normalized_details
+        )
+        if not has_index_lock_error or not lock_path.is_file():
             return False
 
         git_pids = self._git_process_ids_for_repo(repo_root)
+        if git_pids is None:
+            logger.warning(
+                "knowledge_git_lock_recovery_skipped",
+                base_id=self.base_id,
+                repo_root=str(repo_root),
+                lock_path=str(lock_path),
+            )
+            return False
         if git_pids:
             logger.warning(
                 "knowledge_git_lock_preserved",
@@ -1435,17 +1441,25 @@ async def _stop_and_remove_shared_manager(base_id: str) -> None:
     await manager.stop_watcher()
 
 
-async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[str, Any]:
+async def _sync_manager_without_full_reindex(
+    manager: KnowledgeManager,
+    *,
+    allow_background_git_startup: bool = True,
+) -> dict[str, Any]:
     if manager._git_config() is not None:
-        if manager._git_background_startup_enabled():
+        if allow_background_git_startup and manager._git_background_startup_enabled():
             return await manager.prepare_background_git_startup("incremental")
         return await manager.sync_git_repository()
     return await manager.sync_indexed_files()
 
 
-async def _resume_manager_without_full_reindex(manager: KnowledgeManager) -> dict[str, Any]:
+async def _resume_manager_without_full_reindex(
+    manager: KnowledgeManager,
+    *,
+    allow_background_git_startup: bool = True,
+) -> dict[str, Any]:
     if manager._git_config() is not None:
-        if manager._git_background_startup_enabled():
+        if allow_background_git_startup and manager._git_background_startup_enabled():
             return await manager.prepare_background_git_startup("resume")
         git_result = await manager.sync_git_repository(index_changes=False)
         sync_result = await manager.sync_indexed_files()
@@ -1519,7 +1533,8 @@ async def _create_knowledge_manager_for_target(
     startup_mode: Literal["full_reindex", "resume", "incremental"] = (
         "full_reindex" if reindex_on_create else manager._startup_index_mode()
     )
-    if manager._git_background_startup_enabled():
+    background_git_startup = manager._git_background_startup_enabled() and not binding.request_scoped
+    if background_git_startup:
         sync_result = await manager.prepare_background_git_startup(startup_mode)
         logger.info(
             "Knowledge manager initialized with background git sync",
@@ -1528,45 +1543,50 @@ async def _create_knowledge_manager_for_target(
             startup_mode=startup_mode,
             loaded_count=sync_result["loaded_count"],
         )
+    elif startup_mode == "full_reindex":
+        await manager.initialize()
     else:
-        if startup_mode == "full_reindex":
-            await manager.initialize()
+        if startup_mode == "resume":
+            sync_result = await _resume_manager_without_full_reindex(
+                manager,
+                allow_background_git_startup=background_git_startup,
+            )
         else:
-            if startup_mode == "resume":
-                sync_result = await _resume_manager_without_full_reindex(manager)
-            else:
-                sync_result = await _sync_manager_without_full_reindex(manager)
-            await asyncio.to_thread(manager._save_persisted_indexing_settings)
-            sync_log_context: dict[str, object] = {
-                "base_id": target.key.base_id,
-                "path": str(manager.knowledge_path),
-                "startup_mode": startup_mode,
-            }
-            if "git_updated" in sync_result:
-                sync_log_context.update(
-                    {
-                        "git_updated": sync_result["git_updated"],
-                        "git_changed_count": sync_result["git_changed_count"],
-                        "git_removed_count": sync_result["git_removed_count"],
-                    },
-                )
-            elif manager._git_config() is not None:
-                sync_log_context.update(
-                    {
-                        "updated": sync_result["updated"],
-                        "changed_count": sync_result["changed_count"],
-                        "removed_count": sync_result["removed_count"],
-                    },
-                )
-            if "loaded_count" in sync_result:
-                sync_log_context.update(
-                    {
-                        "loaded_count": sync_result["loaded_count"],
-                        "indexed_count": sync_result["indexed_count"],
-                        "removed_count": sync_result["removed_count"],
-                    },
-                )
-            logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
+            sync_result = await _sync_manager_without_full_reindex(
+                manager,
+                allow_background_git_startup=background_git_startup,
+            )
+        await asyncio.to_thread(manager._save_persisted_indexing_settings)
+        sync_log_context: dict[str, object] = {
+            "base_id": target.key.base_id,
+            "path": str(manager.knowledge_path),
+            "startup_mode": startup_mode,
+        }
+        if "git_updated" in sync_result:
+            sync_log_context.update(
+                {
+                    "git_updated": sync_result["git_updated"],
+                    "git_changed_count": sync_result["git_changed_count"],
+                    "git_removed_count": sync_result["git_removed_count"],
+                },
+            )
+        elif manager._git_config() is not None:
+            sync_log_context.update(
+                {
+                    "updated": sync_result["updated"],
+                    "changed_count": sync_result["changed_count"],
+                    "removed_count": sync_result["removed_count"],
+                },
+            )
+        if "loaded_count" in sync_result:
+            sync_log_context.update(
+                {
+                    "loaded_count": sync_result["loaded_count"],
+                    "indexed_count": sync_result["indexed_count"],
+                    "removed_count": sync_result["removed_count"],
+                },
+            )
+        logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
 
     if binding.start_background_watchers:
         await manager.start_watcher()

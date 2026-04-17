@@ -425,15 +425,87 @@ describe('Knowledge', () => {
         expect.objectContaining({
           chunk_size: 2048,
           chunk_overlap: 256,
-          git: {
+          git: expect.objectContaining({
             repo_url: 'https://github.com/org/repo-updated',
             branch: 'release',
             poll_interval_seconds: 45,
             credentials_service: 'github-private',
+            startup_behavior: 'blocking',
+            lfs: false,
+            sync_timeout_seconds: 3600,
+            stale_lock_recovery: true,
             skip_hidden: false,
             include_patterns: ['docs/**', 'knowledge/**'],
             exclude_patterns: ['docs/private/**'],
+          }),
+        })
+      );
+    });
+  });
+
+  it('saves advanced git settings from base settings', async () => {
+    mockStore(
+      {
+        docs: {
+          path: './knowledge_docs/docs',
+          watch: true,
+          chunk_size: 5000,
+          chunk_overlap: 0,
+          git: {
+            repo_url: 'https://github.com/org/repo',
+            branch: 'main',
+            startup_behavior: 'background',
+            lfs: true,
+            sync_timeout_seconds: 1800,
+            stale_lock_recovery: false,
           },
+        },
+      },
+      { isDirty: true }
+    );
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: 'docs',
+          folder_path: './knowledge_docs/docs',
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: 'docs',
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText('Active: docs');
+
+    fireEvent.click(screen.getByRole('combobox', { name: 'Startup Behavior' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Blocking' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Enable Git LFS' }));
+    fireEvent.change(screen.getByLabelText('Sync Timeout (seconds)'), {
+      target: { value: '900' },
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Recover Stale Git Locks' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }));
+    await waitFor(() => {
+      expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+      expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
+        'docs',
+        expect.objectContaining({
+          git: expect.objectContaining({
+            repo_url: 'https://github.com/org/repo',
+            branch: 'main',
+            startup_behavior: 'blocking',
+            lfs: false,
+            sync_timeout_seconds: 900,
+            stale_lock_recovery: true,
+          }),
         })
       );
     });
