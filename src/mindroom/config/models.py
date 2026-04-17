@@ -349,6 +349,7 @@ class DefaultsConfig(BaseModel):
             "(None = deny by default). Common built-in examples include openai, anthropic, "
             "google, google_oauth_client, github_private, and ollama. "
             "Allowlisted shared credentials are mirrored regardless of whether they came from env sync or were saved through the credentials API/UI, but they are mirrored only and are not injected as env vars. Sandbox-proxied python and shell execution use a deny-by-default env contract, and some credentials may still require worker-specific tool support beyond mirroring."
+            " This setting does not affect local shared-only integrations such as gmail, google_calendar, google_sheets, and homeassistant because those stay in the main runtime."
             " google_vertex_adc is intentionally unsupported in isolated workers and must stay in the main runtime."
         ),
     )

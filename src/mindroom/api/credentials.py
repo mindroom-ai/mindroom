@@ -27,7 +27,9 @@ from mindroom.credentials import (
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    local_shared_credential_allowlist,
     require_worker_key_for_scope,
+    service_uses_local_shared_credentials,
     unsupported_shared_only_integration_message,
     unsupported_shared_only_integration_names,
 )
@@ -429,10 +431,13 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
     if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
 
+    shared_manager = target.base_manager.shared_manager()
+    local_allowlist = local_shared_credential_allowlist(service, target.worker_scope)
+    allowed_shared_services = local_allowlist or target.allowed_shared_services or frozenset()
     shared_credentials = load_worker_grantable_shared_credentials(
         service,
-        shared_manager=target.base_manager.shared_manager(),
-        allowed_services=target.allowed_shared_services or frozenset(),
+        shared_manager=shared_manager,
+        allowed_services=allowed_shared_services,
     )
     worker_credentials = target.target_manager.load_credentials(service)
     if not shared_credentials and not isinstance(worker_credentials, dict):
@@ -475,12 +480,19 @@ async def list_services(
     if target.worker_scope is None:
         return target.target_manager.list_services()
     worker_services = set(target.target_manager.list_services())
+    shared_manager = target.base_manager.shared_manager()
     shared_services = set(
         list_worker_grantable_shared_services(
-            shared_manager=target.base_manager.shared_manager(),
+            shared_manager=shared_manager,
             allowed_services=target.allowed_shared_services or frozenset(),
         ),
     )
+    if target.worker_scope == "shared":
+        shared_services |= {
+            service
+            for service in shared_manager.list_services()
+            if service_uses_local_shared_credentials(service, target.worker_scope)
+        }
     services = worker_services | shared_services
     services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
     return sorted(services)

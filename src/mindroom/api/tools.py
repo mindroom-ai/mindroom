@@ -27,6 +27,7 @@ from mindroom.tool_system.metadata import export_tools_metadata, resolved_tool_m
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     build_worker_target_from_runtime_env,
+    local_shared_credential_allowlist,
     unsupported_shared_only_integration_names,
 )
 
@@ -55,6 +56,17 @@ class _ResolvedToolAvailabilityContext:
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
     allowed_shared_services: frozenset[str] | None
+
+
+def _effective_allowed_shared_services(
+    service: str,
+    context: _ResolvedToolAvailabilityContext,
+) -> frozenset[str] | None:
+    """Return the worker allowlist that applies to one dashboard credential lookup."""
+    local_allowlist = local_shared_credential_allowlist(service, context.execution_scope)
+    if local_allowlist is not None:
+        return local_allowlist
+    return context.allowed_shared_services
 
 
 def _check_homeassistant_configured(tool_name: str, ha_creds: dict[str, Any] | None) -> bool:
@@ -220,18 +232,19 @@ def _update_tools_statuses(
 
     def get_credentials(service: str) -> dict[str, Any] | None:
         if service not in credentials_cache:
+            allowed_shared_services = _effective_allowed_shared_services(service, context)
             if context.status_authoritative:
                 credentials_cache[service] = load_scoped_credentials(
                     service,
                     credentials_manager=context.credentials_manager,
                     worker_target=context.worker_target,
-                    allowed_shared_services=context.allowed_shared_services,
+                    allowed_shared_services=allowed_shared_services,
                 )
             else:
                 credentials_cache[service] = _load_shared_preview_credentials(
                     service,
                     credentials_manager=context.credentials_manager,
-                    allowed_shared_services=context.allowed_shared_services,
+                    allowed_shared_services=allowed_shared_services,
                 )
         return credentials_cache[service]
 

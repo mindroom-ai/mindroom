@@ -1467,6 +1467,63 @@ def test_get_tools_hides_non_allowlisted_shared_scoped_credentials(test_client: 
     assert tool["dashboard_configuration_supported"] is False
 
 
+def test_get_tools_shared_scope_local_only_integrations_ignore_worker_allowlist(test_client: TestClient) -> None:
+    """Shared-scope local integrations should reflect shared credentials without worker mirroring config."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google",
+        {
+            "token": "token-value",
+            "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+            "_source": "ui",
+        },
+    )
+    manager.save_credentials(
+        "homeassistant",
+        {
+            "instance_url": "http://homeassistant.local:8123",
+            "access_token": "ha-token",
+            "_source": "ui",
+        },
+    )
+    tools = [
+        {
+            "name": "gmail",
+            "display_name": "Gmail",
+            "description": "Mailbox access",
+            "category": "email",
+            "status": "requires_config",
+            "setup_type": "special",
+            "auth_provider": "google",
+            "config_fields": [],
+        },
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "Home automation",
+            "category": "home",
+            "status": "requires_config",
+            "setup_type": "special",
+            "auth_provider": None,
+            "config_fields": [],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is True
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert tools_by_name["gmail"]["status"] == "available"
+    assert tools_by_name["homeassistant"]["status"] == "available"
+
+
 def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
     test_client: TestClient,
 ) -> None:

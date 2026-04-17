@@ -31,6 +31,7 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 `gmail` is the only tool on this page with `auth_provider="google"`.
 It uses the shared Google Services integration instead of standalone per-tool credentials.
 `gmail` is also a shared-only integration, so it is supported only for unscoped agents or agents with `worker_scope: shared`.
+Like `google_calendar`, `google_sheets`, and `homeassistant`, `gmail` stays local even when other tools are routed through the sandbox proxy.
 MindRoom enforces that restriction both at config-validation time and again during tool construction.
 On this branch, `src/mindroom/api/integrations.py` only exposes Spotify routes, while Google OAuth lives in `src/mindroom/api/google_integration.py`, so the rest of the tools on this page rely on ordinary stored tool credentials or SDK environment variables rather than a dedicated MindRoom OAuth flow.
 Password fields should be stored through the dashboard or credential store instead of inline YAML.
@@ -85,6 +86,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 - Connect Google once through the shared Google Services integration rather than storing a Gmail-specific API key.
 - The Google integration on this branch requests Gmail read, modify, and compose scopes alongside Calendar, Sheets, Drive, and profile scopes.
+- `gmail` is both shared-only and local-only on this branch, so `worker_scope=user` and `worker_scope=user_agent` are unsupported and the tool is never proxied through sandbox workers.
 - The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus Google OAuth is the verified setup path.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 

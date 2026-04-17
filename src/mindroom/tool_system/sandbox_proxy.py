@@ -20,10 +20,10 @@ from mindroom.constants import (
 from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
-    SHARED_ONLY_INTEGRATION_NAMES,
     ResolvedWorkerTarget,
     WorkerScope,
     resolve_unscoped_worker_key,
+    tool_stays_local,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
@@ -47,7 +47,6 @@ _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
-_LOCAL_ONLY_SANDBOX_TOOLS = frozenset(SHARED_ONLY_INTEGRATION_NAMES - {"google", "spotify"})
 _EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 
 
@@ -465,7 +464,7 @@ def _sandbox_proxy_enabled_for_tool(
     means "route nothing through the proxy for this agent".
     """
     proxy_config = sandbox_proxy_config(runtime_paths)
-    if proxy_config.runner_mode or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
+    if proxy_config.runner_mode or tool_stays_local(tool_name):
         return False
 
     if worker_tools_override is not None:

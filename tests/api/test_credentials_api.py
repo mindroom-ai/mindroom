@@ -391,6 +391,49 @@ class TestCredentialsAPI:
         assert response.json()["has_key"] is True
         assert response.json()["source"] == "ui"
 
+    def test_shared_agent_name_local_shared_credentials_bypass_worker_allowlist(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Shared-scope local integrations should stay visible without worker mirroring allowlists."""
+        config = _config_with_worker_scope("shared")
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": "http://homeassistant.local:8123",
+                "access_token": "ha-token",
+                "_source": "ui",
+            },
+        )
+        manager.save_credentials(
+            "google",
+            {
+                "token": "token-value",
+                "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+                "_source": "ui",
+            },
+        )
+
+        _publish_committed_runtime_config(client.app, config)
+
+        list_response = client.get("/api/credentials/list?agent_name=general")
+        ha_status_response = client.get("/api/credentials/homeassistant/status?agent_name=general")
+        google_status_response = client.get("/api/credentials/google/status?agent_name=general")
+
+        assert list_response.status_code == 200
+        assert "homeassistant" in list_response.json()
+        assert "google" in list_response.json()
+
+        assert ha_status_response.status_code == 200
+        assert ha_status_response.json()["has_credentials"] is True
+        assert set(ha_status_response.json()["key_names"]) == {"instance_url", "access_token"}
+
+        assert google_status_response.status_code == 200
+        assert google_status_response.json()["has_credentials"] is True
+        assert set(google_status_response.json()["key_names"]) == {"token", "scopes"}
+
     def test_rejects_raw_source_worker_key_query_param(
         self,
         client: TestClient,

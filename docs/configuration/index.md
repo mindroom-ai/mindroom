@@ -268,6 +268,8 @@ Common built-in examples include `openai`, `anthropic`, `google`, `openrouter`, 
 Allowlisted shared credentials are mirrored into the worker shared credential layer regardless of whether they came from env sync or were saved through the credentials API/UI.
 `google_vertex_adc` is intentionally not allowed here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep that auth path in the main runtime instead.
 This setting does not inject provider env into sandbox-proxied `python` or `shell` execution.
+This setting also does not control local shared-only integrations that stay in the main runtime, such as `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+Those tools keep reading shared credentials directly because nothing is being mirrored into an isolated worker for them.
 Sandbox-proxied execution uses a narrower env contract than direct local execution: ordinary runtime `.env` values and provider env stay deny-by-default unless they are explicitly passed through by the tool/runtime.
 Some credential types may still require worker-specific tool support beyond mirroring.
 
