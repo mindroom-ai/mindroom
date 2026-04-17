@@ -244,9 +244,11 @@ async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> Non
         run_id="run-123",
     )
 
-    with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel"):
+    with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await bot._on_reaction(room, reaction_event)
 
+    mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
+    task.cancel.assert_called_once()
     bot._send_response.assert_awaited_once_with(
         "!test:example.com",
         "$message:example.com",
