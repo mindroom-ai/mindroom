@@ -1490,7 +1490,7 @@ class ResponseRunner:
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
                 agent_name=self.deps.agent_name,
-                prompt=request.prompt,
+                prompt=runtime.model_prompt or request.prompt,
                 session_id=runtime.session_id,
                 runtime_paths=self.deps.runtime_paths,
                 config=self.deps.runtime.config,
@@ -1546,7 +1546,7 @@ class ResponseRunner:
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
             agent_name=self.deps.agent_name,
-            prompt=request.prompt,
+            prompt=runtime.model_prompt or request.prompt,
             session_id=runtime.session_id,
             runtime_paths=self.deps.runtime_paths,
             config=self.deps.runtime.config,
@@ -1996,7 +1996,7 @@ class ResponseRunner:
                 )
                 return await ai_response(
                     agent_name=agent_name,
-                    prompt=memory_prompt,
+                    prompt=model_prompt or memory_prompt,
                     session_id=session_id,
                     runtime_paths=self.deps.runtime_paths,
                     config=self.deps.runtime.config,
