@@ -370,6 +370,42 @@ async def test_agent_refuses_invite_when_accept_invites_disabled(
 
 
 @pytest.mark.asyncio
+async def test_unknown_entity_refuses_invite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Entities removed from config should reject new invites."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default")),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+
+    join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot.join_room", join_room)
+
+    room = MagicMock(room_id="!invited-room:localhost")
+    event = MagicMock(sender="@user:localhost")
+
+    await bot._on_invite(room, event)
+
+    join_room.assert_not_awaited()
+    assert not _invited_rooms_path(tmp_path, "agent1").exists()
+
+
+@pytest.mark.asyncio
 async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Opted-in agents should persist non-DM invited rooms after joining."""
     agent_user = AgentMatrixUser(
@@ -472,6 +508,41 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
     assert left_room_ids == ["!old-room:localhost"]
 
 
+def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -> None:
+    """Invalid UTF-8 in the persisted invite file should be ignored."""
+    invited_rooms_path = _invited_rooms_path(tmp_path, "agent1")
+    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_rooms_path.write_bytes(b"\x80")
+
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    assert bot._load_invited_rooms() == set()
+    assert bot._invited_rooms == set()
+
+
 def test_get_configured_bots_for_room_includes_persisted_invited_rooms(tmp_path: Path) -> None:
     """Persisted invited rooms should count as configured for cleanup and reinvites."""
     config = bind_runtime_paths(
@@ -498,3 +569,25 @@ def test_get_configured_bots_for_room_includes_persisted_invited_rooms(tmp_path:
         agent_username_localpart("agent1", runtime_paths),
         agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths),
     }
+
+
+def test_load_persisted_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -> None:
+    """Invalid UTF-8 should not break configured-room resolution."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    invited_rooms_path = _invited_rooms_path(runtime_paths.storage_root, "agent1")
+    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_rooms_path.write_bytes(b"\x80")
+
+    assert config._load_persisted_invited_rooms("agent1", runtime_paths) == set()

@@ -812,19 +812,17 @@ class AgentBot:
             return True
         if self.agent_name in self.config.teams:
             return True
-        agent_config = self.config.agents.get(self.agent_name)
-        if agent_config is None:
-            return True
-        return agent_config.accept_invites
+        if self.agent_name in self.config.agents:
+            return self.config.agents[self.agent_name].accept_invites
+        return False
 
     def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
         if self.agent_name == ROUTER_AGENT_NAME:
             return False
-        agent_config = self.config.agents.get(self.agent_name)
-        if agent_config is None:
-            return False
-        return agent_config.accept_invites
+        if self.agent_name in self.config.agents:
+            return self.config.agents[self.agent_name].accept_invites
+        return False
 
     def _invited_rooms_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
@@ -839,7 +837,7 @@ class AgentBot:
             return set()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             self.logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
             return set()
         if not isinstance(raw, list) or not all(isinstance(room_id, str) for room_id in raw):

@@ -1706,8 +1706,9 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
     ) -> set[str]:
         """Return persisted invited rooms for one opted-in agent."""
-        agent_config = self.agents.get(agent_name)
-        if agent_config is None or not agent_config.accept_invites:
+        if agent_name not in self.agents:
+            return set()
+        if not self.agents[agent_name].accept_invites:
             return set()
 
         path = agent_state_root_path(runtime_paths.storage_root, agent_name) / "invited_rooms.json"
@@ -1716,7 +1717,7 @@ class Config(BaseModel):
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             logger.warning("failed_to_load_invited_rooms", agent_name=agent_name, path=str(path), exc_info=True)
             return set()
 
