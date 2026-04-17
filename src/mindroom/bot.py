@@ -1299,6 +1299,7 @@ class AgentBot:
 
         if event.key == "🛑":
             sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
+            tracked_target = self.stop_manager.get_tracked_target(event.reacts_to)
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                 self.logger.info(
                     "Stop requested for message",
@@ -1310,7 +1311,12 @@ class AgentBot:
                     event.reacts_to,
                     notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
                 )
-                await self._send_response(room.room_id, event.reacts_to, _STOPPING_RESPONSE_TEXT, None)
+                await self._send_response(
+                    room.room_id,
+                    event.reacts_to,
+                    _STOPPING_RESPONSE_TEXT,
+                    tracked_target.resolved_thread_id if tracked_target is not None else None,
+                )
                 return
 
         pending_change = config_confirmation.get_pending_change(event.reacts_to)

@@ -187,6 +187,77 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
 
 
 @pytest.mark.asyncio
+async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> None:
+    """Threaded stop acknowledgements should preserve the tracked thread target."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = MagicMock()
+    config.authorization.agent_reply_permissions = {}
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
+        rooms=["!test:example.com"],
+    )
+
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+    bot.logger = MagicMock()
+    bot.stop_manager = StopManager()
+    bot._send_response = AsyncMock(return_value="$stopping:example.com")
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$message:example.com",
+                    "key": "🛑",
+                },
+            },
+            "event_id": "$reaction:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+
+    task = MagicMock()
+    task.done = MagicMock(return_value=False)
+    bot.stop_manager.set_current(
+        message_id="$message:example.com",
+        target=MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com"),
+        task=task,
+        run_id="run-123",
+    )
+
+    with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
+        await bot._on_reaction(room, reaction_event)
+
+    mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
+    task.cancel.assert_called_once()
+    bot._send_response.assert_awaited_once_with(
+        "!test:example.com",
+        "$message:example.com",
+        "⏹️ Stopping generation...",
+        "$thread:example.com",
+    )
+
+
+@pytest.mark.asyncio
 async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellable() -> None:
     """A stop request must hard-cancel quickly when the Agno run is not live yet."""
     stop_manager = StopManager(graceful_cancel_fallback_seconds=0.01)
