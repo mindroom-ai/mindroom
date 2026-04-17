@@ -2498,6 +2498,64 @@ async def test_initialize_shared_knowledge_managers_background_git_startup_defer
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_stops_background_git_sync_when_startup_becomes_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reused shared managers should stop the deferred git loop when startup_behavior switches off."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge", startup_behavior="background")
+    runtime_paths = runtime_paths_for(config)
+
+    prepare_background_git_startup = AsyncMock(
+        return_value={
+            "startup_mode": "resume",
+            "loaded_count": 0,
+            "indexed_count": 0,
+            "removed_count": 0,
+            "git_deferred": True,
+        },
+    )
+    start_git_sync = AsyncMock(return_value=None)
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+
+    monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
+    monkeypatch.setattr(KnowledgeManager, "_start_git_sync", start_git_sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths,
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+        manager = managers["research"]
+        stop_git_sync = AsyncMock(return_value=None)
+        monkeypatch.setattr(manager, "_stop_git_sync", stop_git_sync)
+
+        blocking_config = _make_git_config(tmp_path / "knowledge", startup_behavior="blocking")
+        blocking_managers = await initialize_shared_knowledge_managers(
+            blocking_config,
+            runtime_paths_for(blocking_config),
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+
+        assert blocking_managers["research"] is manager
+        stop_git_sync.assert_awaited_once_with()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+    prepare_background_git_startup.assert_awaited_once_with("resume")
+    start_git_sync.assert_awaited_once()
+    sync_git_repository.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_resumes_partial_git_index_with_full_file_sync(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
