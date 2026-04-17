@@ -170,6 +170,18 @@ def emit_timing_event(event_name: str, **event_data: object) -> None:
     logger.info(event_name, **filtered_event_data)
 
 
+def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
+    """Emit one elapsed timing event relative to a previously recorded start time."""
+    if not _is_enabled():
+        return
+    emit_timing_event(
+        "timing_elapsed",
+        label=label,
+        duration_ms=round((time.monotonic() - start) * 1000, 1),
+        **event_data,
+    )
+
+
 def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:  # noqa: C901
     """Decorator that logs elapsed time for sync/async functions.
 
