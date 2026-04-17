@@ -195,7 +195,8 @@ In containerized deployments, generated overrides are written under the persiste
  Generate missing managed avatar files in the workspace.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --force            Overwrite existing managed workspace avatar files.                  │
+│ --help   -h        Show this message and exit.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -226,7 +227,8 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
  account.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --force            Replace existing Matrix room and root-space avatars.                │
+│ --help   -h        Show this message and exit.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

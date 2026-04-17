@@ -1090,6 +1090,24 @@ class TestAvatarsCommands:
         run_avatar_generation.assert_awaited_once()
         assert run_avatar_generation.await_args.args[0].config_path == cfg.resolve()
 
+    def test_avatars_generate_force_passes_force_true(self, tmp_path: Path) -> None:
+        """Avatar generation command should expose an explicit force flag."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        run_avatar_generation = AsyncMock()
+
+        with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
+            result = _invoke_with_runtime(["avatars", "generate", "--force"], cfg)
+
+        assert result.exit_code == 0
+        run_avatar_generation.assert_awaited_once()
+        assert run_avatar_generation.await_args.kwargs["force"] is True
+
     def test_avatars_sync_runs_matrix_sync(self, tmp_path: Path) -> None:
         """Avatar sync command should invoke the Matrix sync workflow."""
         cfg = tmp_path / "config.yaml"
@@ -1107,6 +1125,24 @@ class TestAvatarsCommands:
         assert result.exit_code == 0
         set_room_avatars_in_matrix.assert_awaited_once()
         assert set_room_avatars_in_matrix.await_args.args[0].config_path == cfg.resolve()
+
+    def test_avatars_sync_force_passes_force_true(self, tmp_path: Path) -> None:
+        """Avatar sync command should expose an explicit force flag."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        set_room_avatars_in_matrix = AsyncMock()
+
+        with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
+            result = _invoke_with_runtime(["avatars", "sync", "--force"], cfg)
+
+        assert result.exit_code == 0
+        set_room_avatars_in_matrix.assert_awaited_once()
+        assert set_room_avatars_in_matrix.await_args.kwargs["force"] is True
 
     def test_avatars_sync_reports_sync_failure(self, tmp_path: Path) -> None:
         """Unexpected avatar sync failures should propagate for debugging."""

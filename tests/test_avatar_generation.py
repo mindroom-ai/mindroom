@@ -84,6 +84,37 @@ def test_get_console_returns_shared_console_instance() -> None:
     assert generate_avatars.get_console() is generate_avatars.get_console()
 
 
+def test_resolve_avatar_prompt_settings_applies_overrides_and_defaults(tmp_path: Path) -> None:
+    """Avatar prompt settings should honor authored overrides and fall back to built-ins."""
+    config = _config_with_runtime_paths(
+        {
+            "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+            "router": {"model": "default"},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "model": "default",
+                },
+            },
+            "avatars": {
+                "prompts": {
+                    "character_style": "custom character style",
+                    "room_system_prompt": "custom room system prompt",
+                },
+            },
+        },
+        tmp_path,
+    )
+
+    prompt_settings = generate_avatars.resolve_avatar_prompt_settings(config)
+
+    assert prompt_settings.character_style == "custom character style"
+    assert prompt_settings.room_system_prompt == "custom room system prompt"
+    assert prompt_settings.room_style == generate_avatars.ROOM_STYLE
+    assert prompt_settings.agent_system_prompt == generate_avatars.AGENT_SYSTEM_PROMPT
+    assert prompt_settings.team_system_prompt == generate_avatars.TEAM_SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_room_has_avatar_rechecks_state_even_when_cached_avatar_exists() -> None:
     """Room avatar checks should not trust a cached avatar URL without state confirmation."""
@@ -512,6 +543,75 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
+async def test_generate_avatar_skips_existing_file_without_force(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Avatar generation should preserve existing workspace files by default."""
+    avatar_path = tmp_path / "generated.png"
+    avatar_path.write_bytes(b"existing-avatar")
+    generate_content = AsyncMock()
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    generate_prompt = AsyncMock()
+
+    monkeypatch.setattr(generate_avatars, "get_avatar_path", lambda *_args, **_kwargs: avatar_path)
+    monkeypatch.setattr(generate_avatars, "generate_prompt", generate_prompt)
+
+    await generate_avatars.generate_avatar(
+        client,
+        generate_avatars.AvatarTarget(
+            entity_type="agents",
+            entity_name="general",
+            role="Helpful assistant",
+        ),
+        _runtime_paths(tmp_path),
+    )
+
+    assert avatar_path.read_bytes() == b"existing-avatar"
+    generate_prompt.assert_not_awaited()
+    generate_content.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_avatar_force_overwrites_existing_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forced avatar generation should overwrite an existing workspace file."""
+    avatar_path = tmp_path / "generated.png"
+    avatar_path.write_bytes(b"existing-avatar")
+    image_response = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part(inline_data=types.Blob(data=b"new-avatar", mime_type="image/png"))],
+                ),
+            ),
+        ],
+    )
+    generate_content = AsyncMock(return_value=image_response)
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+
+    monkeypatch.setattr(generate_avatars, "get_avatar_path", lambda *_args, **_kwargs: avatar_path)
+    monkeypatch.setattr(generate_avatars, "generate_prompt", AsyncMock(return_value="avatar prompt"))
+
+    await generate_avatars.generate_avatar(
+        client,
+        generate_avatars.AvatarTarget(
+            entity_type="agents",
+            entity_name="general",
+            role="Helpful assistant",
+        ),
+        _runtime_paths(tmp_path),
+        force=True,
+    )
+
+    assert avatar_path.read_bytes() == b"new-avatar"
+    generate_content.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,
@@ -543,8 +643,13 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         _client: object,
         target: generate_avatars.AvatarTarget,
         runtime_paths: constants_mod.RuntimePaths,
+        *,
+        force: bool = False,
+        prompt_settings: generate_avatars.AvatarPromptSettings | None = None,
     ) -> None:
         del runtime_paths
+        del force
+        del prompt_settings
         avatar_path = workspace_avatar_dir / target.entity_type / f"{target.entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"generated")
@@ -719,6 +824,72 @@ async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avata
     await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
 
     client.room_get_state_event.assert_awaited_once_with("!war:localhost", "m.room.avatar")
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_room_avatars_in_matrix_force_replaces_existing_matrix_avatar(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Forced Matrix avatar sync should replace an already-set room avatar."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": ["war_room"],
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    room_avatar_path = workspace_avatar_dir / "rooms" / "war_room.png"
+    room_avatar_path.parent.mkdir(parents=True)
+    room_avatar_path.write_bytes(b"room-bytes")
+
+    router_account = SimpleNamespace(username="router")
+    router_account.password = b"pw".decode()
+
+    def _get_account(key: str) -> object | None:
+        return router_account if key == "agent_router" else None
+
+    state = SimpleNamespace(
+        space_room_id=None,
+        get_account=_get_account,
+    )
+    client = SimpleNamespace(close=AsyncMock())
+    room_has_avatar = AsyncMock(side_effect=lambda *_args, **_kwargs: pytest.fail("force sync should not skip"))
+    set_room_avatar_from_file = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
+    )
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "room_has_avatar", room_has_avatar)
+    monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
+    monkeypatch.setattr(
+        generate_avatars,
+        "get_room_id",
+        lambda room_name, _runtime_paths: "!war:localhost" if room_name == "war_room" else None,
+    )
+    monkeypatch.setattr(
+        generate_avatars.constants,
+        "runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
+
+    await generate_avatars.set_room_avatars_in_matrix(
+        _runtime_paths(workspace_avatar_dir.parent),
+        force=True,
+    )
+
+    room_has_avatar.assert_not_awaited()
+    set_room_avatar_from_file.assert_awaited_once()
     client.close.assert_awaited_once()
 
 

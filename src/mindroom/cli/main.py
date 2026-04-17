@@ -196,7 +196,13 @@ app.command()(doctor)
 
 
 @avatars_app.command("generate")
-def avatars_generate() -> None:
+def avatars_generate(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite existing managed workspace avatar files.",
+    ),
+) -> None:
     """Generate missing managed avatar files in the workspace."""
     runtime_paths = _activate_cli_runtime()
     _load_active_config_or_exit(runtime_paths)
@@ -204,14 +210,20 @@ def avatars_generate() -> None:
     try:
         from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
 
-        asyncio.run(run_avatar_generation(runtime_paths))
+        asyncio.run(run_avatar_generation(runtime_paths, force=force))
     except AvatarGenerationError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
 
 
 @avatars_app.command("sync")
-def avatars_sync() -> None:
+def avatars_sync(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Replace existing Matrix room and root-space avatars.",
+    ),
+) -> None:
     """Sync configured room and root-space avatars to Matrix using the initialized router account."""
     runtime_paths = _activate_cli_runtime()
     _load_active_config_or_exit(runtime_paths)
@@ -219,7 +231,7 @@ def avatars_sync() -> None:
     try:
         from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
 
-        asyncio.run(set_room_avatars_in_matrix(runtime_paths))
+        asyncio.run(set_room_avatars_in_matrix(runtime_paths, force=force))
     except AvatarSyncError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
