@@ -315,6 +315,38 @@ class HandledTurnLedger:
         )
         return transaction_id
 
+    def record_pending_response_event(self, handled_turn: HandledTurnState) -> None:
+        """Persist the first visible response event without marking the turn complete."""
+        normalized_source_event_ids = handled_turn.source_event_ids
+        if not normalized_source_event_ids or handled_turn.response_event_id is None:
+            return
+
+        with self._thread_lock, self._file_lock(exclusive=True):
+            self._responses = self._read_responses_file_locked()
+            completed = any(
+                _completed_for_record(self._responses.get(event_id)) for event_id in normalized_source_event_ids
+            )
+            self._persist_handled_turn_locked(
+                source_event_ids=normalized_source_event_ids,
+                response_event_id=handled_turn.response_event_id,
+                response_transaction_id=None,
+                visible_echo_transaction_id=None,
+                completed=completed,
+                visible_echo_event_id=handled_turn.visible_echo_event_id,
+                source_event_prompts=handled_turn.source_event_prompts,
+                response_owner=handled_turn.response_owner,
+                history_scope=handled_turn.history_scope,
+                conversation_target=handled_turn.conversation_target,
+                anchor_event_id=handled_turn.anchor_event_id,
+            )
+            self._save_responses_locked()
+        logger.debug(
+            "pending_response_event_recorded",
+            agent=self.agent_name,
+            response_event_id=handled_turn.response_event_id,
+            source_event_count=len(normalized_source_event_ids),
+        )
+
     def reserve_visible_echo_transaction_id(self, handled_turn: HandledTurnState) -> str:
         """Persist and return one stable outbound tx-id for a pending visible echo."""
         normalized_source_event_ids = handled_turn.source_event_ids

@@ -1080,6 +1080,10 @@ class TurnController:
             return
 
         pending_response = self.deps.turn_store.reserve_pending_response(handled_turn)
+
+        def record_visible_response_event_id(response_event_id: str) -> None:
+            self.deps.turn_store.record_pending_response_event(handled_turn, response_event_id)
+
         if not dispatch.context.am_i_mentioned:
             with bound_log_context(**dispatch.target.log_context):
                 self.deps.logger.info("Will respond: only agent in thread")
@@ -1180,6 +1184,7 @@ class TurnController:
                     strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                     requires_full_thread_history=False,
                     on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
+                    record_visible_response_event_id=request.record_visible_response_event_id,
                     pipeline_timing=request.pipeline_timing,
                 )
 
@@ -1201,6 +1206,7 @@ class TurnController:
                         matrix_run_metadata=matrix_run_metadata,
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
+                        record_visible_response_event_id=record_visible_response_event_id,
                         pipeline_timing=dispatch_timing,
                     ),
                     team_agents=action.form_team.eligible_members,
@@ -1222,6 +1228,7 @@ class TurnController:
                         matrix_run_metadata=matrix_run_metadata,
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
+                        record_visible_response_event_id=record_visible_response_event_id,
                         pipeline_timing=dispatch_timing,
                     ),
                 )

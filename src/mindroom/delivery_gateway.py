@@ -210,6 +210,7 @@ class StreamingDeliveryRequest:
     response_stream: AsyncIterator[_StreamInputChunk]
     existing_event_id: str | None = None
     response_transaction_id: str | None = None
+    record_visible_response_event_id: Callable[[str], None] | None = None
     adopt_existing_placeholder: bool = False
     header: str | None = None
     show_tool_calls: bool = False
@@ -637,6 +638,7 @@ class DeliveryGateway:
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             response_transaction_id=request.response_transaction_id,
+            record_visible_response_event_id=request.record_visible_response_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             target=request.target,
             room_mode=request.target.is_room_mode,

@@ -1295,6 +1295,46 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
 
 
 @pytest.mark.asyncio
+async def test_run_cancellable_response_records_visible_placeholder_event_id(
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """Thinking placeholders should publish their visible event id immediately after send succeeds."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+
+    bot._send_response = AsyncMock(return_value="$thinking")
+    install_send_response_mock(bot, bot._send_response)
+    recorded_event_ids: list[str] = []
+
+    async def response_function(message_id: str | None) -> None:
+        assert message_id == "$thinking"
+
+    await bot._response_runner.run_cancellable_response(
+        room_id="!room:localhost",
+        reply_to_event_id="$reply",
+        thread_id=None,
+        response_function=response_function,
+        thinking_message="Thinking...",
+        record_visible_response_event_id=recorded_event_ids.append,
+    )
+
+    assert recorded_event_ids == ["$thinking"]
+
+
+@pytest.mark.asyncio
 async def test_failed_update_config_does_not_strand_queued_reload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

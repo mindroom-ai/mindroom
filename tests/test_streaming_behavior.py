@@ -116,6 +116,59 @@ async def test_send_streaming_response_uses_explicit_response_transaction_id(tmp
     assert mock_send.await_args.kwargs["transaction_id"] == "txn-123"
 
 
+@pytest.mark.asyncio
+async def test_send_streaming_response_records_initial_visible_response_event_id(tmp_path: Path) -> None:
+    """Streaming should record the first visible event id as soon as the initial send succeeds."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"a": AgentConfig(display_name="A", rooms=["!r:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            router=RouterConfig(model="default"),
+        ),
+        runtime_paths,
+    )
+    client = _make_matrix_client_mock()
+    recorded_event_ids: list[str] = []
+
+    with (
+        patch(
+            "mindroom.streaming.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$evt:localhost",
+                    content_sent={"body": "hello", "msgtype": "m.text"},
+                ),
+            ),
+        ),
+        patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$edit:localhost",
+                    content_sent={"body": "hello", "msgtype": "m.text"},
+                ),
+            ),
+        ),
+    ):
+        event_id, text = await send_streaming_response(
+            client=client,
+            room_id="!r:localhost",
+            reply_to_event_id="$orig",
+            thread_id=None,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths,
+            response_stream=_aiter("hello"),
+            record_visible_response_event_id=recorded_event_ids.append,
+            room_mode=True,
+        )
+
+    assert event_id == "$evt:localhost"
+    assert text == "hello"
+    assert recorded_event_ids == ["$evt:localhost"]
+
+
 @pytest.fixture
 def mock_helper_agent() -> AgentMatrixUser:
     """Create a mock helper agent user."""

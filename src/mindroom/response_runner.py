@@ -293,6 +293,7 @@ class ResponseRequest:
     strip_transient_enrichment_after_run: bool = False
     requires_full_thread_history: bool = False
     prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
+    record_visible_response_event_id: Callable[[str], None] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
 
@@ -1214,6 +1215,7 @@ class ResponseRunner:
                 thinking_message=thinking_msg,
                 existing_event_id=request.existing_event_id,
                 response_transaction_id=request.response_transaction_id,
+                record_visible_response_event_id=request.record_visible_response_event_id,
                 user_id=requester_user_id,
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,
@@ -1281,6 +1283,7 @@ class ResponseRunner:
         thinking_message: str | None = None,
         existing_event_id: str | None = None,
         response_transaction_id: str | None = None,
+        record_visible_response_event_id: Callable[[str], None] | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
         target: MessageTarget | None = None,
@@ -1311,6 +1314,8 @@ class ResponseRunner:
                             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                         ),
                     )
+                    if initial_message_id is not None and record_visible_response_event_id is not None:
+                        record_visible_response_event_id(initial_message_id)
                     if initial_message_id is not None and pipeline_timing is not None:
                         pipeline_timing.mark("placeholder_sent")
                         pipeline_timing.mark_first_visible_reply("placeholder")
@@ -1597,6 +1602,7 @@ class ResponseRunner:
                     extra_content=response_extra_content,
                     tool_trace_collector=tool_trace,
                     streaming_cls=StreamingResponse,
+                    record_visible_response_event_id=request.record_visible_response_event_id,
                     pipeline_timing=request.pipeline_timing,
                 ),
             )
@@ -2273,6 +2279,7 @@ class ResponseRunner:
                 thinking_message=thinking_msg,
                 existing_event_id=request.existing_event_id,
                 response_transaction_id=request.response_transaction_id,
+                record_visible_response_event_id=request.record_visible_response_event_id,
                 user_id=request.user_id,
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,

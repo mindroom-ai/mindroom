@@ -13,8 +13,12 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.conversation_resolver import MessageContext
+from mindroom.handled_turns import HandledTurnState
+from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
+from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -377,6 +381,112 @@ async def test_execute_command_skill_reply_reserves_transaction_id(tmp_path: Pat
 
     assert bot._response_runner.send_skill_command_response.await_args is not None
     assert bot._response_runner.send_skill_command_response.await_args.kwargs["response_transaction_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_execute_response_action_records_pending_visible_response_event_before_completion(
+    tmp_path: Path,
+) -> None:
+    """The first visible AI reply should be durably anchored before the turn reaches a terminal outcome."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"])}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="General",
+            password="test_password",  # noqa: S106
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.agent_user.user_id)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "hello", "msgtype": "m.text"},
+            "event_id": "$visible-anchor-source:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+        },
+    )
+    event.source = {
+        "content": {"body": "hello", "msgtype": "m.text"},
+        "event_id": "$visible-anchor-source:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "room_id": room.room_id,
+    }
+
+    wrap_extracted_collaborators(bot, "_response_runner")
+    replace_turn_controller_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        response_runner=bot._response_runner,
+        delivery_gateway=bot._delivery_gateway,
+        normalizer=bot._inbound_turn_normalizer,
+        turn_store=bot._turn_store,
+    )
+
+    async def fake_generate_response(request: object) -> str | None:
+        prepared_request = await request.prepare_after_lock(request)
+        assert prepared_request.record_visible_response_event_id is not None
+        prepared_request.record_visible_response_event_id("$visible-anchor:localhost")
+        return None
+
+    bot._response_runner.generate_response = AsyncMock(side_effect=fake_generate_response)
+    replace_turn_controller_deps(bot, response_runner=bot._response_runner)
+
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=bot._conversation_resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=None,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        ),
+        correlation_id="corr-visible-anchor",
+        envelope=bot._conversation_resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id="@user:localhost",
+        ),
+    )
+
+    async def payload_builder(_context: MessageContext) -> DispatchPayload:
+        return DispatchPayload(prompt=event.body)
+
+    await bot._turn_controller._execute_response_action(
+        room,
+        event,
+        dispatch,
+        ResponseAction(kind="individual"),
+        payload_builder,
+        processing_log="Processing",
+        dispatch_started_at=0.0,
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+    )
+
+    turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert turn_record is not None
+    assert turn_record.response_event_id == "$visible-anchor:localhost"
+    assert turn_record.completed is False
 
 
 @pytest.mark.asyncio

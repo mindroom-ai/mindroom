@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import typing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -189,6 +190,7 @@ class StreamingResponse:
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
+    record_visible_response_event_id: typing.Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -412,6 +414,8 @@ class StreamingResponse:
         if delivered is None:
             return False
         self.event_id = delivered.event_id
+        if self.record_visible_response_event_id is not None:
+            self.record_visible_response_event_id(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
         logger.debug("Initial streaming message sent", event_id=self.event_id)
@@ -582,6 +586,7 @@ async def send_streaming_response(
     header: str | None = None,
     existing_event_id: str | None = None,
     response_transaction_id: str | None = None,
+    record_visible_response_event_id: typing.Callable[[str], None] | None = None,
     adopt_existing_placeholder: bool = False,
     room_mode: bool = False,
     target: MessageTarget | None = None,
@@ -613,6 +618,7 @@ async def send_streaming_response(
         room_mode=resolved_target.is_room_mode,
         show_tool_calls=show_tool_calls,
         response_transaction_id=response_transaction_id,
+        record_visible_response_event_id=record_visible_response_event_id,
         extra_content=extra_content,
         update_interval=sc.update_interval,
         min_update_interval=sc.min_update_interval,
