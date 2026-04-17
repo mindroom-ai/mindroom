@@ -209,6 +209,12 @@ def _collect_credential_overrides(
     services = _credential_services_for_call(tool_name, function_name, proxy_config=proxy_config)
     if not services:
         return {}
+    allowed_shared_services: frozenset[str] | None = None
+    if worker_target is not None and worker_target.worker_scope is not None:
+        context = get_tool_runtime_context()
+        allowed_shared_services = (
+            context.config.get_worker_grantable_credentials() if context is not None else frozenset()
+        )
 
     merged_overrides: dict[str, object] = {}
     for service in services:
@@ -216,6 +222,7 @@ def _collect_credential_overrides(
             service,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
         )
         if isinstance(credentials, Mapping):
             merged_overrides.update(_filter_internal_credential_keys(credentials))

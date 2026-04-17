@@ -102,15 +102,13 @@ def _shell_subprocess_path(
 def _shell_subprocess_env(
     runtime_env: dict[str, str],
     *,
-    process_env_overrides: dict[str, str] | None = None,
+    base_process_env: dict[str, str] | None = None,
     shell_path_prepend: str | None = None,
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses."""
     env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
-    if process_env_overrides is not None:
-        env.update(
-            {key: value for key, value in process_env_overrides.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS},
-        )
+    if base_process_env is not None:
+        env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
     env.update(runtime_env)
 
     path_value = _shell_subprocess_path(
@@ -261,7 +259,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     process_env=runtime_paths.process_env,
                 ),
             )
-            self._process_env_overrides = dict(runtime_paths.process_env)
+            self._base_process_env = dict(runtime_paths.process_env)
             self._processes = _process_registry
             self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
@@ -294,7 +292,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     cwd=str(self.base_dir) if self.base_dir else None,
                     env=_shell_subprocess_env(
                         self._runtime_env,
-                        process_env_overrides=self._process_env_overrides,
+                        base_process_env=self._base_process_env,
                         shell_path_prepend=self._shell_path_prepend,
                     ),
                     start_new_session=True,

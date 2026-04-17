@@ -256,6 +256,7 @@ class TestCredentialsManager:
             "google",
             credentials_manager=manager,
             worker_target=_worker_target("shared", "general", execution_identity),
+            allowed_shared_services=frozenset({"google"}),
         )
 
         assert loaded_credentials == {"api_key": "global-ui-key", "_source": "ui"}
@@ -283,9 +284,38 @@ class TestCredentialsManager:
             "google",
             credentials_manager=manager,
             worker_target=_worker_target("shared", "general", execution_identity),
+            allowed_shared_services=frozenset({"google"}),
         )
 
         assert loaded_credentials == {"api_key": "env-key", "_source": "env"}
+
+    def test_load_scoped_credentials_shared_scope_blocks_non_grantable_shared_credentials(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Shared worker scope should hide shared credentials that are not allowlisted for workers."""
+        manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        manager.save_credentials("google", {"api_key": "global-ui-key", "_source": "ui"})
+
+        loaded_credentials = load_scoped_credentials(
+            "google",
+            credentials_manager=manager,
+            worker_target=_worker_target("shared", "general", execution_identity),
+            allowed_shared_services=frozenset(),
+        )
+
+        assert loaded_credentials is None
 
     def test_load_scoped_credentials_uses_worker_rooted_manager_without_nesting(
         self,

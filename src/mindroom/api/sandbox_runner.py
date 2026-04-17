@@ -12,7 +12,7 @@ import pickle
 import secrets
 import subprocess
 import sys
-from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any
@@ -49,7 +49,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backends.local import get_local_worker_manager
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
     from agno.tools.toolkit import Toolkit
 
@@ -100,53 +100,6 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
         process_env=resolved_runtime_paths.process_env,
         env_file_values=MappingProxyType(env_file_values),
     )
-
-
-_DEDICATED_WORKER_PROCESS_ENV_EXTRA_KEYS = (
-    "PIP_CACHE_DIR",
-    "PYTHONPYCACHEPREFIX",
-    "SHELL",
-    "TERM",
-    "USER",
-    "UV_CACHE_DIR",
-    "XDG_CACHE_HOME",
-)
-
-
-def _dedicated_worker_process_env(
-    runtime_paths: RuntimePaths,
-    execution_env: dict[str, str],
-) -> dict[str, str]:
-    """Return the fail-closed env visible during dedicated-worker tool execution."""
-    process_env = sandbox_exec.generic_subprocess_env()
-    for key in _DEDICATED_WORKER_PROCESS_ENV_EXTRA_KEYS:
-        value = os.environ.get(key)
-        if value:
-            process_env[key] = value
-    process_env.update(constants.sandbox_execution_runtime_env_values(runtime_paths))
-    process_env.update(execution_env)
-    return process_env
-
-
-@contextmanager
-def _tool_execution_process_env(
-    runtime_paths: RuntimePaths,
-    execution_env: dict[str, str],
-) -> Iterator[None]:
-    """Patch the live process env for dedicated-worker in-process tool execution."""
-    if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
-        with nullcontext():
-            yield
-        return
-
-    original_env = dict(os.environ)
-    os.environ.clear()
-    os.environ.update(_dedicated_worker_process_env(runtime_paths, execution_env))
-    try:
-        yield
-    finally:
-        os.environ.clear()
-        os.environ.update(original_env)
 
 
 def _startup_runner_token_from_env() -> str | None:
@@ -506,6 +459,7 @@ def _resolve_entrypoint(
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
+            allowed_shared_services=(config.get_worker_grantable_credentials() if worker_scope is not None else None),
             worker_target=worker_target,
         )
     except (ToolConfigOverrideError, ToolInitOverrideError) as exc:
@@ -569,7 +523,6 @@ async def _execute_request_inprocess(
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
     with (
-        _tool_execution_process_env(effective_runtime_paths, execution_env),
         tool_execution_identity(
             execution_identity,
         ),

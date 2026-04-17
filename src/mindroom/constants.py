@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -360,21 +360,6 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def _worker_credential_env_names(
-    allowed_services: Collection[str] | None,
-) -> frozenset[str] | None:
-    if allowed_services is None:
-        return None
-    env_names = {PROVIDER_ENV_KEYS[service] for service in allowed_services if service in PROVIDER_ENV_KEYS}
-    if "google_vertex_adc" in allowed_services:
-        env_names.update({"GOOGLE_APPLICATION_CREDENTIALS", *VERTEXAI_CLAUDE_ENV_KEYS})
-    if "google_oauth_client" in allowed_services:
-        env_names.update({"GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"})
-    if "github_private" in allowed_services:
-        env_names.add("GITHUB_TOKEN")
-    return frozenset(env_names)
-
-
 def _is_known_worker_credential_env_name(name: str) -> bool:
     return name in {
         *PROVIDER_ENV_KEYS.values(),
@@ -388,53 +373,28 @@ def _is_known_worker_credential_env_name(name: str) -> bool:
 
 def _is_execution_runtime_process_env_name(
     name: str,
-    *,
-    allowed_credential_env_names: frozenset[str] | None = None,
 ) -> bool:
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
-        return False
-    if _is_public_runtime_startup_env_name(name):
-        if allowed_credential_env_names is not None and _is_known_worker_credential_env_name(name):
-            return name in allowed_credential_env_names
-        return True
-    if allowed_credential_env_names is None:
-        return _is_known_worker_credential_env_name(name)
-    return name in allowed_credential_env_names
+    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES and (
+        _is_public_runtime_startup_env_name(name) or _is_known_worker_credential_env_name(name)
+    )
 
 
 def _is_allowed_execution_runtime_env_file_name(
     name: str,
-    *,
-    allowed_credential_env_names: frozenset[str] | None = None,
 ) -> bool:
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
-        return False
-    if allowed_credential_env_names is not None and _is_known_worker_credential_env_name(name):
-        return name in allowed_credential_env_names
-    return True
+    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
 
 
 def _execution_runtime_env_layers(
     runtime_paths: RuntimePaths,
-    *,
-    allowed_credential_services: Collection[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    allowed_credential_env_names = _worker_credential_env_names(allowed_credential_services)
     env_file_values = {
         key: value
         for key, value in runtime_paths.env_file_values.items()
-        if _is_allowed_execution_runtime_env_file_name(
-            key,
-            allowed_credential_env_names=allowed_credential_env_names,
-        )
+        if _is_allowed_execution_runtime_env_file_name(key)
     }
     process_env = {
-        key: value
-        for key, value in runtime_paths.process_env.items()
-        if _is_execution_runtime_process_env_name(
-            key,
-            allowed_credential_env_names=allowed_credential_env_names,
-        )
+        key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)
     }
     return process_env, env_file_values
 
@@ -483,8 +443,6 @@ def shell_extra_env_values(
 
 def execution_runtime_env_values(
     runtime_paths: RuntimePaths,
-    *,
-    allowed_credential_services: Collection[str] | None = None,
 ) -> Mapping[str, str]:
     """Return the runtime env that execution tools may observe.
 
@@ -493,10 +451,7 @@ def execution_runtime_env_values(
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
     """
-    process_env, env_file_values = _execution_runtime_env_layers(
-        runtime_paths,
-        allowed_credential_services=allowed_credential_services,
-    )
+    process_env, env_file_values = _execution_runtime_env_layers(runtime_paths)
     merged_env = dict(env_file_values)
     merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
@@ -532,7 +487,6 @@ def shell_execution_runtime_env_values(
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
-    allowed_credential_services: Collection[str] | None = None,
 ) -> Mapping[str, str]:
     """Return the env visible to shell execution after explicit passthrough is applied."""
     merged_env = dict(
@@ -541,12 +495,7 @@ def shell_execution_runtime_env_values(
             process_env=process_env,
         ),
     )
-    merged_env.update(
-        execution_runtime_env_values(
-            runtime_paths,
-            allowed_credential_services=allowed_credential_services,
-        ),
-    )
+    merged_env.update(execution_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 

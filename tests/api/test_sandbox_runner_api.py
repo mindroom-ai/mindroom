@@ -388,11 +388,11 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
 
 
 @pytest.mark.asyncio
-async def test_dedicated_worker_inprocess_python_does_not_see_runner_local_env(
+async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Dedicated-worker in-process Python should not observe ambient runner env."""
+    """Dedicated-worker in-process shell should not observe ambient runner env."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -417,11 +417,14 @@ async def test_dedicated_worker_inprocess_python_does_not_see_runner_local_env(
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
     response = await sandbox_runner_module._execute_request_inprocess(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
-            tool_name="python",
-            function_name="run_python_code",
+            tool_name="shell",
+            function_name="run_shell_command",
             args=[
-                'import os\nresult = {"openai_base_url": os.environ.get("OPENAI_BASE_URL"), "test": os.environ.get("TEST_EXECUTION_ENV"), "runner_token": os.environ.get("MINDROOM_SANDBOX_PROXY_TOKEN"), "namespace": os.environ.get("MINDROOM_NAMESPACE")}',
-                "result",
+                [
+                    "bash",
+                    "-lc",
+                    "printf '%s' \"$OPENAI_BASE_URL|$TEST_EXECUTION_ENV|$MINDROOM_SANDBOX_PROXY_TOKEN|$MINDROOM_NAMESPACE\"",
+                ],
             ],
             kwargs={},
         ),
@@ -431,12 +434,7 @@ async def test_dedicated_worker_inprocess_python_does_not_see_runner_local_env(
     )
 
     assert response.ok is True
-    assert ast.literal_eval(str(response.result)) == {
-        "openai_base_url": None,
-        "test": None,
-        "runner_token": None,
-        "namespace": "alpha1234",
-    }
+    assert response.result == "|||alpha1234"
 
 
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:

@@ -357,6 +357,7 @@ def _build_registered_agent_tool(
     shared_storage_path: Path,
     worker_tools: list[str],
     worker_scope: WorkerScope | None,
+    allowed_shared_services: frozenset[str] | None,
     agent_name: str,
     tool_config_overrides: dict[str, object] | None,
     workspace_path: Path | None,
@@ -389,6 +390,7 @@ def _build_registered_agent_tool(
         runtime_overrides=runtime_overrides,
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
+        allowed_shared_services=allowed_shared_services,
         worker_target=worker_target,
     )
 
@@ -527,6 +529,7 @@ def build_agent_toolkit(  # noqa: PLR0911
         shared_storage_path,
         worker_tools,
         tool_init_context.execution_scope,
+        (config.get_worker_grantable_credentials() if tool_init_context.execution_scope is not None else None),
         agent_name,
         tool_config_overrides,
         tool_init_context.workspace_path,

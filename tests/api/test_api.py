@@ -23,6 +23,7 @@ from mindroom.api import config_lifecycle, google_integration, main
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
@@ -42,7 +43,11 @@ def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None)
     )
 
 
-def _config_with_worker_scope(worker_scope: str | None) -> Config:
+def _config_with_worker_scope(
+    worker_scope: str | None,
+    *,
+    worker_grantable_credentials: list[str] | None = None,
+) -> Config:
     config = Config.model_validate(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
@@ -55,7 +60,10 @@ def _config_with_worker_scope(worker_scope: str | None) -> Config:
                     "rooms": ["lobby"],
                 },
             },
-            "defaults": {"markdown": True},
+            "defaults": {
+                "markdown": True,
+                "worker_grantable_credentials": worker_grantable_credentials,
+            },
         },
     )
     config.agents["general"].worker_scope = worker_scope
@@ -1385,10 +1393,12 @@ def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
     assert response.json()["detail"] == "Unknown agent: missing"
 
 
-def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
-    """Supported scoped tools should report runtime env credentials as available."""
-    config = _config_with_worker_scope("shared")
+def test_get_tools_marks_allowlisted_shared_ui_scoped_tools_available(test_client: TestClient) -> None:
+    """Scoped tool preview should reflect allowlisted shared credentials regardless of source."""
+    config = _config_with_worker_scope("user", worker_grantable_credentials=["weather"])
     runtime_paths = main._app_runtime_paths(main.app)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("weather", {"WEATHER_API_KEY": "secret", "_source": "ui"})
     tools = [
         {
             "name": "weather",
@@ -1409,10 +1419,6 @@ def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClie
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
-        patch(
-            "mindroom.api.tools._load_env_shared_preview_credentials",
-            return_value={"WEATHER_API_KEY": "secret", "_source": "env"},
-        ),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
 
@@ -1421,6 +1427,43 @@ def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClie
     tool = response.json()["tools"][0]
     assert tool["name"] == "weather"
     assert tool["status"] == "available"
+    assert tool["dashboard_configuration_supported"] is False
+
+
+def test_get_tools_hides_non_allowlisted_shared_scoped_credentials(test_client: TestClient) -> None:
+    """Scoped tool preview should not claim non-allowlisted shared credentials are worker-visible."""
+    config = _config_with_worker_scope("user")
+    runtime_paths = main._app_runtime_paths(main.app)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("weather", {"WEATHER_API_KEY": "secret", "_source": "ui"})
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [
+                {
+                    "name": "WEATHER_API_KEY",
+                    "required": True,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "weather"
+    assert tool["status"] == "requires_config"
     assert tool["dashboard_configuration_supported"] is False
 
 
@@ -1502,6 +1545,7 @@ def test_get_tools_uses_one_runtime_snapshot(
             status_authoritative=True,
             credentials_manager=MagicMock(),
             worker_target=None,
+            allowed_shared_services=None,
         )
 
     with (
