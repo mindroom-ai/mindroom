@@ -211,6 +211,7 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None
     event_cache.get_mxc_text.return_value = None
+    event_cache.get_recent_room_thread_ids.return_value = []
     event_cache.get_thread_events.return_value = None
     event_cache.get_thread_cache_state.return_value = None
     event_cache.get_thread_id_for_event.return_value = None

@@ -549,6 +549,40 @@ class MatrixConversationCache(ConversationCacheProtocol):
             cache_write_guard_started_at=fetch_started_at,
         )
 
+    async def _startup_thread_prewarm_ids(
+        self,
+        room_id: str,
+    ) -> list[str] | None:
+        """Return startup-prewarm thread IDs using local recency first and /threads as a top-up."""
+        thread_ids = await self.runtime.event_cache.get_recent_room_thread_ids(room_id, limit=20)
+        if len(thread_ids) >= 20:
+            return thread_ids
+        try:
+            thread_roots, _next_batch = await get_room_threads_page(
+                self._require_client(),
+                room_id,
+                limit=20,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not thread_ids:
+                self.logger.warning(
+                    "startup_thread_prewarm_room_threads_failed",
+                    room_id=room_id,
+                    error=str(exc),
+                )
+                return None
+            return thread_ids
+
+        for thread_root in thread_roots:
+            thread_id = thread_root.event_id.strip()
+            if thread_id and thread_id not in thread_ids:
+                thread_ids.append(thread_id)
+            if len(thread_ids) >= 20:
+                break
+        return thread_ids
+
     async def prewarm_recent_room_threads(
         self,
         room_id: str,
@@ -559,28 +593,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         started_at = time.perf_counter()
         threads_warmed = 0
         threads_failed = 0
-
-        try:
-            thread_roots, _next_batch = await get_room_threads_page(
-                self._require_client(),
-                room_id,
-                limit=20,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_room_threads_failed",
-                room_id=room_id,
-                error=str(exc),
-            )
+        thread_ids = await self._startup_thread_prewarm_ids(room_id)
+        if thread_ids is None:
             return False
 
-        for thread_root in thread_roots:
+        for thread_id in thread_ids:
             if is_shutting_down():
                 return False
 
-            thread_id = thread_root.event_id.strip()
             if not thread_id:
                 threads_failed += 1
                 self.logger.warning(
