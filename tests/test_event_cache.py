@@ -255,6 +255,82 @@ async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_recent_room_thread_ids_orders_by_latest_event_in_each_thread(tmp_path: Path) -> None:
+    """Recent thread IDs should be ordered by the freshest cached event per thread, not by root timestamp."""
+    cache = _EventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+
+    try:
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_old_root_recent_reply",
+            events=[
+                {
+                    "event_id": "$thread_old_root_recent_reply",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"body": "Old root", "msgtype": "m.text"},
+                },
+                {
+                    "event_id": "$recent_reply",
+                    "sender": "@agent:localhost",
+                    "origin_server_ts": 9000,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "Recent reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread_old_root_recent_reply",
+                        },
+                    },
+                },
+            ],
+        )
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_recent_root_no_replies",
+            events=[
+                {
+                    "event_id": "$thread_recent_root_no_replies",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 5000,
+                    "type": "m.room.message",
+                    "content": {"body": "Recent root", "msgtype": "m.text"},
+                },
+            ],
+        )
+        await _seed_thread_cache(
+            cache,
+            room_id="!other_room:localhost",
+            thread_id="$thread_other_room",
+            events=[
+                {
+                    "event_id": "$thread_other_room",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 99999,
+                    "type": "m.room.message",
+                    "content": {"body": "Other room root", "msgtype": "m.text"},
+                },
+            ],
+        )
+
+        all_recent = await cache.get_recent_room_thread_ids("!room:localhost", limit=10)
+        first_only = await cache.get_recent_room_thread_ids("!room:localhost", limit=1)
+    finally:
+        await cache.close()
+
+    assert all_recent == [
+        "$thread_old_root_recent_reply",
+        "$thread_recent_root_no_replies",
+    ]
+    assert first_only == ["$thread_old_root_recent_reply"]
+
+
+@pytest.mark.asyncio
 async def test_event_cache_preserves_insertion_order_for_same_timestamp_events(tmp_path: Path) -> None:
     """Cached reads should preserve the stored order when timestamps tie."""
     cache = _EventCache(tmp_path / "event_cache.db")

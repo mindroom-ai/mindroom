@@ -367,6 +367,9 @@ class ConversationEventCache(Protocol):
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
 
+    async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
+        """Return locally known thread IDs for one room ordered by newest cached activity."""
+
     async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
         """Return durable freshness metadata for one cached thread."""
 
@@ -517,6 +520,19 @@ class _EventCache:
                 db,
                 room_id=room_id,
                 thread_id=thread_id,
+            ),
+        )
+
+    async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
+        """Return locally known thread IDs for one room ordered by newest cached activity."""
+        return await self._read_operation(
+            room_id,
+            operation="get_recent_room_thread_ids",
+            disabled_result=[],
+            reader=lambda db: event_cache_threads.load_recent_room_thread_ids(
+                db,
+                room_id=room_id,
+                limit=limit,
             ),
         )
 

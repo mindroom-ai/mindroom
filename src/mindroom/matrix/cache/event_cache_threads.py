@@ -67,6 +67,29 @@ async def load_thread_events(
     return [json.loads(row[0]) for row in rows]
 
 
+async def load_recent_room_thread_ids(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    limit: int,
+) -> list[str]:
+    """Return thread IDs for one room ordered by the newest locally cached event timestamp."""
+    cursor = await db.execute(
+        """
+        SELECT thread_id
+        FROM thread_events
+        WHERE room_id = ?
+        GROUP BY thread_id
+        ORDER BY MAX(origin_server_ts) DESC, thread_id ASC
+        LIMIT ?
+        """,
+        (room_id, limit),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [str(row[0]) for row in rows]
+
+
 async def load_thread_cache_state_row(
     db: aiosqlite.Connection,
     *,
