@@ -119,6 +119,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         str(base_config.chunk_overlap),
         git_config.repo_url if git_config is not None else "",
         git_config.branch if git_config is not None else "",
+        str(git_config.lfs) if git_config is not None else "",
         str(git_config.skip_hidden) if git_config is not None else "",
         str(tuple(git_config.include_patterns)) if git_config is not None else "",
         str(tuple(git_config.exclude_patterns)) if git_config is not None else "",

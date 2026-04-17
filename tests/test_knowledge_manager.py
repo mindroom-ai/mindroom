@@ -984,6 +984,44 @@ async def test_initialize_shared_knowledge_managers_non_index_setting_change_reu
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_full_reindex_on_git_lfs_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching Git LFS mode must rebuild the index because file contents can change."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "research", lfs=False)
+    runtime_paths = runtime_paths_for(config)
+
+    initial_sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    initial_sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", initial_sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", initial_sync_indexed_files)
+
+    managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+    original_manager = managers["research"]
+
+    updated_config = _make_git_config(tmp_path / "research", lfs=True)
+
+    initialize = AsyncMock()
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+    monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+
+    managers = await initialize_shared_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
+    new_manager = managers["research"]
+
+    assert new_manager is not original_manager
+    initialize.assert_awaited_once()
+    sync_indexed_files.assert_not_awaited()
+
+    await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_private_knowledge_managers_copy_template_and_isolate_private_instance_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
