@@ -2,17 +2,22 @@
 
 import inspect
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from agno.tools import Toolkit
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
+import mindroom.tool_system.metadata as metadata_module
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
+    _capture_tool_registry_snapshot,
+    _execute_validation_plugin_module,
     AUTHORED_OVERRIDE_INHERIT,
     TOOL_METADATA,
     ConfigField,
@@ -105,6 +110,34 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
         _restore_builtin_tool_metadata_state()
+
+
+def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plugin validation should snapshot sys.modules before iterating over it."""
+
+    class SnapshotOnlyModules(dict[str, ModuleType]):
+        def items(self):  # type: ignore[override]
+            msg = "live sys.modules.items() should not be used"
+            raise RuntimeError(msg)
+
+        def copy(self):  # type: ignore[override]
+            return dict(self)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    module_path = plugin_root / "tools.py"
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
+    monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
+
+    snapshot = _capture_tool_registry_snapshot()
+    assert isinstance(snapshot.plugin_modules, dict)
+
+    module_name = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
+    assert module_name
+    assert "demo" in module_name
+    assert "__validation__" in module_name
 
 
 def test_tool_metadata_consistency() -> None:
