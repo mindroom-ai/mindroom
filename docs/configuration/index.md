@@ -267,7 +267,7 @@ defaults:
 Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
-This setting does not add provider env vars to sandbox-proxied `python` or `shell`.
+This setting does not add provider env vars such as `OPENAI_API_KEY` to sandbox-proxied `python` or `shell`.
 This setting also does not control local shared-only integrations that stay in the main runtime, such as `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
 Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
 `google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
