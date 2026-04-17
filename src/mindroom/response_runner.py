@@ -1999,6 +1999,7 @@ class ResponseRunner:
                     thread_history=thread_history,
                     room_id=room_id,
                     knowledge=knowledge,
+                    user_id=user_id,
                     reply_to_event_id=reply_to_event_id,
                     active_event_ids=active_event_ids,
                     show_tool_calls=show_tool_calls,

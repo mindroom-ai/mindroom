@@ -39,7 +39,7 @@ from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
-    build_prompt_with_thread_history,
+    build_matrix_prompt_with_thread_history,
     prepare_bound_team_execution_context,
 )
 from mindroom.history.runtime import (
@@ -1400,7 +1400,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 scope_context=scope_context,
                 entity_name=configured_team_name or team_name,
             )
-            fallback_prompt = build_prompt_with_thread_history(
+            fallback_prompt = build_matrix_prompt_with_thread_history(
                 message,
                 thread_history,
                 header="Thread Context:",
@@ -1701,7 +1701,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 scope_context=scope_context,
                 entity_name=configured_team_name or team_label,
             )
-            fallback_prompt = build_prompt_with_thread_history(
+            fallback_prompt = build_matrix_prompt_with_thread_history(
                 message,
                 thread_history,
                 header="Thread Context:",

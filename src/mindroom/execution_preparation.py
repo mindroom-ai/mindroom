@@ -88,30 +88,20 @@ class PreparedExecutionContext:
 
 
 def _wrap_msg_body(sender: str, body: str) -> str:
-    """Render one message as a <msg from="..."> tag with verbatim body."""
-    safe_body = body.replace("</msg>", "<\\/msg>")
-    return f"<msg from={xml_quoteattr(sender)}>{safe_body}</msg>"
+    """Render one Matrix message as a <msg from="..."><![CDATA[...]]></msg> tag."""
+    safe_body = body.replace("]]>", "]]]]><![CDATA[>")
+    return f"<msg from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
 
 
-def _format_history_line(sender: str, body: str, *, wrap: bool) -> str:
-    return _wrap_msg_body(sender, body) if wrap else f"{sender}: {body}"
-
-
-def _format_history_block(context_lines: list[str], *, wrap: bool) -> str:
-    joined = "\n".join(context_lines)
-    return f"<conversation>\n{joined}\n</conversation>" if wrap else joined
-
-
-def _collect_history_lines(
+def _collect_history_messages(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     max_messages: int | None,
     max_message_length: int | None,
     missing_sender_label: str | None,
-    wrap: bool,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     messages = thread_history[-max_messages:] if max_messages is not None else thread_history
-    lines: list[str] = []
+    collected: list[tuple[str, str]] = []
     for msg in messages:
         body = msg.body
         if not body:
@@ -123,8 +113,37 @@ def _collect_history_lines(
             if missing_sender_label is None:
                 continue
             sender = missing_sender_label
-        lines.append(_format_history_line(sender, body, wrap=wrap))
-    return lines
+        collected.append((sender, body))
+    return collected
+
+
+def _build_plain_prompt_with_history(
+    prompt: str,
+    history_messages: list[tuple[str, str]],
+    *,
+    header: str,
+    prompt_intro: str,
+) -> str:
+    if not history_messages:
+        return prompt
+    context = "\n".join(f"{sender}: {body}" for sender, body in history_messages)
+    return f"{header}\n{context}\n\n{prompt_intro}{prompt}"
+
+
+def _build_matrix_prompt_with_history(
+    prompt: str,
+    history_messages: list[tuple[str, str]],
+    *,
+    header: str,
+    prompt_intro: str,
+    current_sender: str | None,
+) -> str:
+    current_block = _wrap_msg_body(current_sender, prompt) if current_sender is not None else prompt
+    standalone_prompt = f"{prompt_intro}{current_block}" if current_sender is not None else prompt
+    if not history_messages:
+        return standalone_prompt
+    rendered_history = "\n".join(_wrap_msg_body(sender, body) for sender, body in history_messages)
+    return f"{header}\n<conversation>\n{rendered_history}\n</conversation>\n\n{prompt_intro}{current_block}"
 
 
 def build_prompt_with_thread_history(
@@ -136,39 +155,53 @@ def build_prompt_with_thread_history(
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
-    current_sender: str | None = None,
 ) -> str:
-    """Build a prompt with thread history context when available.
-
-    When ``current_sender`` is provided, history is rendered as
-    ``<msg from="...">body</msg>`` tags inside a ``<conversation>`` block and
-    the current prompt receives the same wrapping so the model can attribute
-    every turn — used for Matrix multi-sender threads where unseen messages
-    from other participants may be prepended. Bodies are passed through
-    verbatim; a literal ``</msg>`` is neutralized so it cannot prematurely
-    close the wrapper.
-
-    When ``current_sender`` is ``None`` (e.g., the OpenAI-compatible API),
-    callers have already organized prior turns by role, so we render history
-    as plain ``sender: body`` lines and pass the current prompt through
-    unwrapped.
-    """
-    wrap = current_sender is not None
-    current_block = _wrap_msg_body(current_sender, prompt) if current_sender else prompt
-    standalone_prompt = f"{prompt_intro}{current_block}" if current_sender else prompt
+    """Build a plain-text prompt with ``sender: body`` history lines."""
     if not thread_history:
-        return standalone_prompt
-    context_lines = _collect_history_lines(
+        return prompt
+    history_messages = _collect_history_messages(
         thread_history,
         max_messages=max_messages,
         max_message_length=max_message_length,
         missing_sender_label=missing_sender_label,
-        wrap=wrap,
     )
-    if not context_lines:
-        return standalone_prompt
-    context = _format_history_block(context_lines, wrap=wrap)
-    return f"{header}\n{context}\n\n{prompt_intro}{current_block}"
+    return _build_plain_prompt_with_history(
+        prompt,
+        history_messages,
+        header=header,
+        prompt_intro=prompt_intro,
+    )
+
+
+def build_matrix_prompt_with_thread_history(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    *,
+    header: str = "Previous conversation in this thread:",
+    prompt_intro: str = "Current message:\n",
+    max_messages: int | None = None,
+    max_message_length: int | None = None,
+    missing_sender_label: str | None = None,
+    current_sender: str | None = None,
+) -> str:
+    """Build a Matrix prompt with structured XML-like message wrappers."""
+    history_messages = (
+        _collect_history_messages(
+            thread_history,
+            max_messages=max_messages,
+            max_message_length=max_message_length,
+            missing_sender_label=missing_sender_label,
+        )
+        if thread_history
+        else []
+    )
+    return _build_matrix_prompt_with_history(
+        prompt,
+        history_messages,
+        header=header,
+        prompt_intro=prompt_intro,
+        current_sender=current_sender,
+    )
 
 
 def _classify_partial_reply(
@@ -318,17 +351,23 @@ def _build_prompt_with_unseen(
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:
         if current_sender_id:
-            return build_prompt_with_thread_history(
+            return build_matrix_prompt_with_thread_history(
                 prompt,
                 None,
                 current_sender=current_sender_id,
             )
         return prompt
+    if current_sender_id:
+        return build_matrix_prompt_with_thread_history(
+            prompt,
+            unseen_messages,
+            header=_build_unseen_messages_header(partial_reply_kinds or set()),
+            current_sender=current_sender_id,
+        )
     return build_prompt_with_thread_history(
         prompt,
         unseen_messages,
         header=_build_unseen_messages_header(partial_reply_kinds or set()),
-        current_sender=current_sender_id,
     )
 
 
@@ -401,6 +440,7 @@ async def _prepare_execution_context_common(
     *,
     scope_context: ScopeSessionContext | None,
     prompt: str,
+    standalone_prompt: str,
     fallback_prompt: str | None,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     reply_to_event_id: str | None,
@@ -445,7 +485,7 @@ async def _prepare_execution_context_common(
             current_sender_id=current_sender_id,
         )
     else:
-        final_prompt = prompt
+        final_prompt = standalone_prompt
         unseen_event_ids = []
 
     prepared_history = _finalize_prepared_history(
@@ -457,7 +497,7 @@ async def _prepare_execution_context_common(
         ),
     )
     if replay_fallback_prompt is not None:
-        final_prompt = prompt if prepared_history.replays_persisted_history else replay_fallback_prompt
+        final_prompt = standalone_prompt if prepared_history.replays_persisted_history else replay_fallback_prompt
 
     return PreparedExecutionContext(
         final_prompt=final_prompt,
@@ -488,13 +528,29 @@ async def prepare_agent_execution_context(
     """Prepare one agent's final prompt and replay plan for the current call."""
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
+    standalone_prompt = (
+        build_matrix_prompt_with_thread_history(
+            prompt,
+            None,
+            current_sender=current_sender_id,
+        )
+        if current_sender_id is not None
+        else prompt
+    )
     fallback_prompt = (
         None
         if reply_to_event_id and thread_history
-        else build_prompt_with_thread_history(
-            prompt,
-            thread_history,
-            current_sender=current_sender_id,
+        else (
+            build_matrix_prompt_with_thread_history(
+                prompt,
+                thread_history,
+                current_sender=current_sender_id,
+            )
+            if current_sender_id is not None
+            else build_prompt_with_thread_history(
+                prompt,
+                thread_history,
+            )
         )
     )
     runtime_model = config.resolve_runtime_model(
@@ -528,6 +584,7 @@ async def prepare_agent_execution_context(
     return await _prepare_execution_context_common(
         scope_context=scope_context,
         prompt=prompt,
+        standalone_prompt=standalone_prompt,
         fallback_prompt=fallback_prompt,
         thread_history=thread_history,
         reply_to_event_id=reply_to_event_id,
@@ -565,6 +622,15 @@ async def prepare_bound_team_execution_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
+    standalone_prompt = (
+        build_matrix_prompt_with_thread_history(
+            prompt,
+            None,
+            current_sender=current_sender_id,
+        )
+        if current_sender_id is not None
+        else prompt
+    )
 
     async def _prepare_team_scope_history(
         prepared_prompt: str,
@@ -587,6 +653,7 @@ async def prepare_bound_team_execution_context(
     return await _prepare_execution_context_common(
         scope_context=scope_context,
         prompt=prompt,
+        standalone_prompt=standalone_prompt,
         fallback_prompt=fallback_prompt,
         thread_history=thread_history,
         reply_to_event_id=reply_to_event_id,
