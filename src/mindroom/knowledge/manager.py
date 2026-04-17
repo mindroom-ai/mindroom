@@ -942,10 +942,13 @@ class KnowledgeManager:
 
     async def initialize(self) -> None:
         """Initialize and index all existing knowledge files."""
-        if self._git_config() is not None and not self._git_background_startup_enabled():
+        git_config = self._git_config()
+        if git_config is not None and not self._git_background_startup_enabled():
             await self.sync_git_repository(index_changes=False)
 
         indexed_count = await self.reindex_all()
+        if git_config is not None and not self._git_background_startup_enabled():
+            self._git_initial_sync_complete = True
         logger.info(
             "Knowledge base initialized",
             base_id=self.base_id,

@@ -2515,7 +2515,7 @@ async def test_initialize_git_backed_base_syncs_before_single_full_reindex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Git-backed initialization should refresh the checkout once, then do one full reindex."""
+    """Git-backed initialization should refresh the checkout once, then report completed initial sync."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -2534,6 +2534,7 @@ async def test_initialize_git_backed_base_syncs_before_single_full_reindex(
 
     sync_git_repository.assert_awaited_once_with(index_changes=False)
     reindex_all.assert_awaited_once_with()
+    assert manager.get_status()["git"]["initial_sync_complete"] is True
 
 
 @pytest.mark.asyncio
