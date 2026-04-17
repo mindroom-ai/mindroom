@@ -170,7 +170,7 @@ class StreamingResponse:
     target: MessageTarget | None = None
     accumulated_text: str = ""
     event_id: str | None = None  # None until first message sent
-    initial_transaction_id: str | None = None
+    response_transaction_id: str | None = None
     last_update: float = 0.0
     update_interval: float = 5.0
     min_update_interval: float = 0.5
@@ -407,7 +407,7 @@ class StreamingResponse:
             client,
             self.room_id,
             content,
-            transaction_id=self.initial_transaction_id,
+            transaction_id=self.response_transaction_id,
         )
         if delivered is None:
             return False
@@ -581,7 +581,7 @@ async def send_streaming_response(
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
-    initial_transaction_id: str | None = None,
+    response_transaction_id: str | None = None,
     adopt_existing_placeholder: bool = False,
     room_mode: bool = False,
     target: MessageTarget | None = None,
@@ -612,7 +612,7 @@ async def send_streaming_response(
         latest_thread_event_id=latest_thread_event_id,
         room_mode=resolved_target.is_room_mode,
         show_tool_calls=show_tool_calls,
-        initial_transaction_id=initial_transaction_id,
+        response_transaction_id=response_transaction_id,
         extra_content=extra_content,
         update_interval=sc.update_interval,
         min_update_interval=sc.min_update_interval,

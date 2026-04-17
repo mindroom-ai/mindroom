@@ -301,7 +301,7 @@ async def test_replayed_message_reuses_pending_response_transaction_id(tmp_path:
         history_scope=None,
         conversation_target=target,
     )
-    pending_tx = bot._turn_store.reserve_response_transaction_id(handled_turn)
+    pending_response = bot._turn_store.reserve_pending_response(handled_turn)
 
     dispatch = PreparedDispatch(
         requester_user_id="@user:example.com",
@@ -344,8 +344,8 @@ async def test_replayed_message_reuses_pending_response_transaction_id(tmp_path:
     )
 
     request = bot._response_runner.generate_response.await_args.args[0]
-    assert request.initial_transaction_id == pending_tx
+    assert request.response_transaction_id == pending_response.response_transaction_id
     turn_record = bot._turn_store.get_turn_record(message_event.event_id)
     assert turn_record is not None
     assert turn_record.response_event_id == "$response:example.com"
-    assert turn_record.response_transaction_id == pending_tx
+    assert turn_record.response_transaction_id == pending_response.response_transaction_id

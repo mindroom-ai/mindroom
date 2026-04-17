@@ -188,7 +188,7 @@ class FinalDeliveryRequest:
     correlation_id: str
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
-    initial_transaction_id: str | None = None
+    response_transaction_id: str | None = None
     existing_event_is_placeholder: bool = False
     apply_before_hooks: bool = True
 
@@ -209,7 +209,7 @@ class StreamingDeliveryRequest:
     target: MessageTarget
     response_stream: AsyncIterator[_StreamInputChunk]
     existing_event_id: str | None = None
-    initial_transaction_id: str | None = None
+    response_transaction_id: str | None = None
     adopt_existing_placeholder: bool = False
     header: str | None = None
     show_tool_calls: bool = False
@@ -548,7 +548,7 @@ class DeliveryGateway:
                 SendTextRequest(
                     target=resolved_target,
                     response_text=display_text,
-                    transaction_id=request.initial_transaction_id,
+                    transaction_id=request.response_transaction_id,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 ),
@@ -636,7 +636,7 @@ class DeliveryGateway:
             header=request.header,
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
-            initial_transaction_id=request.initial_transaction_id,
+            response_transaction_id=request.response_transaction_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             target=request.target,
             room_mode=request.target.is_room_mode,

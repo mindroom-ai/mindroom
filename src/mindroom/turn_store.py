@@ -37,6 +37,13 @@ class LoadedTurnRecord:
 
 
 @dataclass(frozen=True)
+class PendingResponseReservation:
+    """Durable delivery state reserved before the first visible reply send."""
+
+    response_transaction_id: str
+
+
+@dataclass(frozen=True)
 class _PersistedTurnMetadata:
     """Run metadata needed to rebuild a coalesced turn after a partial ledger write."""
 
@@ -125,9 +132,11 @@ class TurnStore:
         """Return the first visible echo already tracked for one or more source events."""
         return self._ledger.visible_echo_event_id_for_sources(source_event_ids)
 
-    def reserve_response_transaction_id(self, handled_turn: HandledTurnState) -> str:
-        """Reserve one stable outbound transaction id for the first visible reply send."""
-        return self._ledger.reserve_response_transaction_id(handled_turn)
+    def reserve_pending_response(self, handled_turn: HandledTurnState) -> PendingResponseReservation:
+        """Reserve durable delivery state for the first visible reply send."""
+        return PendingResponseReservation(
+            response_transaction_id=self._ledger.reserve_response_transaction_id(handled_turn),
+        )
 
     def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
         """Return the ledger-backed turn record for one source event when available."""

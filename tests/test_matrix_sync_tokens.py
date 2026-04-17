@@ -134,7 +134,7 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await bot._on_sync_response(response)
-    flush_task = bot._sync_checkpoint_flush_task
+    flush_task = bot._sync_checkpoint.flush_task
     if flush_task is not None:
         await asyncio.gather(flush_task, return_exceptions=True)
 
@@ -156,7 +156,7 @@ async def test_on_sync_response_defers_persisting_latest_sync_token_until_pendin
         await gate.wait()
 
     task = asyncio.create_task(slow_event_task())
-    bot._pending_sync_event_tasks = {task}
+    bot._sync_checkpoint.register_event_task(task)
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after"
     response.rooms = MagicMock(join={})
@@ -168,7 +168,7 @@ async def test_on_sync_response_defers_persisting_latest_sync_token_until_pendin
     finally:
         gate.set()
         await task
-        flush_task = bot._sync_checkpoint_flush_task
+        flush_task = bot._sync_checkpoint.flush_task
         if flush_task is not None:
             await asyncio.gather(flush_task, return_exceptions=True)
 
@@ -201,7 +201,7 @@ async def test_prepare_for_sync_shutdown_waits_for_pending_event_tasks_before_fl
         await gate.wait()
 
     task = asyncio.create_task(slow_event_task())
-    bot._pending_sync_event_tasks = {task}
+    bot._sync_checkpoint.register_event_task(task)
     shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
 
     try:

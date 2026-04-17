@@ -65,7 +65,7 @@ def _make_matrix_client_mock() -> AsyncMock:
 
 
 @pytest.mark.asyncio
-async def test_send_streaming_response_uses_explicit_initial_transaction_id(tmp_path: Path) -> None:
+async def test_send_streaming_response_uses_explicit_response_transaction_id(tmp_path: Path) -> None:
     """The first visible streaming send should forward the reserved transaction id."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -107,7 +107,7 @@ async def test_send_streaming_response_uses_explicit_initial_transaction_id(tmp_
             config=config,
             runtime_paths=runtime_paths,
             response_stream=_aiter("hello"),
-            initial_transaction_id="txn-123",
+            response_transaction_id="txn-123",
             room_mode=True,
         )
 

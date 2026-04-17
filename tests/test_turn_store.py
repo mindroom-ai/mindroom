@@ -57,16 +57,16 @@ def test_turn_store_reuses_reserved_response_transaction_id_across_reload(tmp_pa
     )
     store = TurnStore(deps)
 
-    first = store.reserve_response_transaction_id(HandledTurnState.from_source_event_id("$event"))
+    first = store.reserve_pending_response(HandledTurnState.from_source_event_id("$event"))
 
     reloaded_store = TurnStore(deps)
-    second = reloaded_store.reserve_response_transaction_id(HandledTurnState.from_source_event_id("$event"))
+    second = reloaded_store.reserve_pending_response(HandledTurnState.from_source_event_id("$event"))
 
-    assert first == second
+    assert first.response_transaction_id == second.response_transaction_id
     assert reloaded_store.is_handled("$event") is False
     turn_record = reloaded_store.get_turn_record("$event")
     assert turn_record is not None
-    assert turn_record.response_transaction_id == first
+    assert turn_record.response_transaction_id == first.response_transaction_id
     assert turn_record.completed is False
 
 

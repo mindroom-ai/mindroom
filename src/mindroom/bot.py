@@ -121,6 +121,7 @@ from .scheduling import (
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
+from .sync_checkpoint import SyncCheckpointCoordinator
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import (
     IngressHookRunner,
@@ -158,6 +159,7 @@ def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: object | None = None,
+    register_sync_event_task: Callable[[asyncio.Task[Any]], None] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
@@ -179,7 +181,9 @@ def _create_task_wrapper(
                 logger.exception("Error in event callback")
 
         # Keep a strong reference via background task registry.
-        create_background_task(error_handler(), owner=owner)
+        task = create_background_task(error_handler(), owner=owner)
+        if register_sync_event_task is not None:
+            register_sync_event_task(task)
 
     return wrapper
 
@@ -313,6 +317,7 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _invited_rooms: set[str]
+    _sync_checkpoint: SyncCheckpointCoordinator
 
     def __init__(
         self,
@@ -363,6 +368,11 @@ class AgentBot:
             ),
         )
         self._invited_rooms = self._room_lifecycle.invited_rooms
+        self._sync_checkpoint = SyncCheckpointCoordinator(
+            agent_name=self.agent_name,
+            persist_sync_token=self._persist_sync_token,
+            owner=self._runtime_view,
+        )
         self._init_runtime_components()
 
     def _init_runtime_components(self) -> None:
@@ -978,11 +988,9 @@ class AgentBot:
             # skipping events whose timeline metadata never reached local state.
             self._conversation_cache.cache_sync_timeline(_response)
 
-        # Event callbacks run fire-and-forget in background tasks. A crash after
-        # persisting `next_batch` but before all callback tasks finish can still
-        # lose events. That window is small, and tracking every background task
-        # here would add more complexity than this restart optimization warrants.
-        self._persist_sync_token()
+        token = _response.next_batch if isinstance(_response.next_batch, str) else None
+        if token:
+            self._sync_checkpoint.note_sync_token(token)
         self._first_sync_done = True
 
         if first_sync_response:
@@ -1055,7 +1063,7 @@ class AgentBot:
                     _create_task_wrapper(
                         callback,
                         owner=self._runtime_view,
-                        register_sync_event_task=self._register_sync_event_task,
+                        register_sync_event_task=self._sync_checkpoint.register_event_task,
                     ),
                     event_type,
                 )
@@ -1249,7 +1257,9 @@ class AgentBot:
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
         await self._coalescing_gate.drain_all()
-        self._persist_sync_token()
+        await self._sync_checkpoint.flush_for_shutdown(
+            self.client.next_batch if self.client is not None else None,
+        )
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
