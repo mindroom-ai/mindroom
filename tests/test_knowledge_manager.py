@@ -1843,6 +1843,59 @@ async def test_initialize_shared_knowledge_managers_refreshes_shared_managers_on
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_stops_existing_watchers_when_reuse_disables_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reused shared managers should tear down an active file watcher when a later caller disables it."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    async def _watch_loop_until_stopped(manager: KnowledgeManager) -> None:
+        await manager._watch_stop_event.wait()
+
+    monkeypatch.setattr(KnowledgeManager, "_watch_loop", _watch_loop_until_stopped)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=True)},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=True,
+            reindex_on_create=False,
+        )
+        manager = managers["docs"]
+        original_stop_watcher = manager.stop_watcher
+        stop_watcher = AsyncMock(side_effect=original_stop_watcher)
+        monkeypatch.setattr(manager, "stop_watcher", stop_watcher)
+
+        reused_managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+
+        assert reused_managers["docs"] is manager
+        stop_watcher.assert_awaited_once_with()
+        assert manager._watch_task is None
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

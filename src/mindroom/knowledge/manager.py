@@ -1638,7 +1638,9 @@ async def _ensure_shared_knowledge_manager_for_target(
                 target.binding.knowledge_path,
             )
             background_git_startup_enabled = existing._git_background_startup_enabled()
-            if not target.binding.start_background_watchers and not background_git_startup_enabled:
+            if not target.binding.start_background_watchers and existing._watch_task is not None:
+                await existing.stop_watcher()
+            elif not target.binding.start_background_watchers and not background_git_startup_enabled:
                 await existing._stop_git_sync()
             if target.binding.incremental_sync_on_access and not background_git_startup_enabled:
                 await _sync_manager_without_full_reindex(existing)
