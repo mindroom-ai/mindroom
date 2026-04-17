@@ -181,6 +181,26 @@ def test_record_outcome_tracks_response_event_id(temp_dir: Path) -> None:
     )
 
 
+def test_pending_handled_turn_round_trips_response_transaction_id(temp_dir: Path) -> None:
+    """Pending handled-turn records should preserve one reserved outbound transaction id."""
+    tracker = HandledTurnLedger("test_pending", base_path=temp_dir)
+    tracker.record_handled_turn_record(
+        HandledTurnRecord(
+            anchor_event_id="$event",
+            source_event_ids=("$event",),
+            completed=False,
+            response_transaction_id="txn-123",
+        ),
+    )
+
+    reloaded = HandledTurnLedger("test_pending", base_path=temp_dir)
+    turn_record = reloaded.get_turn_record("$event")
+
+    assert turn_record is not None
+    assert turn_record.completed is False
+    assert turn_record.response_transaction_id == "txn-123"
+
+
 def test_record_outcome_deduplicates_source_event_ids(temp_dir: Path) -> None:
     """Duplicate source IDs should collapse into one stored turn record."""
     tracker = HandledTurnLedger("test_dedup", base_path=temp_dir)

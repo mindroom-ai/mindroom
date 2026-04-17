@@ -287,6 +287,7 @@ class ResponseRequest:
     response_envelope: MessageEnvelope | None = None
     correlation_id: str | None = None
     target: MessageTarget | None = None
+    initial_transaction_id: str | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     strip_transient_enrichment_after_run: bool = False
@@ -1075,6 +1076,7 @@ class ResponseRunner:
                                 target=delivery_target,
                                 response_stream=response_stream,
                                 existing_event_id=delivery_request.existing_event_id,
+                                initial_transaction_id=request.initial_transaction_id,
                                 adopt_existing_placeholder=delivery_request.existing_event_id is not None
                                 and delivery_request.existing_event_is_placeholder,
                                 header=None,
@@ -1184,6 +1186,7 @@ class ResponseRunner:
                     FinalDeliveryRequest(
                         target=delivery_target,
                         existing_event_id=message_id,
+                        initial_transaction_id=request.initial_transaction_id,
                         existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
                         response_text=response_text,
                         response_kind="team",
@@ -1210,6 +1213,7 @@ class ResponseRunner:
                 response_function=generate_team_response,
                 thinking_message=thinking_msg,
                 existing_event_id=request.existing_event_id,
+                initial_transaction_id=request.initial_transaction_id,
                 user_id=requester_user_id,
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,
@@ -1276,6 +1280,7 @@ class ResponseRunner:
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
         thinking_message: str | None = None,
         existing_event_id: str | None = None,
+        initial_transaction_id: str | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
         target: MessageTarget | None = None,
@@ -1302,6 +1307,7 @@ class ResponseRunner:
                         SendTextRequest(
                             target=resolved_target,
                             response_text=thinking_message,
+                            transaction_id=initial_transaction_id,
                             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                         ),
                     )
@@ -1584,6 +1590,7 @@ class ResponseRunner:
                     target=runtime.resolved_target,
                     response_stream=wrapped_response_stream,
                     existing_event_id=request.existing_event_id,
+                    initial_transaction_id=request.initial_transaction_id,
                     adopt_existing_placeholder=request.existing_event_id is not None
                     and request.existing_event_is_placeholder,
                     show_tool_calls=self._show_tool_calls(),
@@ -1696,6 +1703,7 @@ class ResponseRunner:
             FinalDeliveryRequest(
                 target=runtime.resolved_target,
                 existing_event_id=request.existing_event_id,
+                initial_transaction_id=request.initial_transaction_id,
                 existing_event_is_placeholder=request.existing_event_is_placeholder,
                 response_text=response_text,
                 response_kind=response_kind,
@@ -2260,6 +2268,7 @@ class ResponseRunner:
                 response_function=generate,
                 thinking_message=thinking_msg,
                 existing_event_id=request.existing_event_id,
+                initial_transaction_id=request.initial_transaction_id,
                 user_id=request.user_id,
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,

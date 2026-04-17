@@ -387,6 +387,28 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
 
 
 @pytest.mark.asyncio
+async def test_delivery_gateway_send_text_forwards_transaction_id(tmp_path: Path) -> None:
+    """Direct sends should forward caller-owned transaction IDs to Matrix delivery."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    target = MessageTarget.resolve("!test:server", None, "$event123")
+
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ) as mock_send:
+        event_id = await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="formatted response",
+                transaction_id="txn-123",
+            ),
+        )
+
+    assert event_id == "$response"
+    assert mock_send.await_args.kwargs["transaction_id"] == "txn-123"
+
+
+@pytest.mark.asyncio
 async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_path: Path) -> None:
     """Threaded edits should treat edit_message success as an event ID and write through immediately."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)

@@ -431,6 +431,68 @@ class TestSendMessageResult:
     """Tests for send_message_result."""
 
     @pytest.mark.asyncio
+    async def test_passes_transaction_id_to_room_send(self) -> None:
+        """Explicit transaction IDs should be forwarded through cached room sends."""
+        client = _mock_client(encrypted=False)
+        client.room_send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+
+        with patch(
+            "mindroom.matrix.client.prepare_large_message",
+            new=AsyncMock(return_value={"body": "hello", "msgtype": "m.text"}),
+        ):
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                transaction_id="txn-123",
+            )
+
+        assert result is not None
+        client.room_send.assert_awaited_once_with(
+            room_id="!room:localhost",
+            message_type="m.room.message",
+            content={"body": "hello", "msgtype": "m.text"},
+            tx_id="txn-123",
+        )
+
+    @pytest.mark.asyncio
+    async def test_passes_transaction_id_to_raw_api_send(self) -> None:
+        """Explicit transaction IDs should also flow through uncached raw API sends."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = None
+        client.access_token = "token"  # noqa: S105
+        client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+            "not found",
+            status_code="M_NOT_FOUND",
+        )
+        client._send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+
+        prepared_content = {"body": "hello", "msgtype": "m.text"}
+        with (
+            patch("mindroom.matrix.client.prepare_large_message", new=AsyncMock(return_value=prepared_content)),
+            patch(
+                "mindroom.matrix.client.Api.room_send",
+                return_value=("PUT", "/_matrix/client/v3/rooms/!room:localhost/send", "{}"),
+            ) as mock_room_send_api,
+        ):
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                transaction_id="txn-raw-123",
+            )
+
+        assert result is not None
+        mock_room_send_api.assert_called_once_with(
+            "token",
+            "!room:localhost",
+            "m.room.message",
+            prepared_content,
+            "txn-raw-123",
+        )
+
+    @pytest.mark.asyncio
     async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self) -> None:
         """Encrypted-room text sends should fail before sidecar prep when nio E2EE support is disabled."""
         client = _mock_client(encrypted=True)

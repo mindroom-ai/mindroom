@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -11,8 +12,12 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
+from mindroom.hooks import MessageEnvelope
+from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
+from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from tests.conftest import install_runtime_cache_support, replace_turn_controller_deps, wrap_extracted_collaborators
 
 if TYPE_CHECKING:
@@ -43,6 +48,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Create a minimal mock config
     config = Mock()
     config.agents = {"test_agent": Mock()}
+    config.teams = {}
     config.get_agent_knowledge_base_ids.return_value = []
     config.get_ids.return_value = {"test_agent": MatrixID.parse("@test_agent:example.com")}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
@@ -158,6 +164,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Create a minimal mock config
     config = Mock()
     config.agents = {"test_agent": Mock()}
+    config.teams = {}
     config.get_agent_knowledge_base_ids.return_value = []
     config.get_ids.return_value = {"test_agent": MatrixID.parse("@test_agent:example.com")}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
@@ -226,3 +233,119 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
         # The bot should NOT process this message again
         mock_dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_replayed_message_reuses_pending_response_transaction_id(tmp_path: Path) -> None:
+    """Replay should keep using the same reserved transaction id until the turn completes."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = Mock()
+    config.agents = {"test_agent": Mock()}
+    config.teams = {}
+    config.get_agent_knowledge_base_ids.return_value = []
+    config.get_ids.return_value = {"test_agent": MatrixID.parse("@test_agent:example.com")}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.authorization.agent_reply_permissions = {}
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
+        rooms=["!test:example.com"],
+    )
+    wrap_extracted_collaborators(bot)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+    install_runtime_cache_support(bot)
+    bot.logger = MagicMock()
+    replace_turn_controller_deps(bot, logger=bot.logger)
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    message_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@test_agent what is 3+3?",
+                "msgtype": "m.text",
+            },
+            "event_id": "$message:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    message_event.source = {
+        "content": {
+            "body": "@test_agent what is 3+3?",
+            "msgtype": "m.text",
+        },
+        "event_id": "$message:example.com",
+        "sender": "@user:example.com",
+        "room_id": "!test:example.com",
+    }
+
+    target = MessageTarget.resolve("!test:example.com", None, message_event.event_id)
+    handled_turn = bot._turn_store.attach_response_context(
+        HandledTurnState.from_source_event_id(message_event.event_id),
+        history_scope=None,
+        conversation_target=target,
+    )
+    pending_tx = bot._turn_store.reserve_response_transaction_id(handled_turn)
+
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:example.com",
+        context=SimpleNamespace(
+            thread_history=[],
+            thread_id=None,
+            requires_full_thread_history=False,
+            am_i_mentioned=True,
+        ),
+        target=target,
+        correlation_id=message_event.event_id,
+        envelope=MessageEnvelope(
+            source_event_id=message_event.event_id,
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:example.com",
+            sender_id="@user:example.com",
+            body=message_event.body,
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="test_agent",
+            source_kind="message",
+        ),
+    )
+
+    async def payload_builder(_context: object) -> DispatchPayload:
+        return DispatchPayload(prompt=message_event.body)
+
+    bot._response_runner.generate_response = AsyncMock(return_value="$response:example.com")
+
+    await bot._turn_controller._execute_response_action(
+        room,
+        message_event,
+        dispatch,
+        ResponseAction(kind="individual"),
+        payload_builder,
+        processing_log="Processing message",
+        dispatch_started_at=0.0,
+        handled_turn=handled_turn,
+    )
+
+    request = bot._response_runner.generate_response.await_args.args[0]
+    assert request.initial_transaction_id == pending_tx
+    turn_record = bot._turn_store.get_turn_record(message_event.event_id)
+    assert turn_record is not None
+    assert turn_record.response_event_id == "$response:example.com"
+    assert turn_record.response_transaction_id == pending_tx

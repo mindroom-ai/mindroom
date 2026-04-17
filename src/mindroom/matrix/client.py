@@ -1004,6 +1004,8 @@ async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
+    *,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload.
 
@@ -1014,6 +1016,7 @@ async def send_message_result(
         client: Authenticated Matrix client
         room_id: The room ID to send the message to
         content: The message content dictionary
+        transaction_id: Optional caller-owned Matrix transaction id for idempotent sends
 
     Returns:
         The delivered event id plus the exact sent content, or None if sending failed
@@ -1047,6 +1050,7 @@ async def send_message_result(
             return None
 
     content_sent = await prepare_large_message(client, room_id, content)
+    tx_id = transaction_id if isinstance(transaction_id, str) and transaction_id else uuid4().hex
     if cache_bypass:
         access_token = client.access_token
         if not access_token:
@@ -1057,7 +1061,7 @@ async def send_message_result(
             room_id,
             "m.room.message",
             content_sent,
-            uuid4(),
+            tx_id,
         )
         response = await client._send(
             nio.RoomSendResponse,
@@ -1071,6 +1075,7 @@ async def send_message_result(
             room_id=room_id,
             message_type="m.room.message",
             content=content_sent,
+            tx_id=tx_id,
         )
     if isinstance(response, nio.RoomSendResponse):
         logger.debug(

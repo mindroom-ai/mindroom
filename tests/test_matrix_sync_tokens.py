@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -124,6 +125,7 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
 async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> None:
     """Successful sync responses should update the saved next_batch token."""
     bot = _agent_bot(tmp_path)
+    bot._first_sync_done = True
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_latest"
     response = MagicMock(spec=nio.SyncResponse)
@@ -132,8 +134,45 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await bot._on_sync_response(response)
+    flush_task = bot._sync_checkpoint_flush_task
+    if flush_task is not None:
+        await asyncio.gather(flush_task, return_exceptions=True)
 
     assert load_sync_token(tmp_path, bot.agent_name) == "s_latest"
+
+
+@pytest.mark.asyncio
+async def test_on_sync_response_defers_persisting_latest_sync_token_until_pending_event_tasks_finish(
+    tmp_path: Path,
+) -> None:
+    """The sync checkpoint should wait until pending event tasks settle."""
+    bot = _agent_bot(tmp_path)
+    bot._first_sync_done = True
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after"
+    gate = asyncio.Event()
+
+    async def slow_event_task() -> None:
+        await gate.wait()
+
+    task = asyncio.create_task(slow_event_task())
+    bot._pending_sync_event_tasks = {task}
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after"
+    response.rooms = MagicMock(join={})
+
+    try:
+        with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+            await bot._on_sync_response(response)
+            assert load_sync_token(tmp_path, bot.agent_name) is None
+    finally:
+        gate.set()
+        await task
+        flush_task = bot._sync_checkpoint_flush_task
+        if flush_task is not None:
+            await asyncio.gather(flush_task, return_exceptions=True)
+
+    assert load_sync_token(tmp_path, bot.agent_name) == "s_after"
 
 
 @pytest.mark.asyncio
@@ -145,5 +184,32 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     bot._coalescing_gate.drain_all = AsyncMock()
 
     await bot.prepare_for_sync_shutdown()
+
+    assert load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_sync_shutdown_waits_for_pending_event_tasks_before_flushing_token(tmp_path: Path) -> None:
+    """Shutdown should not checkpoint past unfinished event work."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_shutdown"
+    bot._coalescing_gate.drain_all = AsyncMock()
+    gate = asyncio.Event()
+
+    async def slow_event_task() -> None:
+        await gate.wait()
+
+    task = asyncio.create_task(slow_event_task())
+    bot._pending_sync_event_tasks = {task}
+    shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
+
+    try:
+        await asyncio.sleep(0)
+        assert load_sync_token(tmp_path, bot.agent_name) is None
+    finally:
+        gate.set()
+        await task
+        await shutdown_task
 
     assert load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"

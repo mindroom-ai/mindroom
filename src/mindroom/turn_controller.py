@@ -932,6 +932,7 @@ class TurnController:
         reply_to_event_id: str,
         thread_id: str | None,
         error: Exception,
+        transaction_id: str | None = None,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message."""
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
@@ -944,6 +945,7 @@ class TurnController:
                     reply_to_event_id=reply_to_event_id,
                 ),
                 response_text=error_text,
+                transaction_id=transaction_id,
                 extra_content=terminal_extra_content,
             ),
         )
@@ -993,11 +995,13 @@ class TurnController:
             dispatch_timing.note(response_action_kind=action.kind)
 
         if action.kind == "reject":
+            initial_transaction_id = self.deps.turn_store.reserve_response_transaction_id(handled_turn)
             assert action.rejection_message is not None
             response_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=dispatch.target,
                     response_text=action.rejection_message,
+                    transaction_id=initial_transaction_id,
                 ),
             )
             self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
@@ -1007,6 +1011,7 @@ class TurnController:
                 dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
             return
 
+        initial_transaction_id = self.deps.turn_store.reserve_response_transaction_id(handled_turn)
         if not dispatch.context.am_i_mentioned:
             with bound_log_context(**dispatch.target.log_context):
                 self.deps.logger.info("Will respond: only agent in thread")
@@ -1029,6 +1034,7 @@ class TurnController:
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
                 error=error,
+                transaction_id=initial_transaction_id,
             )
             if response_event_id is not None:
                 self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
@@ -1100,6 +1106,7 @@ class TurnController:
                     response_envelope=prepared_payload.envelope,
                     correlation_id=request.correlation_id,
                     target=request.target,
+                    initial_transaction_id=request.initial_transaction_id,
                     matrix_run_metadata=request.matrix_run_metadata,
                     system_enrichment_items=prepared_payload.system_enrichment_items,
                     strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
@@ -1122,6 +1129,7 @@ class TurnController:
                         response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
+                        initial_transaction_id=initial_transaction_id,
                         matrix_run_metadata=matrix_run_metadata,
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
@@ -1142,6 +1150,7 @@ class TurnController:
                         response_envelope=dispatch.envelope,
                         correlation_id=dispatch.correlation_id,
                         target=dispatch.target,
+                        initial_transaction_id=initial_transaction_id,
                         matrix_run_metadata=matrix_run_metadata,
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
@@ -1155,6 +1164,7 @@ class TurnController:
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
                 error=failure,
+                transaction_id=initial_transaction_id,
             )
             if response_event_id is not None:
                 self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))

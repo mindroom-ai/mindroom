@@ -159,6 +159,7 @@ class SendTextRequest:
 
     target: MessageTarget
     response_text: str
+    transaction_id: str | None = None
     skip_mentions: bool = False
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
@@ -187,6 +188,7 @@ class FinalDeliveryRequest:
     correlation_id: str
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
+    initial_transaction_id: str | None = None
     existing_event_is_placeholder: bool = False
     apply_before_hooks: bool = True
 
@@ -207,6 +209,7 @@ class StreamingDeliveryRequest:
     target: MessageTarget
     response_stream: AsyncIterator[_StreamInputChunk]
     existing_event_id: str | None = None
+    initial_transaction_id: str | None = None
     adopt_existing_placeholder: bool = False
     header: str | None = None
     show_tool_calls: bool = False
@@ -332,7 +335,12 @@ class DeliveryGateway:
         if request.skip_mentions:
             content["com.mindroom.skip_mentions"] = True
 
-        delivered = await send_message_result(client, resolved_target.room_id, content)
+        delivered = await send_message_result(
+            client,
+            resolved_target.room_id,
+            content,
+            transaction_id=request.transaction_id,
+        )
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
@@ -540,6 +548,7 @@ class DeliveryGateway:
                 SendTextRequest(
                     target=resolved_target,
                     response_text=display_text,
+                    transaction_id=request.initial_transaction_id,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 ),
@@ -627,6 +636,7 @@ class DeliveryGateway:
             header=request.header,
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
+            initial_transaction_id=request.initial_transaction_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             target=request.target,
             room_mode=request.target.is_room_mode,

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Literal, NotRequired, TypedDict
+from uuid import uuid4
 
 from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
@@ -45,6 +46,7 @@ class _SerializedHandledTurnRecord(TypedDict):
     response_event_id: str | None
     completed: NotRequired[bool]
     anchor_event_id: NotRequired[str]
+    response_transaction_id: NotRequired[str]
     visible_echo_event_id: NotRequired[str | None]
     source_event_ids: NotRequired[list[str]]
     source_event_prompts: NotRequired[dict[str, str] | None]
@@ -193,6 +195,7 @@ class HandledTurnRecord:
     anchor_event_id: str
     source_event_ids: tuple[str, ...]
     response_event_id: str | None = None
+    response_transaction_id: str | None = None
     completed: bool = True
     visible_echo_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
@@ -237,6 +240,7 @@ class HandledTurnLedger:
             self._persist_handled_turn_locked(
                 source_event_ids=normalized_source_event_ids,
                 response_event_id=handled_turn.response_event_id,
+                response_transaction_id=None,
                 completed=True,
                 visible_echo_event_id=handled_turn.visible_echo_event_id,
                 source_event_prompts=handled_turn.source_event_prompts,
@@ -258,6 +262,7 @@ class HandledTurnLedger:
             self._persist_handled_turn_locked(
                 normalized_source_event_ids,
                 response_event_id=turn_record.response_event_id,
+                response_transaction_id=turn_record.response_transaction_id,
                 completed=turn_record.completed,
                 visible_echo_event_id=turn_record.visible_echo_event_id,
                 source_event_prompts=turn_record.source_event_prompts,
@@ -269,6 +274,42 @@ class HandledTurnLedger:
             self._save_responses_locked()
         logger.debug("handled_turn_recorded", source_event_count=len(normalized_source_event_ids))
 
+    def reserve_response_transaction_id(self, handled_turn: HandledTurnState) -> str:
+        """Persist and return one stable outbound transaction id for a pending turn."""
+        normalized_source_event_ids = handled_turn.source_event_ids
+        if not normalized_source_event_ids:
+            msg = "Cannot reserve a response transaction id without source events"
+            raise ValueError(msg)
+
+        with self._thread_lock, self._file_lock(exclusive=True):
+            self._responses = self._read_responses_file_locked()
+            for event_id in normalized_source_event_ids:
+                existing_transaction_id = _response_transaction_id_for_record(self._responses.get(event_id))
+                if existing_transaction_id is not None:
+                    return existing_transaction_id
+
+            transaction_id = f"reply_{uuid4().hex}"
+            self._persist_handled_turn_locked(
+                source_event_ids=normalized_source_event_ids,
+                response_event_id=handled_turn.response_event_id,
+                response_transaction_id=transaction_id,
+                completed=False,
+                visible_echo_event_id=handled_turn.visible_echo_event_id,
+                source_event_prompts=handled_turn.source_event_prompts,
+                response_owner=handled_turn.response_owner,
+                history_scope=handled_turn.history_scope,
+                conversation_target=handled_turn.conversation_target,
+                anchor_event_id=handled_turn.anchor_event_id,
+            )
+            self._save_responses_locked()
+        logger.debug(
+            "response_transaction_id_reserved",
+            agent=self.agent_name,
+            response_transaction_id=transaction_id,
+            source_event_count=len(normalized_source_event_ids),
+        )
+        return transaction_id
+
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo without marking the turn terminally handled."""
         with self._thread_lock, self._file_lock(exclusive=True):
@@ -278,6 +319,7 @@ class HandledTurnLedger:
             self._persist_handled_turn_locked(
                 source_event_ids=source_event_ids,
                 response_event_id=_response_event_id_for_record(existing_record),
+                response_transaction_id=_response_transaction_id_for_record(existing_record),
                 completed=_completed_for_record(existing_record),
                 visible_echo_event_id=echo_event_id,
                 source_event_prompts=_prompt_map_for_record(source_event_ids, existing_record),
@@ -334,6 +376,7 @@ class HandledTurnLedger:
                 anchor_event_id=_anchor_event_id_for_record(source_event_ids, record),
                 source_event_ids=source_event_ids,
                 response_event_id=_response_event_id_for_record(record),
+                response_transaction_id=_response_transaction_id_for_record(record),
                 completed=_completed_for_record(record),
                 visible_echo_event_id=_visible_echo_event_id_for_record(record),
                 source_event_prompts=_prompt_map_for_record(source_event_ids, record),
@@ -497,6 +540,7 @@ class HandledTurnLedger:
         source_event_ids: tuple[str, ...],
         *,
         response_event_id: str | None,
+        response_transaction_id: str | None,
         completed: bool,
         visible_echo_event_id: str | None,
         source_event_prompts: typing.Mapping[str, str] | None,
@@ -507,6 +551,7 @@ class HandledTurnLedger:
     ) -> None:
         """Persist one handled turn while the thread and file locks are already held."""
         visible_echo_event_id = visible_echo_event_id or self._visible_echo_for_sources(source_event_ids)
+        response_transaction_id = self._normalized_response_transaction_id(source_event_ids, response_transaction_id)
         prompt_map = self._normalized_prompt_map(source_event_ids, source_event_prompts)
         response_owner = self._normalized_response_owner(source_event_ids, response_owner)
         history_scope = self._normalized_history_scope(source_event_ids, history_scope)
@@ -517,6 +562,7 @@ class HandledTurnLedger:
             self._responses[event_id] = _serialized_record(
                 timestamp=timestamp,
                 response_event_id=response_event_id,
+                response_transaction_id=response_transaction_id,
                 completed=completed,
                 anchor_event_id=anchor_event_id,
                 source_event_ids=source_event_ids,
@@ -539,6 +585,21 @@ class HandledTurnLedger:
             existing_prompt_map = _prompt_map_for_record(source_event_ids, self._responses.get(event_id))
             if existing_prompt_map is not None:
                 return existing_prompt_map
+        return None
+
+    def _normalized_response_transaction_id(
+        self,
+        source_event_ids: tuple[str, ...],
+        response_transaction_id: str | None,
+    ) -> str | None:
+        """Return the explicit response transaction id or preserve an existing one."""
+        normalized_response_transaction_id = _normalized_transaction_id(response_transaction_id)
+        if normalized_response_transaction_id is not None:
+            return normalized_response_transaction_id
+        for event_id in source_event_ids:
+            existing_response_transaction_id = _response_transaction_id_for_record(self._responses.get(event_id))
+            if existing_response_transaction_id is not None:
+                return existing_response_transaction_id
         return None
 
     def _normalized_response_owner(
@@ -619,6 +680,11 @@ def _normalized_event_id(event_id: str | None) -> str | None:
     return event_id if isinstance(event_id, str) and event_id else None
 
 
+def _normalized_transaction_id(transaction_id: str | None) -> str | None:
+    """Return a non-empty Matrix transaction id or None."""
+    return transaction_id if isinstance(transaction_id, str) and transaction_id else None
+
+
 def _normalized_response_owner(response_owner: str | None) -> str | None:
     """Return a non-empty response owner or None."""
     return response_owner if isinstance(response_owner, str) and response_owner else None
@@ -677,6 +743,7 @@ def _serialized_record(
     *,
     timestamp: float,
     response_event_id: str | None,
+    response_transaction_id: str | None,
     completed: bool,
     anchor_event_id: str | None,
     source_event_ids: tuple[str, ...],
@@ -695,6 +762,8 @@ def _serialized_record(
     }
     if anchor_event_id is not None and anchor_event_id != source_event_ids[-1]:
         record["anchor_event_id"] = anchor_event_id
+    if response_transaction_id is not None:
+        record["response_transaction_id"] = response_transaction_id
     if visible_echo_event_id is not None:
         record["visible_echo_event_id"] = visible_echo_event_id
     if source_event_prompts is not None:
@@ -791,6 +860,7 @@ def _normalize_serialized_record(
     visible_echo_event_id = raw_record.get("visible_echo_event_id")
     if not isinstance(visible_echo_event_id, str):
         visible_echo_event_id = raw_record.get("visible_echo_response_id")
+    response_transaction_id = _normalized_transaction_id(raw_record.get("response_transaction_id"))
     timestamp = raw_record.get("timestamp")
     raw_source_event_ids = raw_record.get("source_event_ids")
     normalized_source_event_ids = (
@@ -814,28 +884,54 @@ def _normalize_serialized_record(
         "completed": bool(raw_record.get("completed", True)),
         "source_event_ids": list(normalized_source_event_ids),
     }
-    if anchor_event_id is not None and anchor_event_id != normalized_source_event_ids[-1]:
-        normalized_record["anchor_event_id"] = anchor_event_id
-    if isinstance(visible_echo_event_id, str):
-        normalized_record["visible_echo_event_id"] = visible_echo_event_id
+    return _with_optional_serialized_record_fields(
+        normalized_record,
+        anchor_event_id=anchor_event_id if anchor_event_id != normalized_source_event_ids[-1] else None,
+        response_transaction_id=response_transaction_id,
+        visible_echo_event_id=visible_echo_event_id if isinstance(visible_echo_event_id, str) else None,
+        prompt_map=prompt_map,
+        response_owner=response_owner,
+        history_scope=history_scope,
+        conversation_target=conversation_target,
+    )
+
+
+def _with_optional_serialized_record_fields(
+    record: _SerializedHandledTurnRecord,
+    *,
+    anchor_event_id: str | None,
+    response_transaction_id: str | None,
+    visible_echo_event_id: str | None,
+    prompt_map: dict[str, str] | None,
+    response_owner: str | None,
+    history_scope: HistoryScope | None,
+    conversation_target: MessageTarget | None,
+) -> _SerializedHandledTurnRecord:
+    """Attach optional normalized fields to one serialized handled-turn record."""
+    if anchor_event_id is not None:
+        record["anchor_event_id"] = anchor_event_id
+    if response_transaction_id is not None:
+        record["response_transaction_id"] = response_transaction_id
+    if visible_echo_event_id is not None:
+        record["visible_echo_event_id"] = visible_echo_event_id
     if prompt_map is not None:
-        normalized_record["source_event_prompts"] = prompt_map
+        record["source_event_prompts"] = prompt_map
     if response_owner is not None:
-        normalized_record["response_owner"] = response_owner
+        record["response_owner"] = response_owner
     if history_scope is not None:
-        normalized_record["history_scope"] = {
+        record["history_scope"] = {
             "kind": history_scope.kind,
             "scope_id": history_scope.scope_id,
         }
     if conversation_target is not None:
-        normalized_record["conversation_target"] = {
+        record["conversation_target"] = {
             "room_id": conversation_target.room_id,
             "source_thread_id": conversation_target.source_thread_id,
             "resolved_thread_id": conversation_target.resolved_thread_id,
             "reply_to_event_id": conversation_target.reply_to_event_id,
             "session_id": conversation_target.session_id,
         }
-    return normalized_record
+    return record
 
 
 def _source_event_ids_for_record(
@@ -936,6 +1032,13 @@ def _response_event_id_for_record(record: _SerializedHandledTurnRecordLike | Non
         return response_event_id
     legacy_response_id = record.get("response_id")
     return legacy_response_id if isinstance(legacy_response_id, str) else None
+
+
+def _response_transaction_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
+    """Return the normalized response transaction id for one record."""
+    if record is None:
+        return None
+    return _normalized_transaction_id(record.get("response_transaction_id"))
 
 
 def _visible_echo_event_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:

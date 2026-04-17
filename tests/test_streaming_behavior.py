@@ -64,6 +64,58 @@ def _make_matrix_client_mock() -> AsyncMock:
     return client
 
 
+@pytest.mark.asyncio
+async def test_send_streaming_response_uses_explicit_initial_transaction_id(tmp_path: Path) -> None:
+    """The first visible streaming send should forward the reserved transaction id."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"a": AgentConfig(display_name="A", rooms=["!r:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            router=RouterConfig(model="default"),
+        ),
+        runtime_paths,
+    )
+    client = _make_matrix_client_mock()
+
+    with (
+        patch(
+            "mindroom.streaming.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$evt:localhost",
+                    content_sent={"body": "hello", "msgtype": "m.text"},
+                ),
+            ),
+        ) as mock_send,
+        patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$edit:localhost",
+                    content_sent={"body": "hello", "msgtype": "m.text"},
+                ),
+            ),
+        ),
+    ):
+        event_id, text = await send_streaming_response(
+            client=client,
+            room_id="!r:localhost",
+            reply_to_event_id="$orig",
+            thread_id=None,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths,
+            response_stream=_aiter("hello"),
+            initial_transaction_id="txn-123",
+            room_mode=True,
+        )
+
+    assert event_id == "$evt:localhost"
+    assert text == "hello"
+    assert mock_send.await_args.kwargs["transaction_id"] == "txn-123"
+
+
 @pytest.fixture
 def mock_helper_agent() -> AgentMatrixUser:
     """Create a mock helper agent user."""
@@ -808,7 +860,10 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            transaction_id: str | None = None,
         ) -> DeliveredMatrixEvent:
+            _ = transaction_id
             return DeliveredMatrixEvent(event_id="$stream-send", content_sent=dict(content))
 
         async def record_edit(
@@ -925,7 +980,10 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            transaction_id: str | None = None,
         ) -> DeliveredMatrixEvent:
+            _ = transaction_id
             sent_contents.append(content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
@@ -981,7 +1039,10 @@ class TestStreamingBehavior:
             _client: object,
             room_id: str,
             content: dict[str, object],
+            *,
+            transaction_id: str | None = None,
         ) -> DeliveredMatrixEvent:
+            _ = transaction_id
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
