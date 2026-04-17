@@ -39,6 +39,7 @@ from mindroom.teams import (
 from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
+    has_multiple_non_agent_users_in_thread,
     should_agent_respond,
     thread_requires_explicit_agent_targeting,
 )
@@ -346,6 +347,17 @@ class TurnPolicy:
         materializable_agent_names: set[str] | None = None,
     ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
+        if (
+            context.is_thread
+            and not context.mentioned_agents
+            and has_multiple_non_agent_users_in_thread(
+                context.thread_history,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            )
+        ):
+            return TeamResolution.none()
+
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
             context.thread_history,
             self.deps.runtime.config,
