@@ -68,7 +68,11 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_agent_for_message
-from mindroom.thread_utils import get_configured_agents_for_room
+from mindroom.thread_utils import (
+    check_agent_mentioned,
+    get_configured_agents_for_room,
+    thread_requires_explicit_agent_targeting,
+)
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -359,6 +363,42 @@ class TurnController:
         if is_agent_id(sender_id, self.deps.runtime.config, self.deps.runtime_paths):
             return False
         return self.deps.response_runner.has_active_response_for_target(target)
+
+    async def _should_skip_router_before_shared_ingress_work(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        *,
+        requester_user_id: str,
+        thread_id: str | None,
+    ) -> bool:
+        """Return whether the router can safely skip shared ingress work for one text event."""
+        if self.deps.agent_name != ROUTER_AGENT_NAME:
+            return False
+        if command_parser.parse(event.body.strip()) is not None:
+            return False
+
+        mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+            event.source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        if mentioned_agents or has_non_agent_mentions:
+            return True
+        if thread_id is None:
+            return False
+
+        thread_history = await self.deps.conversation_cache.get_dispatch_thread_snapshot(
+            room.room_id,
+            thread_id,
+        )
+        return thread_requires_explicit_agent_targeting(
+            thread_history,
+            sender_id=requester_user_id,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
 
     async def _coalescing_key_for_event(
         self,
@@ -1169,28 +1209,14 @@ class TurnController:
         async with self.deps.resolver.turn_thread_cache_scope():
             await self._handle_message_inner(room, event)
 
-    async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    async def _handle_message_inner(  # noqa: C901, PLR0911
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+    ) -> None:
         """Handle one text message inside the per-turn conversation lookup scope."""
         ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-        self.deps.logger.info(
-            "Received message",
-            event_id=event.event_id,
-            room_id=room.room_id,
-            sender=event.sender,
-            thread_id=ingress_thread_id,
-        )
-        dispatch_timing = create_dispatch_pipeline_timing(
-            event_id=event.event_id,
-            room_id=room.room_id,
-        )
-        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         event_info = EventInfo.from_event(event.source)
-        await self._append_live_event_with_timing(
-            room.room_id,
-            event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1203,6 +1229,38 @@ class TurnController:
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return
+        if await self._should_skip_router_before_shared_ingress_work(
+            room,
+            prechecked_event.event,
+            requester_user_id=prechecked_event.requester_user_id,
+            thread_id=ingress_thread_id,
+        ):
+            self.deps.logger.debug(
+                "skip_router_shared_ingress_work",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                thread_id=ingress_thread_id,
+            )
+            return
+
+        self.deps.logger.info(
+            "Received message",
+            event_id=event.event_id,
+            room_id=room.room_id,
+            sender=event.sender,
+            thread_id=ingress_thread_id,
+        )
+        dispatch_timing = create_dispatch_pipeline_timing(
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
+        await self._append_live_event_with_timing(
+            room.room_id,
+            event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
+        )
 
         if event_info.is_edit:
             await self.deps.edit_regenerator.handle_message_edit(
