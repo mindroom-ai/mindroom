@@ -131,6 +131,7 @@ _SUPPORTED_BLOCK_END_TAG_PATTERN = re.compile(
 )
 _HR_BLOCK_TAG_PATTERN = re.compile(r"^[ ]{0,3}<hr\b[^<>]*/?>\s*$", re.IGNORECASE)
 _FENCE_OPEN_PATTERN = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+_MATH_PLACEHOLDER_TEMPLATE = "MINDROOMMATHPLACEHOLDER{index}TOKEN"
 
 
 def _count_repeated_characters(text: str, start_index: int, character: str) -> int:
@@ -138,6 +139,15 @@ def _count_repeated_characters(text: str, start_index: int, character: str) -> i
     while end_index < len(text) and text[end_index] == character:
         end_index += 1
     return end_index - start_index
+
+
+def _is_escaped_character(text: str, index: int) -> bool:
+    backslash_count = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        backslash_count += 1
+        cursor -= 1
+    return backslash_count % 2 == 1
 
 
 def _is_fence_closing_line(line: str, fence_character: str, opening_length: int) -> bool:
@@ -295,6 +305,121 @@ def _escape_unterminated_html_fragments(html_text: str) -> str:
     return _UNTERMINATED_HTML_FRAGMENT_PATTERN.sub(lambda match: escape(match.group(0)), html_text)
 
 
+def _find_inline_code_span_end(text: str, search_start: int, delimiter_length: int) -> int | None:
+    index = search_start
+    while index < len(text):
+        if text[index] != "`":
+            index += 1
+            continue
+        run_length = _count_repeated_characters(text, index, "`")
+        if run_length == delimiter_length:
+            return index
+        index += run_length
+    return None
+
+
+def _can_open_inline_math(text: str, index: int) -> bool:
+    if index > 0 and text[index - 1].isdigit():
+        return False
+    next_index = index + 1
+    return next_index < len(text) and not text[next_index].isspace() and text[next_index] != "$"
+
+
+def _find_display_math_end(text: str, start_index: int) -> int | None:
+    index = start_index + 2
+    while index < len(text):
+        match_index = text.find("$$", index)
+        if match_index == -1:
+            return None
+        if not _is_escaped_character(text, match_index):
+            return match_index + 2
+        index = match_index + 2
+    return None
+
+
+def _find_inline_math_end(text: str, start_index: int) -> int | None:
+    index = start_index + 1
+    while index < len(text):
+        current_character = text[index]
+        if current_character == "\n":
+            return None
+        if current_character != "$":
+            index += 1
+            continue
+        if text.startswith("$$", index):
+            index += 2
+            continue
+        if _is_escaped_character(text, index):
+            index += 1
+            continue
+        if text[index - 1].isspace():
+            index += 1
+            continue
+        if index + 1 < len(text) and text[index + 1].isdigit():
+            index += 1
+            continue
+        return index + 1
+    return None
+
+
+def _find_math_span_end(text: str, start_index: int) -> int | None:
+    if text[start_index] != "$" or _is_escaped_character(text, start_index):
+        return None
+    if text.startswith("$$", start_index):
+        return _find_display_math_end(text, start_index)
+    if not _can_open_inline_math(text, start_index):
+        return None
+    return _find_inline_math_end(text, start_index)
+
+
+def _protect_math_spans_in_text(
+    text: str,
+    protected_spans: list[tuple[str, str]],
+) -> str:
+    protected_parts: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "`":
+            delimiter_length = _count_repeated_characters(text, index, "`")
+            closing_index = _find_inline_code_span_end(text, index + delimiter_length, delimiter_length)
+            if closing_index is not None:
+                protected_parts.append(text[index : closing_index + delimiter_length])
+                index = closing_index + delimiter_length
+                continue
+            protected_parts.append(text[index : index + delimiter_length])
+            index += delimiter_length
+            continue
+
+        math_end_index = _find_math_span_end(text, index)
+        if math_end_index is None:
+            protected_parts.append(text[index])
+            index += 1
+            continue
+
+        placeholder = _MATH_PLACEHOLDER_TEMPLATE.format(index=len(protected_spans))
+        protected_spans.append((placeholder, text[index:math_end_index]))
+        protected_parts.append(placeholder)
+        index = math_end_index
+
+    return "".join(protected_parts)
+
+
+def _protect_math_spans(text: str) -> tuple[str, list[tuple[str, str]]]:
+    protected_spans: list[tuple[str, str]] = []
+    protected_text = _transform_markdown_outside_fenced_code(
+        text,
+        lambda prose_text: _protect_math_spans_in_text(prose_text, protected_spans),
+    )
+    return protected_text, protected_spans
+
+
+def _restore_protected_math_spans(html_text: str, protected_spans: list[tuple[str, str]]) -> str:
+    restored_html = html_text
+    for placeholder, original_math in protected_spans:
+        restored_html = restored_html.replace(placeholder, escape(original_math))
+    return restored_html
+
+
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
     allowed_attributes = _ALLOWED_FORMATTED_BODY_ATTRIBUTES.get(tag_name, frozenset())
     sanitized_attributes: list[str] = []
@@ -423,10 +548,12 @@ def markdown_to_html(text: str) -> str:
     blank line before them.
     """
     normalized_input = _normalize_input_line_endings(text)
-    escaped_text = _escape_html_block_openers(normalized_input)
+    protected_text, protected_spans = _protect_math_spans(normalized_input)
+    escaped_text = _escape_html_block_openers(protected_text)
     normalized_text = _normalize_supported_block_html_boundaries(escaped_text)
     html_text: str = _MARKDOWN_RENDERER.render(normalized_text)
-    return _sanitize_formatted_body_html(html_text)
+    sanitized_html = _sanitize_formatted_body_html(html_text)
+    return _restore_protected_math_spans(sanitized_html, protected_spans)
 
 
 def _build_thread_relation(

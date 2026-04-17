@@ -130,6 +130,46 @@ def test_inline_code_escapes_html_without_double_escaping() -> None:
     assert "&amp;lt;tool&amp;gt;" not in html
 
 
+def test_inline_math_preserves_latex_escapes() -> None:
+    """Inline math content should survive markdown parsing verbatim."""
+    html = markdown_to_html(r"$\text{previous\_speaker}$")
+    assert r"$\text{previous\_speaker}$" in html
+    assert r"$\text{previous_speaker}$" not in html
+
+
+def test_display_math_preserves_latex_escapes() -> None:
+    """Display math blocks should preserve escaped underscores."""
+    html = markdown_to_html("$$\n\\text{previous\\_speaker} = \\text{Latone}\n$$")
+    assert "$$\n\\text{previous\\_speaker} = \\text{Latone}\n$$" in html
+    assert r"\text{previous_speaker}" not in html
+
+
+def test_mixed_markdown_around_math_preserves_formatting() -> None:
+    """Normal markdown should still render around protected math spans."""
+    html = markdown_to_html(
+        "Paragraph text with **bold text**, `inline_code`, and "
+        r"$\text{previous\_speaker}$"
+        "\n- bullet item",
+    )
+    assert "<strong>bold text</strong>" in html
+    assert "<code>inline_code</code>" in html
+    assert r"$\text{previous\_speaker}$" in html
+    assert "<ul>" in html
+    assert "<li>bullet item</li>" in html
+
+
+def test_code_spans_containing_dollar_delimiters_remain_untouched() -> None:
+    """Math protection must not rewrite code spans."""
+    html = markdown_to_html(r"`$\text{previous\_speaker}$`")
+    assert r"<code>$\text{previous\_speaker}$</code>" in html
+
+
+def test_non_math_markdown_escaping_behavior_is_unchanged() -> None:
+    """Escapes outside math should keep current markdown semantics."""
+    html = markdown_to_html(r"outside \_ math")
+    assert "<p>outside _ math</p>" in html
+
+
 # --- Links, images, lists, blockquotes ---
 
 
