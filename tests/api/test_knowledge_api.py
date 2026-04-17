@@ -72,9 +72,25 @@ def test_knowledge_bases_list_uses_existing_manager_without_initializing(
     tmp_path: Path,
 ) -> None:
     """Base listing should use an existing manager without triggering initialization."""
-    config = _knowledge_config(tmp_path)
+    config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
-    manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
+    manager.get_status.return_value = {
+        "indexed_count": 3,
+        "file_count": 4,
+        "git": {
+            "repo_url": "https://github.com/example/private-repo.git",
+            "branch": "main",
+            "lfs": True,
+            "startup_behavior": "background",
+            "syncing": False,
+            "repo_present": True,
+            "initial_sync_complete": True,
+            "last_successful_sync_at": "2026-04-17T12:00:00+00:00",
+            "last_successful_commit": "abc123",
+            "last_error": None,
+            "pending_startup_mode": None,
+        },
+    }
     _publish_committed_runtime_config(test_client.app, config)
 
     with (
@@ -96,6 +112,19 @@ def test_knowledge_bases_list_uses_existing_manager_without_initializing(
     assert payload["bases"][0]["indexed_count"] == 3
     assert payload["bases"][0]["file_count"] == 4
     assert payload["bases"][0]["manager_available"] is True
+    assert payload["bases"][0]["git"] == {
+        "repo_url": "https://github.com/example/private-repo.git",
+        "branch": "main",
+        "lfs": True,
+        "startup_behavior": "background",
+        "syncing": False,
+        "repo_present": True,
+        "initial_sync_complete": True,
+        "last_successful_sync_at": "2026-04-17T12:00:00+00:00",
+        "last_successful_commit": "abc123",
+        "last_error": None,
+        "pending_startup_mode": None,
+    }
     get_manager.assert_called_once()
     init_managers.assert_not_awaited()
 
@@ -168,9 +197,25 @@ def test_knowledge_status_uses_existing_manager_without_initializing(
     tmp_path: Path,
 ) -> None:
     """Status should use an existing manager without triggering initialization."""
-    config = _knowledge_config(tmp_path)
+    config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
-    manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
+    manager.get_status.return_value = {
+        "indexed_count": 3,
+        "file_count": 4,
+        "git": {
+            "repo_url": "https://github.com/example/private-repo.git",
+            "branch": "main",
+            "lfs": False,
+            "startup_behavior": "blocking",
+            "syncing": True,
+            "repo_present": False,
+            "initial_sync_complete": False,
+            "last_successful_sync_at": None,
+            "last_successful_commit": None,
+            "last_error": "fetch failed",
+            "pending_startup_mode": "resume",
+        },
+    }
     _publish_committed_runtime_config(test_client.app, config)
 
     with (
@@ -193,6 +238,19 @@ def test_knowledge_status_uses_existing_manager_without_initializing(
         "file_count": 4,
         "indexed_count": 3,
         "manager_available": True,
+        "git": {
+            "repo_url": "https://github.com/example/private-repo.git",
+            "branch": "main",
+            "lfs": False,
+            "startup_behavior": "blocking",
+            "syncing": True,
+            "repo_present": False,
+            "initial_sync_complete": False,
+            "last_successful_sync_at": None,
+            "last_successful_commit": None,
+            "last_error": "fetch failed",
+            "pending_startup_mode": "resume",
+        },
     }
     get_manager.assert_called_once()
     init_managers.assert_not_awaited()
