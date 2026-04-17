@@ -1130,6 +1130,22 @@ matrix_space:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
+## Managed Avatars
+
+MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space. Use the optional `avatars.prompts` block to override the built-in prompt styles without editing Python code. Every field is optional and falls back to MindRoom's built-in defaults when omitted.
+
+```
+avatars:
+  prompts:
+    character_style: "professional AI avatar portrait, abstract geometric silhouette"
+    room_style: "minimalist wayfinding icon, precise geometry, strong silhouette"
+    agent_system_prompt: "You are creating distinctive visual elements for a professional AI agent avatar."
+    team_system_prompt: "You are creating distinctive visual elements for a professional AI team avatar."
+    room_system_prompt: "You are creating a refined, minimalist icon design for a room avatar."
+```
+
+`mindroom avatars generate` only creates missing local avatar files by default. Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles. `mindroom avatars sync` only fills missing Matrix avatars by default. Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
+
 ## Internal User Username
 
 - Configure `mindroom_user.username` with the Matrix localpart you want before first startup.
@@ -12232,7 +12248,7 @@ Generate and sync managed avatar assets.
 
 ## avatars generate
 
-Generate missing managed avatar files in the workspace. In a source checkout, generated files are written under `./avatars/`. In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
+Generate missing managed avatar files in the workspace. In a source checkout, generated files are written under `./avatars/`. In containerized deployments, generated overrides are written under the persistent MindRoom storage path. Existing managed files are skipped by default. Use `--force` to overwrite them after changing avatar prompts or styles.
 
 ```
  Usage: root avatars generate [OPTIONS]
@@ -12240,13 +12256,14 @@ Generate missing managed avatar files in the workspace. In a source checkout, ge
  Generate missing managed avatar files in the workspace.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --force            Overwrite existing managed workspace avatar files.                  │
+│ --help   -h        Show this message and exit.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars sync
 
-Sync configured room and root-space avatars to Matrix using the initialized router account.
+Sync configured room and root-space avatars to Matrix using the initialized router account. Existing Matrix avatars are skipped by default. Use `--force` to replace them.
 
 ```
  Usage: root avatars sync [OPTIONS]
@@ -12255,7 +12272,8 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
  account.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
+│ --force            Replace existing Matrix room and root-space avatars.                │
+│ --help   -h        Show this message and exit.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
