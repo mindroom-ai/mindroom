@@ -477,6 +477,32 @@ async def test_replay_pending_inbound_turns_skips_events_with_interrupted_visibl
 
 
 @pytest.mark.asyncio
+async def test_replay_pending_inbound_turns_skips_reserved_coalesced_turn_when_stale_cleanup_found_source_event(
+    tmp_path: Path,
+) -> None:
+    """Pending replay should skip txid-reserved turns once stale cleanup already found their source event."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    first_event = _message_event(event_id="$coalesced-first:localhost", body="first")
+    second_event = _message_event(event_id="$coalesced-second:localhost", body="second")
+    bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=first_event.source)
+    bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=second_event.source)
+    bot._turn_store.reserve_pending_response(
+        HandledTurnState.create([first_event.event_id, second_event.event_id]),
+    )
+
+    with patch.object(bot, "_on_message", AsyncMock()) as mock_on_message:
+        replayed_source_event_ids = await bot.replay_pending_inbound_turns(
+            interrupted_source_event_ids={first_event.event_id},
+        )
+        await asyncio.sleep(0)
+
+    assert replayed_source_event_ids == set()
+    mock_on_message.assert_not_awaited()
+    assert bot._turn_store.pending_inbound_replays() == []
+
+
+@pytest.mark.asyncio
 async def test_startup_replay_does_not_reschedule_same_message_when_sync_redelivers_it(tmp_path: Path) -> None:
     """A claimed startup replay should suppress later sync redelivery of the same event."""
     bot = _agent_bot(tmp_path)

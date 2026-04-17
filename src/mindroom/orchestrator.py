@@ -944,6 +944,7 @@ class MultiAgentOrchestrator:
         bots: list[AgentBot | TeamBot],
         *,
         interrupted_target_event_ids: set[str] | None = None,
+        interrupted_source_event_ids: set[str] | None = None,
     ) -> set[str]:
         """Schedule startup replays for durable inbound claims left incomplete before restart."""
         replayed_source_event_ids: set[str] = set()
@@ -954,6 +955,7 @@ class MultiAgentOrchestrator:
             try:
                 bot_replayed_source_event_ids = await bot.replay_pending_inbound_turns(
                     interrupted_target_event_ids=interrupted_target_event_ids,
+                    interrupted_source_event_ids=interrupted_source_event_ids,
                 )
             except Exception as exc:
                 logger.warning(
@@ -997,6 +999,9 @@ class MultiAgentOrchestrator:
         interrupted_target_event_ids = {
             thread.target_event_id for thread in interrupted_threads if thread.target_event_id
         }
+        interrupted_source_event_ids = {
+            thread.source_event_id for thread in interrupted_threads if thread.source_event_id
+        }
         # Restart recovery is deliberately split by durable anchor:
         # pending-inbound replay owns text/media source events that never reached
         # a visible bot reply, while stale-stream cleanup/auto-resume owns turns
@@ -1004,6 +1009,7 @@ class MultiAgentOrchestrator:
         await self._replay_pending_inbound_turns_after_restart(
             started_bots,
             interrupted_target_event_ids=interrupted_target_event_ids,
+            interrupted_source_event_ids=interrupted_source_event_ids,
         )
         await self._auto_resume_after_restart(interrupted_threads, config)
 

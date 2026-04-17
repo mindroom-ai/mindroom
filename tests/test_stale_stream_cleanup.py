@@ -560,6 +560,7 @@ async def test_cleanup_returns_interrupted_thread_for_transitive_plain_reply(tmp
     assert len(interrupted) == 1
     assert interrupted[0].thread_id == "$thread-root"
     assert interrupted[0].target_event_id == "$plain-reply"
+    assert interrupted[0].source_event_id == "$thread-reply"
     assert interrupted[0].agent_name == "test_agent"
 
 
@@ -1972,6 +1973,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
                 room_id=ROOM_ID,
                 thread_id="$thread-root",
                 target_event_id="$target",
+                source_event_id="$source",
                 partial_text="Half finished",
                 agent_name="test_agent",
             ),
@@ -1984,8 +1986,10 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
         _: list[object],
         *,
         interrupted_target_event_ids: set[str] | None = None,
+        interrupted_source_event_ids: set[str] | None = None,
     ) -> set[str]:
         assert interrupted_target_event_ids == {"$target"}
+        assert interrupted_source_event_ids == {"$source"}
         call_order.append("replay")
         return set()
 
@@ -2046,7 +2050,7 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_passes_interrupted_target_event_ids_to_pending_replay(tmp_path: Path) -> None:
+async def test_orchestrator_passes_interrupted_recovery_ids_to_pending_replay(tmp_path: Path) -> None:
     """Startup replay should filter out turns already owned by stale-stream recovery."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
@@ -2054,13 +2058,16 @@ async def test_orchestrator_passes_interrupted_target_event_ids_to_pending_repla
     orchestrator.config = config
 
     captured_target_event_ids: list[set[str] | None] = []
+    captured_source_event_ids: list[set[str] | None] = []
 
     async def _replay(
         _bots: list[object],
         *,
         interrupted_target_event_ids: set[str] | None = None,
+        interrupted_source_event_ids: set[str] | None = None,
     ) -> set[str]:
         captured_target_event_ids.append(interrupted_target_event_ids)
+        captured_source_event_ids.append(interrupted_source_event_ids)
         return set()
 
     router_bot = MagicMock()
@@ -2083,6 +2090,7 @@ async def test_orchestrator_passes_interrupted_target_event_ids_to_pending_repla
                         room_id=ROOM_ID,
                         thread_id="$thread-root",
                         target_event_id="$target",
+                        source_event_id="$source",
                         partial_text="Half finished",
                         agent_name="test_agent",
                     ),
@@ -2102,6 +2110,7 @@ async def test_orchestrator_passes_interrupted_target_event_ids_to_pending_repla
         await orchestrator.start()
 
     assert captured_target_event_ids == [{"$target"}]
+    assert captured_source_event_ids == [{"$source"}]
 
 
 @pytest.mark.asyncio

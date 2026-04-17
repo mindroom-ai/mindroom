@@ -1411,6 +1411,7 @@ class AgentBot:
         self,
         *,
         interrupted_target_event_ids: set[str] | None = None,
+        interrupted_source_event_ids: set[str] | None = None,
     ) -> set[str]:
         """Schedule startup replays for pending inbound turns without visible recovery anchors.
 
@@ -1423,15 +1424,22 @@ class AgentBot:
             return set()
         replayed_source_event_ids: set[str] = set()
         interrupted_target_event_ids = interrupted_target_event_ids or set()
+        interrupted_source_event_ids = interrupted_source_event_ids or set()
         skipped_source_event_ids: set[str] = set()
         own_user_id = self.agent_user.user_id
         for pending_replay in self._turn_store.pending_inbound_replays():
             turn_record = self._turn_store.get_turn_record(pending_replay.event_id)
-            if turn_record is not None and (
-                turn_record.response_event_id in interrupted_target_event_ids
-                or turn_record.visible_echo_event_id in interrupted_target_event_ids
+            if pending_replay.event_id in interrupted_source_event_ids or (
+                turn_record is not None
+                and (
+                    turn_record.response_event_id in interrupted_target_event_ids
+                    or turn_record.visible_echo_event_id in interrupted_target_event_ids
+                    or bool(interrupted_source_event_ids.intersection(turn_record.source_event_ids))
+                )
             ):
-                skipped_source_event_ids.update(turn_record.source_event_ids)
+                skipped_source_event_ids.update(
+                    turn_record.source_event_ids if turn_record is not None else (pending_replay.event_id,),
+                )
                 continue
             try:
                 replay_event_source = dict(pending_replay.event_source)

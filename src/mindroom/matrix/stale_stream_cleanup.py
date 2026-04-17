@@ -84,6 +84,7 @@ class InterruptedThread:
     target_event_id: str
     partial_text: str
     agent_name: str
+    source_event_id: str | None = field(default=None, compare=False)
     original_sender_id: str | None = None
     timestamp_ms: int = field(default=0, compare=False)
 
@@ -98,6 +99,7 @@ class _MessageState:
     latest_thread_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
+    reply_to_event_id: str | None = None
     stream_status: str | None = None
     requester_user_id: str | None = None
     stop_reaction_event_ids: set[str] = field(default_factory=set)
@@ -402,6 +404,7 @@ async def _cleanup_one_stale_message(
             room_id=room_id,
             thread_id=state.thread_id,
             target_event_id=target_event_id,
+            source_event_id=state.reply_to_event_id,
             partial_text=_truncate_partial_text(_extract_partial_text(state.latest_body)),
             agent_name=agent_name,
             original_sender_id=state.requester_user_id,
@@ -625,6 +628,7 @@ def _merge_resolved_message_state(
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
     state.thread_id = message.thread_id or fallback_thread_id
+    state.reply_to_event_id = message.reply_to_event_id
     state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
 
