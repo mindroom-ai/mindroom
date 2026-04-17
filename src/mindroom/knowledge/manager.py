@@ -524,6 +524,9 @@ class KnowledgeManager:
     def _save_git_lfs_hydrated_head(self, head: str) -> None:
         self._git_lfs_hydrated_head_path.write_text(head, encoding="utf-8")
 
+    def _clear_git_lfs_hydrated_head(self) -> None:
+        self._git_lfs_hydrated_head_path.unlink(missing_ok=True)
+
     def _has_existing_index(self) -> bool:
         vector_db = self._knowledge.vector_db
         if not isinstance(vector_db, ChromaDb) or not vector_db.exists():
@@ -778,6 +781,7 @@ class KnowledgeManager:
             env={"GIT_LFS_SKIP_SMUDGE": "1"} if git_config.lfs else None,
         )
         self._git_repo_present = True
+        await asyncio.to_thread(self._clear_git_lfs_hydrated_head)
         await self._ensure_git_lfs_repository_ready(knowledge_root)
         await self._hydrate_git_lfs_worktree(git_config, repo_root=knowledge_root)
         return True

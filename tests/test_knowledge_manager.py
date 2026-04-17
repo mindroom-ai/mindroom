@@ -3095,7 +3095,7 @@ async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Initial LFS clones should skip smudging until the explicit hydrate step runs."""
+    """Initial LFS clones should hydrate even if an old hydrated-head marker matches the cloned commit."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -3107,6 +3107,8 @@ async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
     )
 
     clone_envs: list[dict[str, str] | None] = []
+    git_calls: list[list[str]] = []
+    manager._git_lfs_hydrated_head_path.write_text("same", encoding="utf-8")
 
     async def _fake_run_git(
         args: list[str],
@@ -3115,16 +3117,19 @@ async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
         env: dict[str, str] | None = None,
     ) -> str:
         _ = cwd
+        git_calls.append(args)
         if args[0] == "clone":
             clone_envs.append(env)
         return ""
 
     monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager, "_git_rev_parse", AsyncMock(return_value="same"))
 
     cloned = await manager._ensure_git_repository(manager._git_config())
 
     assert cloned is True
     assert clone_envs == [{"GIT_LFS_SKIP_SMUDGE": "1"}]
+    assert ["lfs", "pull", "origin", "main"] in git_calls
 
 
 @pytest.mark.asyncio
