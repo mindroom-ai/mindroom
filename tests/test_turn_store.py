@@ -71,7 +71,7 @@ def test_turn_store_reuses_reserved_response_transaction_id_across_reload(tmp_pa
 
 
 def test_turn_store_replays_pending_inbound_claims_until_turn_completes(tmp_path: Path) -> None:
-    """Pending inbound claims should survive reload and disappear after terminal completion."""
+    """Pending inbound claims should replay until execution starts, then disappear."""
     tracking_path = tmp_path / "tracking"
     deps = TurnStoreDeps(
         agent_name="agent",
@@ -91,26 +91,64 @@ def test_turn_store_replays_pending_inbound_claims_until_turn_completes(tmp_path
         },
     }
 
-    store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source)
+    assert store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source) is True
 
     reloaded_store = TurnStore(deps)
     pending_replays = reloaded_store.pending_inbound_replays()
 
     assert len(pending_replays) == 1
     assert pending_replays[0].room_id == "!room:example.com"
-    assert pending_replays[0].source_event_ids == ("$event",)
+    assert pending_replays[0].event_id == "$event"
     assert pending_replays[0].event_source == event_source
-    assert pending_replays[0].response_transaction_id is None
 
-    pending_response = reloaded_store.reserve_pending_response(HandledTurnState.from_source_event_id("$event"))
-    pending_after_reservation = reloaded_store.pending_inbound_replays()
+    reloaded_store.mark_inbound_started(["$event"])
 
-    assert len(pending_after_reservation) == 1
-    assert pending_after_reservation[0].response_transaction_id == pending_response.response_transaction_id
+    assert reloaded_store.pending_inbound_replays() == []
+    assert reloaded_store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source) is False
 
     reloaded_store.record_turn(HandledTurnState.from_source_event_id("$event", response_event_id="$response"))
 
     assert reloaded_store.pending_inbound_replays() == []
+
+
+def test_turn_store_preserves_each_pending_event_after_coalesced_response_state_is_written(tmp_path: Path) -> None:
+    """Coalesced response bookkeeping must not collapse multiple replayable source events into one."""
+    tracking_path = tmp_path / "tracking"
+    deps = TurnStoreDeps(
+        agent_name="agent",
+        tracking_base_path=tracking_path,
+        state_writer=MagicMock(),
+        resolver=MagicMock(),
+        tool_runtime=MagicMock(),
+    )
+    store = TurnStore(deps)
+    first_event_source = {
+        "type": "m.room.message",
+        "event_id": "$first",
+        "sender": "@user:example.com",
+        "content": {
+            "msgtype": "m.text",
+            "body": "first",
+        },
+    }
+    second_event_source = {
+        "type": "m.room.message",
+        "event_id": "$second",
+        "sender": "@user:example.com",
+        "content": {
+            "msgtype": "m.text",
+            "body": "second",
+        },
+    }
+
+    assert store.claim_pending_inbound(room_id="!room:example.com", event_source=first_event_source) is True
+    assert store.claim_pending_inbound(room_id="!room:example.com", event_source=second_event_source) is True
+    store.reserve_pending_response(HandledTurnState.create(["$first", "$second"]))
+
+    reloaded_store = TurnStore(deps)
+    pending_replays = reloaded_store.pending_inbound_replays()
+
+    assert [replay.event_id for replay in pending_replays] == ["$first", "$second"]
 
 
 def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:

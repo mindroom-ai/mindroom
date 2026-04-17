@@ -287,6 +287,14 @@ class TurnController:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
 
+    def _mark_inbound_events_started(self, source_event_ids: Sequence[str]) -> None:
+        """Mark one or more claimed inbound events as no longer safe to replay."""
+        self.deps.turn_store.mark_inbound_started(source_event_ids)
+
+    def _clear_inbound_records(self, source_event_ids: Sequence[str]) -> None:
+        """Delete any non-terminal inbound state for the provided source events."""
+        self.deps.turn_store.clear_inbound_records(source_event_ids)
+
     def _has_newer_unresponded_in_thread(
         self,
         event: _TextDispatchEvent,
@@ -1217,8 +1225,6 @@ class TurnController:
     async def prepare_sync_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
         """Claim one sync-delivered text event durably before long-running processing."""
         event_info = EventInfo.from_event(event.source)
-        if event_info.is_edit:
-            return True
         if not isinstance(event.body, str):
             return False
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1228,7 +1234,7 @@ class TurnController:
         }:
             return False
 
-        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=False)
+        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return False
         ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
@@ -1246,16 +1252,16 @@ class TurnController:
             )
             return False
         if isinstance(event.source, dict):
-            self.deps.turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source)
-        return True
+            return self.deps.turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source)
+        return False
 
     async def prepare_sync_media_event(self, room: nio.MatrixRoom, event: _MediaDispatchEvent) -> bool:
         """Claim one sync-delivered media event durably before long-running processing."""
         if self._precheck_dispatch_event(room, event) is None:
             return False
         if isinstance(event.source, dict):
-            self.deps.turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source)
-        return True
+            return self.deps.turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source)
+        return False
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one inbound text event."""
@@ -1316,12 +1322,14 @@ class TurnController:
         )
 
         if event_info.is_edit:
+            self._mark_inbound_events_started((event.event_id,))
             await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
                 event_info,
                 prechecked_event.requester_user_id,
             )
+            self._clear_inbound_records((event.event_id,))
             return
 
         prepared_event = await self._resolve_text_event_with_ingress_timing(
@@ -1348,6 +1356,7 @@ class TurnController:
                 resolved_thread_id=coalescing_thread_id,
             )
             if selection is not None:
+                self._mark_inbound_events_started((prepared_event.event_id,))
                 await self.handle_interactive_selection(
                     room,
                     selection=selection,
@@ -1418,6 +1427,7 @@ class TurnController:
                 dispatch_timing.mark("dispatch_start")
             dispatch_started_at = time.monotonic()
             handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
+            self._mark_inbound_events_started(handled_turn.source_event_ids)
 
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
@@ -1649,6 +1659,7 @@ class TurnController:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
         if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+            self._mark_inbound_events_started((event.event_id,))
             await self._on_audio_media_message(
                 room,
                 _PrecheckedEvent(
@@ -1726,6 +1737,7 @@ class TurnController:
         event = prechecked_event.event
         if not is_v2_sidecar_text_preview(event.source):
             return False
+        self._mark_inbound_events_started((event.event_id,))
 
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:

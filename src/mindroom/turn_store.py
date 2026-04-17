@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,8 +17,8 @@ from mindroom.handled_turns import (
     HandledTurnLedger,
     HandledTurnRecord,
     HandledTurnState,
-    PendingInboundClaim,
 )
+from mindroom.pending_inbound import PendingInboundReplay, PendingInboundStore
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
@@ -46,17 +47,6 @@ class PendingResponseReservation:
     """Durable delivery state reserved before the first visible reply send."""
 
     response_transaction_id: str
-
-
-@dataclass(frozen=True)
-class PendingInboundReplay:
-    """Durable replay metadata for one not-yet-completed inbound turn."""
-
-    anchor_event_id: str
-    source_event_ids: tuple[str, ...]
-    room_id: str
-    event_source: dict[str, Any]
-    response_transaction_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,12 +101,18 @@ class TurnStore:
 
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)
+    _pending_inbound: PendingInboundStore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Construct the private handled-turn ledger for this runtime entity."""
+        tracking_base_path = Path(self.deps.tracking_base_path)
         self._ledger = HandledTurnLedger(
             self.deps.agent_name,
-            base_path=Path(self.deps.tracking_base_path),
+            base_path=tracking_base_path,
+        )
+        self._pending_inbound = PendingInboundStore(
+            self.deps.agent_name,
+            base_path=tracking_base_path,
         )
 
     def record_turn(self, handled_turn: HandledTurnState) -> None:
@@ -124,12 +120,14 @@ class TurnStore:
         visible_echo_event_id = handled_turn.visible_echo_event_id or self.visible_echo_for_sources(
             handled_turn.source_event_ids,
         )
+        self._pending_inbound.remove(handled_turn.source_event_ids)
         self._ledger.record_handled_turn(
             handled_turn.with_visible_echo_event_id(visible_echo_event_id),
         )
 
     def record_turn_record(self, turn_record: HandledTurnRecord) -> None:
         """Persist one exact handled-turn record without losing its anchor event."""
+        self._pending_inbound.remove(turn_record.source_event_ids)
         self._ledger.record_handled_turn_record(turn_record)
 
     def is_handled(self, event_id: str) -> bool:
@@ -154,28 +152,25 @@ class TurnStore:
             response_transaction_id=self._ledger.reserve_response_transaction_id(handled_turn),
         )
 
-    def claim_pending_inbound(self, *, room_id: str, event_source: dict[str, Any]) -> None:
+    def claim_pending_inbound(self, *, room_id: str, event_source: dict[str, Any]) -> bool:
         """Persist one replayable inbound claim before the turn enters long-running work."""
-        self._ledger.claim_pending_inbound(room_id=room_id, event_source=event_source)
+        return self._pending_inbound.claim(room_id=room_id, event_source=event_source)
 
     def pending_inbound_replays(self) -> list[PendingInboundReplay]:
         """Return replay metadata for incomplete inbound turns."""
-        return [self._pending_inbound_replay_from_claim(claim) for claim in self._ledger.pending_inbound_claims()]
+        return self._pending_inbound.pending_replays()
+
+    def mark_inbound_started(self, source_event_ids: typing.Sequence[str]) -> None:
+        """Mark one or more claimed inbound events as no longer safe to auto-replay."""
+        self._pending_inbound.mark_started(source_event_ids)
+
+    def clear_inbound_records(self, source_event_ids: typing.Sequence[str]) -> None:
+        """Delete any pending or started inbound claims for the provided source events."""
+        self._pending_inbound.remove(source_event_ids)
 
     def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
         """Return the ledger-backed turn record for one source event when available."""
         return self._ledger.get_turn_record(source_event_id)
-
-    @staticmethod
-    def _pending_inbound_replay_from_claim(claim: PendingInboundClaim) -> PendingInboundReplay:
-        """Lift one ledger claim into the runtime-facing replay carrier."""
-        return PendingInboundReplay(
-            anchor_event_id=claim.anchor_event_id,
-            source_event_ids=claim.source_event_ids,
-            room_id=claim.room_id,
-            event_source=claim.event_source,
-            response_transaction_id=claim.response_transaction_id,
-        )
 
     def response_history_scope(
         self,

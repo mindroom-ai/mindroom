@@ -40,7 +40,6 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
-from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_tokens import SyncTokenStore
 from mindroom.matrix.thread_membership import resolve_related_event_thread_id_best_effort
 from mindroom.matrix.users import (
@@ -1394,7 +1393,7 @@ class AgentBot:
             except Exception as exc:
                 self.logger.warning(
                     "pending_inbound_replay_parse_failed",
-                    anchor_event_id=pending_replay.anchor_event_id,
+                    event_id=pending_replay.event_id,
                     error=str(exc),
                 )
                 continue
@@ -1429,11 +1428,11 @@ class AgentBot:
             else:
                 self.logger.warning(
                     "pending_inbound_replay_skipped",
-                    anchor_event_id=pending_replay.anchor_event_id,
+                    event_id=pending_replay.event_id,
                     event_type=type(parsed_event).__name__,
                 )
                 continue
-            replayed_source_event_ids.update(pending_replay.source_event_ids)
+            replayed_source_event_ids.add(pending_replay.event_id)
         return replayed_source_event_ids
 
     def _should_queue_follow_up_in_active_response_thread(

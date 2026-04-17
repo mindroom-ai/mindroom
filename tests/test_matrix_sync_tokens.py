@@ -94,6 +94,55 @@ def _message_event(
     return cast("nio.RoomMessageText", event)
 
 
+def _edit_event(
+    *,
+    room_id: str = "!room:localhost",
+    event_id: str = "$edit:localhost",
+    original_event_id: str = "$original:localhost",
+    body: str = "* hello edited",
+    new_body: str = "hello edited",
+) -> nio.RoomMessageText:
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": body,
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": new_body,
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": original_event_id,
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1001,
+            "type": "m.room.message",
+        },
+    )
+    event.source = {
+        "type": "m.room.message",
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "room_id": room_id,
+        "content": {
+            "body": body,
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": new_body,
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": original_event_id,
+                "rel_type": "m.replace",
+            },
+        },
+    }
+    return cast("nio.RoomMessageText", event)
+
+
 def test_load_sync_token_returns_none_when_missing(tmp_path: Path) -> None:
     """First-run agents should have no saved sync token."""
     assert load_sync_token(tmp_path, "code") is None
@@ -310,3 +359,54 @@ async def test_replay_pending_inbound_turns_schedules_saved_text_message_process
     finally:
         gate.set()
         await wait_for_background_tasks(owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+async def test_startup_replay_does_not_reschedule_same_message_when_sync_redelivers_it(tmp_path: Path) -> None:
+    """A claimed startup replay should suppress later sync redelivery of the same event."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _message_event(event_id="$dup:localhost")
+    bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=event.source)
+    gate = asyncio.Event()
+
+    async def slow_background_message(_room: nio.MatrixRoom, _event: nio.RoomMessageText) -> None:
+        await gate.wait()
+
+    try:
+        with (
+            patch.object(bot, "_on_message", side_effect=slow_background_message) as mock_on_message,
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch.object(
+                bot._turn_controller,
+                "_should_skip_router_before_shared_ingress_work",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            replayed_source_event_ids = await bot.replay_pending_inbound_turns()
+            await asyncio.sleep(0)
+            assert replayed_source_event_ids == {"$dup:localhost"}
+
+            await bot._on_sync_message(room, event)
+            await asyncio.sleep(0)
+
+        assert mock_on_message.await_count == 1
+    finally:
+        gate.set()
+        await wait_for_background_tasks(owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+async def test_prepare_sync_text_event_records_edit_for_replay(tmp_path: Path) -> None:
+    """Edit events delivered during startup should be durably replayable before processing starts."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _edit_event()
+
+    with patch("mindroom.turn_controller.is_authorized_sender", return_value=True):
+        should_process = await bot._turn_controller.prepare_sync_text_event(room, event)
+
+    assert should_process is True
+    pending_replays = bot._turn_store.pending_inbound_replays()
+    assert [replay.event_source["event_id"] for replay in pending_replays] == ["$edit:localhost"]

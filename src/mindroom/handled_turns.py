@@ -39,13 +39,6 @@ class _SerializedConversationTarget(TypedDict):
     session_id: str
 
 
-class _SerializedPendingInboundClaim(TypedDict):
-    """JSON-safe replay metadata for one claimed inbound event."""
-
-    room_id: str
-    event_source: dict[str, Any]
-
-
 class _SerializedHandledTurnRecord(TypedDict):
     """Record of one handled source event persisted to disk."""
 
@@ -60,7 +53,6 @@ class _SerializedHandledTurnRecord(TypedDict):
     response_owner: NotRequired[str | None]
     history_scope: NotRequired[_SerializedHistoryScope | None]
     conversation_target: NotRequired[_SerializedConversationTarget | None]
-    pending_inbound_claim: NotRequired[_SerializedPendingInboundClaim | None]
 
 
 type _SerializedHandledTurnRecordLike = _SerializedHandledTurnRecord | dict[str, Any]
@@ -218,17 +210,6 @@ class HandledTurnRecord:
         return len(self.source_event_ids) > 1
 
 
-@dataclass(frozen=True)
-class PendingInboundClaim:
-    """Durable replay metadata for one incompletely handled inbound turn."""
-
-    anchor_event_id: str
-    source_event_ids: tuple[str, ...]
-    room_id: str
-    event_source: dict[str, Any]
-    response_transaction_id: str | None = None
-
-
 @dataclass
 class HandledTurnLedger:
     """Track handled source events for one runtime entity."""
@@ -328,64 +309,6 @@ class HandledTurnLedger:
             source_event_count=len(normalized_source_event_ids),
         )
         return transaction_id
-
-    def claim_pending_inbound(self, *, room_id: str, event_source: dict[str, Any]) -> None:
-        """Persist one replayable inbound claim before response execution begins."""
-        event_id = _normalized_event_id(event_source.get("event_id"))
-        if event_id is None:
-            msg = "Cannot claim a pending inbound event without an event_id"
-            raise ValueError(msg)
-        pending_inbound_claim = _normalized_pending_inbound_claim(room_id=room_id, event_source=event_source)
-        with self._thread_lock, self._file_lock(exclusive=True):
-            self._responses = self._read_responses_file_locked()
-            existing_record = self._responses.get(event_id)
-            source_event_ids = _source_event_ids_for_record(event_id, existing_record)
-            self._persist_handled_turn_locked(
-                source_event_ids=source_event_ids,
-                response_event_id=_response_event_id_for_record(existing_record),
-                response_transaction_id=_response_transaction_id_for_record(existing_record),
-                completed=_completed_for_record(existing_record),
-                visible_echo_event_id=_visible_echo_event_id_for_record(existing_record),
-                source_event_prompts=_prompt_map_for_record(source_event_ids, existing_record),
-                response_owner=_response_owner_for_record(existing_record),
-                history_scope=_history_scope_for_record(existing_record),
-                conversation_target=_conversation_target_for_record(existing_record),
-                anchor_event_id=_anchor_event_id_for_record(source_event_ids, existing_record),
-                pending_inbound_claim=pending_inbound_claim,
-            )
-            self._save_responses_locked()
-        logger.debug(
-            "pending_inbound_claim_recorded",
-            agent=self.agent_name,
-            event_id=event_id,
-            room_id=pending_inbound_claim["room_id"],
-        )
-
-    def pending_inbound_claims(self) -> list[PendingInboundClaim]:
-        """Return unique replayable inbound claims for incomplete turns."""
-        with self._thread_lock, self._file_lock(exclusive=False):
-            self._responses = self._read_responses_file_locked(repair_corrupt_file=False)
-            unique_claims: dict[str, tuple[float, PendingInboundClaim]] = {}
-            for event_id, record in self._responses.items():
-                pending_inbound_claim = _pending_inbound_claim_for_record(record)
-                if pending_inbound_claim is None or _completed_for_record(record):
-                    continue
-                source_event_ids = _source_event_ids_for_record(event_id, record)
-                anchor_event_id = _anchor_event_id_for_record(source_event_ids, record)
-                unique_claims.setdefault(
-                    anchor_event_id,
-                    (
-                        float(record.get("timestamp", 0.0)),
-                        PendingInboundClaim(
-                            anchor_event_id=anchor_event_id,
-                            source_event_ids=source_event_ids,
-                            room_id=pending_inbound_claim["room_id"],
-                            event_source=pending_inbound_claim["event_source"],
-                            response_transaction_id=_response_transaction_id_for_record(record),
-                        ),
-                    ),
-                )
-            return [claim for _timestamp, claim in sorted(unique_claims.values(), key=lambda item: item[0])]
 
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo without marking the turn terminally handled."""
@@ -625,7 +548,6 @@ class HandledTurnLedger:
         history_scope: HistoryScope | None,
         conversation_target: MessageTarget | None,
         anchor_event_id: str | None = None,
-        pending_inbound_claim: _SerializedPendingInboundClaim | None | Literal[False] = False,
     ) -> None:
         """Persist one handled turn while the thread and file locks are already held."""
         visible_echo_event_id = visible_echo_event_id or self._visible_echo_for_sources(source_event_ids)
@@ -635,8 +557,6 @@ class HandledTurnLedger:
         history_scope = self._normalized_history_scope(source_event_ids, history_scope)
         conversation_target = self._normalized_conversation_target(source_event_ids, conversation_target)
         anchor_event_id = self._normalized_anchor_event_id(source_event_ids, anchor_event_id)
-        if pending_inbound_claim is False:
-            pending_inbound_claim = None if completed else self._normalized_pending_inbound_claim(source_event_ids)
         timestamp = time.time()
         for event_id in source_event_ids:
             self._responses[event_id] = _serialized_record(
@@ -651,7 +571,6 @@ class HandledTurnLedger:
                 response_owner=response_owner,
                 history_scope=history_scope,
                 conversation_target=conversation_target,
-                pending_inbound_claim=pending_inbound_claim,
             )
 
     def _normalized_prompt_map(
@@ -743,17 +662,6 @@ class HandledTurnLedger:
                 return _anchor_event_id_for_record(source_event_ids, existing_record)
         return source_event_ids[-1]
 
-    def _normalized_pending_inbound_claim(
-        self,
-        source_event_ids: tuple[str, ...],
-    ) -> _SerializedPendingInboundClaim | None:
-        """Preserve an existing replay claim across non-terminal ledger updates."""
-        for event_id in source_event_ids:
-            existing_claim = _pending_inbound_claim_for_record(self._responses.get(event_id))
-            if existing_claim is not None:
-                return existing_claim
-        return None
-
 
 def _normalize_source_event_ids(source_event_ids: typing.Sequence[str]) -> tuple[str, ...]:
     """Deduplicate source event IDs while preserving order."""
@@ -816,24 +724,6 @@ def _normalized_conversation_target(conversation_target: MessageTarget | None) -
     )
 
 
-def _normalized_pending_inbound_claim(
-    *,
-    room_id: str,
-    event_source: dict[str, Any],
-) -> _SerializedPendingInboundClaim:
-    """Return normalized replay metadata for one pending inbound event."""
-    if not isinstance(room_id, str) or not room_id:
-        msg = "Pending inbound claims require a room_id"
-        raise ValueError(msg)
-    if not isinstance(event_source, dict):
-        msg = "Pending inbound claims require a dict event source"
-        raise TypeError(msg)
-    return {
-        "room_id": room_id,
-        "event_source": dict(event_source),
-    }
-
-
 def _explicit_prompt_map_for_sources(
     source_event_ids: tuple[str, ...],
     source_event_prompts: typing.Mapping[str, str] | None,
@@ -862,7 +752,6 @@ def _serialized_record(
     response_owner: str | None = None,
     history_scope: HistoryScope | None = None,
     conversation_target: MessageTarget | None = None,
-    pending_inbound_claim: _SerializedPendingInboundClaim | None = None,
 ) -> _SerializedHandledTurnRecord:
     """Build one persisted handled-turn record from normalized fields."""
     record: _SerializedHandledTurnRecord = {
@@ -893,11 +782,6 @@ def _serialized_record(
             "resolved_thread_id": conversation_target.resolved_thread_id,
             "reply_to_event_id": conversation_target.reply_to_event_id,
             "session_id": conversation_target.session_id,
-        }
-    if pending_inbound_claim is not None:
-        record["pending_inbound_claim"] = {
-            "room_id": pending_inbound_claim["room_id"],
-            "event_source": dict(pending_inbound_claim["event_source"]),
         }
     return record
 
@@ -994,7 +878,6 @@ def _normalize_serialized_record(
     response_owner = _response_owner_for_record(raw_record)
     history_scope = _history_scope_for_record(raw_record)
     conversation_target = _conversation_target_for_record(raw_record)
-    pending_inbound_claim = _pending_inbound_claim_for_record(raw_record)
     normalized_record: _SerializedHandledTurnRecord = {
         "timestamp": float(timestamp) if isinstance(timestamp, int | float) else 0.0,
         "response_event_id": response_event_id if isinstance(response_event_id, str) else None,
@@ -1010,7 +893,6 @@ def _normalize_serialized_record(
         response_owner=response_owner,
         history_scope=history_scope,
         conversation_target=conversation_target,
-        pending_inbound_claim=pending_inbound_claim,
     )
 
 
@@ -1024,7 +906,6 @@ def _with_optional_serialized_record_fields(
     response_owner: str | None,
     history_scope: HistoryScope | None,
     conversation_target: MessageTarget | None,
-    pending_inbound_claim: _SerializedPendingInboundClaim | None,
 ) -> _SerializedHandledTurnRecord:
     """Attach optional normalized fields to one serialized handled-turn record."""
     if anchor_event_id is not None:
@@ -1049,11 +930,6 @@ def _with_optional_serialized_record_fields(
             "resolved_thread_id": conversation_target.resolved_thread_id,
             "reply_to_event_id": conversation_target.reply_to_event_id,
             "session_id": conversation_target.session_id,
-        }
-    if pending_inbound_claim is not None:
-        record["pending_inbound_claim"] = {
-            "room_id": pending_inbound_claim["room_id"],
-            "event_source": dict(pending_inbound_claim["event_source"]),
         }
     return record
 
@@ -1145,25 +1021,6 @@ def _conversation_target_for_record(record: _SerializedHandledTurnRecordLike | N
         ),
     )
     return _normalized_conversation_target(normalized_target)
-
-
-def _pending_inbound_claim_for_record(
-    record: _SerializedHandledTurnRecordLike | None,
-) -> _SerializedPendingInboundClaim | None:
-    """Return normalized replay metadata for one incomplete inbound turn."""
-    if record is None:
-        return None
-    raw_claim = record.get("pending_inbound_claim")
-    if not isinstance(raw_claim, dict):
-        return None
-    room_id = raw_claim.get("room_id")
-    event_source = raw_claim.get("event_source")
-    if not isinstance(room_id, str) or not room_id or not isinstance(event_source, dict):
-        return None
-    return {
-        "room_id": room_id,
-        "event_source": dict(event_source),
-    }
 
 
 def _response_event_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
