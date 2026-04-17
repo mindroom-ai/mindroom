@@ -68,11 +68,17 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_agent_for_message
-from mindroom.thread_utils import get_configured_agents_for_room
+from mindroom.thread_utils import (
+    check_agent_mentioned,
+    get_agents_in_thread,
+    get_configured_agents_for_room,
+    has_multiple_non_agent_users_in_thread,
+)
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
+    emit_elapsed_timing,
     get_dispatch_pipeline_timing,
 )
 from mindroom.timing import timing_scope as timing_scope_context
@@ -360,6 +366,53 @@ class TurnController:
             return False
         return self.deps.response_runner.has_active_response_for_target(target)
 
+    async def _should_skip_router_before_shared_ingress_work(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        *,
+        requester_user_id: str,
+        thread_id: str | None,
+    ) -> bool:
+        """Return whether the router can safely skip shared ingress work for one text event."""
+        if self.deps.agent_name != ROUTER_AGENT_NAME:
+            return False
+        if command_parser.parse(event.body.strip()) is not None:
+            return False
+
+        mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+            event.source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        if mentioned_agents or has_non_agent_mentions:
+            return True
+        if thread_id is None:
+            return False
+
+        thread_history = await self.deps.conversation_cache.get_dispatch_thread_snapshot(
+            room.room_id,
+            thread_id,
+        )
+        sender_visible_agents = filter_agents_by_sender_permissions(
+            get_agents_in_thread(
+                thread_history,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            ),
+            requester_user_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        if sender_visible_agents:
+            return True
+        return has_multiple_non_agent_users_in_thread(
+            thread_history,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+
     async def _coalescing_key_for_event(
         self,
         room: nio.MatrixRoom,
@@ -418,6 +471,7 @@ class TurnController:
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_enter")
+        enqueue_start = time.monotonic()
         effective_requester_user_id = requester_user_id or self._requester_user_id(
             sender=event.sender,
             source=event.source,
@@ -432,14 +486,37 @@ class TurnController:
                 trusted_relay_event,
                 effective_requester_user_id,
             )
+            emit_elapsed_timing(
+                "ingress_handoff.enqueue_for_dispatch",
+                enqueue_start,
+                path="trusted_internal_relay",
+            )
             return
+        coalescing_key_start = time.monotonic()
+        resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, effective_requester_user_id)
+        emit_elapsed_timing(
+            "ingress_handoff.enqueue_for_dispatch.coalescing_key",
+            coalescing_key_start,
+            thread_id=resolved_key[1],
+        )
+        gate_enqueue_start = time.monotonic()
         await self.deps.coalescing_gate.enqueue(
-            coalescing_key or await self._coalescing_key_for_event(room, event, effective_requester_user_id),
+            resolved_key,
             PendingEvent(
                 event=event,
                 room=room,
                 source_kind=source_kind,
             ),
+        )
+        emit_elapsed_timing(
+            "ingress_handoff.enqueue_for_dispatch.coalescing_gate",
+            gate_enqueue_start,
+            source_kind=source_kind,
+        )
+        emit_elapsed_timing(
+            "ingress_handoff.enqueue_for_dispatch",
+            enqueue_start,
+            source_kind=source_kind,
         )
 
     async def _maybe_send_visible_voice_echo(
@@ -485,17 +562,35 @@ class TurnController:
         handled_turn: HandledTurnState,
     ) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
+        extract_context_start = time.monotonic()
         if self._is_trusted_router_relay_event(event):
             context = await self.deps.resolver.extract_trusted_router_relay_context(room, event)
+            emit_elapsed_timing(
+                "dispatch_handoff.prepare_dispatch.extract_context",
+                extract_context_start,
+                path="trusted_router_relay",
+            )
         else:
             context = await self.deps.resolver.extract_dispatch_context(room, event)
+            emit_elapsed_timing(
+                "dispatch_handoff.prepare_dispatch.extract_context",
+                extract_context_start,
+                path="normal",
+            )
+        target_start = time.monotonic()
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=context.thread_id,
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
+        emit_elapsed_timing(
+            "dispatch_handoff.prepare_dispatch.build_message_target",
+            target_start,
+            resolved_thread_id=target.resolved_thread_id,
+        )
         correlation_id = event.event_id
+        envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_message_envelope(
             room_id=room.room_id,
             event=event,
@@ -503,11 +598,22 @@ class TurnController:
             context=context,
             target=target,
         )
+        emit_elapsed_timing(
+            "dispatch_handoff.prepare_dispatch.build_message_envelope",
+            envelope_start,
+            source_kind=envelope.source_kind,
+        )
         ingress_policy = hook_ingress_policy(envelope)
+        hooks_start = time.monotonic()
         suppressed = await self.deps.ingress_hook_runner.emit_message_received_hooks(
             envelope=envelope,
             correlation_id=correlation_id,
             policy=ingress_policy,
+        )
+        emit_elapsed_timing(
+            "dispatch_handoff.prepare_dispatch.emit_message_received_hooks",
+            hooks_start,
+            suppressed=suppressed,
         )
         if suppressed:
             self._mark_source_events_responded(handled_turn)
@@ -1136,6 +1242,7 @@ class TurnController:
         dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_exit")
+        retarget_start = time.monotonic()
         batch_coalescing_key = await self._coalescing_key_for_event(
             batch.room,
             batch.primary_event,
@@ -1152,7 +1259,14 @@ class TurnController:
             batch.requester_user_id,
         )
         self.deps.coalescing_gate.retarget(batch_coalescing_key, canonical_key)
+        emit_elapsed_timing(
+            "coalescing.handle_batch.retarget",
+            retarget_start,
+            original_thread_id=batch_coalescing_key[1],
+            resolved_thread_id=canonical_key[1],
+        )
         async with self.deps.resolver.turn_thread_cache_scope():
+            dispatch_start = time.monotonic()
             await self._dispatch_text_message(
                 batch.room,
                 dispatch_event,
@@ -1163,34 +1277,25 @@ class TurnController:
                     source_event_prompts=batch.source_event_prompts,
                 ),
             )
+            emit_elapsed_timing(
+                "coalescing.handle_batch.dispatch_text_message",
+                dispatch_start,
+                source_event_count=len(batch.source_event_ids),
+            )
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one inbound text event."""
         async with self.deps.resolver.turn_thread_cache_scope():
             await self._handle_message_inner(room, event)
 
-    async def _handle_message_inner(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    async def _handle_message_inner(  # noqa: C901, PLR0911
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+    ) -> None:
         """Handle one text message inside the per-turn conversation lookup scope."""
         ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-        self.deps.logger.info(
-            "Received message",
-            event_id=event.event_id,
-            room_id=room.room_id,
-            sender=event.sender,
-            thread_id=ingress_thread_id,
-        )
-        dispatch_timing = create_dispatch_pipeline_timing(
-            event_id=event.event_id,
-            room_id=room.room_id,
-        )
-        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         event_info = EventInfo.from_event(event.source)
-        await self._append_live_event_with_timing(
-            room.room_id,
-            event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1203,6 +1308,38 @@ class TurnController:
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return
+        if await self._should_skip_router_before_shared_ingress_work(
+            room,
+            prechecked_event.event,
+            requester_user_id=prechecked_event.requester_user_id,
+            thread_id=ingress_thread_id,
+        ):
+            self.deps.logger.debug(
+                "skip_router_shared_ingress_work",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                thread_id=ingress_thread_id,
+            )
+            return
+
+        self.deps.logger.info(
+            "Received message",
+            event_id=event.event_id,
+            room_id=room.room_id,
+            sender=event.sender,
+            thread_id=ingress_thread_id,
+        )
+        dispatch_timing = create_dispatch_pipeline_timing(
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
+        await self._append_live_event_with_timing(
+            room.room_id,
+            event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
+        )
 
         if event_info.is_edit:
             await self.deps.edit_regenerator.handle_message_edit(

@@ -1366,6 +1366,147 @@ class TestRouterSkipsSingleAgent:
     """Test router's behavior when there's only one agent in the room."""
 
     @pytest.mark.asyncio
+    async def test_router_skips_shared_ingress_work_for_explicit_agent_mentions(self) -> None:
+        """Router should bail out before shared ingress work when another agent is explicitly mentioned."""
+        agent_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
+        bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
+        bot.logger = MagicMock()
+        wrap_extracted_collaborators(bot, "_turn_policy")
+        _sync_turn_policy_runtime(bot)
+        bot._turn_controller._append_live_event_with_timing = AsyncMock()
+        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
+
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@mindroom_calculator:localhost": None,
+            "@user:localhost": None,
+        }
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event_explicit_mention",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "Hey @mindroom_general:localhost can you help?",
+                    "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
+                },
+            },
+        )
+
+        await bot._on_message(room, event)
+
+        bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
+        bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
+        bot._conversation_cache.get_dispatch_thread_snapshot.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_skips_shared_ingress_work_for_agent_owned_thread_follow_up(self) -> None:
+        """Router should bail out before shared ingress work when the thread already has a visible agent."""
+        agent_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
+        bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
+        bot.logger = MagicMock()
+        wrap_extracted_collaborators(bot, "_turn_policy")
+        _sync_turn_policy_runtime(bot)
+        bot._turn_controller._append_live_event_with_timing = AsyncMock()
+        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            return_value=thread_history_result(
+                [
+                    _message(sender="@mindroom_general:localhost", body="I can help with that."),
+                    _message(sender="@user:localhost", body="Can you continue?"),
+                ],
+                is_full_history=False,
+            ),
+        )
+
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@mindroom_calculator:localhost": None,
+            "@user:localhost": None,
+        }
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event_thread_follow_up",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "Following up on that",
+                    "m.relates_to": {"event_id": "$thread_root", "rel_type": "m.thread"},
+                },
+            },
+        )
+
+        await bot._on_message(room, event)
+
+        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+            "!test:server",
+            "$thread_root",
+        )
+        bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
+        bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_router_skips_routing_with_single_agent(self) -> None:
         """Test that router doesn't route when there's only one agent available."""
         # Create router agent

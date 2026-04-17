@@ -15,6 +15,7 @@ from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from .hooks.ingress import is_voice_event
 from .matrix.media import extract_media_caption
+from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -408,9 +409,16 @@ class CoalescingGate:
 
     async def enqueue(self, key: CoalescingKey, pending_event: PendingEvent) -> None:
         """Queue one pending event and schedule its eventual flush."""
+        enqueue_start = time.monotonic()
         # Path 1: bypass — explicitly exempt automation
         if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
             await self._dispatch_batch(build_coalesced_batch(key, [pending_event]))
+            emit_elapsed_timing(
+                "coalescing_gate.enqueue",
+                enqueue_start,
+                path="bypass",
+                source_kind=pending_event.source_kind,
+            )
             return
 
         # Path 2: command interrupt — flush pending, dispatch command solo
@@ -420,6 +428,12 @@ class CoalescingGate:
                 self._cancel_timer(gate)
             await self._flush(key, bypass_grace=True)
             await self._dispatch_batch(build_coalesced_batch(key, [pending_event]))
+            emit_elapsed_timing(
+                "coalescing_gate.enqueue",
+                enqueue_start,
+                path="command_interrupt",
+                source_kind=pending_event.source_kind,
+            )
             return
 
         gate = self._gates.get(key)
@@ -432,6 +446,13 @@ class CoalescingGate:
             if _is_media_event(pending_event.event):
                 gate.pending.append(pending_event)
                 self._schedule_grace(key)
+                emit_elapsed_timing(
+                    "coalescing_gate.enqueue",
+                    enqueue_start,
+                    path="grace_media_extend",
+                    source_kind=pending_event.source_kind,
+                    pending_count=len(gate.pending),
+                )
                 return
             # Text during grace → flush existing batch, start new turn
             self._cancel_timer(gate)
@@ -444,11 +465,32 @@ class CoalescingGate:
         # Path 4: normal append + schedule
         gate.pending.append(pending_event)
         if gate.phase is GatePhase.IN_FLIGHT:
+            emit_elapsed_timing(
+                "coalescing_gate.enqueue",
+                enqueue_start,
+                path="in_flight_buffer",
+                source_kind=pending_event.source_kind,
+                pending_count=len(gate.pending),
+            )
             return
         if self._debounce_seconds() <= 0:
             await self._flush(key)
+            emit_elapsed_timing(
+                "coalescing_gate.enqueue",
+                enqueue_start,
+                path="immediate_flush",
+                source_kind=pending_event.source_kind,
+                pending_count=len(gate.pending),
+            )
             return
         self._reset_timer(key, delay=self._debounce_seconds(), phase=GatePhase.DEBOUNCE)
+        emit_elapsed_timing(
+            "coalescing_gate.enqueue",
+            enqueue_start,
+            path="debounce_schedule",
+            source_kind=pending_event.source_kind,
+            pending_count=len(gate.pending),
+        )
 
     async def drain_all(self) -> None:
         """Flush every active gate, canceling timers and awaiting dispatch.
@@ -539,6 +581,7 @@ class CoalescingGate:
 
     async def _flush(self, key: CoalescingKey, *, bypass_grace: bool = False) -> None:
         """Execute one gate flush cycle."""
+        flush_start = time.monotonic()
         gate = self._gates.get(key)
         if gate is None or not gate.pending or gate.phase is GatePhase.IN_FLIGHT:
             return
@@ -550,6 +593,12 @@ class CoalescingGate:
             and _pending_has_only_text(gate.pending)
         ):
             self._schedule_grace(key)
+            emit_elapsed_timing(
+                "coalescing_gate.flush",
+                flush_start,
+                outcome="scheduled_grace",
+                pending_count=len(gate.pending),
+            )
             return
         # Set IN_FLIGHT before _cancel_timer so the running timer task
         # (which may be the current task) is not self-cancelled.
@@ -558,8 +607,22 @@ class CoalescingGate:
         pending_events = list(gate.pending)
         gate.pending.clear()
         try:
+            dispatch_batch_start = time.monotonic()
             await self._dispatch_batch(build_coalesced_batch(key, pending_events))
+            emit_elapsed_timing(
+                "coalescing_gate.flush.dispatch_batch",
+                dispatch_batch_start,
+                pending_count=len(pending_events),
+                bypass_grace=bypass_grace,
+            )
         finally:
+            emit_elapsed_timing(
+                "coalescing_gate.flush",
+                flush_start,
+                outcome="dispatched",
+                pending_count=len(pending_events),
+                bypass_grace=bypass_grace,
+            )
             current_key, gate = self._resolve_gate_entry(key, gate)
             if gate is not None and current_key is not None:
                 gate.phase = GatePhase.DEBOUNCE
