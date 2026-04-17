@@ -1300,6 +1300,72 @@ async def test_worker_scoped_git_private_knowledge_ignores_background_startup_wi
 
 
 @pytest.mark.asyncio
+async def test_worker_scoped_git_private_knowledge_full_reindex_still_syncs_before_reindex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Request-scoped background Git bases must still refresh before a full reindex."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": _mind_private_agent(
+                watch=False,
+                template_dir=str(template_dir),
+                knowledge_path="kb_repo",
+                git=KnowledgeGitConfig(
+                    repo_url="https://github.com/example/memory.git",
+                    branch="main",
+                    poll_interval_seconds=30,
+                    startup_behavior="background",
+                ),
+            ),
+        },
+        models={},
+    )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    reindex_all = AsyncMock(return_value=0)
+    prepare_background_git_startup = AsyncMock()
+    start_watcher = AsyncMock()
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", reindex_all)
+    monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
+    monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
+
+    try:
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=identity,
+            reindex_on_create=True,
+        )
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+    sync_git_repository.assert_awaited_once_with(index_changes=False)
+    reindex_all.assert_awaited_once_with()
+    prepare_background_git_startup.assert_not_awaited()
+    start_watcher.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_git_knowledge_starts_background_sync_when_watch_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

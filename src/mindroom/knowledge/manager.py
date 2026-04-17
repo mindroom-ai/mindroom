@@ -386,6 +386,7 @@ class KnowledgeManager:
         default=None,
         init=False,
     )
+    _git_background_startup_allowed: bool = field(default=True, init=False)
     _git_lfs_checked: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -579,7 +580,11 @@ class KnowledgeManager:
         return bool(git_config is None or git_config.stale_lock_recovery)
 
     def _git_background_startup_enabled(self) -> bool:
-        return self._git_config() is not None and self._git_startup_behavior() == "background"
+        return (
+            self._git_config() is not None
+            and self._git_startup_behavior() == "background"
+            and self._git_background_startup_allowed
+        )
 
     def _skip_hidden_paths(self) -> bool:
         git_config = self._git_config()
@@ -1530,6 +1535,7 @@ async def _create_knowledge_manager_for_target(
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
+    manager._git_background_startup_allowed = not binding.request_scoped
     startup_mode: Literal["full_reindex", "resume", "incremental"] = (
         "full_reindex" if reindex_on_create else manager._startup_index_mode()
     )
