@@ -9,9 +9,11 @@ import pytest
 
 import mindroom.custom_tools._google_oauth as google_oauth_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
@@ -93,3 +95,42 @@ def test_google_wrapper_build_credentials_uses_scope_urls_for_default_scopes(
     )
 
     assert creds.scopes == expected_scopes
+
+
+@pytest.mark.parametrize("tool_name", ["gmail", "google_calendar", "google_sheets"])
+def test_google_wrappers_keep_allowlisted_shared_credentials_on_internal_reload(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Shared-scope Google wrappers should keep allowlisted shared credentials on reload."""
+    credentials_manager = CredentialsManager(base_path=tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google",
+        {
+            "token": "token",
+            "refresh_token": "refresh",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+            "_source": "ui",
+        },
+    )
+
+    tool = get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        allowed_shared_services=frozenset({"google"}),
+        worker_target=resolve_worker_target(
+            "shared",
+            "general",
+            execution_identity=None,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        ),
+    )
+
+    assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleSheetsTools))
+    assert tool._load_token_data() is not None

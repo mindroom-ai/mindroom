@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.ALLOWED_SHARED_SERVICES,
         ToolManagedInitArg.WORKER_TARGET,
     ),
     dependencies=["google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"],

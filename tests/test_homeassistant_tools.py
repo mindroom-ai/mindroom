@@ -92,6 +92,43 @@ class TestHomeAssistantTools:
         assert tool._worker_target.worker_scope == "shared"
         assert tool._worker_target.routing_agent_name == "general"
 
+    def test_shared_scope_allowlisted_credentials_survive_local_reload(
+        self,
+        runtime_paths: RuntimePaths,
+        tmp_path: Path,
+    ) -> None:
+        """Shared-scope local tools should keep allowlisted shared credentials on internal reload."""
+        credentials_manager = CredentialsManager(base_path=tmp_path / "credentials")
+        credentials_manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": "http://homeassistant.local:8123",
+                "access_token": TEST_PASSWORD,
+                "_source": "ui",
+            },
+        )
+
+        tool = get_tool_by_name(
+            "homeassistant",
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            allowed_shared_services=frozenset({"homeassistant"}),
+            worker_target=resolve_worker_target(
+                "shared",
+                "general",
+                execution_identity=None,
+                tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+                account_id=runtime_paths.env_value("ACCOUNT_ID"),
+            ),
+        )
+
+        assert isinstance(tool, HomeAssistantTools)
+        assert tool._load_config() == {
+            "instance_url": "http://homeassistant.local:8123",
+            "access_token": TEST_PASSWORD,
+            "_source": "ui",
+        }
+
     def test_tool_metadata_rejects_isolating_worker_scope(
         self,
         mock_credentials_manager: CredentialsManager,

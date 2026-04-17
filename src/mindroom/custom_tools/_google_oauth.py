@@ -39,6 +39,7 @@ class ScopedGoogleOAuthMixin:
     _oauth_logger: BoundLogger
     _runtime_paths: RuntimePaths
     _creds_manager: CredentialsManager
+    _allowed_shared_services: frozenset[str] | None
     _worker_target: ResolvedWorkerTarget | None
     _provided_creds: bool
     _original_auth: Callable[[], None]
@@ -47,6 +48,7 @@ class ScopedGoogleOAuthMixin:
     def _initialize_google_oauth(
         self,
         *,
+        allowed_shared_services: frozenset[str] | None,
         worker_target: ResolvedWorkerTarget | None,
         provided_creds: Any,  # noqa: ANN401
         logger: BoundLogger,
@@ -63,6 +65,7 @@ class ScopedGoogleOAuthMixin:
             )
             raise ValueError(msg)
 
+        self._allowed_shared_services = allowed_shared_services
         self._worker_target = worker_target
         self._provided_creds = provided_creds is not None
         self._oauth_logger = logger
@@ -73,6 +76,7 @@ class ScopedGoogleOAuthMixin:
         return load_scoped_credentials(
             "google",
             credentials_manager=self._creds_manager,
+            allowed_shared_services=self._allowed_shared_services,
             worker_target=self._worker_target,
         )
 

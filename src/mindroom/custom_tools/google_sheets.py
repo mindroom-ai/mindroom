@@ -32,6 +32,7 @@ class GoogleSheetsTools(ScopedGoogleOAuthMixin, AgnoGoogleSheetsTools):
         *,
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
+        allowed_shared_services: frozenset[str] | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
@@ -47,6 +48,7 @@ class GoogleSheetsTools(ScopedGoogleOAuthMixin, AgnoGoogleSheetsTools):
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         creds = self._initialize_google_oauth(
+            allowed_shared_services=allowed_shared_services,
             worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,
