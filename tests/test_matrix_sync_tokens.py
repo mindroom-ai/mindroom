@@ -193,7 +193,12 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 async def test_bot_start_tracks_only_message_and_media_callbacks_for_sync_checkpointing(
     tmp_path: Path,
 ) -> None:
-    """Startup catch-up checkpointing should only track text/media ingress callbacks."""
+    """Startup catch-up checkpointing should only track offline text/media ingress callbacks.
+
+    This locks the intended product boundary for the restart fix: source
+    messages and media received while the bot was offline or still starting are
+    durably caught up, while reactions remain a separate live-only flow.
+    """
     bot = _agent_bot(tmp_path)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     tracked_callbacks: dict[str, set[bool]] = {}

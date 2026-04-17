@@ -1050,11 +1050,14 @@ class AgentBot:
             # the sync loop is never blocked by event processing.
             #
             # Important restart-safety boundary:
-            # only inbound text/media sync events participate in startup catch-up
-            # checkpointing. Other sync callbacks are intentionally out of scope
-            # here. Reactions, invites, redactions, and any already-started reply
-            # recovery are handled by their own flows and must not delay
-            # next_batch persistence or shutdown.
+            # startup catch-up exists only so text/media source events received
+            # while the bot was offline or still starting are not silently
+            # skipped after next_batch advances. Other sync callbacks are
+            # intentionally out of scope for this feature. In particular,
+            # reaction-driven interactive selections remain a live-only flow:
+            # they are not durably claimed or replayed here and must not delay
+            # next_batch persistence or shutdown. If we ever want restart-safe
+            # reactions, that needs a separate durable claim/replay path.
             def add_sync_event_callback(
                 callback: Callable[..., Awaitable[None]],
                 event_type: type[Any],
@@ -1307,7 +1310,13 @@ class AgentBot:
         await self._conversation_cache.apply_redaction(room.room_id, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
-        """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
+        """Handle live reaction workflows.
+
+        Reaction events are intentionally outside the startup catch-up inbox.
+        This bot only durably replays sync-delivered text/media source events
+        that arrived while it was offline or still starting. Reaction restart
+        recovery, if we ever add it, needs a separate explicit design.
+        """
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 

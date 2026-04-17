@@ -18,8 +18,12 @@ class SyncCheckpointCoordinator:
 
     Intentionally narrow scope:
     only sync-delivered text/media ingress claims should register tasks here.
-    Reactions, redactions, invites, and already-started replies are handled by
-    their own restart flows and must not delay checkpoint persistence.
+    This coordinator exists to protect source events that arrived while the bot
+    was offline or still starting from being skipped after next_batch advances.
+    Reactions, redactions, invites, and already-started replies are outside
+    that guarantee and must not delay checkpoint persistence. If any of those
+    flows need restart-safe replay later, they need their own durable ingress
+    contract instead of widening this coordinator.
     """
 
     agent_name: str
