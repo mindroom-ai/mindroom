@@ -385,7 +385,7 @@ class ConversationResolver:
         event_info: EventInfo,
         *,
         event_id: str | None = None,
-    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
+    ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]:
         """Derive conversation context from canonical Matrix thread membership."""
         is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
             room_id,
@@ -404,7 +404,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
-    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
+    ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage], bool]:
         """Resolve one thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(
             room_id,
@@ -423,9 +423,9 @@ class ConversationResolver:
             dispatch_safe=dispatch_safe,
         )
         if full_history:
-            return True, thread_id, list(thread_messages), False
+            return True, thread_id, thread_messages, False
 
-        return True, thread_id, list(thread_messages), not thread_messages.is_full_history
+        return True, thread_id, thread_messages, not thread_messages.is_full_history
 
     async def extract_dispatch_context(
         self,

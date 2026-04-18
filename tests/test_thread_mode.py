@@ -21,9 +21,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
-from mindroom.matrix.client import ResolvedVisibleMessage, ThreadHistoryResult
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget

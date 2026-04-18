@@ -24,10 +24,10 @@ from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
-    ThreadHistoryResult,
     get_room_threads_page,
 )
 from mindroom.matrix.client_delivery import (
