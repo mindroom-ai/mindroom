@@ -11,6 +11,32 @@ paths = [
     "mindroom.response_runner",
 ]
 
+# Keep the current split Matrix client consumers visible to Tach so the
+# direct-import cleanup stays interface-enforced without widening dependency
+# enforcement repo-wide.
+[[modules]]
+paths = [
+    "mindroom.api.matrix_operations",
+    "mindroom.api.openai_compat",
+    "mindroom.bot_room_lifecycle",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.subagents",
+    "mindroom.delivery_gateway",
+    "mindroom.edit_regenerator",
+    "mindroom.execution_preparation",
+    "mindroom.hooks.matrix_admin",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.provisioning",
+    "mindroom.matrix.room_cleanup",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.users",
+    "mindroom.orchestration.runtime",
+    "mindroom.routing",
+    "mindroom.teams",
+    "mindroom.thread_utils",
+]
+
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
@@ -212,15 +238,20 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
+    "mindroom.thread_utils",
 ]
 
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.bot_room_lifecycle",
     "mindroom.bot_runtime_view",
     "mindroom.constants",
     "mindroom.conversation_resolver",
+    "mindroom.delivery_gateway",
+    "mindroom.edit_regenerator",
     "mindroom.hooks.sender",
+    "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
     "mindroom.memory",
     "mindroom.matrix.cache",
@@ -228,10 +259,14 @@ depends_on = [
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.room_cleanup",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.users",
     "mindroom.post_response_effects",
     "mindroom.response_runner",
     "mindroom.runtime_support",
     "mindroom.scheduling",
+    "mindroom.teams",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
 ]
@@ -243,6 +278,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.conversation_cache",
     "mindroom.scheduling",
+    "mindroom.thread_utils",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -254,6 +290,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_cache",
+    "mindroom.thread_utils",
 ]
 
 [[modules]]
@@ -270,11 +307,20 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.streaming"
-depends_on = ["mindroom.constants", "mindroom.matrix.client_delivery", "mindroom.matrix.conversation_cache"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.orchestration.runtime",
+]
 
 [[modules]]
 path = "mindroom.post_response_effects"
-depends_on = ["mindroom.matrix.conversation_cache", "mindroom.thread_summary"]
+depends_on = [
+    "mindroom.delivery_gateway",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.thread_summary",
+]
 
 [[modules]]
 path = "mindroom.hooks.sender"
@@ -285,11 +331,16 @@ path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.conversation_cache",
     "mindroom.response_runner",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.rooms",
+    "mindroom.routing",
+    "mindroom.thread_utils",
 ]
 
 [[modules]]
@@ -492,12 +543,6 @@ expose = [
 from = ["mindroom.matrix.client"]
 
 [[interfaces]]
-expose = ["cached_room"]
-from = ["mindroom.matrix.client"]
-visibility = ["mindroom.conversation_resolver"]
-exclusive = true
-
-[[interfaces]]
 expose = [
     "add_room_to_space",
     "create_room",
@@ -514,7 +559,16 @@ expose = [
     "leave_room",
 ]
 from = ["mindroom.matrix.client_room_admin"]
-visibility = ["mindroom.matrix.client", "mindroom.matrix.rooms"]
+visibility = [
+    "mindroom.api.matrix_operations",
+    "mindroom.bot_room_lifecycle",
+    "mindroom.hooks.matrix_admin",
+    "mindroom.matrix.client",
+    "mindroom.matrix.room_cleanup",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.orchestrator",
+]
 exclusive = true
 
 [[interfaces]]
@@ -529,7 +583,10 @@ from = ["mindroom.matrix.client_session"]
 visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.provisioning",
+    "mindroom.matrix.rooms",
     "mindroom.matrix.users",
+    "mindroom.orchestration.runtime",
+    "mindroom.orchestrator",
 ]
 exclusive = true
 
@@ -545,7 +602,19 @@ expose = [
     "send_message_result",
 ]
 from = ["mindroom.matrix.client_delivery"]
-visibility = ["mindroom.matrix.client"]
+visibility = [
+    "mindroom.conversation_resolver",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.subagents",
+    "mindroom.delivery_gateway",
+    "mindroom.hooks.sender",
+    "mindroom.matrix.client",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.scheduling",
+    "mindroom.streaming",
+    "mindroom.thread_summary",
+]
 exclusive = true
 
 [[interfaces]]
@@ -558,9 +627,29 @@ expose = [
 ]
 from = ["mindroom.matrix.client_visible_messages"]
 visibility = [
+    "mindroom.ai",
+    "mindroom.api.openai_compat",
+    "mindroom.bot",
+    "mindroom.commands.handler",
+    "mindroom.conversation_resolver",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.edit_regenerator",
+    "mindroom.execution_preparation",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.cache.thread_cache_helpers",
+    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.client",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.memory",
+    "mindroom.post_response_effects",
+    "mindroom.response_runner",
+    "mindroom.routing",
+    "mindroom.teams",
+    "mindroom.thread_summary",
+    "mindroom.thread_utils",
+    "mindroom.turn_controller",
 ]
 exclusive = true
 
