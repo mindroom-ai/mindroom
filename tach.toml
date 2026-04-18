@@ -260,6 +260,7 @@ expose = [
     "EventLookupResult",
     "MatrixConversationCache",
     "ThreadReadResult",
+    "resolve_thread_root_event_id_for_client",
 ]
 from = ["mindroom.matrix.conversation_cache"]
 
@@ -292,6 +293,7 @@ exclusive = true
 
 [[interfaces]]
 expose = [
+    "_fetch_thread_event_sources_via_room_messages",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "fetch_dispatch_thread_history",

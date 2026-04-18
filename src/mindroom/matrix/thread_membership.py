@@ -472,33 +472,6 @@ def room_scan_thread_membership_access(
     )
 
 
-def room_scan_thread_membership_access_for_client(
-    client: nio.AsyncClient,
-    *,
-    lookup_thread_id: ThreadIdLookup,
-    fetch_event_info: EventInfoLookup,
-) -> ThreadMembershipAccess:
-    """Build shared membership access using room scans from one Matrix client."""
-
-    async def fetch_thread_event_sources(
-        room_id: str,
-        thread_root_id: str,
-    ) -> tuple[list[dict[str, object]], bool]:
-        from mindroom.matrix.client_thread_history import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
-
-        return await _fetch_thread_event_sources_via_room_messages(
-            client,
-            room_id,
-            thread_root_id,
-        )
-
-    return room_scan_thread_membership_access(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        fetch_thread_event_sources=fetch_thread_event_sources,
-    )
-
-
 async def lookup_thread_id_from_conversation_cache(
     conversation_cache: ConversationCacheProtocol | None,
     room_id: str,
@@ -587,51 +560,21 @@ def conversation_cache_thread_membership_access_for_client(
             strict=True,
         )
 
-    return room_scan_thread_membership_access_for_client(
-        client,
+    async def fetch_thread_event_sources(
+        room_id: str,
+        thread_root_id: str,
+    ) -> tuple[list[dict[str, object]], bool]:
+        from mindroom.matrix.client_thread_history import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
+
+        scan_result = await _fetch_thread_event_sources_via_room_messages(
+            client,
+            room_id,
+            thread_root_id,
+        )
+        return scan_result.event_sources, True
+
+    return room_scan_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=resolved_fetch_event_info,
-    )
-
-
-async def resolve_thread_root_event_id_for_client(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
-    *,
-    conversation_cache: ConversationCacheProtocol | None = None,
-) -> str | None:
-    """Resolve one event ID into a canonical thread root when thread membership can prove one."""
-    normalized_event_id = event_id.strip() if isinstance(event_id, str) else ""
-    if not normalized_event_id:
-        return None
-
-    event_info = await fetch_event_info_for_client(
-        client,
-        room_id,
-        normalized_event_id,
-        strict=False,
-    )
-    if event_info is None:
-        return await lookup_thread_id_from_conversation_cache(
-            conversation_cache,
-            room_id,
-            normalized_event_id,
-        )
-
-    return await resolve_event_thread_id(
-        room_id,
-        event_info,
-        event_id=normalized_event_id,
-        allow_current_root=True,
-        access=conversation_cache_thread_membership_access_for_client(
-            client,
-            conversation_cache=conversation_cache,
-            fetch_event_info=lambda lookup_room_id, lookup_event_id: fetch_event_info_for_client(
-                client,
-                lookup_room_id,
-                lookup_event_id,
-                strict=False,
-            ),
-        ),
+        fetch_thread_event_sources=fetch_thread_event_sources,
     )
