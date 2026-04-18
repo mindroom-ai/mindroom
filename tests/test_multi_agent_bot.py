@@ -68,7 +68,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
-from mindroom.knowledge import KnowledgeManager
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.utils import MultiKnowledgeVectorDb
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import (
