@@ -15,7 +15,6 @@ from mindroom.knowledge.manager import (
     KnowledgeManager,
     ensure_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
-    initialize_shared_knowledge_managers,
 )
 
 if TYPE_CHECKING:
@@ -88,15 +87,6 @@ def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[l
     return files, total_size
 
 
-async def _ensure_managers(config: Config, runtime_paths: constants.RuntimePaths) -> dict[str, KnowledgeManager]:
-    return await initialize_shared_knowledge_managers(
-        config,
-        runtime_paths,
-        start_watchers=False,
-        reindex_on_create=False,
-    )
-
-
 def _get_existing_manager(
     config: Config,
     base_id: str,
@@ -109,22 +99,12 @@ def _get_existing_manager(
     )
 
 
-async def _ensure_manager(
+async def _ensure_shared_manager(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
-) -> KnowledgeManager | None:
-    existing = _get_existing_manager(config, base_id, runtime_paths)
-    if existing is not None:
-        return existing
-    managers = await _ensure_managers(config, runtime_paths)
-    return managers.get(base_id)
-
-
-async def _ensure_manager_for_explicit_reindex(
-    config: Config,
-    base_id: str,
-    runtime_paths: constants.RuntimePaths,
+    *,
+    initialize_on_create: bool,
 ) -> KnowledgeManager | None:
     existing = _get_existing_manager(config, base_id, runtime_paths)
     if existing is not None:
@@ -135,6 +115,32 @@ async def _ensure_manager_for_explicit_reindex(
         runtime_paths=runtime_paths,
         start_watchers=False,
         reindex_on_create=False,
+        initialize_on_create=initialize_on_create,
+    )
+
+
+async def _ensure_manager(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> KnowledgeManager | None:
+    return await _ensure_shared_manager(
+        config,
+        base_id,
+        runtime_paths,
+        initialize_on_create=True,
+    )
+
+
+async def _ensure_manager_for_explicit_reindex(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> KnowledgeManager | None:
+    return await _ensure_shared_manager(
+        config=config,
+        base_id=base_id,
+        runtime_paths=runtime_paths,
         initialize_on_create=False,
     )
 
@@ -352,14 +358,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     if manager is None:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
 
-    try:
-        if config.knowledge_bases[base_id].git is not None:
-            result = await manager.finish_pending_background_git_startup(force_full_reindex=True)
-            indexed_count = int(result["indexed_count"])
-        else:
-            indexed_count = await manager.reindex_all()
-    finally:
-        await manager.restore_deferred_shared_runtime()
+    indexed_count = await manager.reindex_explicitly()
     return {
         "success": True,
         "base_id": base_id,

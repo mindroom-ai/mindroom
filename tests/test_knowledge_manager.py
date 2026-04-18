@@ -3194,6 +3194,62 @@ async def test_finish_pending_background_git_startup_force_full_reindex_clears_p
     assert manager._git_background_startup_mode is None
 
 
+@pytest.mark.asyncio
+async def test_reindex_explicitly_uses_git_startup_finisher_and_restores_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit manager reindex should delegate Git work and restore deferred shared runtime."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    finish_pending_background_git_startup = AsyncMock(
+        return_value={"startup_mode": "full_reindex", "indexed_count": 7},
+    )
+    restore_deferred_shared_runtime = AsyncMock(return_value=None)
+    monkeypatch.setattr(manager, "finish_pending_background_git_startup", finish_pending_background_git_startup)
+    monkeypatch.setattr(manager, "restore_deferred_shared_runtime", restore_deferred_shared_runtime)
+
+    indexed_count = await manager.reindex_explicitly()
+
+    assert indexed_count == 7
+    finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
+    restore_deferred_shared_runtime.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_reindex_explicitly_restores_runtime_when_git_reindex_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit manager reindex should restore deferred shared runtime even when Git reindex fails."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    finish_pending_background_git_startup = AsyncMock(side_effect=RuntimeError("boom"))
+    restore_deferred_shared_runtime = AsyncMock(return_value=None)
+    monkeypatch.setattr(manager, "finish_pending_background_git_startup", finish_pending_background_git_startup)
+    monkeypatch.setattr(manager, "restore_deferred_shared_runtime", restore_deferred_shared_runtime)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await manager.reindex_explicitly()
+
+    finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
+    restore_deferred_shared_runtime.assert_awaited_once_with()
+
+
 def test_startup_index_mode_does_not_use_collection_count_for_existing_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

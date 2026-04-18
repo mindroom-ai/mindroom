@@ -614,6 +614,16 @@ class KnowledgeManager:
         await _start_shared_manager_runtime_mode(self, runtime_mode)
         self._deferred_shared_runtime_mode = None
 
+    async def reindex_explicitly(self) -> int:
+        """Run a manual full reindex and restore any deferred shared runtime afterward."""
+        try:
+            if self._git_config() is not None:
+                result = await self.finish_pending_background_git_startup(force_full_reindex=True)
+                return int(result["indexed_count"])
+            return await self.reindex_all()
+        finally:
+            await self.restore_deferred_shared_runtime()
+
     def _git_sync_timeout_seconds(self) -> float | None:
         git_config = self._git_config()
         if git_config is None:

@@ -130,10 +130,6 @@ def test_knowledge_bases_list_uses_existing_manager_without_initializing(
             "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
             return_value=manager,
         ) as get_manager,
-        patch(
-            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(),
-        ) as init_managers,
     ):
         response = test_client.get("/api/knowledge/bases")
 
@@ -158,7 +154,6 @@ def test_knowledge_bases_list_uses_existing_manager_without_initializing(
         "pending_startup_mode": None,
     }
     get_manager.assert_called_once()
-    init_managers.assert_not_awaited()
 
 
 def test_knowledge_root_resolves_relative_path_from_config_dir(
@@ -200,10 +195,6 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
             "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
             return_value=manager,
         ) as get_manager,
-        patch(
-            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(),
-        ) as init_managers,
     ):
         response = test_client.get("/api/knowledge/bases/research/files")
 
@@ -221,7 +212,6 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
     ]
     assert payload["manager_available"] is True
     get_manager.assert_called_once()
-    init_managers.assert_not_awaited()
 
 
 def test_knowledge_status_uses_existing_manager_without_initializing(
@@ -255,10 +245,6 @@ def test_knowledge_status_uses_existing_manager_without_initializing(
             "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
             return_value=manager,
         ) as get_manager,
-        patch(
-            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(),
-        ) as init_managers,
     ):
         response = test_client.get("/api/knowledge/bases/research/status")
 
@@ -285,7 +271,6 @@ def test_knowledge_status_uses_existing_manager_without_initializing(
         },
     }
     get_manager.assert_called_once()
-    init_managers.assert_not_awaited()
 
 
 def test_knowledge_status_falls_back_without_initializing_when_manager_missing(
@@ -302,10 +287,6 @@ def test_knowledge_status_falls_back_without_initializing_when_manager_missing(
             "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
             return_value=None,
         ) as get_manager,
-        patch(
-            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(),
-        ) as init_managers,
     ):
         response = test_client.get("/api/knowledge/bases/research/status")
 
@@ -319,7 +300,6 @@ def test_knowledge_status_falls_back_without_initializing_when_manager_missing(
         "manager_available": False,
     }
     get_manager.assert_called_once()
-    init_managers.assert_not_awaited()
 
 
 def test_knowledge_upload_rolls_back_on_oversized_file(
@@ -355,9 +335,9 @@ def test_knowledge_upload_initializes_manager_without_forcing_full_reindex(
 
     with (
         patch(
-            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
-        ) as init_managers,
+            "mindroom.api.knowledge.ensure_shared_knowledge_manager",
+            new=AsyncMock(return_value=manager),
+        ) as ensure_shared_manager,
     ):
         response = test_client.post(
             "/api/knowledge/bases/research/upload",
@@ -366,8 +346,14 @@ def test_knowledge_upload_initializes_manager_without_forcing_full_reindex(
 
     assert response.status_code == 200
     assert (tmp_path / "note.txt").exists()
-    init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is False
+    ensure_shared_manager.assert_awaited_once_with(
+        "research",
+        config=config,
+        runtime_paths=main._app_runtime_paths(test_client.app),
+        start_watchers=False,
+        reindex_on_create=False,
+        initialize_on_create=True,
+    )
     manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
 
 
@@ -425,16 +411,22 @@ def test_knowledge_delete_initializes_manager_without_forcing_full_reindex(
 
     with (
         patch(
-            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
-        ) as init_managers,
+            "mindroom.api.knowledge.ensure_shared_knowledge_manager",
+            new=AsyncMock(return_value=manager),
+        ) as ensure_shared_manager,
     ):
         response = test_client.delete("/api/knowledge/bases/research/files/a.txt")
 
     assert response.status_code == 200
     assert not target.exists()
-    init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is False
+    ensure_shared_manager.assert_awaited_once_with(
+        "research",
+        config=config,
+        runtime_paths=main._app_runtime_paths(test_client.app),
+        start_watchers=False,
+        reindex_on_create=False,
+        initialize_on_create=True,
+    )
     manager.remove_file.assert_awaited_once_with("a.txt")
 
 
@@ -461,42 +453,30 @@ def test_unknown_knowledge_base_returns_404(test_client: TestClient, tmp_path: P
 
 
 def test_reindex_uses_git_startup_finisher_for_git_bases(test_client: TestClient, tmp_path: Path) -> None:
-    """Git-backed bases should delegate direct reindex requests through the startup finisher."""
+    """Git-backed bases should delegate direct reindex requests through the manager helper."""
     config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
     _publish_committed_runtime_config(test_client.app, config)
-    manager.finish_pending_background_git_startup = AsyncMock(
-        return_value={"startup_mode": "full_reindex", "indexed_count": 2},
-    )
-    manager.restore_deferred_shared_runtime = AsyncMock(return_value=None)
+    manager.reindex_explicitly = AsyncMock(return_value=2)
 
     with (
-        patch(
-            "mindroom.api.knowledge._ensure_manager_for_explicit_reindex",
-            new=AsyncMock(return_value=manager),
-        ),
+        patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)),
     ):
         response = test_client.post("/api/knowledge/bases/research/reindex")
 
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 2
-    manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
-    manager.restore_deferred_shared_runtime.assert_awaited_once_with()
+    manager.reindex_explicitly.assert_awaited_once_with()
 
 
 def test_reindex_finishes_pending_background_startup_for_git_bases(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Git-backed manual reindex should consume deferred startup work instead of duplicating it."""
+    """Git-backed manual reindex should delegate to the manager helper without duplicate work."""
     config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
-    manager.finish_pending_background_git_startup = AsyncMock(
-        return_value={"startup_mode": "full_reindex", "indexed_count": 5},
-    )
-    manager.sync_git_repository = AsyncMock()
-    manager.reindex_all = AsyncMock()
-    manager.restore_deferred_shared_runtime = AsyncMock(return_value=None)
+    manager.reindex_explicitly = AsyncMock(return_value=5)
     _publish_committed_runtime_config(test_client.app, config)
 
     with patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)):
@@ -504,21 +484,17 @@ def test_reindex_finishes_pending_background_startup_for_git_bases(
 
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 5
-    manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
-    manager.sync_git_repository.assert_not_awaited()
-    manager.reindex_all.assert_not_awaited()
-    manager.restore_deferred_shared_runtime.assert_awaited_once_with()
+    manager.reindex_explicitly.assert_awaited_once_with()
 
 
 def test_reindex_restores_deferred_shared_runtime_when_git_reindex_fails(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Explicit Git reindex should restore deferred shared runtime even when the reindex fails."""
+    """Explicit Git reindex should surface manager reindex failures."""
     config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
-    manager.finish_pending_background_git_startup = AsyncMock(side_effect=RuntimeError("boom"))
-    manager.restore_deferred_shared_runtime = AsyncMock(return_value=None)
+    manager.reindex_explicitly = AsyncMock(side_effect=RuntimeError("boom"))
     _publish_committed_runtime_config(test_client.app, config)
 
     with (
@@ -527,8 +503,7 @@ def test_reindex_restores_deferred_shared_runtime_when_git_reindex_fails(
     ):
         test_client.post("/api/knowledge/bases/research/reindex")
 
-    manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
-    manager.restore_deferred_shared_runtime.assert_awaited_once_with()
+    manager.reindex_explicitly.assert_awaited_once_with()
 
 
 def test_reindex_cold_local_base_reindexes_only_once(
@@ -538,19 +513,19 @@ def test_reindex_cold_local_base_reindexes_only_once(
     """Cold manual reindex should not do an eager create-time rebuild before the explicit reindex."""
     config = _knowledge_config(tmp_path)
     _publish_committed_runtime_config(test_client.app, config)
-    reindex_all = AsyncMock(return_value=4)
+    reindex_explicitly = AsyncMock(return_value=4)
 
     try:
         with (
             patch("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb),
             patch("mindroom.knowledge.manager.Knowledge", _DummyKnowledge),
-            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_all", new=reindex_all),
+            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_explicitly", new=reindex_explicitly),
         ):
             response = test_client.post("/api/knowledge/bases/research/reindex")
 
         assert response.status_code == 200
         assert response.json()["indexed_count"] == 4
-        reindex_all.assert_awaited_once_with()
+        reindex_explicitly.assert_awaited_once_with()
     finally:
         asyncio.run(shutdown_shared_knowledge_managers())
 
@@ -559,25 +534,22 @@ def test_reindex_cold_git_base_syncs_and_reindexes_only_once(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Cold manual Git reindex should perform one explicit sync/rebuild pass, not two."""
+    """Cold manual Git reindex should perform one explicit reindex pass, not two."""
     config = _knowledge_config(tmp_path, with_git=True)
     _publish_committed_runtime_config(test_client.app, config)
-    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
-    reindex_all = AsyncMock(return_value=6)
+    reindex_explicitly = AsyncMock(return_value=6)
 
     try:
         with (
             patch("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb),
             patch("mindroom.knowledge.manager.Knowledge", _DummyKnowledge),
-            patch("mindroom.knowledge.manager.KnowledgeManager.sync_git_repository", new=sync_git_repository),
-            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_all", new=reindex_all),
+            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_explicitly", new=reindex_explicitly),
         ):
             response = test_client.post("/api/knowledge/bases/research/reindex")
 
         assert response.status_code == 200
         assert response.json()["indexed_count"] == 6
-        sync_git_repository.assert_awaited_once_with(index_changes=False)
-        reindex_all.assert_awaited_once_with()
+        reindex_explicitly.assert_awaited_once_with()
     finally:
         asyncio.run(shutdown_shared_knowledge_managers())
 
@@ -673,5 +645,35 @@ def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path)
             assert manager.knowledge_path == new_path.resolve()
         finally:
             await shutdown_shared_knowledge_managers()
+
+    asyncio.run(_run())
+
+
+def test_ensure_manager_initializes_only_requested_shared_base(tmp_path: Path) -> None:
+    """Ensuring one base should not bootstrap every shared knowledge manager."""
+    knowledge_root = tmp_path / "knowledge"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config = _knowledge_config(knowledge_root)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    manager = MagicMock()
+
+    async def _run() -> None:
+        with (
+            patch(
+                "mindroom.api.knowledge.ensure_shared_knowledge_manager",
+                new=AsyncMock(return_value=manager),
+            ) as ensure_shared_manager,
+        ):
+            result = await knowledge_api._ensure_manager(config, "research", runtime_paths)
+
+        assert result is manager
+        ensure_shared_manager.assert_awaited_once_with(
+            "research",
+            config=config,
+            runtime_paths=runtime_paths,
+            start_watchers=False,
+            reindex_on_create=False,
+            initialize_on_create=True,
+        )
 
     asyncio.run(_run())
