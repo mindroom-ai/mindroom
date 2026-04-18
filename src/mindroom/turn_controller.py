@@ -624,7 +624,7 @@ class TurnController:
             envelope=envelope,
         )
 
-    async def _execute_command(
+    async def _execute_command(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         event: _TextDispatchEvent,
@@ -741,6 +741,13 @@ class TurnController:
                 return
             self.deps.turn_store.record_pending_response_event(handled_turn, response_event_id)
 
+        def record_pending_command_reply(handled_turn: HandledTurnState, response_text: str) -> None:
+            self.deps.turn_store.record_pending_command_reply(
+                handled_turn,
+                response_text,
+                reserve_command_response_transaction_id(),
+            )
+
         context = CommandHandlerContext(
             client=self._client(),
             config=self.deps.runtime.config,
@@ -755,7 +762,7 @@ class TurnController:
             build_message_target=self.deps.resolver.build_message_target,
             record_handled_turn=self.deps.turn_store.record_turn,
             record_pending_response_event=record_pending_response_event,
-            mark_command_non_replayable=lambda event_id: self._mark_source_events_ignored((event_id,)),
+            record_pending_command_reply=record_pending_command_reply,
             send_response=send_response,
             send_skill_command_response=send_skill_command_response,
             run_skill_command_tool=run_skill_command_tool,

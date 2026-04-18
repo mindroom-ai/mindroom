@@ -94,6 +94,7 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
+from .handled_turns import HandledTurnRecord, HandledTurnState
 from .inbound_turn_normalizer import (
     DispatchPayload,
     InboundTurnNormalizer,
@@ -1432,6 +1433,19 @@ class AgentBot:
             if turn_record is not None and turn_record.completed:
                 skipped_source_event_ids.update(turn_record.source_event_ids)
                 continue
+            if (
+                turn_record is not None
+                and turn_record.pending_response_text is not None
+                and turn_record.conversation_target is not None
+                and turn_record.response_transaction_id is not None
+            ):
+                create_background_task(
+                    self._replay_pending_command_reply(turn_record),
+                    name=f"startup_replay_command_reply_{self.agent_name}",
+                    owner=self._runtime_view,
+                )
+                replayed_source_event_ids.add(pending_replay.event_id)
+                continue
             if pending_replay.event_id in interrupted_source_event_ids or (
                 turn_record is not None
                 and (
@@ -1498,6 +1512,34 @@ class AgentBot:
                 count=len(skipped_source_event_ids),
             )
         return replayed_source_event_ids
+
+    async def _replay_pending_command_reply(self, turn_record: HandledTurnRecord) -> None:
+        """Deliver one persisted mutating-command reply without rerunning the side effect."""
+        if (
+            turn_record.pending_response_text is None
+            or turn_record.conversation_target is None
+            or turn_record.response_transaction_id is None
+        ):
+            return
+        response_event_id = await self._delivery_gateway.send_text(
+            SendTextRequest(
+                target=turn_record.conversation_target,
+                response_text=turn_record.pending_response_text,
+                transaction_id=turn_record.response_transaction_id,
+                skip_mentions=True,
+            ),
+        )
+        self._turn_store.record_turn(
+            HandledTurnState.create(
+                turn_record.source_event_ids,
+                response_event_id=response_event_id,
+                visible_echo_event_id=turn_record.visible_echo_event_id,
+                source_event_prompts=turn_record.source_event_prompts,
+                response_owner=turn_record.response_owner,
+                history_scope=turn_record.history_scope,
+                conversation_target=turn_record.conversation_target,
+            ),
+        )
 
     def _should_queue_follow_up_in_active_response_thread(
         self,

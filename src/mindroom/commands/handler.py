@@ -105,9 +105,7 @@ class CommandHandlerContext:
     build_message_target: Callable[..., MessageTarget]
     record_handled_turn: Callable[[HandledTurnState], None]
     record_pending_response_event: Callable[[HandledTurnState], None]
-    # Mutating commands use this before the irreversible side effect so
-    # startup replay prefers skipping the source event over rerunning it.
-    mark_command_non_replayable: Callable[[str], None]
+    record_pending_command_reply: Callable[[HandledTurnState, str], None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
     run_skill_command_tool: Callable[..., Awaitable[str]]
@@ -511,6 +509,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     ).resolved_thread_id
 
     response_text = ""
+    persist_command_reply_before_send = False
 
     if command.type == CommandType.HELP:
         topic = command.args.get("topic")
@@ -522,8 +521,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
-        # Scheduling mutates durable task state before the later chat reply.
-        context.mark_command_non_replayable(event.event_id)
 
         # Get mentioned agents from the command text
         mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
@@ -536,6 +533,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             full_text=full_text,
             mentioned_agents=mentioned_agents,
         )
+        persist_command_reply_before_send = True
 
     elif command.type == CommandType.LIST_SCHEDULES:
         response_text = await list_scheduled_tasks(
@@ -546,8 +544,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         )
 
     elif command.type == CommandType.CANCEL_SCHEDULE:
-        # Cancellation is side-effectful even if the later reply never makes it out.
-        context.mark_command_non_replayable(event.event_id)
         cancel_all = command.args.get("cancel_all", False)
 
         if cancel_all:
@@ -564,10 +560,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 room_id=room.room_id,
                 task_id=task_id,
             )
+        persist_command_reply_before_send = True
 
     elif command.type == CommandType.EDIT_SCHEDULE:
-        # Editing a scheduled task must be at-most-once across restart replay.
-        context.mark_command_non_replayable(event.event_id)
         task_id = command.args["task_id"]
         full_text = command.args["full_text"]
         response_text = await edit_scheduled_task(
@@ -578,6 +573,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             scheduled_by=requester_user_id,
             thread_id=effective_thread_id,
         )
+        persist_command_reply_before_send = True
 
     elif command.type == CommandType.CONFIG:
         # Handle config command
@@ -668,8 +664,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 elif not spec.user_invocable:
                     response_text = f"❌ Skill '{spec.name}' is not user-invocable."
                 elif spec.dispatch and spec.dispatch.kind == "tool":
-                    # Tool-dispatched skills can mutate external state before replying.
-                    context.mark_command_non_replayable(event.event_id)
                     response_text = await context.run_skill_command_tool(
                         agent_name=target_agent,
                         command_tool=spec.dispatch.tool_name,
@@ -679,6 +673,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         room_id=room.room_id,
                         thread_id=effective_thread_id,
                     )
+                    persist_command_reply_before_send = True
                 elif spec.disable_model_invocation:
                     response_text = (
                         f"❌ Skill '{spec.name}' is configured to skip model invocation and has no tool dispatch."
@@ -708,6 +703,23 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = "❌ Unknown command. Try !help for available commands."
 
     if response_text:
+        response_target = context.build_message_target(
+            room_id=room.room_id,
+            thread_id=effective_thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        if persist_command_reply_before_send:
+            # Once a mutating command finishes its side effect, preserve the exact
+            # confirmation we still owe before attempting the visible send. Startup
+            # replay can then deliver this snapshot without rerunning the mutation.
+            context.record_pending_command_reply(
+                HandledTurnState.from_source_event_id(
+                    event.event_id,
+                    conversation_target=response_target,
+                ),
+                response_text,
+            )
         raw_response_event_id = await context.send_response(
             room.room_id,
             event.event_id,
@@ -720,5 +732,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             HandledTurnState.from_source_event_id(
                 event.event_id,
                 response_event_id=_normalized_response_event_id(raw_response_event_id),
+                conversation_target=response_target,
             ),
         )

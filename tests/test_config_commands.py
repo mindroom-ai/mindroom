@@ -248,7 +248,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         record_pending_response_event=MagicMock(),
-        mark_command_non_replayable=MagicMock(),
+        record_pending_command_reply=MagicMock(),
         send_response=AsyncMock(return_value=None),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),
@@ -292,7 +292,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         record_pending_response_event=MagicMock(),
-        mark_command_non_replayable=MagicMock(),
+        record_pending_command_reply=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),
@@ -317,6 +317,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         HandledTurnState.from_source_event_id(
             "$event",
             response_event_id="$reply",
+            conversation_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         ),
     )
 
@@ -337,7 +338,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         record_pending_response_event=MagicMock(),
-        mark_command_non_replayable=MagicMock(),
+        record_pending_command_reply=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),
@@ -432,7 +433,7 @@ async def test_handle_command_config_set_keeps_source_replayable_until_pending_c
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         record_pending_response_event=MagicMock(),
-        mark_command_non_replayable=MagicMock(),
+        record_pending_command_reply=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
         send_skill_command_response=AsyncMock(return_value=None),
         run_skill_command_tool=AsyncMock(return_value=""),

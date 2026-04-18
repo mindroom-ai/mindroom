@@ -49,6 +49,7 @@ class _SerializedHandledTurnRecord(TypedDict):
     response_transaction_id: NotRequired[str]
     visible_echo_transaction_id: NotRequired[str]
     visible_echo_event_id: NotRequired[str | None]
+    pending_response_text: NotRequired[str | None]
     source_event_ids: NotRequired[list[str]]
     source_event_prompts: NotRequired[dict[str, str] | None]
     response_owner: NotRequired[str | None]
@@ -200,6 +201,7 @@ class HandledTurnRecord:
     visible_echo_transaction_id: str | None = None
     completed: bool = True
     visible_echo_event_id: str | None = None
+    pending_response_text: str | None = None
     source_event_prompts: dict[str, str] | None = None
     response_owner: str | None = None
     history_scope: HistoryScope | None = None
@@ -269,6 +271,7 @@ class HandledTurnLedger:
                 visible_echo_transaction_id=turn_record.visible_echo_transaction_id,
                 completed=turn_record.completed,
                 visible_echo_event_id=turn_record.visible_echo_event_id,
+                pending_response_text=turn_record.pending_response_text,
                 source_event_prompts=turn_record.source_event_prompts,
                 response_owner=turn_record.response_owner,
                 history_scope=turn_record.history_scope,
@@ -344,6 +347,44 @@ class HandledTurnLedger:
             "pending_response_event_recorded",
             agent=self.agent_name,
             response_event_id=handled_turn.response_event_id,
+            source_event_count=len(normalized_source_event_ids),
+        )
+
+    def record_pending_command_reply(
+        self,
+        handled_turn: HandledTurnState,
+        *,
+        response_text: str,
+        response_transaction_id: str,
+    ) -> None:
+        """Persist a command reply snapshot after the side effect succeeded but before the send."""
+        normalized_source_event_ids = handled_turn.source_event_ids
+        if not normalized_source_event_ids:
+            return
+
+        with self._thread_lock, self._file_lock(exclusive=True):
+            self._responses = self._read_responses_file_locked()
+            completed = any(
+                _completed_for_record(self._responses.get(event_id)) for event_id in normalized_source_event_ids
+            )
+            self._persist_handled_turn_locked(
+                source_event_ids=normalized_source_event_ids,
+                response_event_id=handled_turn.response_event_id,
+                response_transaction_id=response_transaction_id,
+                visible_echo_transaction_id=None,
+                completed=completed,
+                visible_echo_event_id=handled_turn.visible_echo_event_id,
+                pending_response_text=response_text,
+                source_event_prompts=handled_turn.source_event_prompts,
+                response_owner=handled_turn.response_owner,
+                history_scope=handled_turn.history_scope,
+                conversation_target=handled_turn.conversation_target,
+                anchor_event_id=handled_turn.anchor_event_id,
+            )
+            self._save_responses_locked()
+        logger.debug(
+            "pending_command_reply_recorded",
+            agent=self.agent_name,
             source_event_count=len(normalized_source_event_ids),
         )
 
@@ -455,6 +496,7 @@ class HandledTurnLedger:
                 visible_echo_transaction_id=_visible_echo_transaction_id_for_record(record),
                 completed=_completed_for_record(record),
                 visible_echo_event_id=_visible_echo_event_id_for_record(record),
+                pending_response_text=_pending_response_text_for_record(record),
                 source_event_prompts=_prompt_map_for_record(source_event_ids, record),
                 response_owner=_response_owner_for_record(record),
                 history_scope=_history_scope_for_record(record),
@@ -624,6 +666,7 @@ class HandledTurnLedger:
         response_owner: str | None,
         history_scope: HistoryScope | None,
         conversation_target: MessageTarget | None,
+        pending_response_text: str | None = None,
         anchor_event_id: str | None = None,
     ) -> None:
         """Persist one handled turn while the thread and file locks are already held."""
@@ -649,6 +692,7 @@ class HandledTurnLedger:
                 anchor_event_id=anchor_event_id,
                 source_event_ids=source_event_ids,
                 visible_echo_event_id=visible_echo_event_id,
+                pending_response_text=pending_response_text,
                 source_event_prompts=prompt_map,
                 response_owner=response_owner,
                 history_scope=history_scope,
@@ -848,6 +892,7 @@ def _serialized_record(
     anchor_event_id: str | None,
     source_event_ids: tuple[str, ...],
     visible_echo_event_id: str | None = None,
+    pending_response_text: str | None = None,
     source_event_prompts: typing.Mapping[str, str] | None = None,
     response_owner: str | None = None,
     history_scope: HistoryScope | None = None,
@@ -868,6 +913,8 @@ def _serialized_record(
         record["visible_echo_transaction_id"] = visible_echo_transaction_id
     if visible_echo_event_id is not None:
         record["visible_echo_event_id"] = visible_echo_event_id
+    if pending_response_text is not None:
+        record["pending_response_text"] = pending_response_text
     if source_event_prompts is not None:
         record["source_event_prompts"] = dict(source_event_prompts)
     if response_owner is not None:
@@ -993,6 +1040,7 @@ def _normalize_serialized_record(
         response_transaction_id=response_transaction_id,
         visible_echo_transaction_id=visible_echo_transaction_id,
         visible_echo_event_id=visible_echo_event_id if isinstance(visible_echo_event_id, str) else None,
+        pending_response_text=_pending_response_text_for_record(raw_record),
         prompt_map=prompt_map,
         response_owner=response_owner,
         history_scope=history_scope,
@@ -1007,6 +1055,7 @@ def _with_optional_serialized_record_fields(
     response_transaction_id: str | None,
     visible_echo_transaction_id: str | None,
     visible_echo_event_id: str | None,
+    pending_response_text: str | None,
     prompt_map: dict[str, str] | None,
     response_owner: str | None,
     history_scope: HistoryScope | None,
@@ -1021,6 +1070,8 @@ def _with_optional_serialized_record_fields(
         record["visible_echo_transaction_id"] = visible_echo_transaction_id
     if visible_echo_event_id is not None:
         record["visible_echo_event_id"] = visible_echo_event_id
+    if pending_response_text is not None:
+        record["pending_response_text"] = pending_response_text
     if prompt_map is not None:
         record["source_event_prompts"] = prompt_map
     if response_owner is not None:
@@ -1164,6 +1215,14 @@ def _visible_echo_event_id_for_record(record: _SerializedHandledTurnRecordLike |
         return visible_echo_event_id
     legacy_visible_echo_id = record.get("visible_echo_response_id")
     return legacy_visible_echo_id if isinstance(legacy_visible_echo_id, str) else None
+
+
+def _pending_response_text_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
+    """Return the persisted pending response text for one record."""
+    if record is None:
+        return None
+    pending_response_text = record.get("pending_response_text")
+    return pending_response_text if isinstance(pending_response_text, str) else None
 
 
 def _completed_for_record(record: _SerializedHandledTurnRecordLike | None) -> bool:

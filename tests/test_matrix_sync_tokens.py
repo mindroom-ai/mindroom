@@ -19,6 +19,7 @@ from mindroom.edit_regenerator import EditHandlingResult
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -445,6 +446,57 @@ async def test_replay_pending_inbound_turns_schedules_saved_text_message_process
     finally:
         gate.set()
         await wait_for_background_tasks(owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+async def test_replay_pending_inbound_turns_delivers_snapshotted_command_reply_without_rerunning_side_effect(
+    tmp_path: Path,
+) -> None:
+    """Startup replay should deliver a persisted mutating-command reply instead of rerunning the command."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    event = _message_event(
+        event_id="$command-reply:localhost",
+        body="!schedule tomorrow remind me",
+    )
+    assert bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=event.source) is True
+    handled_turn = HandledTurnState.from_source_event_id(
+        event.event_id,
+        conversation_target=MessageTarget.resolve("!room:localhost", None, event.event_id),
+    )
+    pending_response = bot._turn_store.reserve_pending_response(handled_turn)
+    bot._turn_store.record_pending_command_reply(
+        handled_turn,
+        "Scheduled",
+        pending_response.transaction_id,
+    )
+
+    try:
+        with (
+            patch.object(bot, "_on_message", AsyncMock()) as mock_on_message,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.send_text",
+                new=AsyncMock(return_value="$reply:localhost"),
+            ) as mock_send,
+        ):
+            replayed_source_event_ids = await bot.replay_pending_inbound_turns()
+            await asyncio.sleep(0)
+            await wait_for_background_tasks(owner=bot._runtime_view)
+
+        assert replayed_source_event_ids == {"$command-reply:localhost"}
+        mock_on_message.assert_not_awaited()
+    finally:
+        await wait_for_background_tasks(owner=bot._runtime_view)
+
+    request = mock_send.await_args.args[0]
+    assert request.response_text == "Scheduled"
+    assert request.transaction_id == pending_response.transaction_id
+    turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert turn_record is not None
+    assert turn_record.completed is True
+    assert turn_record.response_event_id == "$reply:localhost"
+    assert turn_record.pending_response_text is None
+    assert bot._turn_store.pending_inbound_replays() == []
 
 
 @pytest.mark.asyncio

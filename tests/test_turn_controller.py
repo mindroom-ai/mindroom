@@ -388,10 +388,10 @@ async def test_execute_command_skill_reply_reserves_transaction_id(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_schedule_command_marks_startup_owned_turn_handled_before_side_effects(
+async def test_schedule_command_persists_reply_snapshot_after_side_effect_before_visible_send(
     tmp_path: Path,
 ) -> None:
-    """Mutating schedule commands should become non-replayable before the scheduler state changes."""
+    """Mutating schedule commands should preserve the owed reply before the visible send."""
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"])},
@@ -446,8 +446,8 @@ async def test_schedule_command_marks_startup_owned_turn_handled_before_side_eff
     assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
 
     async def fake_schedule_task(**_kwargs: object) -> tuple[str | None, str]:
-        assert bot._turn_store.is_handled(event.event_id) is True
-        assert bot._turn_store.has_pending_inbound(event.event_id) is False
+        assert bot._turn_store.is_handled(event.event_id) is False
+        assert bot._turn_store.has_pending_inbound(event.event_id) is True
         return ("task-1", "Scheduled")
 
     with (
@@ -461,17 +461,19 @@ async def test_schedule_command_marks_startup_owned_turn_handled_before_side_eff
             command=command,
         )
 
-    assert bot._turn_store.has_pending_inbound(event.event_id) is False
-    assert bot._turn_store.get_turn_record(event.event_id) is not None
-    assert bot._turn_store.pending_inbound_replays() == []
-    assert await bot.replay_pending_inbound_turns() == set()
+    turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert turn_record is not None
+    assert turn_record.completed is False
+    assert turn_record.pending_response_text == "Scheduled"
+    assert turn_record.response_transaction_id is not None
+    assert bot._turn_store.has_pending_inbound(event.event_id) is True
 
 
 @pytest.mark.asyncio
-async def test_skill_tool_command_marks_startup_owned_turn_handled_before_tool_side_effects(
+async def test_skill_tool_command_persists_reply_snapshot_after_tool_side_effect(
     tmp_path: Path,
 ) -> None:
-    """Tool-dispatched skill commands should become non-replayable before the tool runs."""
+    """Tool-dispatched skills should preserve the owed reply before the visible send."""
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"], skills=["demo"])},
@@ -526,8 +528,8 @@ async def test_skill_tool_command_marks_startup_owned_turn_handled_before_tool_s
     assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
 
     async def fake_run_skill_command_tool(**_kwargs: object) -> str:
-        assert bot._turn_store.is_handled(event.event_id) is True
-        assert bot._turn_store.has_pending_inbound(event.event_id) is False
+        assert bot._turn_store.is_handled(event.event_id) is False
+        assert bot._turn_store.has_pending_inbound(event.event_id) is True
         return "Tool finished"
 
     spec = _SkillCommandSpec(
@@ -555,10 +557,12 @@ async def test_skill_tool_command_marks_startup_owned_turn_handled_before_tool_s
             command=command,
         )
 
-    assert bot._turn_store.has_pending_inbound(event.event_id) is False
-    assert bot._turn_store.get_turn_record(event.event_id) is not None
-    assert bot._turn_store.pending_inbound_replays() == []
-    assert await bot.replay_pending_inbound_turns() == set()
+    turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert turn_record is not None
+    assert turn_record.completed is False
+    assert turn_record.pending_response_text == "Tool finished"
+    assert turn_record.response_transaction_id is not None
+    assert bot._turn_store.has_pending_inbound(event.event_id) is True
 
 
 @pytest.mark.asyncio

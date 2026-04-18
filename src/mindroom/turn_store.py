@@ -165,6 +165,19 @@ class TurnStore:
             handled_turn.with_response_event_id(response_event_id),
         )
 
+    def record_pending_command_reply(
+        self,
+        handled_turn: HandledTurnState,
+        response_text: str,
+        response_transaction_id: str,
+    ) -> None:
+        """Persist a command reply snapshot without retiring the replayable source event yet."""
+        self._ledger.record_pending_command_reply(
+            handled_turn,
+            response_text=response_text,
+            response_transaction_id=response_transaction_id,
+        )
+
     def claim_pending_inbound(self, *, room_id: str, event_source: dict[str, Any]) -> bool:
         """Persist one replayable inbound claim before the turn enters long-running work."""
         return self._pending_inbound.claim(room_id=room_id, event_source=event_source)
