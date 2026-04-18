@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import nio
@@ -71,7 +71,6 @@ from .coalescing import (
     CoalescingGate,
 )
 from .commands import config_confirmation
-from .commands.parsing import command_parser
 from .constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
@@ -117,6 +116,10 @@ from .scheduling import (
     drain_deferred_overdue_tasks,
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
+)
+from .startup_catchup import (
+    STARTUP_CATCH_UP_MEDIA_EVENT_TYPES,
+    catch_up_missed_user_messages,
 )
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import (
@@ -267,103 +270,6 @@ type _MediaDispatchEvent = (
 )
 
 type _MessageContext = MessageContext
-
-type _StartupCatchUpMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
-
-
-_STARTUP_CATCH_UP_MEDIA_EVENT_TYPES = (
-    nio.RoomMessageImage,
-    nio.RoomEncryptedImage,
-    nio.RoomMessageFile,
-    nio.RoomEncryptedFile,
-    nio.RoomMessageVideo,
-    nio.RoomEncryptedVideo,
-    nio.RoomMessageAudio,
-    nio.RoomEncryptedAudio,
-)
-
-
-def _should_catch_up_message(bot: AgentBot, event: object) -> bool:
-    if not isinstance(event, (nio.RoomMessageText, *_STARTUP_CATCH_UP_MEDIA_EVENT_TYPES)):
-        return False
-
-    sender = getattr(event, "sender", None)
-    if not isinstance(sender, str) or is_agent_id(sender, bot.config, bot.runtime_paths):
-        return False
-
-    event_id = getattr(event, "event_id", None)
-    if not isinstance(event_id, str) or bot._turn_store.is_handled(event_id):
-        return False
-
-    if not isinstance(event, nio.RoomMessageText):
-        return True
-
-    content = event.source.get("content") if isinstance(event.source, dict) else None
-    relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
-    if isinstance(relates_to, dict) and relates_to.get("rel_type") == "m.replace":
-        return False
-
-    return command_parser.parse(event.body) is None
-
-
-def _require_catch_up_sync_response(bot: AgentBot, response: object) -> nio.SyncResponse:
-    if isinstance(response, nio.SyncResponse):
-        return response
-    if isinstance(response, nio.SyncError):
-        bot.logger.warning("startup_catch_up_sync_failed", status_code=response.status_code)
-        msg = f"Startup catch-up sync failed for {bot.agent_name}"
-        raise RuntimeError(msg)  # noqa: TRY004
-    msg = f"Unexpected startup catch-up response for {bot.agent_name}: {type(response).__name__}"
-    raise TypeError(msg)
-
-
-async def _dispatch_catch_up_event(
-    bot: AgentBot,
-    room: nio.MatrixRoom,
-    room_id: str,
-    event: nio.RoomMessageText | _StartupCatchUpMediaEvent,
-) -> None:
-    try:
-        if isinstance(event, nio.RoomMessageText):
-            await bot._on_message(room, event)
-        else:
-            await bot._on_media_message(room, cast("_MediaDispatchEvent", event))
-    except Exception:
-        bot.logger.exception(
-            "startup_catch_up_dispatch_failed",
-            room_id=room_id,
-            event_id=getattr(event, "event_id", None),
-        )
-
-
-async def catch_up_missed_user_messages(bot: AgentBot) -> None:
-    client = bot.client
-    if client is None:
-        return
-
-    try:
-        token = load_sync_token(bot.storage_path, bot.agent_name)
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
-        bot.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-        return
-
-    if token is None:
-        return
-
-    response = _require_catch_up_sync_response(
-        bot,
-        await client.sync(timeout=0, since=token, full_state=False),
-    )
-
-    for room_id, room_info in response.rooms.join.items():
-        room = client.rooms.get(room_id) or nio.MatrixRoom(room_id, client.user_id or bot.agent_user.user_id or "")
-        for event in room_info.timeline.events:
-            if not _should_catch_up_message(bot, event):
-                continue
-            await _dispatch_catch_up_event(bot, room, room_id, event)
-
-    client.next_batch = response.next_batch
-    save_sync_token(bot.storage_path, bot.agent_name, response.next_batch)
 
 
 class AgentBot:
@@ -1148,7 +1054,7 @@ class AgentBot:
         )
 
         media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
-        for event_type in _STARTUP_CATCH_UP_MEDIA_EVENT_TYPES:
+        for event_type in STARTUP_CATCH_UP_MEDIA_EVENT_TYPES:
             client.add_event_callback(media_callback, event_type)
         client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
         client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]

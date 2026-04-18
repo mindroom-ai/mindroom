@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import catch_up_missed_user_messages
+from mindroom.startup_catchup import catch_up_missed_user_messages
 from tests.conftest import make_matrix_client_mock
 from tests.test_bot_ready_hook import _agent_bot
 
@@ -68,8 +68,8 @@ async def _run_catchup(bot, *events: object, next_batch: str = "s_next", handled
     bot._turn_store.is_handled = handled or (lambda _event_id: False)
     response = _sync_response(*events, next_batch=next_batch)
     with (
-        patch("mindroom.bot.load_sync_token", return_value="s_prev"),
-        patch("mindroom.bot.save_sync_token") as save_sync_token,
+        patch("mindroom.startup_catchup.load_sync_token", return_value="s_prev"),
+        patch("mindroom.startup_catchup.save_sync_token") as save_sync_token,
     ):
         bot.client.sync = AsyncMock(return_value=response)
         await catch_up_missed_user_messages(bot)
@@ -121,7 +121,7 @@ async def test_catchup_skips_edits(tmp_path: Path) -> None:
 async def test_catchup_no_token_no_op(tmp_path: Path) -> None:
     bot = _bot(tmp_path)
     bot.client.sync = AsyncMock()
-    with patch("mindroom.bot.load_sync_token", return_value=None):
+    with patch("mindroom.startup_catchup.load_sync_token", return_value=None):
         await catch_up_missed_user_messages(bot)
     bot.client.sync.assert_not_awaited()
 
@@ -133,8 +133,8 @@ async def test_catchup_sync_error_raises(tmp_path: Path) -> None:
     response.__class__ = nio.SyncError
     response.status_code = "M_UNKNOWN"
     with (
-        patch("mindroom.bot.load_sync_token", return_value="s_prev"),
-        patch("mindroom.bot.save_sync_token") as save_sync_token,
+        patch("mindroom.startup_catchup.load_sync_token", return_value="s_prev"),
+        patch("mindroom.startup_catchup.save_sync_token") as save_sync_token,
         pytest.raises(RuntimeError, match="Startup catch-up sync failed"),
     ):
         bot.client.sync = AsyncMock(return_value=response)
@@ -231,8 +231,8 @@ async def test_sync_forever_does_not_register_callbacks_before_catchup(tmp_path:
     bot.client.sync_forever = AsyncMock()
 
     with (
-        patch("mindroom.bot.load_sync_token", return_value="s_prev"),
-        patch("mindroom.bot.save_sync_token"),
+        patch("mindroom.startup_catchup.load_sync_token", return_value="s_prev"),
+        patch("mindroom.startup_catchup.save_sync_token"),
     ):
         await bot.sync_forever()
 
