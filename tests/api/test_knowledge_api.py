@@ -343,11 +343,11 @@ def test_knowledge_upload_rolls_back_on_oversized_file(
     assert not (tmp_path / "second.txt").exists()
 
 
-def test_knowledge_upload_initializes_manager_with_full_reindex(
+def test_knowledge_upload_initializes_manager_without_forcing_full_reindex(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Upload should initialize managers with full create-time indexing."""
+    """Upload should let shared-manager bootstrap choose its own startup mode."""
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.index_file = AsyncMock(return_value=True)
@@ -367,7 +367,7 @@ def test_knowledge_upload_initializes_manager_with_full_reindex(
     assert response.status_code == 200
     assert (tmp_path / "note.txt").exists()
     init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is True
+    assert init_managers.await_args.kwargs["reindex_on_create"] is False
     manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
 
 
@@ -411,11 +411,11 @@ def test_git_knowledge_upload_waits_for_checkout_ready_before_writing(
     manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
 
 
-def test_knowledge_delete_initializes_manager_with_full_reindex(
+def test_knowledge_delete_initializes_manager_without_forcing_full_reindex(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Delete should use managers initialized with full create-time indexing."""
+    """Delete should let shared-manager bootstrap choose its own startup mode."""
     config = _knowledge_config(tmp_path)
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -434,7 +434,7 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
     assert response.status_code == 200
     assert not target.exists()
     init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is True
+    assert init_managers.await_args.kwargs["reindex_on_create"] is False
     manager.remove_file.assert_awaited_once_with("a.txt")
 
 
@@ -507,6 +507,27 @@ def test_reindex_finishes_pending_background_startup_for_git_bases(
     manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
     manager.sync_git_repository.assert_not_awaited()
     manager.reindex_all.assert_not_awaited()
+    manager.restore_deferred_shared_runtime.assert_awaited_once_with()
+
+
+def test_reindex_restores_deferred_shared_runtime_when_git_reindex_fails(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Explicit Git reindex should restore deferred shared runtime even when the reindex fails."""
+    config = _knowledge_config(tmp_path, with_git=True)
+    manager = MagicMock()
+    manager.finish_pending_background_git_startup = AsyncMock(side_effect=RuntimeError("boom"))
+    manager.restore_deferred_shared_runtime = AsyncMock(return_value=None)
+    _publish_committed_runtime_config(test_client.app, config)
+
+    with (
+        patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        test_client.post("/api/knowledge/bases/research/reindex")
+
+    manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
     manager.restore_deferred_shared_runtime.assert_awaited_once_with()
 
 

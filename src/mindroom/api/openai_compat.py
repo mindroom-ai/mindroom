@@ -643,7 +643,7 @@ async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePa
         config=config,
         runtime_paths=runtime_paths,
         start_watchers=False,
-        reindex_on_create=True,
+        reindex_on_create=False,
     )
 
 

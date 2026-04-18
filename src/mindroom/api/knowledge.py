@@ -93,7 +93,7 @@ async def _ensure_managers(config: Config, runtime_paths: constants.RuntimePaths
         config,
         runtime_paths,
         start_watchers=False,
-        reindex_on_create=True,
+        reindex_on_create=False,
     )
 
 
@@ -352,12 +352,14 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     if manager is None:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
 
-    if config.knowledge_bases[base_id].git is not None:
-        result = await manager.finish_pending_background_git_startup(force_full_reindex=True)
-        indexed_count = int(result["indexed_count"])
-    else:
-        indexed_count = await manager.reindex_all()
-    await manager.restore_deferred_shared_runtime()
+    try:
+        if config.knowledge_bases[base_id].git is not None:
+            result = await manager.finish_pending_background_git_startup(force_full_reindex=True)
+            indexed_count = int(result["indexed_count"])
+        else:
+            indexed_count = await manager.reindex_all()
+    finally:
+        await manager.restore_deferred_shared_runtime()
     return {
         "success": True,
         "base_id": base_id,
