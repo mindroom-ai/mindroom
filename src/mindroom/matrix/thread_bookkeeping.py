@@ -20,11 +20,15 @@ from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     ThreadRootProof,
     fetch_event_info_for_client,
-    fetch_event_info_from_conversation_cache,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
+from mindroom.matrix.thread_room_scan import (
+    RoomScanConversationCache,
+    _fetch_event_info_from_conversation_cache,
+    _room_scan_membership_access_for_client,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -33,7 +37,6 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 
 def is_thread_affecting_relation(event_info: EventInfo) -> bool:
@@ -108,11 +111,9 @@ async def resolve_event_thread_impact_for_client(
     *,
     event_type: str,
     content: Mapping[str, object],
-    conversation_cache: ConversationCacheProtocol | None,
+    conversation_cache: RoomScanConversationCache | None,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one outbound client-side event payload."""
-    from mindroom.matrix.conversation_cache import _room_scan_membership_access_for_client  # noqa: PLC0415
-
     if event_type != "m.room.message":
         return MutationThreadImpact.room_level()
     event_info = EventInfo.from_event({"type": event_type, "content": dict(content)})
@@ -132,11 +133,9 @@ async def resolve_redaction_thread_impact_for_client(
     room_id: str,
     *,
     event_id: str,
-    conversation_cache: ConversationCacheProtocol | None,
+    conversation_cache: RoomScanConversationCache | None,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one client-side redaction target."""
-    from mindroom.matrix.conversation_cache import _room_scan_membership_access_for_client  # noqa: PLC0415
-
     if conversation_cache is None:
         target_event_info = await fetch_event_info_for_client(
             client,
@@ -145,7 +144,7 @@ async def resolve_redaction_thread_impact_for_client(
             strict=True,
         )
     else:
-        target_event_info = await fetch_event_info_from_conversation_cache(
+        target_event_info = await _fetch_event_info_from_conversation_cache(
             conversation_cache,
             room_id,
             event_id,

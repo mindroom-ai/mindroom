@@ -614,6 +614,7 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 
 
 __all__ = [
+    "DeliveredMatrixEvent",
     "PermanentMatrixStartupError",
     "ResolvedVisibleMessage",
     "RoomThreadsPageError",
@@ -627,6 +628,7 @@ __all__ = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "matrix_client",
     "replace_visible_message",
     "send_file_message",
     "send_message_result",

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, overload
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 type ThreadHistoryDiagnosticValue = str | int | float | bool
 
