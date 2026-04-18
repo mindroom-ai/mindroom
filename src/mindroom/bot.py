@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import nio
@@ -71,6 +71,7 @@ from .coalescing import (
     CoalescingGate,
 )
 from .commands import config_confirmation
+from .commands.parsing import command_parser
 from .constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
@@ -267,6 +268,103 @@ type _MediaDispatchEvent = (
 
 type _MessageContext = MessageContext
 
+type _StartupCatchUpMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
+
+
+_STARTUP_CATCH_UP_MEDIA_EVENT_TYPES = (
+    nio.RoomMessageImage,
+    nio.RoomEncryptedImage,
+    nio.RoomMessageFile,
+    nio.RoomEncryptedFile,
+    nio.RoomMessageVideo,
+    nio.RoomEncryptedVideo,
+    nio.RoomMessageAudio,
+    nio.RoomEncryptedAudio,
+)
+
+
+def _should_catch_up_message(bot: AgentBot, event: object) -> bool:
+    if not isinstance(event, (nio.RoomMessageText, *_STARTUP_CATCH_UP_MEDIA_EVENT_TYPES)):
+        return False
+
+    sender = getattr(event, "sender", None)
+    if not isinstance(sender, str) or is_agent_id(sender, bot.config, bot.runtime_paths):
+        return False
+
+    event_id = getattr(event, "event_id", None)
+    if not isinstance(event_id, str) or bot._turn_store.is_handled(event_id):
+        return False
+
+    if not isinstance(event, nio.RoomMessageText):
+        return True
+
+    content = event.source.get("content") if isinstance(event.source, dict) else None
+    relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
+    if isinstance(relates_to, dict) and relates_to.get("rel_type") == "m.replace":
+        return False
+
+    return command_parser.parse(event.body) is None
+
+
+def _require_catch_up_sync_response(bot: AgentBot, response: object) -> nio.SyncResponse:
+    if isinstance(response, nio.SyncResponse):
+        return response
+    if isinstance(response, nio.SyncError):
+        bot.logger.warning("startup_catch_up_sync_failed", status_code=response.status_code)
+        msg = f"Startup catch-up sync failed for {bot.agent_name}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    msg = f"Unexpected startup catch-up response for {bot.agent_name}: {type(response).__name__}"
+    raise TypeError(msg)
+
+
+async def _dispatch_catch_up_event(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    room_id: str,
+    event: nio.RoomMessageText | _StartupCatchUpMediaEvent,
+) -> None:
+    try:
+        if isinstance(event, nio.RoomMessageText):
+            await bot._on_message(room, event)
+        else:
+            await bot._on_media_message(room, cast("_MediaDispatchEvent", event))
+    except Exception:
+        bot.logger.exception(
+            "startup_catch_up_dispatch_failed",
+            room_id=room_id,
+            event_id=getattr(event, "event_id", None),
+        )
+
+
+async def catch_up_missed_user_messages(bot: AgentBot) -> None:
+    client = bot.client
+    if client is None:
+        return
+
+    try:
+        token = load_sync_token(bot.storage_path, bot.agent_name)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        bot.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+        return
+
+    if token is None:
+        return
+
+    response = _require_catch_up_sync_response(
+        bot,
+        await client.sync(timeout=0, since=token, full_state=False),
+    )
+
+    for room_id, room_info in response.rooms.join.items():
+        room = client.rooms.get(room_id) or nio.MatrixRoom(room_id, client.user_id or bot.agent_user.user_id or "")
+        for event in room_info.timeline.events:
+            if not _should_catch_up_message(bot, event):
+                continue
+            await _dispatch_catch_up_event(bot, room, room_id, event)
+
+    client.next_batch = response.next_batch
+    save_sync_token(bot.storage_path, bot.agent_name, response.next_batch)
+
 
 class AgentBot:
     """Matrix lifecycle shell for one configured agent or router entity."""
@@ -309,6 +407,7 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _invited_rooms: set[str]
+    _sync_callbacks_registered: bool
 
     def __init__(
         self,
@@ -333,6 +432,7 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._sync_callbacks_registered = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._runtime_view = BotRuntimeState(
             client=None,
@@ -1022,6 +1122,38 @@ class AgentBot:
             return
         raise PermanentMatrixStartupError(self._runtime_support_injection_error())
 
+    def _register_sync_callbacks(self) -> None:
+        """Register nio sync callbacks exactly once per client instance."""
+        if self._sync_callbacks_registered:
+            return
+
+        client = self.client
+        assert client is not None
+
+        client.add_event_callback(
+            _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+            nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_message, owner=self._runtime_view),
+            nio.RoomMessageText,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
+            nio.RedactionEvent,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
+            nio.ReactionEvent,
+        )
+
+        media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
+        for event_type in _STARTUP_CATCH_UP_MEDIA_EVENT_TYPES:
+            client.add_event_callback(media_callback, event_type)
+        client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+        client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
+        self._sync_callbacks_registered = True
+
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         self._validate_runtime_support_injection_contract_for_startup()
@@ -1039,41 +1171,6 @@ class AgentBot:
             interactive.init_persistence(self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
-
-            # Register event callbacks - wrap them to run as background tasks
-            # This ensures the sync loop is never blocked, allowing stop reactions to work
-            client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
-                nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view),
-                nio.RoomMessageText,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
-                nio.RedactionEvent,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
-                nio.ReactionEvent,
-            )
-
-            # Register media callbacks on all agents (each agent handles its own routing)
-            media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
-            for event_type in (
-                nio.RoomMessageImage,
-                nio.RoomEncryptedImage,
-                nio.RoomMessageFile,
-                nio.RoomEncryptedFile,
-                nio.RoomMessageVideo,
-                nio.RoomEncryptedVideo,
-                nio.RoomMessageAudio,
-                nio.RoomEncryptedAudio,
-            ):
-                client.add_event_callback(media_callback, event_type)
-            client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
-            client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
             self.running = True
 
@@ -1253,6 +1350,9 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
+        if not self._sync_callbacks_registered:
+            await catch_up_missed_user_messages(self)
+            self._register_sync_callbacks()
         await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=not self._first_sync_done)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:

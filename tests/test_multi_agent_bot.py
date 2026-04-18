@@ -937,6 +937,7 @@ class TestAgentBot:
         # add_event_callback is a sync method, not async
         mock_client.add_event_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
+        mock_client.sync_forever = AsyncMock()
         mock_login.return_value = mock_client
 
         # Mock ensure_user_account to not change the agent_user
@@ -955,9 +956,17 @@ class TestAgentBot:
         # and then login with whatever user account was ensured
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
+        assert mock_client.add_event_callback.call_count == 0
+        assert mock_client.add_response_callback.call_count == 0
+
+        with patch("mindroom.bot.catch_up_missed_user_messages", new=AsyncMock(), create=True) as mock_catchup:
+            await bot.sync_forever()
+
+        mock_catchup.assert_awaited_once_with(bot)
         assert (
             mock_client.add_event_callback.call_count == 12
         )  # invite, message, redaction, reaction, audio, image/file/video callbacks
+        assert mock_client.add_response_callback.call_count == 2
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -990,6 +999,47 @@ class TestAgentBot:
         await bot.sync_forever()
 
         assert call_order == ["sync"]
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_sync_registers_callbacks_after_startup_catchup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """AgentBot should defer callback registration until startup catch-up finishes."""
+        config = self._config_for_storage(tmp_path)
+        mock_client = AsyncMock()
+        mock_client.event_callbacks = []
+        mock_client.response_callbacks = []
+        mock_client.add_event_callback = MagicMock(
+            side_effect=lambda callback, event_type: mock_client.event_callbacks.append((callback, event_type)),
+        )
+        mock_client.add_response_callback = MagicMock(
+            side_effect=lambda callback, event_type: mock_client.response_callbacks.append((callback, event_type)),
+        )
+        sync_order: list[str] = []
+
+        async def _sync_forever(*_args: object, **_kwargs: object) -> None:
+            sync_order.append("sync")
+
+        mock_client.sync_forever = AsyncMock(side_effect=_sync_forever)
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = mock_client
+        bot.running = True
+
+        async def _fake_catchup(_bot: AgentBot) -> None:
+            assert mock_client.event_callbacks == []
+            assert mock_client.response_callbacks == []
+            sync_order.append("catchup")
+
+        with patch("mindroom.bot.catch_up_missed_user_messages", new=AsyncMock(side_effect=_fake_catchup), create=True):
+            await bot.sync_forever()
+
+        assert sync_order == ["catchup", "sync"]
+        assert len(mock_client.event_callbacks) == 12
+        assert len(mock_client.response_callbacks) == 2
 
     @pytest.mark.asyncio
     async def test_agent_bot_try_start_reraises_permanent_startup_error(
