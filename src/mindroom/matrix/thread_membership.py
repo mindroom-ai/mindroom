@@ -12,14 +12,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 import nio
 
 from mindroom.matrix.event_info import EventInfo
-
-if TYPE_CHECKING:
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 type ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
@@ -112,6 +109,10 @@ class ThreadMembershipProofError(RuntimeError):
 
 class ThreadMembershipLookupError(RuntimeError):
     """Raised when related-event lookup cannot determine thread membership from available data."""
+
+
+class ThreadRoomScanRootNotFoundError(RuntimeError):
+    """Raised when a room scan finishes without ever seeing the requested root event."""
 
 
 def _next_related_event_target(
@@ -340,8 +341,6 @@ def map_backed_thread_membership_access(
 
 def _is_thread_root_not_found_error(error: Exception) -> bool:
     """Return whether one proof failure means the candidate root simply does not exist."""
-    from mindroom.matrix.client_thread_history import ThreadRoomScanRootNotFoundError  # noqa: PLC0415
-
     return isinstance(error, ThreadRoomScanRootNotFoundError)
 
 
@@ -530,51 +529,4 @@ async def fetch_event_info_for_client(
         response,
         event_id=event_id,
         strict=strict,
-    )
-
-
-def conversation_cache_thread_membership_access_for_client(
-    client: nio.AsyncClient,
-    *,
-    conversation_cache: ConversationCacheProtocol | None,
-    fetch_event_info: EventInfoLookup | None = None,
-) -> ThreadMembershipAccess:
-    """Build room-scan membership access backed by conversation-cache lookups when available."""
-
-    async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
-        return await lookup_thread_id_from_conversation_cache(
-            conversation_cache,
-            lookup_room_id,
-            lookup_event_id,
-        )
-
-    async def resolved_fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
-        if fetch_event_info is not None:
-            return await fetch_event_info(lookup_room_id, lookup_event_id)
-        if conversation_cache is None:
-            return None
-        return await fetch_event_info_from_conversation_cache(
-            conversation_cache,
-            lookup_room_id,
-            lookup_event_id,
-            strict=True,
-        )
-
-    async def fetch_thread_event_sources(
-        room_id: str,
-        thread_root_id: str,
-    ) -> tuple[list[dict[str, object]], bool]:
-        from mindroom.matrix.client_thread_history import _fetch_thread_event_sources_via_room_messages  # noqa: PLC0415
-
-        scan_result = await _fetch_thread_event_sources_via_room_messages(
-            client,
-            room_id,
-            thread_root_id,
-        )
-        return scan_result.event_sources, True
-
-    return room_scan_thread_membership_access(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=resolved_fetch_event_info,
-        fetch_thread_event_sources=fetch_thread_event_sources,
     )

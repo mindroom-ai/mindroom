@@ -43,6 +43,7 @@ from mindroom.matrix.thread_projection import (
     sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
 )
+from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -841,11 +842,6 @@ async def _fetch_thread_history_via_room_messages_with_events(
         resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
         sidecar_hydration_ms=sidecar_hydration_ms,
     )
-
-
-class ThreadRoomScanRootNotFoundError(RuntimeError):
-    """Raised when a room scan finishes without ever seeing the requested root event."""
-
 
 def _record_scanned_room_message_source(
     event: nio.Event,

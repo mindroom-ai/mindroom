@@ -21,6 +21,7 @@ from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
     resolve_event_thread_id_best_effort,
+    resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
@@ -325,6 +326,20 @@ class ConversationResolver:
                 full_history=full_history,
                 dispatch_safe=dispatch_safe,
             ),
+        )
+
+    async def resolve_related_event_thread_id_best_effort(
+        self,
+        room_id: str,
+        related_event_id: str,
+        *,
+        access: ThreadMembershipAccess,
+    ) -> str | None:
+        """Return best-effort canonical thread membership for one related target event."""
+        return await resolve_related_event_thread_id_best_effort(
+            room_id,
+            related_event_id,
+            access=access,
         )
 
     def thread_membership_access(
