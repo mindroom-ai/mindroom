@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 type MediaDispatchEvent = (
     nio.RoomMessageImage

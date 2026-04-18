@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 # Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
 # Accepts both single and double quotes (mautrix bridges use single quotes).
 # Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.

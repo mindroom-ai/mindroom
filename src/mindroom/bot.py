@@ -101,11 +101,8 @@ from .inbound_turn_normalizer import (
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
-from .matrix.client import (
-    PermanentMatrixStartupError,
-    ResolvedVisibleMessage,
-    get_joined_rooms,
-)
+from .matrix.client_room_admin import get_joined_rooms
+from .matrix.client_session import PermanentMatrixStartupError
 from .media_inputs import MediaInputs
 from .response_runner import (
     ResponseRequest,
@@ -138,7 +135,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry

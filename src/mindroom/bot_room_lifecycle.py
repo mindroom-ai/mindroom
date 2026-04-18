@@ -10,7 +10,7 @@ import nio
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import _generate_welcome_message
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.client import get_joined_rooms, join_room
+from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,

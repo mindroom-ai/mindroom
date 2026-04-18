@@ -33,7 +33,7 @@ from mindroom.hooks import (
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
 from mindroom.logging_config import bound_log_context, get_logger
-from mindroom.matrix.client import send_message_result
+from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content

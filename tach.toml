@@ -193,7 +193,8 @@ depends_on = [
 path = "mindroom.matrix.stale_stream_cleanup"
 depends_on = [
     "mindroom.constants",
-    "mindroom.matrix.client",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
@@ -206,7 +207,7 @@ depends_on = [
 path = "mindroom.conversation_resolver"
 depends_on = [
     "mindroom.constants",
-    "mindroom.matrix.client",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
@@ -223,7 +224,8 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.memory",
     "mindroom.matrix.cache",
-    "mindroom.matrix.client",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
     "mindroom.post_response_effects",
@@ -250,7 +252,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.hooks.sender",
     "mindroom.constants",
-    "mindroom.matrix.client",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_cache",
 ]
 
@@ -262,13 +264,13 @@ depends_on = ["mindroom.matrix.conversation_cache", "mindroom.scheduling"]
 path = "mindroom.thread_summary"
 depends_on = [
     "mindroom.ai",
-    "mindroom.matrix.client",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_cache",
 ]
 
 [[modules]]
 path = "mindroom.streaming"
-depends_on = ["mindroom.constants", "mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+depends_on = ["mindroom.constants", "mindroom.matrix.client_delivery", "mindroom.matrix.conversation_cache"]
 
 [[modules]]
 path = "mindroom.post_response_effects"
@@ -276,7 +278,7 @@ depends_on = ["mindroom.matrix.conversation_cache", "mindroom.thread_summary"]
 
 [[modules]]
 path = "mindroom.hooks.sender"
-depends_on = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+depends_on = ["mindroom.matrix.client_delivery", "mindroom.matrix.conversation_cache"]
 
 [[modules]]
 path = "mindroom.turn_controller"

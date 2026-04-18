@@ -21,13 +21,9 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
-    edit_message_result,
-    get_joined_rooms,
-    send_message_result,
-)
-from mindroom.matrix.client_visible_messages import resolve_latest_visible_messages
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_room_admin import get_joined_rooms
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.mentions import format_message_with_mentions

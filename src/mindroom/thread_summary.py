@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from mindroom.ai import cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import send_message_result
+from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.timing import timed
 
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 logger = get_logger(__name__)

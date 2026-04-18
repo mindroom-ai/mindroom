@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.tools import Toolkit
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.matrix.client import send_message_result
+from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import (

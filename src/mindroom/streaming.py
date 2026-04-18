@@ -19,7 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import is_sync_restart_cancel

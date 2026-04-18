@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.hooks.types import HookMatrixAdmin
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget

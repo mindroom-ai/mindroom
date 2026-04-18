@@ -26,10 +26,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
-    replace_visible_message,
-)
+from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.timing import timed
 
@@ -43,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.history import CompactionOutcome
     from mindroom.history.runtime import PreparedScopeHistory
     from mindroom.history.types import PreparedHistoryState, ResolvedReplayPlan
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 
