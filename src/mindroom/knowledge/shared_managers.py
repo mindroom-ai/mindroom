@@ -42,6 +42,8 @@ class _ResolvedKnowledgeManagerTarget:
 
 
 _shared_knowledge_managers: dict[str, KnowledgeManager] = {}
+# Two registries: shared managers serialize by base_id, request-scoped managers
+# serialize by resolved storage/path key. Weakref-backed so transient request keys don't leak.
 _shared_knowledge_manager_init_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 _request_knowledge_manager_init_locks: weakref.WeakValueDictionary[_KnowledgeManagerKey, asyncio.Lock] = (
     weakref.WeakValueDictionary()

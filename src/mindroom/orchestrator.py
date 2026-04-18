@@ -26,7 +26,8 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import EVENT_CONFIG_RELOADED
-from mindroom.knowledge.manager import (
+from mindroom.knowledge import (
+    KnowledgeManager,
     initialize_shared_knowledge_managers,
     shutdown_shared_knowledge_managers,
 )
@@ -115,8 +116,6 @@ if TYPE_CHECKING:
     from mindroom.hooks.sender import HookMessageSender
 
     from .constants import RuntimePaths
-    from .knowledge.manager import KnowledgeManager
-
 logger = get_logger(__name__)
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0

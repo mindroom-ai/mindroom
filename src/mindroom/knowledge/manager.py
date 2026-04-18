@@ -781,6 +781,8 @@ class KnowledgeManager:
                 return set(), set(), False
 
             await self._run_git(["checkout", git_config.branch])
+            # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
+            # intentional way to realign it with the configured remote state.
             await self._run_git(["reset", "--hard", remote_ref])
             await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
             after_files = await self._git_list_tracked_files()
@@ -788,7 +790,8 @@ class KnowledgeManager:
             return changed_files, set(), True
 
         await self._run_git(["checkout", git_config.branch])
-        # Force-align the local checkout with remote to tolerate local dirty state.
+        # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
+        # intentional way to realign it with the configured remote state.
         await self._run_git(["reset", "--hard", remote_ref])
         await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
 
@@ -1417,14 +1420,3 @@ class KnowledgeManager:
                 await self.index_file(resolved_path, upsert=True)
         elif change == Change.deleted:
             await self.remove_file(resolved_path)
-
-
-from mindroom.knowledge import shared_managers as _shared_manager_api  # noqa: E402
-
-_get_shared_knowledge_manager = _shared_manager_api._get_shared_knowledge_manager
-_shared_knowledge_managers = _shared_manager_api._shared_knowledge_managers
-ensure_agent_knowledge_managers = _shared_manager_api.ensure_agent_knowledge_managers
-ensure_shared_knowledge_manager = _shared_manager_api.ensure_shared_knowledge_manager
-get_shared_knowledge_manager_for_config = _shared_manager_api.get_shared_knowledge_manager_for_config
-initialize_shared_knowledge_managers = _shared_manager_api.initialize_shared_knowledge_managers
-shutdown_shared_knowledge_managers = _shared_manager_api.shutdown_shared_knowledge_managers

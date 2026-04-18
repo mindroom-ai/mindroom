@@ -35,8 +35,7 @@ from mindroom.history.runtime import (
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
 )
-from mindroom.knowledge.manager import initialize_shared_knowledge_managers
-from mindroom.knowledge.utils import get_agent_knowledge
+from mindroom.knowledge import get_agent_knowledge, initialize_shared_knowledge_managers
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent

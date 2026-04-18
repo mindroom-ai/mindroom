@@ -34,7 +34,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.types import EVENT_SESSION_STARTED
-from mindroom.knowledge.utils import KnowledgeAccessSupport, ensure_request_knowledge_managers
+from mindroom.knowledge import KnowledgeAccessSupport, ensure_request_knowledge_managers
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client import replace_visible_message
 from mindroom.matrix.identity import is_agent_id

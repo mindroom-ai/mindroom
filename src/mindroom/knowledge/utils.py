@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
-from mindroom.knowledge.manager import (
+from mindroom.knowledge.shared_managers import (
     ensure_agent_knowledge_managers,
     get_shared_knowledge_manager_for_config,
 )
@@ -33,6 +33,19 @@ class _KnowledgeVectorDb(Protocol):
     """Subset of vector DB interface this module requires."""
 
     def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]: ...
+
+
+@runtime_checkable
+class _AsyncKnowledgeVectorDb(_KnowledgeVectorDb, Protocol):
+    """Vector DBs that support the async search path directly."""
+
+    async def async_search(
         self,
         *,
         query: str,
@@ -155,6 +168,8 @@ class MultiKnowledgeVectorDb:
     If agno changes the ``__post_init__`` protocol, this adapter will need updating.
     """
 
+    # Agno Knowledge.__post_init__ calls exists()/create(); this adapter intentionally
+    # lies because KnowledgeManager already owns the underlying DB lifecycle.
     vector_dbs: list[_KnowledgeVectorDb]
 
     def exists(self) -> bool:
@@ -199,9 +214,12 @@ class MultiKnowledgeVectorDb:
         async def _search_one(vdb: _KnowledgeVectorDb) -> list[Document]:
             results: list[Document]
             try:
-                try:
-                    results = await cast("Any", vdb).async_search(query=query, limit=limit, filters=filters)
-                except (NotImplementedError, AttributeError):
+                if isinstance(vdb, _AsyncKnowledgeVectorDb):
+                    try:
+                        results = await vdb.async_search(query=query, limit=limit, filters=filters)
+                    except (NotImplementedError, AttributeError):
+                        results = vdb.search(query=query, limit=limit, filters=filters)
+                else:
                     results = vdb.search(query=query, limit=limit, filters=filters)
             except Exception:
                 logger.warning(

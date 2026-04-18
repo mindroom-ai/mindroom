@@ -99,7 +99,7 @@ from .inbound_turn_normalizer import (
     InboundTurnNormalizer,
     InboundTurnNormalizerDeps,
 )
-from .knowledge.utils import KnowledgeAccessSupport, MultiKnowledgeVectorDb
+from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -146,7 +146,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
+__all__ = ["AgentBot"]
 
 
 # Constants

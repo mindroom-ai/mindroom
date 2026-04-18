@@ -23,6 +23,8 @@ from mindroom.knowledge.manager import (
     _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
     KnowledgeManager,
     _create_embedder,
+)
+from mindroom.knowledge.shared_managers import (
     _get_shared_knowledge_manager,
     _shared_knowledge_managers,
     ensure_agent_knowledge_managers,

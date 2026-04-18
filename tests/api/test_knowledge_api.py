@@ -16,7 +16,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.knowledge.manager import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
+from mindroom.knowledge import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
 
 
 def _knowledge_config(
