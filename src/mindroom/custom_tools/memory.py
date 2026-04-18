@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.logging_config import get_logger
-from mindroom.memory.functions import (
+from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,
     get_agent_memory,

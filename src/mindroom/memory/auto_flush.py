@@ -15,7 +15,6 @@ from agno.db.base import SessionType
 from agno.session.agent import AgentSession
 
 from mindroom.agents import create_session_storage
-from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
@@ -256,14 +255,12 @@ def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
 def mark_auto_flush_dirty_session(
     storage_path: Path,
     config: Config,
-    runtime_paths: RuntimePaths,
     *,
     agent_name: str,
     session_id: str,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Mark one agent session as dirty for background auto-flush."""
-    _ = runtime_paths
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
@@ -304,14 +301,12 @@ def mark_auto_flush_dirty_session(
 def reprioritize_auto_flush_sessions(
     storage_path: Path,
     config: Config,
-    runtime_paths: RuntimePaths,
     *,
     agent_name: str,
     active_session_id: str,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Raise priority of other dirty sessions for the same agent."""
-    _ = runtime_paths
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
@@ -506,6 +501,9 @@ async def _extract_memory_summary(
     execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> str | None:
+    # Deferred to avoid circular import: mindroom.ai imports from the mindroom.memory facade.
+    from mindroom.ai import get_model_instance  # noqa: PLC0415
+
     extractor = config.memory.auto_flush.extractor
     if not lines:
         return None

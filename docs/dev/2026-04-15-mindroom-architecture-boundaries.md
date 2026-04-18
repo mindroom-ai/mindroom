@@ -142,6 +142,12 @@ Public seams should be memory and knowledge service interfaces rather than priva
 
 Storage details and prompt-building helpers should not become de facto public APIs through direct imports.
 
+The memory facade is now Tach-enforced as a narrow slice with 15 exposed symbols.
+
+A transitional bypass-grep guard blocks direct helper imports while the broader cleanup continues.
+
+See [tach.toml](../../tach.toml) for the enforced surface and its source of truth.
+
 ### User-facing control surfaces
 
 This domain should talk to runtime, conversation, and tool contracts.
@@ -282,7 +288,8 @@ If the narrow cache and conversation pilot succeeds, later phases may include:
 
 - broader runtime contract enforcement
 - thread-domain policy boundaries
-- memory and knowledge boundary cleanup
+- knowledge boundary cleanup
+- broader memory tightening beyond the current facade slice
 - selected private-helper import rules in other domains
 
 Those later phases should only be added once the earlier slice is stable and useful.
