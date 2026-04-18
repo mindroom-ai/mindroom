@@ -6,7 +6,6 @@ source_roots = ["src"]
 [[modules]]
 paths = [
     "mindroom.ai",
-    "mindroom.bot",
     "mindroom.custom_tools.memory",
     "mindroom.orchestrator",
     "mindroom.response_runner",
@@ -23,6 +22,7 @@ path = "mindroom.memory"
 depends_on = [
     "mindroom.ai",
     "mindroom.config.memory",
+    "mindroom.constants",
     "mindroom.matrix.client",
 ]
 
@@ -221,11 +221,13 @@ depends_on = [
     "mindroom.conversation_resolver",
     "mindroom.hooks.sender",
     "mindroom.knowledge",
+    "mindroom.memory",
     "mindroom.matrix.cache",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
     "mindroom.post_response_effects",
+    "mindroom.response_runner",
     "mindroom.runtime_support",
     "mindroom.scheduling",
     "mindroom.tool_system.runtime_context",
