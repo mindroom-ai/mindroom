@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.hooks.types import HookMessageSender  # noqa: TC001
-from mindroom.matrix.client import send_message_result
+from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
 

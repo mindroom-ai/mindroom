@@ -14,7 +14,7 @@ import httpx
 from mindroom import constants
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import (
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
     MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS,

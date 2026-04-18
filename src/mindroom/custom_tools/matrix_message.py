@@ -32,20 +32,20 @@ from mindroom.interactive import (
     should_create_interactive_question,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
-    RoomThreadsPageError,
+from mindroom.matrix.client_delivery import (
     edit_message_result,
-    get_room_threads_page,
     send_file_message,
     send_message_result,
 )
+from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 

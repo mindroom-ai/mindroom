@@ -13,7 +13,7 @@ from nio.responses import RoomGetEventError
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
-from mindroom.matrix.client import cached_room as matrix_cached_room
+from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.message_content import resolve_event_source_content
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
 
 type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent

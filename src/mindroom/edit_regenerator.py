@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.turn_policy import IngressHookRunner

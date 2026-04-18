@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import get_joined_rooms, get_room_members
+from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID, agent_username_localpart
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
 from mindroom.matrix.rooms import is_dm_room
