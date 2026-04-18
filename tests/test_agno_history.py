@@ -45,6 +45,8 @@ from mindroom.history.compaction import (
     _build_summary_input,
     _emit_compaction_hook,
     _generate_compaction_summary,
+    _rewrite_working_session_for_compaction,
+    _strip_stale_anthropic_replay_fields,
     estimate_agent_static_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
@@ -2932,6 +2934,218 @@ def test_estimate_session_summary_tokens_none() -> None:
 def test_estimate_session_summary_tokens_empty() -> None:
     assert estimate_session_summary_tokens("") == 0
     assert estimate_session_summary_tokens("   ") == 0
+
+
+def test_private_strip_stale_anthropic_replay_fields_returns_zero_without_user_messages() -> None:
+    assistant = Message(
+        role="assistant",
+        content="assistant",
+        provider_data={"signature": "sig-1", "keep": "yes"},
+        reasoning_content="thinking",
+        redacted_reasoning_content="redacted",
+    )
+
+    assert _strip_stale_anthropic_replay_fields([assistant]) == 0
+    assert assistant.provider_data == {"signature": "sig-1", "keep": "yes"}
+    assert assistant.reasoning_content == "thinking"
+    assert assistant.redacted_reasoning_content == "redacted"
+
+
+def test_private_strip_stale_anthropic_replay_fields_preserves_single_turn_after_last_user() -> None:
+    assistant = Message(
+        role="assistant",
+        content="assistant",
+        provider_data={"signature": "sig-1"},
+        reasoning_content="thinking",
+        redacted_reasoning_content="redacted",
+    )
+    messages = [
+        Message(role="user", content="question"),
+        assistant,
+    ]
+
+    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert assistant.provider_data == {"signature": "sig-1"}
+    assert assistant.reasoning_content == "thinking"
+    assert assistant.redacted_reasoning_content == "redacted"
+
+
+def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_preserves_current_turn() -> None:
+    old_assistant = Message(
+        role="assistant",
+        content="old assistant",
+        provider_data={"signature": "sig-old", "keep": "yes"},
+        reasoning_content="old thinking",
+        redacted_reasoning_content="old redacted",
+    )
+    current_assistant = Message(
+        role="assistant",
+        content="current assistant",
+        provider_data={"signature": "sig-current"},
+        reasoning_content="current thinking",
+        redacted_reasoning_content="current redacted",
+    )
+    messages = [
+        Message(role="user", content="old user"),
+        old_assistant,
+        Message(role="user", content="current user"),
+        current_assistant,
+    ]
+
+    assert _strip_stale_anthropic_replay_fields(messages) == 1
+    assert old_assistant.provider_data == {"keep": "yes"}
+    assert old_assistant.reasoning_content is None
+    assert old_assistant.redacted_reasoning_content is None
+    assert current_assistant.provider_data == {"signature": "sig-current"}
+    assert current_assistant.reasoning_content == "current thinking"
+    assert current_assistant.redacted_reasoning_content == "current redacted"
+
+
+def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
+    tool_assistant = Message(
+        role="assistant",
+        content="tool call",
+        provider_data={"signature": "sig-tool"},
+        reasoning_content="thinking",
+        redacted_reasoning_content="redacted",
+        tool_calls=[
+            {"id": "call-1", "type": "function", "function": {"name": "tool", "arguments": "{}"}},
+        ],
+    )
+    final_assistant = Message(
+        role="assistant",
+        content="final answer",
+        provider_data={"signature": "sig-final"},
+        reasoning_content="more thinking",
+        redacted_reasoning_content="more redacted",
+    )
+    messages = [
+        Message(role="user", content="question"),
+        tool_assistant,
+        Message(role="tool", content="tool result", tool_call_id="call-1"),
+        final_assistant,
+    ]
+
+    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert tool_assistant.provider_data == {"signature": "sig-tool"}
+    assert tool_assistant.reasoning_content == "thinking"
+    assert tool_assistant.redacted_reasoning_content == "redacted"
+    assert final_assistant.provider_data == {"signature": "sig-final"}
+    assert final_assistant.reasoning_content == "more thinking"
+    assert final_assistant.redacted_reasoning_content == "more redacted"
+
+
+def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_signature() -> None:
+    assistant = Message(
+        role="assistant",
+        content="assistant",
+        provider_data={"keep": "yes"},
+        reasoning_content="thinking",
+        redacted_reasoning_content="redacted",
+    )
+    messages = [
+        Message(role="user", content="old user"),
+        assistant,
+        Message(role="user", content="current user"),
+    ]
+
+    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert assistant.provider_data == {"keep": "yes"}
+    assert assistant.reasoning_content == "thinking"
+    assert assistant.redacted_reasoning_content == "redacted"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields_from_remaining_runs(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    remaining_run = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="old user"),
+            Message(
+                role="assistant",
+                content="old assistant",
+                provider_data={"signature": "sig-old", "keep": "yes"},
+                reasoning_content="old thinking",
+                redacted_reasoning_content="old redacted",
+            ),
+            Message(role="user", content="current user"),
+            Message(
+                role="assistant",
+                content="current assistant",
+                provider_data={"signature": "sig-current"},
+                reasoning_content="current thinking",
+                redacted_reasoning_content="current redacted",
+            ),
+        ],
+    )
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            remaining_run,
+        ],
+    )
+    summary_text = "merged summary " * 40
+    summary_input_budget = next(
+        budget
+        for budget in range(1, 10_000)
+        if len(
+            _build_summary_input(
+                previous_summary=None,
+                compacted_runs=list(working_session.runs or []),
+                max_input_tokens=budget,
+            )[1],
+        )
+        == 1
+        and _build_summary_input(
+            previous_summary=summary_text,
+            compacted_runs=[remaining_run],
+            max_input_tokens=budget,
+        )[1]
+        == []
+    )
+
+    with patch(
+        "mindroom.history.compaction._generate_compaction_summary",
+        new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
+    ):
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=working_session,
+            working_session=working_session,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            session_id="session-1",
+            scope=scope,
+            state=HistoryScopeState(),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=1,
+            summary_input_budget=summary_input_budget,
+            collect_compaction_hook_messages=False,
+        )
+    assert rewrite_result is not None
+    assert rewrite_result.compacted_run_count == 1
+    assert [run.run_id for run in working_session.runs] == ["run-2"]
+    remaining_messages = working_session.runs[0].messages or []
+    assert remaining_messages[1].provider_data == {"keep": "yes"}
+    assert remaining_messages[1].reasoning_content is None
+    assert remaining_messages[1].redacted_reasoning_content is None
+    assert remaining_messages[3].provider_data == {"signature": "sig-current"}
+    assert remaining_messages[3].reasoning_content == "current thinking"
+    assert remaining_messages[3].redacted_reasoning_content == "current redacted"
 
 
 @pytest.mark.asyncio
