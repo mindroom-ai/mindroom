@@ -1,6 +1,19 @@
 exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
 source_roots = ["src"]
 
+# ARCH-B memory enforcement slice: keep public memory config types owned by config.
+[[modules]]
+path = "mindroom.config.memory"
+depends_on = []
+
+# ARCH-B memory enforcement slice: keep memory consumers on the package facade.
+[[modules]]
+path = "mindroom.memory"
+depends_on = [
+    "mindroom.config.memory",
+    "mindroom.matrix.client",
+]
+
 [[modules]]
 path = "mindroom.matrix.cache"
 depends_on = [
@@ -162,6 +175,36 @@ expose = [
     "shutdown_shared_knowledge_managers",
 ]
 from = ["mindroom.knowledge"]
+
+# ARCH-B memory enforcement slice: expose only the config-level memory settings surface.
+[[interfaces]]
+expose = [
+    "MemoryAutoFlushConfig",
+    "MemoryBackend",
+    "MemoryConfig",
+]
+from = ["mindroom.config.memory"]
+
+# ARCH-B memory enforcement slice: expose the supported memory facade, not helper modules.
+[[interfaces]]
+expose = [
+    "MemoryAutoFlushWorker",
+    "MemoryPromptParts",
+    "add_agent_memory",
+    "auto_flush_enabled",
+    "build_memory_enhanced_prompt",
+    "build_memory_prompt_parts",
+    "delete_agent_memory",
+    "get_agent_memory",
+    "list_all_agent_memories",
+    "mark_auto_flush_dirty_session",
+    "reprioritize_auto_flush_sessions",
+    "search_agent_memories",
+    "store_conversation_memory",
+    "strip_user_turn_time_prefix",
+    "update_agent_memory",
+]
+from = ["mindroom.memory"]
 
 [[interfaces]]
 expose = [

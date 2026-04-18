@@ -60,7 +60,7 @@ from mindroom.matrix.users import (
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
-from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import (
     reset_runtime_state,
     set_runtime_failed,

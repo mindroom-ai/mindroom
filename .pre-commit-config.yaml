@@ -65,6 +65,13 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: check-memory-public-seam
+        name: Check memory public seam imports
+        entry: scripts/check_memory_public_seam.sh
+        language: system
+        pass_filenames: false
+        files: ^src/
+
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.6.0"
     hooks:

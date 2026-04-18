@@ -11,7 +11,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.memory.functions import (
+from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,
     get_agent_memory,

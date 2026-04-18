@@ -8,10 +8,36 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.memory import (
+    MemoryPromptParts,
+)
+from mindroom.memory import (
+    add_agent_memory as public_add_agent_memory,
+)
+from mindroom.memory import (
+    build_memory_prompt_parts as public_build_memory_prompt_parts,
+)
+from mindroom.memory import (
+    delete_agent_memory as public_delete_agent_memory,
+)
+from mindroom.memory import (
+    get_agent_memory as public_get_agent_memory,
+)
+from mindroom.memory import (
+    list_all_agent_memories as public_list_all_agent_memories,
+)
+from mindroom.memory import (
+    search_agent_memories as public_search_agent_memories,
+)
+from mindroom.memory import (
+    store_conversation_memory as public_store_conversation_memory,
+)
+from mindroom.memory import (
+    update_agent_memory as public_update_agent_memory,
+)
 from mindroom.memory._prompting import _format_memories_as_context
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
@@ -30,7 +56,7 @@ async def add_agent_memory(
     config: Config,
     metadata: dict | None = None,
 ) -> None:
-    await memory_functions.add_agent_memory(
+    await public_add_agent_memory(
         content,
         agent_name,
         storage_path,
@@ -47,7 +73,7 @@ async def search_agent_memories(
     config: Config,
     limit: int = 3,
 ) -> list[MemoryResult]:
-    return await memory_functions.search_agent_memories(
+    return await public_search_agent_memories(
         query,
         agent_name,
         storage_path,
@@ -65,7 +91,7 @@ async def list_all_agent_memories(
     *,
     preserve_resolved_storage_path: bool = False,
 ) -> list[MemoryResult]:
-    return await memory_functions.list_all_agent_memories(
+    return await public_list_all_agent_memories(
         agent_name,
         storage_path,
         config,
@@ -81,7 +107,7 @@ async def get_agent_memory(
     storage_path: Path,
     config: Config,
 ) -> MemoryResult | None:
-    return await memory_functions.get_agent_memory(
+    return await public_get_agent_memory(
         memory_id,
         caller_context,
         storage_path,
@@ -97,7 +123,7 @@ async def update_agent_memory(
     storage_path: Path,
     config: Config,
 ) -> None:
-    await memory_functions.update_agent_memory(
+    await public_update_agent_memory(
         memory_id,
         content,
         caller_context,
@@ -113,7 +139,7 @@ async def delete_agent_memory(
     storage_path: Path,
     config: Config,
 ) -> None:
-    await memory_functions.delete_agent_memory(
+    await public_delete_agent_memory(
         memory_id,
         caller_context,
         storage_path,
@@ -122,13 +148,13 @@ async def delete_agent_memory(
     )
 
 
-async def build_memory_enhanced_prompt(
+async def build_memory_prompt_parts(
     prompt: str,
     agent_name: str,
     storage_path: Path,
     config: Config,
-) -> str:
-    return await memory_functions.build_memory_enhanced_prompt(
+) -> MemoryPromptParts:
+    return await public_build_memory_prompt_parts(
         prompt,
         agent_name,
         storage_path,
@@ -145,7 +171,7 @@ async def store_conversation_memory(
     config: Config,
     **kwargs: object,
 ) -> None:
-    await memory_functions.store_conversation_memory(
+    await public_store_conversation_memory(
         prompt,
         agent_name,
         storage_path,
@@ -412,7 +438,7 @@ class TestMemoryFacade:
         assert _format_memories_as_context([], "agent") == ""
 
     @pytest.mark.asyncio
-    async def test_build_memory_enhanced_prompt(
+    async def test_build_memory_prompt_parts(
         self,
         mock_memory: AsyncMock,
         storage_path: Path,
@@ -422,19 +448,21 @@ class TestMemoryFacade:
         mock_memory.search.return_value = {"results": agent_memories}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            enhanced = await build_memory_enhanced_prompt(
+            prompt_parts = await build_memory_prompt_parts(
                 "What is 3+3?",
                 "calculator",
                 storage_path,
                 config,
             )
 
-        assert "[Automatically extracted agent memories - may not be relevant to current context]" in enhanced
-        assert "I previously calculated 2+2=4" in enhanced
-        assert "What is 3+3?" in enhanced
+        assert prompt_parts.session_preamble == ""
+        assert "[Automatically extracted agent memories - may not be relevant to current context]" in (
+            prompt_parts.turn_context
+        )
+        assert "I previously calculated 2+2=4" in prompt_parts.turn_context
 
     @pytest.mark.asyncio
-    async def test_build_memory_enhanced_prompt_no_memories(
+    async def test_build_memory_prompt_parts_no_memories(
         self,
         mock_memory: AsyncMock,
         storage_path: Path,
@@ -443,9 +471,9 @@ class TestMemoryFacade:
         mock_memory.search.return_value = {"results": []}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            enhanced = await build_memory_enhanced_prompt("Original prompt", "agent", storage_path, config)
+            prompt_parts = await build_memory_prompt_parts("Original prompt", "agent", storage_path, config)
 
-        assert enhanced == "Original prompt"
+        assert prompt_parts == MemoryPromptParts()
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
