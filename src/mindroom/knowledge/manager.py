@@ -392,6 +392,10 @@ class KnowledgeManager:
         default=None,
         init=False,
     )
+    _deferred_shared_runtime_mode: Literal["watch", "git_sync"] | None = field(
+        default=None,
+        init=False,
+    )
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
 
@@ -594,6 +598,21 @@ class KnowledgeManager:
 
     def _mark_git_initial_sync_complete(self) -> None:
         self._git_initial_sync_complete = True
+
+    def defer_shared_runtime_restore(
+        self,
+        runtime_mode: Literal["watch", "git_sync"] | None,
+    ) -> None:
+        """Remember a shared runtime mode to restart after an explicit reindex succeeds."""
+        self._deferred_shared_runtime_mode = runtime_mode
+
+    async def restore_deferred_shared_runtime(self) -> None:
+        """Restart any shared watcher or Git sync that was deferred during explicit reindex bootstrap."""
+        runtime_mode = self._deferred_shared_runtime_mode
+        if runtime_mode is None:
+            return
+        await _start_shared_manager_runtime_mode(self, runtime_mode)
+        self._deferred_shared_runtime_mode = None
 
     def _git_sync_timeout_seconds(self) -> float | None:
         git_config = self._git_config()
@@ -1696,6 +1715,8 @@ async def _ensure_shared_knowledge_manager_for_target(
                 )
                 if initialize_on_create:
                     await _start_shared_manager_runtime_mode(manager, preserved_runtime_mode)
+                else:
+                    manager.defer_shared_runtime_restore(preserved_runtime_mode)
                 _shared_knowledge_managers[target.key.base_id] = manager
                 return manager
 

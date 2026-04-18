@@ -468,6 +468,7 @@ def test_reindex_uses_git_startup_finisher_for_git_bases(test_client: TestClient
     manager.finish_pending_background_git_startup = AsyncMock(
         return_value={"startup_mode": "full_reindex", "indexed_count": 2},
     )
+    manager.restore_deferred_shared_runtime = AsyncMock(return_value=None)
 
     with (
         patch(
@@ -480,6 +481,7 @@ def test_reindex_uses_git_startup_finisher_for_git_bases(test_client: TestClient
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 2
     manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
+    manager.restore_deferred_shared_runtime.assert_awaited_once_with()
 
 
 def test_reindex_finishes_pending_background_startup_for_git_bases(
@@ -494,6 +496,7 @@ def test_reindex_finishes_pending_background_startup_for_git_bases(
     )
     manager.sync_git_repository = AsyncMock()
     manager.reindex_all = AsyncMock()
+    manager.restore_deferred_shared_runtime = AsyncMock(return_value=None)
     _publish_committed_runtime_config(test_client.app, config)
 
     with patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)):
@@ -504,6 +507,7 @@ def test_reindex_finishes_pending_background_startup_for_git_bases(
     manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
     manager.sync_git_repository.assert_not_awaited()
     manager.reindex_all.assert_not_awaited()
+    manager.restore_deferred_shared_runtime.assert_awaited_once_with()
 
 
 def test_reindex_cold_local_base_reindexes_only_once(

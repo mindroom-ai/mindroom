@@ -357,6 +357,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
         indexed_count = int(result["indexed_count"])
     else:
         indexed_count = await manager.reindex_all()
+    await manager.restore_deferred_shared_runtime()
     return {
         "success": True,
         "base_id": base_id,

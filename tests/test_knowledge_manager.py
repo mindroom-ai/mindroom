@@ -26,6 +26,7 @@ from mindroom.knowledge.manager import (
     _get_shared_knowledge_manager,
     _shared_knowledge_managers,
     ensure_agent_knowledge_managers,
+    ensure_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
     initialize_shared_knowledge_managers,
     shutdown_shared_knowledge_managers,
@@ -2839,6 +2840,81 @@ async def test_initialize_shared_knowledge_managers_full_reindex_preserves_backg
         await shutdown_shared_knowledge_managers()
 
     prepare_background_git_startup.assert_awaited_once_with("resume")
+
+
+@pytest.mark.asyncio
+async def test_explicit_reindex_replacement_restores_preserved_background_git_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit reindex should restore the prior shared git-sync runtime after stale-manager replacement."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge", startup_behavior="background")
+    runtime_paths = runtime_paths_for(config)
+
+    prepare_background_git_startup = AsyncMock(
+        return_value={
+            "startup_mode": "resume",
+            "loaded_count": 0,
+            "indexed_count": 0,
+            "removed_count": 0,
+            "git_deferred": True,
+        },
+    )
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    reindex_all = AsyncMock(return_value=4)
+    git_sync_starts: list[int] = []
+
+    async def _track_start_git_sync(manager: KnowledgeManager) -> None:
+        git_sync_starts.append(id(manager))
+        if manager._git_sync_task is None:
+            manager._git_sync_stop_event = asyncio.Event()
+            manager._git_sync_task = asyncio.create_task(manager._git_sync_stop_event.wait())
+
+    monkeypatch.setattr(KnowledgeManager, "prepare_background_git_startup", prepare_background_git_startup)
+    monkeypatch.setattr(KnowledgeManager, "_start_git_sync", _track_start_git_sync)
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths,
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+        original_manager = managers["research"]
+
+        updated_config = _make_git_config(tmp_path / "knowledge", lfs=True, startup_behavior="background")
+        replacement_manager = await ensure_shared_knowledge_manager(
+            "research",
+            config=updated_config,
+            runtime_paths=runtime_paths_for(updated_config),
+            start_watchers=False,
+            reindex_on_create=False,
+            initialize_on_create=False,
+        )
+
+        assert replacement_manager is not None
+        assert replacement_manager is not original_manager
+        assert replacement_manager._git_sync_task is None
+
+        monkeypatch.setattr(replacement_manager, "sync_git_repository", sync_git_repository)
+        monkeypatch.setattr(replacement_manager, "reindex_all", reindex_all)
+
+        result = await replacement_manager.finish_pending_background_git_startup(force_full_reindex=True)
+        await replacement_manager.restore_deferred_shared_runtime()
+
+        assert result["indexed_count"] == 4
+        assert replacement_manager._git_sync_task is not None
+        assert git_sync_starts == [id(original_manager), id(replacement_manager)]
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+    prepare_background_git_startup.assert_awaited_once_with("resume")
+    sync_git_repository.assert_awaited_once_with(index_changes=False)
+    reindex_all.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
