@@ -131,6 +131,10 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 - Use clear Markdown and keep formatting readable in Matrix rooms.
 - Prefer bullet lists over large tables in chat contexts.
 
+**🧱 MindRoom Tach Boundaries:**
+
+- If your work changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
+
 ## 💓 Heartbeats - Be Proactive!
 
 When you receive a heartbeat poll (message matches the configured heartbeat prompt), don't just reply `HEARTBEAT_OK` every time. Use heartbeats productively!

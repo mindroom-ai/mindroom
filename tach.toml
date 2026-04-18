@@ -1,15 +1,110 @@
+# Tach is the source of truth for enforced module boundaries in this repo.
+# If a PR changes runtime module dependencies or public import surfaces in a
+# Tach-governed area, update this file in the same PR.
+#
+# Boundary rules:
+# - Use explicit `[[modules]] path = "..."` entries plus `depends_on` for
+#   importer-specific enforcement.
+# - Use module `visibility` to restrict which modules may import a module.
+# - Use `[[interfaces]]` only for symbol-level public APIs.
+# - Do not rely on interface `visibility` as a substitute for module
+#   dependency rules.
+# - Use grouped `paths = [...]` only when every grouped module intentionally
+#   shares the exact same policy.
+#
+# Docs:
+# - https://docs.gauge.sh/usage/configuration/
+# - https://docs.gauge.sh/usage/interfaces/
 exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
 source_roots = ["src"]
 
-# Keep the current memory facade consumers visible to Tach so the public
-# interface is enforced without widening dependency enforcement repo-wide.
+# Keep memory consumers explicit so imports are enforced rather than merely
+# interface-checked.
 [[modules]]
-paths = [
-    "mindroom.ai",
-    "mindroom.custom_tools.memory",
-    "mindroom.orchestrator",
-    "mindroom.response_runner",
+path = "mindroom.ai"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.execution_preparation",
+    "mindroom.memory",
 ]
+
+[[modules]]
+path = "mindroom.custom_tools.memory"
+depends_on = ["mindroom.memory"]
+
+# Keep split Matrix client consumers on explicit per-module rules so Tach can
+# enforce both dependency edges and module visibility for each importer.
+[[modules]]
+path = "mindroom.api.matrix_operations"
+depends_on = ["mindroom.constants", "mindroom.matrix.client_room_admin", "mindroom.matrix.rooms", "mindroom.matrix.users"]
+
+[[modules]]
+path = "mindroom.api.openai_compat"
+depends_on = ["mindroom.knowledge", "mindroom.execution_preparation", "mindroom.constants", "mindroom.routing", "mindroom.matrix.client_visible_messages", "mindroom.ai"]
+
+[[modules]]
+path = "mindroom.bot_room_lifecycle"
+depends_on = ["mindroom.matrix.client_room_admin", "mindroom.constants", "mindroom.matrix.rooms", "mindroom.commands.handler"]
+
+[[modules]]
+path = "mindroom.custom_tools.attachments"
+depends_on = ["mindroom.tool_system.runtime_context", "mindroom.matrix.client_delivery"]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_message"
+depends_on = ["mindroom.matrix.message_content", "mindroom.custom_tools.attachments", "mindroom.tool_system.runtime_context", "mindroom.matrix.client_thread_history", "mindroom.matrix.client_delivery", "mindroom.constants"]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_room"
+depends_on = ["mindroom.matrix.client_thread_history", "mindroom.tool_system.runtime_context"]
+
+[[modules]]
+path = "mindroom.custom_tools.subagents"
+depends_on = ["mindroom.constants", "mindroom.matrix.client_delivery", "mindroom.tool_system.runtime_context", "mindroom.thread_summary"]
+
+[[modules]]
+path = "mindroom.delivery_gateway"
+depends_on = ["mindroom.streaming", "mindroom.constants", "mindroom.matrix.client_delivery"]
+
+[[modules]]
+path = "mindroom.execution_preparation"
+depends_on = ["mindroom.matrix.client_visible_messages", "mindroom.streaming", "mindroom.constants"]
+
+[[modules]]
+path = "mindroom.hooks.matrix_admin"
+depends_on = ["mindroom.matrix.client_room_admin"]
+
+[[modules]]
+path = "mindroom.matrix.provisioning"
+depends_on = ["mindroom.matrix.client_session", "mindroom.constants"]
+
+[[modules]]
+path = "mindroom.matrix.room_cleanup"
+depends_on = ["mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.users"]
+
+[[modules]]
+path = "mindroom.matrix.rooms"
+depends_on = ["mindroom.constants", "mindroom.matrix.client_room_admin", "mindroom.matrix.client_session", "mindroom.matrix.users"]
+
+[[modules]]
+path = "mindroom.matrix.users"
+depends_on = ["mindroom.matrix.client_session", "mindroom.matrix.provisioning", "mindroom.constants"]
+
+[[modules]]
+path = "mindroom.orchestration.runtime"
+depends_on = ["mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
+
+[[modules]]
+path = "mindroom.orchestrator"
+depends_on = ["mindroom.matrix.users", "mindroom.orchestration.runtime", "mindroom.knowledge", "mindroom.memory", "mindroom.matrix.client_room_admin", "mindroom.scheduling", "mindroom.matrix.rooms", "mindroom.matrix.stale_stream_cleanup", "mindroom.constants", "mindroom.bot", "mindroom.matrix.client_session", "mindroom.runtime_support"]
+
+[[modules]]
+path = "mindroom.response_runner"
+depends_on = ["mindroom.ai", "mindroom.post_response_effects", "mindroom.constants", "mindroom.delivery_gateway", "mindroom.orchestration.runtime", "mindroom.thread_summary", "mindroom.matrix.client_visible_messages", "mindroom.tool_system.runtime_context", "mindroom.knowledge", "mindroom.memory", "mindroom.streaming"]
+
+[[modules]]
+path = "mindroom.routing"
+depends_on = ["mindroom.matrix.client_visible_messages", "mindroom.ai"]
 
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
@@ -127,14 +222,47 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.client_delivery"
 depends_on = ["mindroom.matrix.conversation_cache"]
+visibility = [
+    "mindroom.conversation_resolver",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.subagents",
+    "mindroom.delivery_gateway",
+    "mindroom.hooks.sender",
+    "mindroom.matrix.client",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.scheduling",
+    "mindroom.streaming",
+    "mindroom.thread_summary",
+]
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
 depends_on = []
+visibility = [
+    "mindroom.api.matrix_operations",
+    "mindroom.bot",
+    "mindroom.bot_room_lifecycle",
+    "mindroom.hooks.matrix_admin",
+    "mindroom.matrix.client",
+    "mindroom.matrix.room_cleanup",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.orchestrator",
+]
 
 [[modules]]
 path = "mindroom.matrix.client_session"
 depends_on = ["mindroom.constants"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.matrix.client",
+    "mindroom.matrix.provisioning",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.users",
+    "mindroom.orchestration.runtime",
+    "mindroom.orchestrator",
+]
 
 [[modules]]
 path = "mindroom.matrix.client_visible_messages"
@@ -142,6 +270,15 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+]
+visibility = [
+    "mindroom.api.openai_compat",
+    "mindroom.execution_preparation",
+    "mindroom.matrix.client",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.response_runner",
+    "mindroom.routing",
 ]
 
 [[modules]]
@@ -162,6 +299,13 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_projection",
+]
+visibility = [
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_room",
+    "mindroom.matrix.client",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.thread_room_scan",
 ]
 
 [[modules]]
@@ -218,8 +362,10 @@ depends_on = [
 path = "mindroom.bot"
 depends_on = [
     "mindroom.bot_runtime_view",
+    "mindroom.bot_room_lifecycle",
     "mindroom.constants",
     "mindroom.conversation_resolver",
+    "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
     "mindroom.knowledge",
     "mindroom.memory",
@@ -228,6 +374,9 @@ depends_on = [
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.room_cleanup",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.users",
     "mindroom.post_response_effects",
     "mindroom.response_runner",
     "mindroom.runtime_support",
@@ -270,11 +419,11 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.streaming"
-depends_on = ["mindroom.constants", "mindroom.matrix.client_delivery", "mindroom.matrix.conversation_cache"]
+depends_on = ["mindroom.constants", "mindroom.matrix.client_delivery", "mindroom.matrix.conversation_cache", "mindroom.orchestration.runtime"]
 
 [[modules]]
 path = "mindroom.post_response_effects"
-depends_on = ["mindroom.matrix.conversation_cache", "mindroom.thread_summary"]
+depends_on = ["mindroom.matrix.conversation_cache", "mindroom.thread_summary", "mindroom.delivery_gateway"]
 
 [[modules]]
 path = "mindroom.hooks.sender"
@@ -287,9 +436,12 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache",
     "mindroom.matrix.conversation_cache",
-    "mindroom.response_runner",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.rooms",
+    "mindroom.response_runner",
+    "mindroom.routing",
+    "mindroom.delivery_gateway",
 ]
 
 [[modules]]
@@ -514,8 +666,6 @@ expose = [
     "leave_room",
 ]
 from = ["mindroom.matrix.client_room_admin"]
-visibility = ["mindroom.matrix.client", "mindroom.matrix.rooms"]
-exclusive = true
 
 [[interfaces]]
 expose = [
@@ -526,12 +676,6 @@ expose = [
     "restore_login",
 ]
 from = ["mindroom.matrix.client_session"]
-visibility = [
-    "mindroom.matrix.client",
-    "mindroom.matrix.provisioning",
-    "mindroom.matrix.users",
-]
-exclusive = true
 
 [[interfaces]]
 expose = [
@@ -545,8 +689,6 @@ expose = [
     "send_message_result",
 ]
 from = ["mindroom.matrix.client_delivery"]
-visibility = ["mindroom.matrix.client"]
-exclusive = true
 
 [[interfaces]]
 expose = [
@@ -557,12 +699,6 @@ expose = [
     "resolve_latest_visible_messages",
 ]
 from = ["mindroom.matrix.client_visible_messages"]
-visibility = [
-    "mindroom.matrix.client",
-    "mindroom.matrix.client_thread_history",
-    "mindroom.matrix.stale_stream_cleanup",
-]
-exclusive = true
 
 [[interfaces]]
 expose = [
@@ -577,12 +713,6 @@ expose = [
     "refresh_thread_history_from_source",
 ]
 from = ["mindroom.matrix.client_thread_history"]
-visibility = [
-    "mindroom.matrix.client",
-    "mindroom.matrix.conversation_cache",
-    "mindroom.matrix.thread_room_scan",
-]
-exclusive = true
 
 [[interfaces]]
 expose = [

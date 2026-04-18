@@ -437,6 +437,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 
 - **Test Before Committing**: **NEVER** claim a task is complete without running `pytest` to ensure all tests pass.
 - **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing to enforce code style and quality.
+- **Update Tach Boundaries in the Same PR**: If your PR changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
 - **Handle Linter Issues**:
   - **False Positives**: The linter may incorrectly flag issues in `pyproject.toml`; these can be ignored.
   - **Test-Related Errors**: If a pre-commit fix breaks a test (e.g., by removing an unused but necessary fixture), suppress the warning with a `# noqa: <error_code>` comment.
