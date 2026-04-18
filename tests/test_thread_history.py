@@ -15,6 +15,7 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 import mindroom.matrix.client_thread_history as matrix_client_module
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -24,7 +25,6 @@ from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,

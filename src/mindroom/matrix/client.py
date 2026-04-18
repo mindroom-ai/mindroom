@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import ssl as ssl_module
-from collections.abc import AsyncGenerator, Mapping, MutableMapping
+from collections.abc import AsyncGenerator, MutableMapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,28 +15,18 @@ from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
-    build_edit_event_content,
-    build_threaded_edit_content,
-    cached_room,
-    cached_rooms,
+    cached_room,  # noqa: F401
     edit_message_result,
     send_file_message,
     send_message_result,
 )
 from mindroom.matrix.client_thread_history import (
     RoomThreadsPageError,
-    ThreadRoomScanRootNotFoundError,
-    fetch_dispatch_thread_history,
-    fetch_dispatch_thread_snapshot,
-    fetch_thread_history,
-    fetch_thread_snapshot,
     get_room_threads_page,
-    refresh_thread_history_from_source,
 )
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     replace_visible_message,
-    resolve_latest_visible_messages,
 )
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 

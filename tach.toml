@@ -4,9 +4,22 @@ source_roots = ["src"]
 [[modules]]
 path = "mindroom.matrix.cache"
 depends_on = [
+    "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.event_cache_threads"
+depends_on = ["mindroom.matrix.cache.event_cache_events"]
+
+[[modules]]
+path = "mindroom.matrix.cache.event_cache"
+depends_on = [
+    "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.cache.event_cache_threads",
 ]
 
 [[modules]]
@@ -33,6 +46,10 @@ path = "mindroom.matrix.cache.event_cache_events"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.cache.write_coordinator"
+depends_on = []
+
+[[modules]]
 path = "mindroom.matrix.cache.thread_writes"
 depends_on = [
     "mindroom.matrix.cache.event_cache_events",
@@ -52,7 +69,10 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.runtime_support"
-depends_on = ["mindroom.matrix.cache"]
+depends_on = [
+    "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.write_coordinator",
+]
 
 [[modules]]
 path = "mindroom.bot_runtime_view"
@@ -215,6 +235,30 @@ expose = [
 from = ["mindroom.matrix.cache"]
 
 [[interfaces]]
+expose = ["ConversationEventCache", "ThreadCacheState"]
+from = ["mindroom.matrix.cache.event_cache"]
+visibility = ["mindroom.matrix.cache"]
+exclusive = true
+
+[[interfaces]]
+expose = ["_EventCache"]
+from = ["mindroom.matrix.cache.event_cache"]
+visibility = ["mindroom.runtime_support"]
+exclusive = true
+
+[[interfaces]]
+expose = ["EventCacheWriteCoordinator"]
+from = ["mindroom.matrix.cache.write_coordinator"]
+visibility = ["mindroom.matrix.cache"]
+exclusive = true
+
+[[interfaces]]
+expose = ["_EventCacheWriteCoordinator"]
+from = ["mindroom.matrix.cache.write_coordinator"]
+visibility = ["mindroom.runtime_support"]
+exclusive = true
+
+[[interfaces]]
 expose = [
     "ConversationEventCache",
     "ThreadHistoryResult",
@@ -245,12 +289,6 @@ expose = [
 ]
 from = ["mindroom.matrix.cache.thread_writes"]
 visibility = ["mindroom.matrix.conversation_cache"]
-exclusive = true
-
-[[interfaces]]
-expose = ["_EventCache", "_EventCacheWriteCoordinator"]
-from = ["mindroom.matrix.cache"]
-visibility = ["mindroom.runtime_support"]
 exclusive = true
 
 [[interfaces]]

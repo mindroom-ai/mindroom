@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -22,7 +22,7 @@ THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"
 
 
 @dataclass(slots=True, eq=False)
-class ThreadHistoryResult(Sequence["ResolvedVisibleMessage"]):
+class ThreadHistoryResult(Sequence["ResolvedVisibleMessage"]):  # noqa: PLW1641
     """Sequence wrapper that preserves whether the history is already fully hydrated."""
 
     messages: list[ResolvedVisibleMessage]
@@ -30,15 +30,25 @@ class ThreadHistoryResult(Sequence["ResolvedVisibleMessage"]):
     diagnostics: dict[str, ThreadHistoryDiagnosticValue] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[ResolvedVisibleMessage]:
+        """Iterate over wrapped visible messages."""
         return iter(self.messages)
 
     def __len__(self) -> int:
+        """Return the number of wrapped visible messages."""
         return len(self.messages)
 
-    def __getitem__(self, index: int | slice) -> ResolvedVisibleMessage | list[ResolvedVisibleMessage]:
+    @overload
+    def __getitem__(self, index: int) -> ResolvedVisibleMessage: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[ResolvedVisibleMessage]: ...
+
+    def __getitem__(self, index: int | slice) -> ResolvedVisibleMessage | Sequence[ResolvedVisibleMessage]:
+        """Return one wrapped message or one sliced view of the history."""
         return self.messages[index]
 
     def __eq__(self, other: object) -> bool:
+        """Compare history results by visible-message contents for list-style behavior."""
         if isinstance(other, ThreadHistoryResult):
             return self.messages == other.messages
         if isinstance(other, Sequence) and not isinstance(other, (str, bytes, bytearray)):

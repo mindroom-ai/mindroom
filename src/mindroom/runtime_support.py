@@ -6,7 +6,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.cache import _EventCache, _EventCacheWriteCoordinator
+from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 
 if TYPE_CHECKING:
     from pathlib import Path
