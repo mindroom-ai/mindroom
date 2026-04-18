@@ -19,8 +19,9 @@ Main invariants:
 
 from .event_cache import ConversationEventCache, ThreadCacheState
 from .event_cache_events import normalize_nio_event_for_cache
-from .thread_cache_helpers import thread_cache_state_is_usable
+from .thread_cache_helpers import thread_cache_rejection_reason, thread_cache_state_is_usable
 from .thread_history_result import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_CACHE,
@@ -33,6 +34,7 @@ from .thread_history_result import (
 from .write_coordinator import EventCacheWriteCoordinator
 
 __all__ = [
+    "THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC",
     "THREAD_HISTORY_DEGRADED_DIAGNOSTIC",
     "THREAD_HISTORY_ERROR_DIAGNOSTIC",
     "THREAD_HISTORY_SOURCE_CACHE",
@@ -44,6 +46,7 @@ __all__ = [
     "ThreadCacheState",
     "ThreadHistoryResult",
     "normalize_nio_event_for_cache",
+    "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",
     "thread_history_result",
 ]

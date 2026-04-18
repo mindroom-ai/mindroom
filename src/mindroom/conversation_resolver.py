@@ -621,7 +621,7 @@ class ConversationResolver:
         _client: nio.AsyncClient,
         room_id: str,
         thread_id: str,
-    ) -> list[ResolvedVisibleMessage]:
+    ) -> ThreadReadResult:
         """Fetch strict post-lock thread history through the shared conversation-cache policy."""
         return await self._read_thread_messages(
             room_id,

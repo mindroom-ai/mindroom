@@ -11,7 +11,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
-from mindroom.matrix.client import (
+from mindroom.matrix.client_session import (
     login,
     matrix_client,
     matrix_startup_error,
