@@ -1208,18 +1208,21 @@ def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) 
 
 def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValidationInfo]:
     """Deserialize one JSON payload into validation-only tool metadata."""
-    if not isinstance(payload, dict) or any(not isinstance(tool_name, str) for tool_name in payload):
+    if not isinstance(payload, dict):
         msg = "Tool validation snapshot must be a JSON object keyed by tool name."
         raise TypeError(msg)
 
-    typed_payload = cast("dict[str, object]", payload)
     snapshot: dict[str, ToolValidationInfo] = {}
-    for tool_name, raw_info in typed_payload.items():
-        if not isinstance(raw_info, dict):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
+    for raw_tool_name, raw_info in payload.items():
+        if not isinstance(raw_tool_name, str):
+            msg = "Tool validation snapshot must be a JSON object keyed by tool name."
             raise TypeError(msg)
-        raw_info_dict = cast("dict[str, object]", raw_info)
-        raw_validator = raw_info_dict.get(
+        if not isinstance(raw_info, dict):
+            msg = f"Tool validation snapshot entry for '{raw_tool_name}' must be an object."
+            raise TypeError(msg)
+        tool_name = raw_tool_name
+        raw_info_mapping = cast("dict[str, object]", raw_info)
+        raw_validator = raw_info_mapping.get(
             "authored_override_validator",
             ToolAuthoredOverrideValidator.DEFAULT.value,
         )
@@ -1231,18 +1234,18 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 f"authored_override_validator '{raw_validator}'."
             )
             raise TypeError(msg) from exc
-        raw_runtime_loadable = raw_info_dict.get("runtime_loadable", True)
+        raw_runtime_loadable = raw_info_mapping.get("runtime_loadable", True)
         if not isinstance(raw_runtime_loadable, bool):
             msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
             raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
-                raw_info_dict.get("config_fields", []),
+                raw_info_mapping.get("config_fields", []),
                 field_name=f"{tool_name}.config_fields",
             ),
             agent_override_fields=_deserialize_tool_validation_fields(
-                raw_info_dict.get("agent_override_fields", []),
+                raw_info_mapping.get("agent_override_fields", []),
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
