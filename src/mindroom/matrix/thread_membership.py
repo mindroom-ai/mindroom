@@ -12,11 +12,14 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import nio
 
 from mindroom.matrix.event_info import EventInfo
+
+if TYPE_CHECKING:
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 type ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]

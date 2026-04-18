@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import nio
 from nio.responses import RoomGetEventError
@@ -14,6 +13,9 @@ from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     room_scan_thread_membership_access,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
 

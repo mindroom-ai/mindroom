@@ -44,7 +44,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.matrix.thread_room_scan import _room_scan_membership_access_for_client
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from contextlib import AbstractAsyncContextManager
 
     import structlog

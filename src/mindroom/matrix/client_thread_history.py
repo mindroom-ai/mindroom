@@ -37,13 +37,13 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     visible_body_from_event_source,
 )
+from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
     sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
 )
-from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -842,6 +842,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
         resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
         sidecar_hydration_ms=sidecar_hydration_ms,
     )
+
 
 def _record_scanned_room_message_source(
     event: nio.Event,

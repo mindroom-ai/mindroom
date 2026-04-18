@@ -8,7 +8,7 @@ from typing import Literal
 import httpx
 
 from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
-from mindroom.matrix.client import matrix_startup_error
+from mindroom.matrix.client_session import matrix_startup_error
 
 
 def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
