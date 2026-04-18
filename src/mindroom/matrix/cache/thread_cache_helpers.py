@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.matrix.cache.event_cache import ThreadCacheState
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 THREAD_CACHE_MAX_AGE_SECONDS = 300.0

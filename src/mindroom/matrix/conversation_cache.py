@@ -27,7 +27,6 @@ from mindroom.matrix.cache.thread_writes import (
     ThreadSyncWritePolicy,
 )
 from mindroom.matrix.client_thread_history import (
-    _fetch_thread_event_sources_via_room_messages,
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
@@ -36,17 +35,16 @@ from mindroom.matrix.client_thread_history import (
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
+from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_membership import (
-    ThreadMembershipAccess,
     fetch_event_info_for_client,
-    fetch_event_info_from_conversation_cache,
     lookup_thread_id_from_conversation_cache,
     resolve_event_thread_id,
-    room_scan_thread_membership_access,
 )
+from mindroom.matrix.thread_room_scan import _room_scan_membership_access_for_client
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -81,54 +79,6 @@ __all__ = [
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 20
-
-
-async def _scan_thread_event_sources(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_root_id: str,
-) -> tuple[Sequence[Mapping[str, object]], bool]:
-    """Fetch authoritative room-scan event sources for one candidate thread root."""
-    scan_result = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_root_id)
-    return scan_result.event_sources, True
-
-
-def _room_scan_membership_access_for_client(
-    client: nio.AsyncClient,
-    *,
-    conversation_cache: ConversationCacheProtocol | None,
-    fetch_event_info: Callable[[str, str], Any] | None = None,
-) -> ThreadMembershipAccess:
-    """Build client-backed membership access without widening the cache protocol."""
-
-    async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
-        return await lookup_thread_id_from_conversation_cache(
-            conversation_cache,
-            lookup_room_id,
-            lookup_event_id,
-        )
-
-    async def resolved_fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
-        if fetch_event_info is not None:
-            return await fetch_event_info(lookup_room_id, lookup_event_id)
-        if conversation_cache is None:
-            return None
-        return await fetch_event_info_from_conversation_cache(
-            conversation_cache,
-            lookup_room_id,
-            lookup_event_id,
-            strict=True,
-        )
-
-    return room_scan_thread_membership_access(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=resolved_fetch_event_info,
-        fetch_thread_event_sources=lambda room_id, thread_root_id: _scan_thread_event_sources(
-            client,
-            room_id,
-            thread_root_id,
-        ),
-    )
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -402,8 +352,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def __post_init__(self) -> None:
         """Bind extracted read/write collaborators to this facade."""
-        from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver  # noqa: PLC0415
-
         self._reads = ThreadReadPolicy(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
