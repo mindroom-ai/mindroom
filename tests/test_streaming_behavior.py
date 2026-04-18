@@ -19,7 +19,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.hooks import MessageEnvelope
-from mindroom.matrix.client import DeliveredMatrixEvent, build_edit_event_content
+from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget

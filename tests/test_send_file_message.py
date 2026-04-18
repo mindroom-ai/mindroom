@@ -8,11 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
-from mindroom.matrix.client import (
-    DeliveredMatrixEvent,
+from mindroom.matrix.client import DeliveredMatrixEvent, join_room
+from mindroom.matrix.client_delivery import (
     _msgtype_for_mimetype,
     _upload_file_as_mxc,
-    join_room,
     send_file_message,
     send_message_result,
 )
@@ -73,7 +72,7 @@ class TestUploadFileAsMxc:
         file.write_bytes(b"\x00" * 16)
 
         with patch(
-            "mindroom.matrix.client.crypto.attachments.encrypt_attachment",
+            "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
             return_value=(
                 b"encrypted_bytes",
                 {
@@ -162,7 +161,7 @@ class TestSendFileMessage:
         file = tmp_path / "report.pdf"
         file.write_bytes(b"%PDF")
 
-        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -195,9 +194,9 @@ class TestSendFileMessage:
         file.write_bytes(b"\x00" * 8)
 
         with (
-            patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", True),
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
             patch(
-                "mindroom.matrix.client.crypto.attachments.encrypt_attachment",
+                "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
                 return_value=(
                     b"encrypted",
                     {
@@ -207,7 +206,7 @@ class TestSendFileMessage:
                     },
                 ),
             ),
-            patch("mindroom.matrix.client.send_message_result", side_effect=capture_send),
+            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
         ):
             event_id = await send_file_message(
                 client,
@@ -237,7 +236,7 @@ class TestSendFileMessage:
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -271,7 +270,7 @@ class TestSendFileMessage:
         file.write_text("a,b,c", encoding="utf-8")
 
         with (
-            patch("mindroom.matrix.client.send_message_result", side_effect=capture_send),
+            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
         ):
             event_id = await send_file_message(
                 client,
@@ -312,7 +311,7 @@ class TestSendFileMessage:
         file.write_text("a,b,c", encoding="utf-8")
 
         with patch(
-            "mindroom.matrix.client.send_message_result",
+            "mindroom.matrix.client_delivery.send_message_result",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$evt:localhost",
@@ -367,8 +366,8 @@ class TestSendFileMessage:
         file.write_bytes(b"\x00" * 8)
 
         with (
-            patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
-            patch("mindroom.matrix.client._upload_file_as_mxc", new_callable=AsyncMock) as mock_upload,
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
+            patch("mindroom.matrix.client_delivery._upload_file_as_mxc", new_callable=AsyncMock) as mock_upload,
         ):
             result = await send_file_message(
                 client,
@@ -395,7 +394,7 @@ class TestSendFileMessage:
         file = tmp_path / "report.pdf"
         file.write_bytes(b"%PDF")
 
-        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
             await send_file_message(
                 client,
                 "!room:localhost",
@@ -436,8 +435,8 @@ class TestSendMessageResult:
         client = _mock_client(encrypted=True)
 
         with (
-            patch("mindroom.matrix.client.crypto.ENCRYPTION_ENABLED", False),
-            patch("mindroom.matrix.client.prepare_large_message", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
+            patch("mindroom.matrix.client_delivery.prepare_large_message", new_callable=AsyncMock) as mock_prepare,
         ):
             result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
@@ -460,7 +459,7 @@ class TestSendMessageResult:
         client._send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
 
         prepared_content = {"body": "hello", "msgtype": "m.text"}
-        with patch("mindroom.matrix.client.prepare_large_message", new_callable=AsyncMock) as mock_prepare:
+        with patch("mindroom.matrix.client_delivery.prepare_large_message", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = prepared_content
             result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
@@ -488,7 +487,7 @@ class TestSendMessageResult:
         )
 
         with patch(
-            "mindroom.matrix.client.prepare_large_message",
+            "mindroom.matrix.client_delivery.prepare_large_message",
             new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
         ):
             result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
@@ -506,7 +505,7 @@ class TestSendMessageResult:
         client.room_send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
 
         with patch(
-            "mindroom.matrix.client.prepare_large_message",
+            "mindroom.matrix.client_delivery.prepare_large_message",
             new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
         ):
             result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
@@ -552,7 +551,7 @@ class TestSendFileMessageMsgtype:
         file = tmp_path / "photo.png"
         file.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",
@@ -582,7 +581,7 @@ class TestSendFileMessageMsgtype:
         file = tmp_path / "clip.mp4"
         file.write_bytes(b"\x00\x00\x00\x1cftyp")
 
-        with patch("mindroom.matrix.client.send_message_result", side_effect=capture_send):
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",

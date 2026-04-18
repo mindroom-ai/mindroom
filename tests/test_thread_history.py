@@ -14,7 +14,7 @@ import pytest
 from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
-import mindroom.matrix.client as matrix_client_module
+import mindroom.matrix.client_thread_history as matrix_client_module
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -28,14 +28,16 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
     ThreadHistoryResult,
+    get_room_threads_page,
+)
+from mindroom.matrix.client_delivery import (
+    build_threaded_edit_content as _build_threaded_edit_content_impl,
+)
+from mindroom.matrix.client_thread_history import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
     _resolve_scanned_thread_message_sources,
     _resolve_thread_history_from_event_sources_timed,
-    get_room_threads_page,
-)
-from mindroom.matrix.client import (
-    build_threaded_edit_content as _build_threaded_edit_content_impl,
 )
 from mindroom.matrix.thread_membership import ordered_event_ids_from_scanned_event_sources
 from tests.conftest import make_event_cache_mock
@@ -218,7 +220,7 @@ class TestThreadHistory:
 
         with (
             patch(
-                "mindroom.matrix.client._fetch_thread_history_with_events",
+                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 new=AsyncMock(
                     return_value=MagicMock(
                         history=expected_history,
@@ -228,7 +230,7 @@ class TestThreadHistory:
                     ),
                 ),
             ) as mock_fallback,
-            patch("mindroom.matrix.client._store_thread_history_cache", new=AsyncMock()) as mock_store,
+            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()) as mock_store,
         ):
             history = await fetch_thread_history(
                 client,
@@ -562,7 +564,7 @@ class TestThreadHistory:
 
         with (
             patch(
-                "mindroom.matrix.client._fetch_thread_history_with_events",
+                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 new=AsyncMock(
                     return_value=MagicMock(
                         history=fallback_history,
@@ -572,7 +574,7 @@ class TestThreadHistory:
                     ),
                 ),
             ),
-            patch("mindroom.matrix.client._store_thread_history_cache", new=AsyncMock()) as mock_store,
+            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()) as mock_store,
         ):
             history = await fetch_thread_history(
                 client,
@@ -602,7 +604,7 @@ class TestThreadHistory:
         client = AsyncMock()
 
         with patch(
-            "mindroom.matrix.client.refresh_thread_history_from_source",
+            "mindroom.matrix.client_thread_history.refresh_thread_history_from_source",
             new=AsyncMock(return_value=refreshed_history),
         ) as mock_refresh:
             snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
@@ -646,7 +648,7 @@ class TestThreadHistory:
         client = AsyncMock()
 
         with patch(
-            "mindroom.matrix.client.refresh_thread_history_from_source",
+            "mindroom.matrix.client_thread_history.refresh_thread_history_from_source",
             new=AsyncMock(return_value=refreshed_history),
         ) as mock_refresh:
             snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
@@ -668,7 +670,7 @@ class TestThreadHistory:
     async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
         """Threaded edits should preserve MSC3440 fallback semantics through the latest visible event."""
         with patch(
-            "mindroom.matrix.client.format_message_with_mentions",
+            "mindroom.matrix.client_delivery.format_message_with_mentions",
             return_value={"body": "edited"},
         ) as mock_format:
             content = build_threaded_edit_content(
@@ -1637,7 +1639,10 @@ class TestThreadHistory:
             },
         )
 
-        with patch("mindroom.matrix.client.extract_edit_body", new_callable=AsyncMock) as mock_extract_edit_body:
+        with patch(
+            "mindroom.matrix.client_visible_messages.extract_edit_body",
+            new_callable=AsyncMock,
+        ) as mock_extract_edit_body:
             history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
                 client,
                 room_id="!room:localhost",
@@ -1895,7 +1900,7 @@ async def test_get_room_threads_page_uses_single_threads_request() -> None:
     client._send = AsyncMock(return_value=response)
 
     with patch(
-        "mindroom.matrix.client.nio.Api.room_get_threads",
+        "mindroom.matrix.client_thread_history.nio.Api.room_get_threads",
         return_value=("GET", "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads"),
     ) as mock_api:
         thread_roots, next_token = await get_room_threads_page(
@@ -2004,7 +2009,7 @@ async def test_get_room_threads_page_wraps_transport_timeout() -> None:
 
     with (
         patch(
-            "mindroom.matrix.client.nio.Api.room_get_threads",
+            "mindroom.matrix.client_thread_history.nio.Api.room_get_threads",
             return_value=("GET", "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads"),
         ),
         pytest.raises(RoomThreadsPageError) as exc_info,
@@ -2032,7 +2037,7 @@ async def test_get_room_threads_page_wraps_aiohttp_client_errors() -> None:
 
     with (
         patch(
-            "mindroom.matrix.client.nio.Api.room_get_threads",
+            "mindroom.matrix.client_thread_history.nio.Api.room_get_threads",
             return_value=("GET", "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads"),
         ),
         pytest.raises(RoomThreadsPageError) as exc_info,
