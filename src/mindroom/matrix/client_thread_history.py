@@ -37,7 +37,7 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     visible_body_from_event_source,
 )
-from mindroom.matrix.thread_membership import (
+from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
     sort_thread_event_sources_root_first,

@@ -24,8 +24,8 @@ from mindroom.matrix.thread_membership import (
     fetch_event_info_from_conversation_cache,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
-    resolve_thread_ids_for_event_infos,
 )
+from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence

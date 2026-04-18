@@ -20,7 +20,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
 )
-from mindroom.matrix.thread_membership import latest_visible_thread_event_id_by_thread
+from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.streaming import build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
