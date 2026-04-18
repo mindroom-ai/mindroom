@@ -561,6 +561,7 @@ expose = [
 from = ["mindroom.matrix.client_room_admin"]
 visibility = [
     "mindroom.api.matrix_operations",
+    "mindroom.bot",
     "mindroom.bot_room_lifecycle",
     "mindroom.hooks.matrix_admin",
     "mindroom.matrix.client",
@@ -581,6 +582,7 @@ expose = [
 ]
 from = ["mindroom.matrix.client_session"]
 visibility = [
+    "mindroom.bot",
     "mindroom.matrix.client",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.rooms",
