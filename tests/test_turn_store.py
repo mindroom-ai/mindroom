@@ -6,9 +6,11 @@ import ast
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -173,6 +175,95 @@ def test_turn_store_preserves_each_pending_event_after_coalesced_response_state_
     pending_replays = reloaded_store.pending_inbound_replays()
 
     assert [replay.event_id for replay in pending_replays] == ["$first", "$second"]
+
+
+def test_turn_store_keeps_pending_inbound_when_terminal_ledger_write_fails(tmp_path: Path) -> None:
+    """Terminal turn writes must not clear replayable inbound state before the ledger succeeds."""
+    tracking_path = tmp_path / "tracking"
+    deps = TurnStoreDeps(
+        agent_name="agent",
+        tracking_base_path=tracking_path,
+        state_writer=MagicMock(),
+        resolver=MagicMock(),
+        tool_runtime=MagicMock(),
+    )
+    store = TurnStore(deps)
+    event_source = {
+        "type": "m.room.message",
+        "event_id": "$event",
+        "sender": "@user:example.com",
+        "content": {"msgtype": "m.text", "body": "hello"},
+    }
+    assert store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source) is True
+    store._ledger.record_handled_turn = MagicMock(side_effect=OSError("disk full"))
+
+    with pytest.raises(OSError, match="disk full"):
+        store.record_turn(HandledTurnState.from_source_event_id("$event", response_event_id="$response"))
+
+    assert store.has_pending_inbound("$event") is True
+    assert store.is_handled("$event") is False
+    assert [replay.event_id for replay in store.pending_inbound_replays()] == ["$event"]
+
+
+def test_turn_store_keeps_pending_inbound_when_terminal_turn_record_write_fails(tmp_path: Path) -> None:
+    """Exact terminal turn-record writes must leave inbound replay state intact on ledger failure."""
+    tracking_path = tmp_path / "tracking"
+    deps = TurnStoreDeps(
+        agent_name="agent",
+        tracking_base_path=tracking_path,
+        state_writer=MagicMock(),
+        resolver=MagicMock(),
+        tool_runtime=MagicMock(),
+    )
+    store = TurnStore(deps)
+    event_source = {
+        "type": "m.room.message",
+        "event_id": "$event",
+        "sender": "@user:example.com",
+        "content": {"msgtype": "m.text", "body": "hello"},
+    }
+    assert store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source) is True
+    store._ledger.record_handled_turn_record = MagicMock(side_effect=OSError("disk full"))
+
+    with pytest.raises(OSError, match="disk full"):
+        store.record_turn_record(
+            HandledTurnRecord(
+                anchor_event_id="$event",
+                source_event_ids=("$event",),
+                response_event_id="$response",
+            ),
+        )
+
+    assert store.has_pending_inbound("$event") is True
+    assert store.is_handled("$event") is False
+    assert [replay.event_id for replay in store.pending_inbound_replays()] == ["$event"]
+
+
+def test_turn_store_keeps_terminal_outcome_when_pending_cleanup_fails(tmp_path: Path) -> None:
+    """Pending-inbound cleanup failures after the ledger write should not roll back the terminal outcome."""
+    tracking_path = tmp_path / "tracking"
+    deps = TurnStoreDeps(
+        agent_name="agent",
+        tracking_base_path=tracking_path,
+        state_writer=MagicMock(),
+        resolver=MagicMock(),
+        tool_runtime=MagicMock(),
+    )
+    store = TurnStore(deps)
+    event_source = {
+        "type": "m.room.message",
+        "event_id": "$event",
+        "sender": "@user:example.com",
+        "content": {"msgtype": "m.text", "body": "hello"},
+    }
+    assert store.claim_pending_inbound(room_id="!room:example.com", event_source=event_source) is True
+    store._pending_inbound.remove = MagicMock(side_effect=OSError("disk full"))
+
+    store.record_turn(HandledTurnState.from_source_event_id("$event", response_event_id="$response"))
+
+    assert store.is_handled("$event") is True
+    assert store.get_turn_record("$event") is not None
+    assert store.has_pending_inbound("$event") is True
 
 
 def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:

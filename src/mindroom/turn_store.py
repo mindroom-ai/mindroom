@@ -18,6 +18,7 @@ from mindroom.handled_turns import (
     HandledTurnRecord,
     HandledTurnState,
 )
+from mindroom.logging_config import get_logger
 from mindroom.pending_inbound import PendingInboundReplay, PendingInboundStore
 from mindroom.thread_utils import create_session_id
 
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -123,15 +126,14 @@ class TurnStore:
         visible_echo_event_id = handled_turn.visible_echo_event_id or self.visible_echo_for_sources(
             handled_turn.source_event_ids,
         )
-        self._pending_inbound.remove(handled_turn.source_event_ids)
-        self._ledger.record_handled_turn(
-            handled_turn.with_visible_echo_event_id(visible_echo_event_id),
-        )
+        terminal_turn = handled_turn.with_visible_echo_event_id(visible_echo_event_id)
+        self._ledger.record_handled_turn(terminal_turn)
+        self._retire_pending_inbound_after_terminal_write(terminal_turn.source_event_ids)
 
     def record_turn_record(self, turn_record: HandledTurnRecord) -> None:
         """Persist one exact handled-turn record without losing its anchor event."""
-        self._pending_inbound.remove(turn_record.source_event_ids)
         self._ledger.record_handled_turn_record(turn_record)
+        self._retire_pending_inbound_after_terminal_write(turn_record.source_event_ids)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
@@ -185,6 +187,16 @@ class TurnStore:
         if not normalized_source_event_ids:
             return
         self.record_turn(HandledTurnState.create(normalized_source_event_ids))
+
+    def _retire_pending_inbound_after_terminal_write(self, source_event_ids: tuple[str, ...]) -> None:
+        """Best-effort pending cleanup after terminal durability is already guaranteed."""
+        try:
+            self._pending_inbound.remove(source_event_ids)
+        except Exception:
+            logger.exception(
+                "pending_inbound_cleanup_failed_after_terminal_write",
+                source_event_ids=source_event_ids,
+            )
 
     def get_turn_record(self, source_event_id: str) -> HandledTurnRecord | None:
         """Return the ledger-backed turn record for one source event when available."""
