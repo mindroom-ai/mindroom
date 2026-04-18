@@ -1429,6 +1429,9 @@ class AgentBot:
         own_user_id = self.agent_user.user_id
         for pending_replay in self._turn_store.pending_inbound_replays():
             turn_record = self._turn_store.get_turn_record(pending_replay.event_id)
+            if turn_record is not None and turn_record.completed:
+                skipped_source_event_ids.update(turn_record.source_event_ids)
+                continue
             if pending_replay.event_id in interrupted_source_event_ids or (
                 turn_record is not None
                 and (

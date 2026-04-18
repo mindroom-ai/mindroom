@@ -477,6 +477,32 @@ async def test_replay_pending_inbound_turns_skips_events_with_interrupted_visibl
 
 
 @pytest.mark.asyncio
+async def test_replay_pending_inbound_turns_clears_stale_completed_pending_records(tmp_path: Path) -> None:
+    """Startup replay should retire stale pending claims once the turn is already terminally handled."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    event = _message_event(event_id="$stale-completed:localhost")
+    bot._turn_store.claim_pending_inbound(room_id="!room:localhost", event_source=event.source)
+    real_remove = bot._turn_store._pending_inbound.remove
+    bot._turn_store._pending_inbound.remove = MagicMock(side_effect=OSError("disk full"))
+    bot._turn_store.record_turn(
+        HandledTurnState.from_source_event_id(event.event_id, response_event_id="$response:localhost"),
+    )
+    bot._turn_store._pending_inbound.remove = real_remove
+
+    assert bot._turn_store.is_handled(event.event_id) is True
+    assert [replay.event_id for replay in bot._turn_store.pending_inbound_replays()] == [event.event_id]
+
+    with patch.object(bot, "_on_message", AsyncMock()) as mock_on_message:
+        replayed_source_event_ids = await bot.replay_pending_inbound_turns()
+        await asyncio.sleep(0)
+
+    assert replayed_source_event_ids == set()
+    mock_on_message.assert_not_awaited()
+    assert bot._turn_store.pending_inbound_replays() == []
+
+
+@pytest.mark.asyncio
 async def test_replay_pending_inbound_turns_skips_reserved_coalesced_turn_when_stale_cleanup_found_source_event(
     tmp_path: Path,
 ) -> None:
