@@ -2473,23 +2473,48 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     _refresh_runner_app_from_env()
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from dedicated worker canonical workspace", "note.txt"],
-            "kwargs": {},
-            "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
-        },
-    )
+    expected_base_dir = agent_workspace_root_path(shared_root, "general")
+
+    async def _fake_execute_request_subprocess(
+        request: sandbox_runner_module.SandboxRunnerExecuteRequest,
+        runtime_paths: object,
+        config: object,
+        prepared_worker: object | None = None,
+        *,
+        runner_token: str | None = None,
+    ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        assert request.worker_key == worker_key
+        assert runtime_paths is not None
+        assert config is not None
+        assert runner_token == SANDBOX_TOKEN
+        assert prepared_worker is not None
+        assert prepared_worker.paths.root == worker_root
+        assert prepared_worker.runtime_overrides["base_dir"] == expected_base_dir
+        note_path = expected_base_dir / str(request.args[1])
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(str(request.args[0]), encoding="utf-8")
+        return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="saved")
+
+    monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from dedicated worker canonical workspace", "note.txt"],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    canonical_file = agent_workspace_root_path(shared_root, "general") / "note.txt"
+    canonical_file = expected_base_dir / "note.txt"
     assert canonical_file.read_text(encoding="utf-8") == "hello from dedicated worker canonical workspace"
     assert not (worker_root / "workspace" / "note.txt").exists()
 
@@ -2546,6 +2571,29 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     _refresh_runner_app_from_env()
+
+    async def _fake_execute_request_subprocess(
+        request: sandbox_runner_module.SandboxRunnerExecuteRequest,
+        runtime_paths: object,
+        config: object,
+        prepared_worker: object | None = None,
+        *,
+        runner_token: str | None = None,
+    ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        assert request.worker_key == worker_key
+        assert request.private_agent_names == ["mind"]
+        assert runtime_paths is not None
+        assert config is not None
+        assert runner_token == SANDBOX_TOKEN
+        assert prepared_worker is not None
+        assert prepared_worker.paths.root == worker_root
+        assert prepared_worker.runtime_overrides["base_dir"] == private_base_dir
+        note_path = private_base_dir / str(request.args[1])
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(str(request.args[0]), encoding="utf-8")
+        return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="saved")
+
+    monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
 
     with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
         response = runner_client.post(
