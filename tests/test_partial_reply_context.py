@@ -27,11 +27,9 @@ from mindroom.execution_preparation import (
     _get_unseen_messages_for_sender,
     _PartialReplyKind,
 )
-from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
-    _stream_status_from_content,
-    fetch_thread_history,
-)
+from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_thread_history import fetch_thread_history
+from mindroom.matrix.client_visible_messages import _stream_status_from_content
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,

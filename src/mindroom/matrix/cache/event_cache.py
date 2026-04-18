@@ -30,11 +30,9 @@ _EVENT_CACHE_TABLES = (
     "thread_cache_state",
     "room_cache_state",
 )
-_EVENT_CACHE_RESET_TABLES = _EVENT_CACHE_TABLES
 _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
-_EVENT_CACHE_SCHEMA_VERSION = EVENT_CACHE_SCHEMA_VERSION
 T = TypeVar("T")
 
 logger = get_logger(__name__)
@@ -205,7 +203,7 @@ async def reset_stale_cache_if_needed(
         existing_tables=sorted(current_table_names),
     )
     await db.executescript(
-        "\n".join(f"DROP TABLE IF EXISTS {table_name};" for table_name in _EVENT_CACHE_RESET_TABLES),
+        "\n".join(f"DROP TABLE IF EXISTS {table_name};" for table_name in _EVENT_CACHE_TABLES),
     )
     await db.execute("PRAGMA user_version = 0")
     await db.commit()

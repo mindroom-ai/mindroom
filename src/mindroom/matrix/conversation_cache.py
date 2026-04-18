@@ -38,6 +38,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
     resolve_event_thread_id,
@@ -45,7 +46,7 @@ from mindroom.matrix.thread_membership import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -97,7 +98,7 @@ def _room_scan_membership_access_for_client(
     *,
     conversation_cache: ConversationCacheProtocol | None,
     fetch_event_info: Callable[[str, str], Any] | None = None,
-):
+) -> ThreadMembershipAccess:
     """Build client-backed membership access without widening the cache protocol."""
 
     async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:

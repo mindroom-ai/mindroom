@@ -36,7 +36,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     import nio
@@ -85,7 +85,7 @@ class DeriveConversationContext(Protocol):
         event_info: EventInfo,
         *,
         event_id: str | None = None,
-    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
+    ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]:
         """Return whether one event is threaded plus its thread id and history."""
 
 

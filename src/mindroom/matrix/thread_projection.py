@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import heapq
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import map_backed_thread_membership_access, resolve_event_thread_membership
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
 TThreadItem = TypeVar("TThreadItem")
 
