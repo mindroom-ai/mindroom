@@ -139,7 +139,7 @@ async def store_pending_change_in_matrix(
     client: nio.AsyncClient,
     event_id: str,
     pending_change: _PendingConfigChange,
-) -> None:
+) -> bool:
     """Store pending config change in Matrix room state for persistence.
 
     Args:
@@ -156,21 +156,24 @@ async def store_pending_change_in_matrix(
             state_key=event_id,
         )
 
-        if isinstance(response, nio.RoomPutStateResponse):
-            logger.info(
-                "Stored pending config change in Matrix state",
-                event_id=event_id,
-                room_id=pending_change.room_id,
-                config_path=pending_change.config_path,
-            )
-        else:
+        if not isinstance(response, nio.RoomPutStateResponse):
             logger.error(
                 "Failed to store pending config change in Matrix state",
                 event_id=event_id,
                 error=str(response),
             )
+            return False
+        logger.info(
+            "Stored pending config change in Matrix state",
+            event_id=event_id,
+            room_id=pending_change.room_id,
+            config_path=pending_change.config_path,
+        )
     except Exception:
         logger.exception("Error storing pending config change in Matrix state")
+        return False
+    else:
+        return True
 
 
 async def _remove_pending_change_from_matrix(

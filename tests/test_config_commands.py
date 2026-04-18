@@ -247,6 +247,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
+        record_pending_response_event=MagicMock(),
         mark_command_non_replayable=MagicMock(),
         send_response=AsyncMock(return_value=None),
         send_skill_command_response=AsyncMock(return_value=None),
@@ -290,6 +291,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
+        record_pending_response_event=MagicMock(),
         mark_command_non_replayable=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
         send_skill_command_response=AsyncMock(return_value=None),
@@ -334,6 +336,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
+        record_pending_response_event=MagicMock(),
         mark_command_non_replayable=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
         send_skill_command_response=AsyncMock(return_value=None),
@@ -370,6 +373,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         patch(
             "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
             new_callable=AsyncMock,
+            return_value=True,
         ) as mock_store_pending,
         patch(
             "mindroom.commands.handler.config_confirmation.add_confirmation_reactions",
@@ -396,6 +400,12 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     mock_get_pending.assert_called_once_with("$preview")
     mock_store_pending.assert_awaited_once_with(context.client, "$preview", pending_change)
     mock_add_reactions.assert_awaited_once_with(context.client, "!room:example.org", "$preview")
+    context.record_pending_response_event.assert_called_once_with(
+        HandledTurnState.from_source_event_id(
+            "$event",
+            response_event_id="$preview",
+        ),
+    )
     context.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$event",
@@ -405,8 +415,10 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
 
 
 @pytest.mark.asyncio
-async def test_handle_command_config_set_records_preview_before_post_send_failure(tmp_path: Path) -> None:
-    """Preview sends should still be recorded if later confirmation setup fails."""
+async def test_handle_command_config_set_keeps_source_replayable_until_pending_change_is_durable(
+    tmp_path: Path,
+) -> None:
+    """Config previews must not become terminal before the pending change is stored durably."""
     context = CommandHandlerContext(
         client=AsyncMock(),
         config=MagicMock(),
@@ -419,6 +431,7 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
+        record_pending_response_event=MagicMock(),
         mark_command_non_replayable=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
         send_skill_command_response=AsyncMock(return_value=None),
@@ -454,13 +467,12 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         patch(
             "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
             new_callable=AsyncMock,
+            return_value=False,
         ),
         patch(
             "mindroom.commands.handler.config_confirmation.add_confirmation_reactions",
             new_callable=AsyncMock,
-            side_effect=RuntimeError("reaction failure"),
         ),
-        pytest.raises(RuntimeError, match="reaction failure"),
     ):
         await handle_command(
             context=context,
@@ -470,12 +482,13 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
             requester_user_id="@alice:example.org",
         )
 
-    context.record_handled_turn.assert_called_once_with(
+    context.record_pending_response_event.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$event",
             response_event_id="$preview",
         ),
     )
+    context.record_handled_turn.assert_not_called()
 
 
 @pytest.mark.asyncio

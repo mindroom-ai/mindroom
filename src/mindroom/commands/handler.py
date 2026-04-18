@@ -104,6 +104,7 @@ class CommandHandlerContext:
     requester_user_id_for_event: Callable[[CommandEvent], str]
     build_message_target: Callable[..., MessageTarget]
     record_handled_turn: Callable[[HandledTurnState], None]
+    record_pending_response_event: Callable[[HandledTurnState], None]
     # Mutating commands use this before the irreversible side effect so
     # startup replay prefers skipping the source event over rerunning it.
     mark_command_non_replayable: Callable[[str], None]
@@ -603,39 +604,38 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 response_event_id=response_event_id,
             )
 
-            if response_event_id:
-                context.record_handled_turn(handled_turn)
-                # Register the pending change
-                config_confirmation.register_pending_change(
-                    event_id=response_event_id,
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
-                    config_path=change_info["config_path"],
-                    old_value=change_info["old_value"],
-                    new_value=change_info["new_value"],
-                    requester=requester_user_id,
-                )
-
-                # Get the pending change we just registered
-                pending_change = config_confirmation.get_pending_change(response_event_id)
-
-                # Store in Matrix state for persistence
-                if pending_change:
-                    await config_confirmation.store_pending_change_in_matrix(
-                        context.client,
-                        response_event_id,
-                        pending_change,
-                    )
-
-                # Add reaction buttons
-                await config_confirmation.add_confirmation_reactions(
-                    context.client,
-                    room.room_id,
-                    response_event_id,
-                )
-
             if response_event_id is None:
-                context.record_handled_turn(handled_turn)
+                return
+
+            # Keep the source event replayable until the confirmation workflow is
+            # durably installed, but anchor the visible preview immediately so a
+            # replay can reuse the same tx-id/message instead of sending a second preview.
+            context.record_pending_response_event(handled_turn)
+            config_confirmation.register_pending_change(
+                event_id=response_event_id,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                config_path=change_info["config_path"],
+                old_value=change_info["old_value"],
+                new_value=change_info["new_value"],
+                requester=requester_user_id,
+            )
+            pending_change = config_confirmation.get_pending_change(response_event_id)
+            if pending_change is None:
+                return
+            if not await config_confirmation.store_pending_change_in_matrix(
+                context.client,
+                response_event_id,
+                pending_change,
+            ):
+                return
+
+            context.record_handled_turn(handled_turn)
+            await config_confirmation.add_confirmation_reactions(
+                context.client,
+                room.room_id,
+                response_event_id,
+            )
             return  # Exit early since we've handled the response
 
     elif command.type == CommandType.SKILL:

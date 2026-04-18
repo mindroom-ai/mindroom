@@ -562,6 +562,98 @@ async def test_skill_tool_command_marks_startup_owned_turn_handled_before_tool_s
 
 
 @pytest.mark.asyncio
+async def test_config_command_keeps_startup_owned_turn_replayable_until_confirmation_state_is_durable(
+    tmp_path: Path,
+) -> None:
+    """Startup-owned config previews must stay replayable until their confirmation state is durably stored."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default")),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password="test_password",  # noqa: S106
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.agent_user.user_id)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "!config set defaults.markdown false", "msgtype": "m.text"},
+            "event_id": "$config-preview:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+        },
+    )
+    event.source = {
+        "content": {"body": "!config set defaults.markdown false", "msgtype": "m.text"},
+        "event_id": "$config-preview:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "room_id": room.room_id,
+    }
+    command = command_parser.parse(event.body)
+    assert command is not None
+
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$preview")
+    replace_turn_controller_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+        normalizer=bot._inbound_turn_normalizer,
+    )
+    assert bot._turn_store.claim_pending_inbound(room_id=room.room_id, event_source=event.source) is True
+
+    change_info = {
+        "config_path": "defaults.markdown",
+        "old_value": True,
+        "new_value": False,
+    }
+
+    with (
+        patch(
+            "mindroom.commands.handler.handle_config_command",
+            new=AsyncMock(return_value=("preview", change_info)),
+        ),
+        patch("mindroom.commands.handler.config_confirmation.register_pending_change"),
+        patch(
+            "mindroom.commands.handler.config_confirmation.get_pending_change",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
+            new=AsyncMock(return_value=False),
+        ),
+        patch("mindroom.commands.handler.config_confirmation.add_confirmation_reactions", new=AsyncMock()),
+    ):
+        await bot._turn_controller._execute_command(
+            room,
+            event,
+            requester_user_id="@user:localhost",
+            command=command,
+        )
+
+    turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert turn_record is not None
+    assert turn_record.response_event_id == "$preview"
+    assert turn_record.completed is False
+    assert bot._turn_store.has_pending_inbound(event.event_id) is True
+    assert bot._turn_store.is_handled(event.event_id) is False
+
+
+@pytest.mark.asyncio
 async def test_execute_response_action_records_pending_visible_response_event_before_completion(
     tmp_path: Path,
 ) -> None:

@@ -735,6 +735,12 @@ class TurnController:
         elif self.deps.agent_name == ROUTER_AGENT_NAME:
             matrix_admin = build_hook_matrix_admin(self._client(), self.deps.runtime_paths)
 
+        def record_pending_response_event(handled_turn: HandledTurnState) -> None:
+            response_event_id = handled_turn.response_event_id
+            if response_event_id is None:
+                return
+            self.deps.turn_store.record_pending_response_event(handled_turn, response_event_id)
+
         context = CommandHandlerContext(
             client=self._client(),
             config=self.deps.runtime.config,
@@ -748,6 +754,7 @@ class TurnController:
             requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
             record_handled_turn=self.deps.turn_store.record_turn,
+            record_pending_response_event=record_pending_response_event,
             mark_command_non_replayable=lambda event_id: self._mark_source_events_ignored((event_id,)),
             send_response=send_response,
             send_skill_command_response=send_skill_command_response,
