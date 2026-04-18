@@ -10,7 +10,12 @@ import pytest
 
 from mindroom.constants import tracking_dir
 from mindroom.tool_system import tool_failures
-from mindroom.tool_system.tool_failures import build_tool_failure_record, record_tool_failure
+from mindroom.tool_system.tool_failures import (
+    build_tool_failure_record,
+    build_tool_success_record,
+    record_tool_failure,
+    record_tool_success,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
@@ -73,6 +78,7 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
         channel="matrix",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
         requester_id="@user:localhost",
         session_id="session-1",
         correlation_id="corr-1",
@@ -211,6 +217,7 @@ def test_build_tool_failure_record_redacts_camel_case_and_prefixed_secret_keys(
         channel="matrix",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
         requester_id="@user:localhost",
         session_id="session-1",
         correlation_id="corr-camel",
@@ -285,6 +292,7 @@ def test_build_tool_failure_record_normalizes_non_finite_duration(duration_ms: f
         channel="matrix",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
         requester_id="@user:localhost",
         session_id="session-1",
         correlation_id="corr-duration",
@@ -323,6 +331,7 @@ def test_build_tool_failure_record_handles_unrepresentable_exception_text(
         channel="matrix",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
         requester_id="@user:localhost",
         session_id="session-1",
         correlation_id="corr-broken-exception",
@@ -353,6 +362,7 @@ def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.Monk
             channel="matrix",
             room_id="!room:localhost",
             thread_id="$resolved-thread",
+            reply_to_event_id="$reply",
             requester_id="@user:localhost",
             session_id="session-1",
             correlation_id="corr-2",
@@ -366,7 +376,7 @@ def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.Monk
 def test_record_tool_failure_writes_jsonl_and_rotates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Failure records should append to JSONL and honor rotation limits."""
     runtime_paths = test_runtime_paths(tmp_path)
-    log_path = tracking_dir(runtime_paths) / "tool_failures.jsonl"
+    log_path = tracking_dir(runtime_paths) / "tool_calls.jsonl"
     backup_path = Path(f"{log_path}.1")
 
     monkeypatch.setattr(tool_failures, "_FAILURE_LOG_MAX_BYTES", 300)
@@ -381,6 +391,7 @@ def test_record_tool_failure_writes_jsonl_and_rotates(tmp_path: Path, monkeypatc
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$resolved-thread",
+            reply_to_event_id="$reply",
             requester_id="@user:localhost",
             session_id="session-1",
             correlation_id=f"corr-{index}",
@@ -401,6 +412,60 @@ def test_record_tool_failure_writes_jsonl_and_rotates(tmp_path: Path, monkeypatc
     assert all(line["tool_name"] == "explode" for line in parsed_lines)
 
 
+def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> None:
+    """Successful and failing tool calls should share the same durable context fields."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    log_path = tracking_dir(runtime_paths) / "tool_calls.jsonl"
+
+    success_record = record_tool_success(
+        tool_name="echo",
+        arguments={"api_key": "secret"},
+        result={"authorization": "Bearer hidden-token", "ok": True},
+        duration_ms=5.0,
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-shared",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_paths,
+    )
+    failure_record = record_tool_failure(
+        tool_name="echo",
+        arguments={"api_key": "secret"},
+        error=RuntimeError("boom"),
+        duration_ms=7.0,
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-shared",
+        execution_identity=_execution_identity(),
+        runtime_paths=runtime_paths,
+    )
+
+    assert success_record.success is True
+    assert success_record.result == {"authorization": "***redacted***", "ok": True}
+    assert success_record.reply_to_event_id == "$reply"
+    assert failure_record.success is False
+    assert failure_record.reply_to_event_id == "$reply"
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(records) == 2
+    assert records[0]["success"] is True
+    assert records[0]["reply_to_event_id"] == "$reply"
+    assert records[0]["result"] == {"authorization": "***redacted***", "ok": True}
+    assert records[1]["success"] is False
+    assert records[1]["reply_to_event_id"] == "$reply"
+    assert records[1]["error_type"] == "RuntimeError"
+    for key in ("agent_name", "channel", "room_id", "thread_id", "requester_id", "session_id", "correlation_id"):
+        assert records[0][key] == records[1][key]
+
+
 def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None:
     """JSONL write failures should be logged without replacing the original record."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -417,6 +482,7 @@ def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$resolved-thread",
+            reply_to_event_id="$reply",
             requester_id="@user:localhost",
             session_id="session-1",
             correlation_id="corr-write-fail",
@@ -444,6 +510,7 @@ def test_record_tool_failure_skips_persistence_without_runtime_paths() -> None:
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$resolved-thread",
+            reply_to_event_id="$reply",
             requester_id="@user:localhost",
             session_id="session-1",
             correlation_id="corr-no-runtime",
@@ -454,6 +521,34 @@ def test_record_tool_failure_skips_persistence_without_runtime_paths() -> None:
     assert record.tool_name == "explode"
     assert record.arguments == {"api_key": "***redacted***"}
     mock_append.assert_not_called()
+
+
+def test_build_tool_success_record_redacts_large_result_payloads() -> None:
+    """Success records should reuse the same sanitizer as failure records."""
+    record = build_tool_success_record(
+        tool_name="demo",
+        arguments={"api_key": "secret"},
+        result={
+            "authorization": "Bearer hidden-token",
+            "payload": "x" * 5000,
+        },
+        duration_ms=5.0,
+        agent_name="code",
+        channel="matrix",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-success",
+    )
+
+    assert record.success is True
+    assert record.arguments == {"api_key": "***redacted***"}
+    assert record.result == {
+        "authorization": "***redacted***",
+        "payload": ("x" * (tool_failures._MAX_STRING_LENGTH - len("... [truncated]"))) + "... [truncated]",
+    }
 
 
 def test_build_tool_failure_record_uses_redaction_markers_and_truncates_large_payloads() -> None:
@@ -471,6 +566,7 @@ def test_build_tool_failure_record_uses_redaction_markers_and_truncates_large_pa
         channel="matrix",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
+        reply_to_event_id="$reply",
         requester_id="@user:localhost",
         session_id="session-1",
         correlation_id="corr-3",

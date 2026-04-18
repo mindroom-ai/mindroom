@@ -217,12 +217,16 @@ def _agent_response_handled_turn(
     event_id: str,
     response_event_id: str,
     thread_id: str | None = None,
+    requester_id: str | None = None,
+    correlation_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
 ) -> HandledTurnState:
     """Return the handled-turn state persisted for one direct agent response."""
     return HandledTurnState.from_source_event_id(
         event_id,
         response_event_id=response_event_id,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
         source_event_prompts=source_event_prompts,
     ).with_response_context(
         response_owner=agent_name,
@@ -4959,6 +4963,8 @@ class TestAgentBot:
             room_id=room.room_id,
             event_id="$img_event",
             response_event_id="$response",
+            requester_id="@user:localhost",
+            correlation_id="$img_event",
             source_event_prompts={"$img_event": "[Attached image]"},
         )
         expected_handled_turn = replace(
@@ -5143,6 +5149,8 @@ class TestAgentBot:
                 event_id="$img_event_history",
                 response_event_id="$response",
                 thread_id="$thread_root",
+                requester_id="@user:localhost",
+                correlation_id="$img_event_history",
                 source_event_prompts={"$img_event_history": "[Attached image]"},
             ),
         )
@@ -5433,6 +5441,8 @@ class TestAgentBot:
                 room_id=room.room_id,
                 event_id="$file_event",
                 response_event_id="$response",
+                requester_id="@user:localhost",
+                correlation_id="$file_event",
                 source_event_prompts={"$file_event": "[Attached file]"},
             ).with_response_context(
                 response_owner=mock_agent_user.agent_name,
@@ -7671,6 +7681,8 @@ class TestAgentBot:
                     response_event_id="$voice_echo",
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
                     visible_echo_event_id="$voice_echo",
+                    requester_id="@user:localhost",
+                    correlation_id="corr-visible-echo",
                 ),
             ),
         ]
@@ -7784,6 +7796,8 @@ class TestAgentBot:
                     source_event_prompts={"$voice": "voice prompt", "$text": "hello"},
                 ).with_response_context(
                     response_owner="router",
+                    requester_id="@user:localhost",
+                    correlation_id="corr-router-coalesced",
                     history_scope=None,
                     conversation_target=dispatch.target,
                 ),
@@ -8162,6 +8176,8 @@ class TestAgentBot:
             room_id=room.room_id,
             event_id="$img_event_fail",
             response_event_id="$error",
+            requester_id="@user:localhost",
+            correlation_id="$img_event_fail",
             source_event_prompts={"$img_event_fail": "[Attached image]"},
         )
         expected_handled_turn = replace(

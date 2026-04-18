@@ -3083,29 +3083,30 @@ class TestUserIdPassthrough:
 
         assert response == "Recovered response"
         mock_prepare.assert_awaited_once()
-        assert mock_prepare.await_args.args[1] == "expanded prompt"
-        assert logged_contexts == [
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": prepared_prompt,
-                "metadata": None,
-            },
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
-                "metadata": None,
-            },
-        ]
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
+        assert len(logged_contexts) == 2
+        assert logged_contexts[0]["agent_id"] == "general"
+        assert logged_contexts[0]["session_id"] == "session1"
+        assert logged_contexts[0]["room_id"] is None
+        assert logged_contexts[0]["thread_id"] is None
+        assert logged_contexts[0]["reply_to_event_id"] is None
+        assert logged_contexts[0]["requester_id"] is None
+        assert logged_contexts[0]["prompt"] == "raw prompt"
+        assert logged_contexts[0]["model_prompt"] == "expanded prompt"
+        assert logged_contexts[0]["full_prompt"] == prepared_prompt
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
+        assert logged_contexts[0]["metadata"] == {
+            "room_id": None,
+            "thread_id": None,
+            "reply_to_event_id": None,
+            "requester_id": None,
+            "correlation_id": logged_contexts[0]["correlation_id"],
+            "tools_schema": [],
+            "model_params": {},
+        }
+        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -3266,29 +3267,30 @@ class TestUserIdPassthrough:
 
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
         mock_prepare.assert_awaited_once()
-        assert mock_prepare.await_args.args[1] == "expanded prompt"
-        assert logged_contexts == [
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": prepared_prompt,
-                "metadata": None,
-            },
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
-                "metadata": None,
-            },
-        ]
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
+        assert len(logged_contexts) == 2
+        assert logged_contexts[0]["agent_id"] == "general"
+        assert logged_contexts[0]["session_id"] == "session1"
+        assert logged_contexts[0]["room_id"] is None
+        assert logged_contexts[0]["thread_id"] is None
+        assert logged_contexts[0]["reply_to_event_id"] is None
+        assert logged_contexts[0]["requester_id"] is None
+        assert logged_contexts[0]["prompt"] == "raw prompt"
+        assert logged_contexts[0]["model_prompt"] == "expanded prompt"
+        assert logged_contexts[0]["full_prompt"] == prepared_prompt
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
+        assert logged_contexts[0]["metadata"] == {
+            "room_id": None,
+            "thread_id": None,
+            "reply_to_event_id": None,
+            "requester_id": None,
+            "correlation_id": logged_contexts[0]["correlation_id"],
+            "tools_schema": [],
+            "model_params": {},
+        }
+        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(
@@ -3323,9 +3325,10 @@ class TestUserIdPassthrough:
                 self.db = None
                 self.learning = None
 
-            async def arun(self, prompt: str, **_kwargs: object) -> AsyncIterator[object]:
+            async def arun(self, prompt: str | list[Message], **_kwargs: object) -> AsyncIterator[object]:
+                prompt_messages = prompt if isinstance(prompt, list) else [Message(role="user", content=prompt)]
                 async for _chunk in self.model.ainvoke_stream(
-                    messages=[Message(role="user", content=prompt)],
+                    messages=prompt_messages,
                     assistant_message=Message(role="assistant"),
                     tools=[],
                 ):
@@ -3336,7 +3339,6 @@ class TestUserIdPassthrough:
         model = _DeferredLoggingModel()
         install_llm_request_logging(
             model,
-            agent_name="general",
             debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
             default_log_dir=tmp_path / "unused",
         )
@@ -3347,7 +3349,10 @@ class TestUserIdPassthrough:
             },
         )
 
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._agent_tools_schema", return_value=[]),
+        ):
             mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
             chunks = [
                 chunk
@@ -3370,10 +3375,12 @@ class TestUserIdPassthrough:
         assert len(log_files) == 1
         entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
         assert len(entries) == 1
+        assert entries[0]["agent_id"] == "general"
         assert entries[0]["session_id"] == "session1"
         assert entries[0]["room_id"] == "!room:example.com"
         assert entries[0]["thread_id"] == "$thread:example.com"
         assert entries[0]["reply_to_event_id"] == "$reply:example.com"
+        assert entries[0]["correlation_id"] == "$reply:example.com"
         assert entries[0]["current_turn_prompt"] == "raw prompt"
         assert entries[0]["model_prompt"] == "expanded prompt"
         assert entries[0]["full_prompt"] == prepared_prompt
@@ -3690,6 +3697,13 @@ class TestUserIdPassthrough:
         )
 
         assert metadata == {
+            "room_id": None,
+            "thread_id": None,
+            "reply_to_event_id": "$primary",
+            "requester_id": None,
+            "correlation_id": None,
+            "tools_schema": [],
+            "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$unseen"],
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],

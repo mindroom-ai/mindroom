@@ -76,7 +76,12 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.llm_request_logging import bind_llm_request_log_context, install_llm_request_logging
+from mindroom.llm_request_logging import (
+    bind_llm_request_log_context,
+    build_llm_request_log_context,
+    install_llm_request_logging,
+    model_params_payload,
+)
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
@@ -867,7 +872,6 @@ def get_model_instance(
     if config.debug.log_llm_requests:
         install_llm_request_logging(
             model,
-            agent_name=model_name,
             debug_config=config.debug,
             default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         )
@@ -889,23 +893,35 @@ def build_matrix_run_metadata(
     reply_to_event_id: str | None,
     unseen_event_ids: list[str],
     *,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+    requester_id: str | None = None,
+    correlation_id: str | None = None,
+    tools_schema: list[dict[str, object]] | None = None,
+    model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build metadata dict for a run, tracking consumed Matrix event ids."""
-    if not reply_to_event_id:
-        return dict(extra_metadata) if extra_metadata else None
     metadata = dict(extra_metadata or {})
+    metadata["room_id"] = room_id
+    metadata["thread_id"] = thread_id
+    metadata["reply_to_event_id"] = reply_to_event_id
+    metadata["requester_id"] = requester_id
+    metadata["correlation_id"] = correlation_id
+    metadata["tools_schema"] = tools_schema if tools_schema is not None else []
+    metadata["model_params"] = model_params if model_params is not None else {}
     source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
-    seen_event_ids = _normalized_string_list(
-        [
-            reply_to_event_id,
-            *source_event_ids,
-            *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
-            *unseen_event_ids,
-        ],
-    )
-    metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
-    metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = seen_event_ids
+    if reply_to_event_id:
+        seen_event_ids = _normalized_string_list(
+            [
+                reply_to_event_id,
+                *source_event_ids,
+                *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
+                *unseen_event_ids,
+            ],
+        )
+        metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
+        metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = seen_event_ids
     if MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in metadata and not isinstance(
         metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY],
         dict,
@@ -922,73 +938,6 @@ def _resolved_correlation_id(reply_to_event_id: str | None) -> str:
     if reply_to_event_id:
         return reply_to_event_id
     return uuid4().hex
-
-
-def build_llm_request_log_context(
-    *,
-    session_id: str,
-    room_id: str | None,
-    thread_id: str | None,
-    reply_to_event_id: str | None,
-    prompt: str,
-    model_prompt: str | None,
-    full_prompt: str,
-    metadata: dict[str, object] | None,
-) -> dict[str, object]:
-    """Build per-attempt LLM request-log context for one provider call."""
-    context: dict[str, object] = {
-        "session_id": session_id,
-        "current_turn_prompt": prompt,
-        "full_prompt": full_prompt,
-    }
-    if room_id:
-        context["room_id"] = room_id
-    if thread_id:
-        context["thread_id"] = thread_id
-    if reply_to_event_id:
-        context["reply_to_event_id"] = reply_to_event_id
-    if model_prompt is not None:
-        context["model_prompt"] = model_prompt
-    if not metadata:
-        return context
-
-    source_event_ids = _normalized_string_list(
-        [
-            reply_to_event_id,
-            *_normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)),
-        ],
-    )
-    if source_event_ids:
-        context["source_event_ids"] = source_event_ids
-
-    raw_prompt_map = metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
-    if isinstance(raw_prompt_map, dict):
-        source_event_prompts = {
-            event_id: event_prompt
-            for event_id, event_prompt in raw_prompt_map.items()
-            if isinstance(event_id, str) and event_id and isinstance(event_prompt, str)
-        }
-        if source_event_prompts:
-            context["source_event_prompts"] = source_event_prompts
-
-    return context
-
-
-async def _stream_with_request_log_context[StreamEventT](
-    stream_generator: AsyncIterator[StreamEventT],
-    *,
-    request_context: dict[str, object],
-) -> AsyncIterator[StreamEventT]:
-    """Advance one async stream with request-log context rebound per item pull."""
-    with bind_llm_request_log_context(**request_context):
-        stream_iterator = stream_generator.__aiter__()
-    while True:
-        try:
-            with bind_llm_request_log_context(**request_context):
-                event = await stream_iterator.__anext__()
-        except StopAsyncIteration:
-            return
-        yield event
 
 
 def _agent_tools_schema(agent: Agent) -> list[dict[str, object]]:
@@ -1102,6 +1051,53 @@ def _track_model_request_metrics(
         state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
+
+
+def _attempt_request_log_context(
+    *,
+    agent_id: str,
+    session_id: str,
+    room_id: str | None,
+    thread_id: str | None,
+    reply_to_event_id: str | None,
+    requester_id: str | None,
+    correlation_id: str,
+    prompt: str,
+    model_prompt: str | None,
+    attempt_prompt: ModelRunInput,
+    metadata: dict[str, object] | None,
+) -> dict[str, object]:
+    """Build request-log context for the exact prompt used by one provider attempt."""
+    return build_llm_request_log_context(
+        agent_id=agent_id,
+        session_id=session_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        reply_to_event_id=reply_to_event_id,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
+        prompt=prompt,
+        model_prompt=model_prompt,
+        full_prompt=render_prepared_messages_text(_copy_run_input(attempt_prompt)),
+        metadata=metadata,
+    )
+
+
+async def _stream_with_request_log_context[StreamEventT](
+    stream_generator: AsyncIterator[StreamEventT],
+    *,
+    request_context: dict[str, object],
+) -> AsyncIterator[StreamEventT]:
+    """Advance one async stream with request-log context bound per item pull."""
+    with bind_llm_request_log_context(**request_context):
+        stream_iterator = stream_generator.__aiter__()
+    while True:
+        try:
+            with bind_llm_request_log_context(**request_context):
+                event = await stream_iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        yield event
 
 
 async def cached_agent_run(
@@ -1334,7 +1330,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         config: Application configuration
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
-        thread_id: Optional resolved Matrix thread target retained for call compatibility.
+        thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
@@ -1379,6 +1375,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         agent_name=agent_name,
     )
     media_inputs = media or MediaInputs()
+    resolved_requester_id = _resolved_requester_id(user_id)
+    resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     try:
@@ -1404,7 +1402,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     pipeline_timing.mark("ai_prepare_start")
                 prepared_run = await _prepare_agent_and_prompt(
                     agent_name,
-                    model_prompt or prompt,
+                    prompt,
                     runtime_paths,
                     config,
                     session_id,
@@ -1437,6 +1435,12 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=resolved_requester_id,
+                correlation_id=resolved_correlation_id,
+                tools_schema=_agent_tools_schema(agent) if agent.model is not None else [],
+                model_params=model_params_payload(agent.model) if agent.model is not None else {},
                 extra_metadata=matrix_run_metadata,
             )
 
@@ -1451,17 +1455,21 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     try:
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
-                        request_context = build_llm_request_log_context(
-                            session_id=session_id,
-                            room_id=room_id,
-                            thread_id=thread_id,
-                            reply_to_event_id=reply_to_event_id,
-                            prompt=prompt,
-                            model_prompt=model_prompt,
-                            full_prompt=render_prepared_messages_text(_copy_run_input(attempt_prompt)),
-                            metadata=metadata,
-                        )
-                        with bind_llm_request_log_context(**request_context):
+                        with bind_llm_request_log_context(
+                            **_attempt_request_log_context(
+                                agent_id=agent_name,
+                                session_id=session_id,
+                                room_id=room_id,
+                                thread_id=thread_id,
+                                reply_to_event_id=reply_to_event_id,
+                                requester_id=resolved_requester_id,
+                                correlation_id=resolved_correlation_id,
+                                prompt=prompt,
+                                model_prompt=model_prompt,
+                                attempt_prompt=attempt_prompt,
+                                metadata=metadata,
+                            ),
+                        ):
                             response = await _run_cached_agent_attempt(
                                 agent,
                                 attempt_prompt,
@@ -1682,7 +1690,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         config: Application configuration
         thread_history: Optional thread history
         model_prompt: Optional model-facing current-turn prompt additions.
-        thread_id: Optional resolved Matrix thread target retained for call compatibility.
+        thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
@@ -1725,6 +1733,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         agent_name=agent_name,
     )
     media_inputs = media or MediaInputs()
+    resolved_requester_id = _resolved_requester_id(user_id)
+    resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
 
@@ -1752,7 +1762,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     pipeline_timing.mark("ai_prepare_start")
                 prepared_run = await _prepare_agent_and_prompt(
                     agent_name,
-                    model_prompt or prompt,
+                    prompt,
                     runtime_paths,
                     config,
                     session_id,
@@ -1786,6 +1796,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=resolved_requester_id,
+                correlation_id=resolved_correlation_id,
+                tools_schema=_agent_tools_schema(agent) if agent.model is not None else [],
+                model_params=model_params_payload(agent.model) if agent.model is not None else {},
                 extra_metadata=matrix_run_metadata,
             )
 
@@ -1802,14 +1818,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
-                        request_context = build_llm_request_log_context(
+                        request_context = _attempt_request_log_context(
+                            agent_id=agent_name,
                             session_id=session_id,
                             room_id=room_id,
                             thread_id=thread_id,
                             reply_to_event_id=reply_to_event_id,
+                            requester_id=resolved_requester_id,
+                            correlation_id=resolved_correlation_id,
                             prompt=prompt,
                             model_prompt=model_prompt,
-                            full_prompt=render_prepared_messages_text(_copy_run_input(attempt_prompt)),
+                            attempt_prompt=attempt_prompt,
                             metadata=metadata,
                         )
                         with bind_llm_request_log_context(**request_context):

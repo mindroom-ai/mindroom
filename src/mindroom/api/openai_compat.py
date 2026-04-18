@@ -91,6 +91,14 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedOpenAITeamPrompt:
+    """Prepared team prompt plus the run metadata that must reach Agno."""
+
+    prompt: str
+    run_metadata: dict[str, object] | None
+
+
 def _load_config(
     request: Request,
     *,
@@ -1189,7 +1197,9 @@ async def _prepare_openai_team_prompt(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-) -> str:
+    user: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> _PreparedOpenAITeamPrompt:
     """Prepare the final prompt for one OpenAI-compatible team run."""
     prepared_execution = await prepare_materialized_team_execution(
         scope_context=scope_context,
@@ -1203,12 +1213,19 @@ async def _prepare_openai_team_prompt(
         reply_to_event_id=None,
         active_event_ids=frozenset(),
         response_sender_id=None,
+        room_id=None,
+        thread_id=None,
+        requester_id=user or (execution_identity.requester_id if execution_identity is not None else None),
+        correlation_id=uuid4().hex,
         compaction_outcomes_collector=None,
         configured_team_name=team_name,
         matrix_run_metadata=None,
         system_enrichment_items=(),
     )
-    return prepared_execution.prepared_prompt
+    return _PreparedOpenAITeamPrompt(
+        prompt=prepared_execution.prepared_prompt,
+        run_metadata=prepared_execution.run_metadata,
+    )
 
 
 async def _non_stream_team_completion(
@@ -1257,7 +1274,7 @@ async def _non_stream_team_completion(
             )
 
             try:
-                team_prompt = await _prepare_openai_team_prompt(
+                prepared_team_prompt = await _prepare_openai_team_prompt(
                     scope_context=scope_context,
                     team_name=team_name,
                     agents=agents,
@@ -1266,12 +1283,19 @@ async def _non_stream_team_completion(
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=thread_history,
+                    user=user,
+                    execution_identity=execution_identity,
                 )
             except Exception:
                 logger.exception("Team member preparation failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
             try:
-                response = await team.arun(team_prompt, session_id=session_id, user_id=user)
+                response = await team.arun(
+                    prepared_team_prompt.prompt,
+                    session_id=session_id,
+                    user_id=user,
+                    metadata=prepared_team_prompt.run_metadata,
+                )
             except Exception:
                 logger.exception("Team execution failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
@@ -1364,7 +1388,7 @@ async def _stream_team_completion(  # noqa: C901
         )
 
         try:
-            team_prompt = await _prepare_openai_team_prompt(
+            prepared_team_prompt = await _prepare_openai_team_prompt(
                 scope_context=scope_context,
                 team_name=team_name,
                 agents=agents,
@@ -1373,6 +1397,8 @@ async def _stream_team_completion(  # noqa: C901
                 config=config,
                 runtime_paths=runtime_paths,
                 thread_history=thread_history,
+                user=user,
+                execution_identity=execution_identity,
             )
         except Exception:
             logger.exception("Team member preparation failed", team=team_name)
@@ -1386,11 +1412,12 @@ async def _stream_team_completion(  # noqa: C901
                     stream_factory=lambda: cast(
                         "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]",
                         team.arun(
-                            team_prompt,
+                            prepared_team_prompt.prompt,
                             stream=True,
                             stream_events=True,
                             session_id=session_id,
                             user_id=user,
+                            metadata=prepared_team_prompt.run_metadata,
                         ),
                     ),
                 ),

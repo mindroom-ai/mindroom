@@ -35,7 +35,6 @@ from mindroom.hooks import (
 from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.types import EVENT_SESSION_STARTED
 from mindroom.knowledge import KnowledgeAccessSupport, ensure_request_knowledge_managers
-from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import is_user_online, should_use_streaming
@@ -1340,90 +1339,89 @@ class ResponseRunner:
 
         try:
             self.in_flight_response_count += 1
-            with bound_log_context(**resolved_target.log_context):
-                initial_message_id = None
-                if thinking_message:
-                    assert not existing_event_id
-                    initial_message_id = await self.deps.delivery_gateway.send_text(
-                        SendTextRequest(
-                            target=resolved_target,
-                            response_text=thinking_message,
-                            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-                        ),
+            initial_message_id = None
+            if thinking_message:
+                assert not existing_event_id
+                initial_message_id = await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=resolved_target,
+                        response_text=thinking_message,
+                        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                    ),
+                )
+                if initial_message_id is not None and pipeline_timing is not None:
+                    pipeline_timing.mark("placeholder_sent")
+                    pipeline_timing.mark_first_visible_reply("placeholder")
+
+            message_id = existing_event_id or initial_message_id
+            task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))
+
+            message_to_track = existing_event_id or initial_message_id
+            tracked_message_id = message_to_track or f"__pending_response__:{id(task)}"
+            show_stop_button = False
+
+            self.deps.stop_manager.set_current(
+                tracked_message_id,
+                resolved_target,
+                task,
+                None,
+                run_id=run_id,
+            )
+
+            if message_to_track:
+                show_stop_button = self.deps.runtime.config.defaults.show_stop_button
+                if show_stop_button and user_id:
+                    user_is_online = await is_user_online(
+                        self._client(),
+                        user_id,
+                        room_id=room_id,
                     )
-                    if initial_message_id is not None and pipeline_timing is not None:
-                        pipeline_timing.mark("placeholder_sent")
-                        pipeline_timing.mark_first_visible_reply("placeholder")
+                    show_stop_button = user_is_online
+                    self.deps.logger.info(
+                        "Stop button decision",
+                        message_id=message_to_track,
+                        user_online=user_is_online,
+                        show_button=show_stop_button,
+                    )
 
-                message_id = existing_event_id or initial_message_id
-                task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))
+                if show_stop_button:
+                    self.deps.logger.info("Adding stop button", message_id=message_to_track)
+                    await self.deps.stop_manager.add_stop_button(
+                        self._client(),
+                        message_to_track,
+                        notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
+                    )
 
-                message_to_track = existing_event_id or initial_message_id
-                tracked_message_id = message_to_track or f"__pending_response__:{id(task)}"
-                show_stop_button = False
-
-                self.deps.stop_manager.set_current(
+            try:
+                await task
+            except asyncio.CancelledError as exc:
+                if is_sync_restart_cancel(exc):
+                    self.deps.logger.info(
+                        "Response interrupted by sync restart",
+                        message_id=message_to_track or tracked_message_id,
+                    )
+                else:
+                    self.deps.logger.warning(
+                        "Response cancelled — traceback for diagnosis",
+                        message_id=message_to_track or tracked_message_id,
+                        exc_info=True,
+                    )
+            except Exception as error:
+                self.deps.logger.exception("Error during response generation", error=str(error))
+                raise
+            finally:
+                tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
+                button_already_removed = tracked is None or tracked.reaction_event_id is None
+                self.deps.stop_manager.clear_message(
                     tracked_message_id,
-                    resolved_target,
-                    task,
-                    None,
-                    run_id=run_id,
+                    client=self._client(),
+                    remove_button=show_stop_button and not button_already_removed,
+                    notify_outbound_redaction=(
+                        self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
+                    ),
                 )
 
-                if message_to_track:
-                    show_stop_button = self.deps.runtime.config.defaults.show_stop_button
-                    if show_stop_button and user_id:
-                        user_is_online = await is_user_online(
-                            self._client(),
-                            user_id,
-                            room_id=room_id,
-                        )
-                        show_stop_button = user_is_online
-                        self.deps.logger.info(
-                            "Stop button decision",
-                            message_id=message_to_track,
-                            user_online=user_is_online,
-                            show_button=show_stop_button,
-                        )
-
-                    if show_stop_button:
-                        self.deps.logger.info("Adding stop button", message_id=message_to_track)
-                        await self.deps.stop_manager.add_stop_button(
-                            self._client(),
-                            message_to_track,
-                            notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
-                        )
-
-                try:
-                    await task
-                except asyncio.CancelledError as exc:
-                    if is_sync_restart_cancel(exc):
-                        self.deps.logger.info(
-                            "Response interrupted by sync restart",
-                            message_id=message_to_track or tracked_message_id,
-                        )
-                    else:
-                        self.deps.logger.warning(
-                            "Response cancelled — traceback for diagnosis",
-                            message_id=message_to_track or tracked_message_id,
-                            exc_info=True,
-                        )
-                except Exception as error:
-                    self.deps.logger.exception("Error during response generation", error=str(error))
-                    raise
-                finally:
-                    tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
-                    button_already_removed = tracked is None or tracked.reaction_event_id is None
-                    self.deps.stop_manager.clear_message(
-                        tracked_message_id,
-                        client=self._client(),
-                        remove_button=show_stop_button and not button_already_removed,
-                        notify_outbound_redaction=(
-                            self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
-                        ),
-                    )
-
-                return message_id
+            return message_id
         finally:
             self.in_flight_response_count -= 1
 

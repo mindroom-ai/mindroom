@@ -79,6 +79,8 @@ __all__ = [
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 20
+_STARTUP_PREWARM_LOCAL_RECENCY_TIMEOUT_SECONDS = 0.25
+_STARTUP_PREWARM_THREAD_REFRESH_TIMEOUT_SECONDS = 0.25
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -593,14 +595,26 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> ThreadHistoryResult:
         """Refresh one strict thread snapshot for advisory startup prewarm without the live read barrier."""
         fetch_started_at = time.time()
-        return await fetch_dispatch_thread_snapshot(
-            self._require_client(),
-            room_id,
-            thread_id,
-            event_cache=self.runtime.event_cache,
-            runtime_started_at=self.runtime.runtime_started_at,
-            cache_write_guard_started_at=fetch_started_at,
-        )
+        try:
+            return await asyncio.wait_for(
+                fetch_dispatch_thread_snapshot(
+                    self._require_client(),
+                    room_id,
+                    thread_id,
+                    event_cache=self.runtime.event_cache,
+                    runtime_started_at=self.runtime.runtime_started_at,
+                    cache_write_guard_started_at=fetch_started_at,
+                ),
+                timeout=_STARTUP_PREWARM_THREAD_REFRESH_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            self.logger.warning(
+                "startup_thread_prewarm_refresh_timeout",
+                room_id=room_id,
+                thread_id=thread_id,
+                timeout_seconds=_STARTUP_PREWARM_THREAD_REFRESH_TIMEOUT_SECONDS,
+            )
+            raise
 
     async def _startup_thread_prewarm_ids(
         self,
@@ -612,10 +626,23 @@ class MatrixConversationCache(ConversationCacheProtocol):
         best available recency signal for startup prewarm. /threads is only used to fill any remaining
         slots when we have fewer than the target number of locally known threads.
         """
-        thread_ids = await self.runtime.event_cache.get_recent_room_thread_ids(
-            room_id,
-            limit=_STARTUP_PREWARM_THREAD_LIMIT,
-        )
+        try:
+            thread_ids = await asyncio.wait_for(
+                self.runtime.event_cache.get_recent_room_thread_ids(
+                    room_id,
+                    limit=_STARTUP_PREWARM_THREAD_LIMIT,
+                ),
+                timeout=_STARTUP_PREWARM_LOCAL_RECENCY_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            self.logger.warning(
+                "startup_thread_prewarm_local_threads_timeout",
+                room_id=room_id,
+                timeout_seconds=_STARTUP_PREWARM_LOCAL_RECENCY_TIMEOUT_SECONDS,
+            )
+            thread_ids = []
         if len(thread_ids) >= _STARTUP_PREWARM_THREAD_LIMIT:
             return thread_ids
         try:

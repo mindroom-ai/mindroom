@@ -791,6 +791,8 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
             source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
         ).with_response_context(
             response_owner="home",
+            requester_id="@alice:example.com",
+            correlation_id="$voice_event",
             history_scope=HistoryScope(kind="agent", scope_id="home"),
             conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -1183,6 +1185,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
             response_event_id="$response",
         ).with_response_context(
             response_owner=ROUTER_AGENT_NAME,
+            requester_id="@alice:example.com",
+            correlation_id="$voice_event",
             history_scope=None,
             conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
