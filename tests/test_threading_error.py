@@ -28,6 +28,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_CACHE,
@@ -44,7 +45,6 @@ from mindroom.matrix.client import (
     DeliveredMatrixEvent,
     PermanentMatrixStartupError,
     ResolvedVisibleMessage,
-    ThreadHistoryResult,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
@@ -5011,7 +5011,7 @@ class TestThreadingBehavior:
             "get_thread_snapshot",
             AsyncMock(
                 return_value=ThreadHistoryResult(
-                    history=[_message(event_id="$room_root:localhost", body="Room root")],
+                    [_message(event_id="$room_root:localhost", body="Room root")],
                     is_full_history=False,
                 ),
             ),

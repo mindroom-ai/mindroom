@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,36 +21,49 @@ THREAD_HISTORY_ERROR_DIAGNOSTIC = "thread_read_error"
 THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"
 
 
-class ThreadHistoryResult(list["ResolvedVisibleMessage"]):
-    """List subclass that preserves whether the history is already fully hydrated."""
+@dataclass(slots=True, eq=False)
+class ThreadHistoryResult(Sequence["ResolvedVisibleMessage"]):
+    """Sequence wrapper that preserves whether the history is already fully hydrated."""
 
-    __slots__ = ("diagnostics", "is_full_history")
+    messages: list[ResolvedVisibleMessage]
+    is_full_history: bool
+    diagnostics: dict[str, ThreadHistoryDiagnosticValue] = field(default_factory=dict)
 
-    def __init__(
-        self,
-        history: list[ResolvedVisibleMessage],
-        *,
-        is_full_history: bool,
-        diagnostics: Mapping[str, ThreadHistoryDiagnosticValue] | None = None,
-    ) -> None:
-        super().__init__(history)
-        self.is_full_history = is_full_history
-        self.diagnostics = dict(diagnostics or {})
+    def __iter__(self) -> Iterator[ResolvedVisibleMessage]:
+        return iter(self.messages)
+
+    def __len__(self) -> int:
+        return len(self.messages)
+
+    def __getitem__(self, index: int | slice) -> ResolvedVisibleMessage | list[ResolvedVisibleMessage]:
+        return self.messages[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ThreadHistoryResult):
+            return self.messages == other.messages
+        if isinstance(other, Sequence) and not isinstance(other, (str, bytes, bytearray)):
+            return self.messages == list(other)
+        return NotImplemented
 
 
 def thread_history_result(
-    history: list[ResolvedVisibleMessage],
+    history: Sequence[ResolvedVisibleMessage],
     *,
     is_full_history: bool,
     diagnostics: Mapping[str, ThreadHistoryDiagnosticValue] | None = None,
 ) -> ThreadHistoryResult:
     """Wrap history with hydration metadata used by dispatch fast paths."""
+    resolved_diagnostics = dict(diagnostics or {})
     if isinstance(history, ThreadHistoryResult):
-        history.is_full_history = is_full_history
-        history.diagnostics = dict(history.diagnostics if diagnostics is None else diagnostics)
-        return history
+        if diagnostics is None:
+            resolved_diagnostics = dict(history.diagnostics)
+        return ThreadHistoryResult(
+            messages=list(history),
+            is_full_history=is_full_history,
+            diagnostics=resolved_diagnostics,
+        )
     return ThreadHistoryResult(
-        history,
+        messages=list(history),
         is_full_history=is_full_history,
-        diagnostics=diagnostics,
+        diagnostics=resolved_diagnostics,
     )

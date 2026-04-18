@@ -13,7 +13,6 @@ import nio
 
 from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     build_edit_event_content,
