@@ -114,6 +114,55 @@ depends_on = [
     "mindroom.matrix.conversation_cache",
 ]
 
+[[modules]]
+path = "mindroom.knowledge"
+depends_on = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.shared_managers",
+    "mindroom.knowledge.utils",
+]
+
+[[modules]]
+path = "mindroom.knowledge.chunking"
+depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge.startup"
+depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge.shared_managers"
+depends_on = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.startup",
+]
+
+[[modules]]
+path = "mindroom.knowledge.manager"
+depends_on = [
+    "mindroom.knowledge.chunking",
+]
+
+[[modules]]
+path = "mindroom.knowledge.utils"
+depends_on = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.shared_managers",
+]
+
+[[interfaces]]
+expose = [
+    "KnowledgeAccessSupport",
+    "KnowledgeManager",
+    "ensure_request_knowledge_managers",
+    "ensure_shared_knowledge_manager",
+    "get_agent_knowledge",
+    "get_shared_knowledge_manager_for_config",
+    "initialize_shared_knowledge_managers",
+    "shutdown_shared_knowledge_managers",
+]
+from = ["mindroom.knowledge"]
+
 [[interfaces]]
 expose = [
     "ConversationEventCache",

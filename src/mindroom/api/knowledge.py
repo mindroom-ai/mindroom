@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.knowledge.manager import (
+from mindroom.knowledge import (
     KnowledgeManager,
     ensure_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
