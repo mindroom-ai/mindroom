@@ -82,6 +82,21 @@ depends_on = [
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.thread_projection",
+]
+
+[[modules]]
+path = "mindroom.matrix.thread_projection"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.stale_stream_cleanup"
+depends_on = [
+    "mindroom.matrix.client",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.thread_projection",
+    "mindroom.streaming",
 ]
 
 [[modules]]
@@ -288,6 +303,19 @@ expose = [
 ]
 from = ["mindroom.matrix.client_thread_history"]
 visibility = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+exclusive = true
+
+[[interfaces]]
+expose = [
+    "SupportsVisibleThreadMessage",
+    "latest_visible_thread_event_id_by_thread",
+    "ordered_event_ids_from_scanned_event_sources",
+    "resolve_thread_ids_for_event_infos",
+    "sort_thread_event_sources_root_first",
+    "sort_thread_messages_root_first",
+]
+from = ["mindroom.matrix.thread_projection"]
+visibility = ["mindroom.matrix.client_thread_history", "mindroom.matrix.stale_stream_cleanup"]
 exclusive = true
 
 [[interfaces]]

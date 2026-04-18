@@ -39,7 +39,7 @@ from mindroom.matrix.client_thread_history import (
     _resolve_scanned_thread_message_sources,
     _resolve_thread_history_from_event_sources_timed,
 )
-from mindroom.matrix.thread_membership import ordered_event_ids_from_scanned_event_sources
+from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
 from tests.conftest import make_event_cache_mock
 
 if TYPE_CHECKING:

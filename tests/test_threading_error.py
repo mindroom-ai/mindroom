@@ -55,10 +55,10 @@ from mindroom.matrix.thread_membership import (
     resolve_event_thread_id,
     resolve_related_event_thread_id,
     resolve_related_event_thread_id_best_effort,
-    resolve_thread_ids_for_event_infos,
     room_scan_thread_membership_access,
     snapshot_thread_membership_access,
 )
+from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
