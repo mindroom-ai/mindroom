@@ -338,6 +338,9 @@ knowledge_bases:
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
       poll_interval_seconds: 300
+      startup_behavior: background # Optional: defer resume/incremental syncs to the background loop
+      lfs: false                   # Optional: enable Git LFS support (requires git-lfs on the runtime host)
+      sync_timeout_seconds: 3600   # Optional: abort a hung git command after this many seconds
       skip_hidden: true
       include_patterns: ["docs/**"]  # Optional: root-anchored glob filters
       exclude_patterns: []

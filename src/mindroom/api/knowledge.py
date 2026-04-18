@@ -13,8 +13,8 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.knowledge.manager import (
     KnowledgeManager,
+    ensure_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
-    initialize_shared_knowledge_managers,
 )
 
 if TYPE_CHECKING:
@@ -87,15 +87,6 @@ def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[l
     return files, total_size
 
 
-async def _ensure_managers(config: Config, runtime_paths: constants.RuntimePaths) -> dict[str, KnowledgeManager]:
-    return await initialize_shared_knowledge_managers(
-        config,
-        runtime_paths,
-        start_watchers=False,
-        reindex_on_create=True,
-    )
-
-
 def _get_existing_manager(
     config: Config,
     base_id: str,
@@ -108,16 +99,50 @@ def _get_existing_manager(
     )
 
 
+async def _ensure_shared_manager(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    initialize_on_create: bool,
+) -> KnowledgeManager | None:
+    existing = _get_existing_manager(config, base_id, runtime_paths)
+    if existing is not None:
+        return existing
+    return await ensure_shared_knowledge_manager(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        start_watchers=False,
+        reindex_on_create=False,
+        initialize_on_create=initialize_on_create,
+    )
+
+
 async def _ensure_manager(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> KnowledgeManager | None:
-    existing = _get_existing_manager(config, base_id, runtime_paths)
-    if existing is not None:
-        return existing
-    managers = await _ensure_managers(config, runtime_paths)
-    return managers.get(base_id)
+    return await _ensure_shared_manager(
+        config,
+        base_id,
+        runtime_paths,
+        initialize_on_create=True,
+    )
+
+
+async def _ensure_manager_for_explicit_reindex(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> KnowledgeManager | None:
+    return await _ensure_shared_manager(
+        config=config,
+        base_id=base_id,
+        runtime_paths=runtime_paths,
+        initialize_on_create=False,
+    )
 
 
 def _rollback_uploaded_files(uploaded_paths: list[Path]) -> None:
@@ -172,21 +197,24 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         if manager is None:
             file_count = len(_list_file_info(root)[0])
             indexed_count = 0
+            git_status = None
         else:
             status = manager.get_status()
             file_count = int(status["file_count"])
             indexed_count = int(status["indexed_count"])
+            git_status = status.get("git")
 
-        bases.append(
-            {
-                "name": base_id,
-                "path": str(root),
-                "watch": base_config.watch,
-                "file_count": file_count,
-                "indexed_count": indexed_count,
-                "manager_available": manager is not None,
-            },
-        )
+        base_entry = {
+            "name": base_id,
+            "path": str(root),
+            "watch": base_config.watch,
+            "file_count": file_count,
+            "indexed_count": indexed_count,
+            "manager_available": manager is not None,
+        }
+        if git_status is not None:
+            base_entry["git"] = git_status
+        bases.append(base_entry)
 
     return {
         "bases": bases,
@@ -220,6 +248,13 @@ async def upload_knowledge_files(
     """Upload one or more files into a knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths, create=True)
+    git_backed_base = config.knowledge_bases[base_id].git is not None
+    manager: KnowledgeManager | None = None
+    if git_backed_base:
+        manager = await _ensure_manager(config, base_id, runtime_paths)
+        if manager is None:
+            raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
+        await manager.ensure_git_checkout_ready()
 
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
@@ -245,7 +280,8 @@ async def upload_knowledge_files(
         uploaded_paths.append(destination)
         uploaded.append(destination.relative_to(root).as_posix())
 
-    manager = await _ensure_manager(config, base_id, runtime_paths)
+    if manager is None:
+        manager = await _ensure_manager(config, base_id, runtime_paths)
     if manager is not None:
         for relative_path in uploaded:
             await manager.index_file(relative_path, upsert=True)
@@ -293,11 +329,13 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         manager_status = manager.get_status()
         indexed_count = int(manager_status["indexed_count"])
         file_count = int(manager_status["file_count"])
+        git_status = manager_status.get("git")
     else:
         indexed_count = 0
         file_count = len(_list_file_info(root)[0])
+        git_status = None
 
-    return {
+    payload = {
         "base_id": base_id,
         "folder_path": str(root),
         "watch": config.knowledge_bases[base_id].watch,
@@ -305,6 +343,9 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "indexed_count": indexed_count,
         "manager_available": manager is not None,
     }
+    if git_status is not None:
+        payload["git"] = git_status
+    return payload
 
 
 @router.post("/bases/{base_id}/reindex")
@@ -313,14 +354,11 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
 
-    manager = await _ensure_manager(config, base_id, runtime_paths)
+    manager = await _ensure_manager_for_explicit_reindex(config, base_id, runtime_paths)
     if manager is None:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
 
-    if config.knowledge_bases[base_id].git is not None:
-        await manager.sync_git_repository()
-
-    indexed_count = await manager.reindex_all()
+    indexed_count = await manager.reindex_explicitly()
     return {
         "success": True,
         "base_id": base_id,

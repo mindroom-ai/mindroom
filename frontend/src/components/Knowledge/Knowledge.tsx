@@ -18,6 +18,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { FolderOpen, GitBranch, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 
@@ -37,6 +44,19 @@ interface KnowledgeStatus {
   watch: boolean;
   file_count: number;
   indexed_count: number;
+  git?: {
+    repo_url: string;
+    branch: string;
+    lfs: boolean;
+    startup_behavior: 'blocking' | 'background';
+    syncing: boolean;
+    repo_present: boolean;
+    initial_sync_complete: boolean;
+    last_successful_sync_at: string | null;
+    last_successful_commit: string | null;
+    last_error: string | null;
+    pending_startup_mode: 'resume' | 'incremental' | null;
+  };
 }
 
 interface KnowledgeFilesResponse {
@@ -61,6 +81,9 @@ const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
   repo_url: '',
   branch: 'main',
   poll_interval_seconds: 300,
+  startup_behavior: 'blocking',
+  lfs: false,
+  sync_timeout_seconds: 3600,
   skip_hidden: true,
 };
 
@@ -74,6 +97,15 @@ function formatBytes(bytes: number): string {
 function formatModifiedDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatStartupMode(value: 'resume' | 'incremental'): string {
+  switch (value) {
+    case 'resume':
+      return 'Resume';
+    case 'incremental':
+      return 'Incremental';
+  }
 }
 
 function defaultPathForBase(baseName: string): string {
@@ -119,6 +151,12 @@ function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
         ? gitConfig.poll_interval_seconds
         : DEFAULT_GIT_SETTINGS.poll_interval_seconds,
     credentials_service: gitConfig.credentials_service?.trim() || undefined,
+    startup_behavior: gitConfig.startup_behavior === 'background' ? 'background' : 'blocking',
+    lfs: gitConfig.lfs ?? DEFAULT_GIT_SETTINGS.lfs,
+    sync_timeout_seconds:
+      typeof gitConfig.sync_timeout_seconds === 'number' && gitConfig.sync_timeout_seconds >= 5
+        ? gitConfig.sync_timeout_seconds
+        : DEFAULT_GIT_SETTINGS.sync_timeout_seconds,
     skip_hidden: gitConfig.skip_hidden ?? true,
     include_patterns:
       gitConfig.include_patterns && gitConfig.include_patterns.length > 0
@@ -1053,6 +1091,35 @@ export function Knowledge() {
                     <div className="space-y-2">
                       <label
                         className="text-sm font-medium"
+                        htmlFor="knowledge-git-startup-behavior"
+                      >
+                        Startup Behavior
+                      </label>
+                      <Select
+                        value={settings.git.startup_behavior ?? 'blocking'}
+                        onValueChange={value =>
+                          updateGitSettings({
+                            startup_behavior: value === 'background' ? 'background' : 'blocking',
+                          })
+                        }
+                      >
+                        <SelectTrigger id="knowledge-git-startup-behavior">
+                          <SelectValue placeholder="Select startup behavior" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="blocking">Blocking</SelectItem>
+                          <SelectItem value="background">Background</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Blocking waits for the initial sync. Background serves the current index and
+                        syncs later.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
                         htmlFor="knowledge-git-credentials-service"
                       >
                         Credentials Service (optional)
@@ -1070,6 +1137,45 @@ export function Knowledge() {
                       <p className="text-xs text-muted-foreground">
                         Service name in Credentials tab for private HTTPS repos.
                       </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-sync-timeout-seconds"
+                      >
+                        Sync Timeout (seconds)
+                      </label>
+                      <Input
+                        id="knowledge-git-sync-timeout-seconds"
+                        type="number"
+                        min={5}
+                        value={settings.git.sync_timeout_seconds ?? 3600}
+                        onChange={event => {
+                          const nextValue = Number.parseInt(event.target.value, 10);
+                          updateGitSettings({
+                            sync_timeout_seconds:
+                              Number.isNaN(nextValue) || nextValue < 5 ? 5 : nextValue,
+                          });
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Abort a hung Git command after this many seconds.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium">Enable Git LFS</p>
+                        <p className="text-xs text-muted-foreground">
+                          Pull Git LFS objects after each sync for repositories with large files.
+                        </p>
+                      </div>
+                      <Checkbox
+                        aria-label="Enable Git LFS"
+                        checked={settings.git.lfs ?? false}
+                        onCheckedChange={checked => updateGitSettings({ lfs: checked === true })}
+                      />
                     </div>
 
                     <div className="flex items-center justify-between rounded-md border p-3">
@@ -1158,10 +1264,51 @@ export function Knowledge() {
                   <Badge variant="outline">Files: {status?.file_count ?? 0}</Badge>
                   <Badge variant="outline">Indexed: {status?.indexed_count ?? 0}</Badge>
                   <Badge variant="outline">Total Size: {formatBytes(totalSize)}</Badge>
+                  {status?.git ? (
+                    <>
+                      <Badge variant="outline">Git: {status.git.startup_behavior}</Badge>
+                      <Badge variant={status.git.syncing ? 'default' : 'outline'}>
+                        {status.git.syncing ? 'Syncing' : 'Idle'}
+                      </Badge>
+                      <Badge variant="outline">
+                        {status.git.repo_present ? 'Repo Present' : 'Repo Missing'}
+                      </Badge>
+                      <Badge variant="outline">
+                        {status.git.initial_sync_complete
+                          ? 'Initial Sync Complete'
+                          : 'Initial Sync Pending'}
+                      </Badge>
+                      {status.git.pending_startup_mode ? (
+                        <Badge variant="secondary">
+                          Pending: {formatStartupMode(status.git.pending_startup_mode)}
+                        </Badge>
+                      ) : null}
+                      {status.git.lfs ? <Badge variant="secondary">LFS</Badge> : null}
+                      {status.git.last_error ? (
+                        <Badge variant="destructive">Git Error</Badge>
+                      ) : null}
+                    </>
+                  ) : null}
                 </div>
                 <p className="text-sm text-muted-foreground mt-2">
                   Folder: <code>{status?.folder_path ?? '-'}</code>
                 </p>
+                {status?.git ? (
+                  <div className="mt-2 space-y-1 text-sm text-muted-foreground">
+                    <p>
+                      Repo: <code>{status.git.repo_url}</code> ({status.git.branch})
+                    </p>
+                    {status.git.last_successful_commit ? (
+                      <p>
+                        Last Commit: <code>{status.git.last_successful_commit}</code>
+                      </p>
+                    ) : null}
+                    {status.git.last_successful_sync_at ? (
+                      <p>Last Sync: {formatModifiedDate(status.git.last_successful_sync_at)}</p>
+                    ) : null}
+                    {status.git.last_error ? <p>Git Error: {status.git.last_error}</p> : null}
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
           </>

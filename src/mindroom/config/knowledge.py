@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -18,6 +20,19 @@ class KnowledgeGitConfig(BaseModel):
     credentials_service: str | None = Field(
         default=None,
         description="Optional CredentialsManager service name used for private HTTPS repos",
+    )
+    lfs: bool = Field(
+        default=False,
+        description="Enable Git LFS support for repositories that require large-file downloads",
+    )
+    startup_behavior: Literal["blocking", "background"] = Field(
+        default="blocking",
+        description="Whether startup should wait for Git sync or schedule it in the background",
+    )
+    sync_timeout_seconds: int = Field(
+        default=3600,
+        ge=5,
+        description="Maximum time allowed for one Git sync command before it is aborted",
     )
     skip_hidden: bool = Field(
         default=True,

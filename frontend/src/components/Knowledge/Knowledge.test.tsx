@@ -28,6 +28,19 @@ type KnowledgeApiPayloads = {
     watch: boolean;
     file_count: number;
     indexed_count: number;
+    git?: {
+      repo_url: string;
+      branch: string;
+      lfs: boolean;
+      startup_behavior: 'blocking' | 'background';
+      syncing: boolean;
+      repo_present: boolean;
+      initial_sync_complete: boolean;
+      last_successful_sync_at: string | null;
+      last_successful_commit: string | null;
+      last_error: string | null;
+      pending_startup_mode: 'resume' | 'incremental' | null;
+    };
   };
   files: {
     base_id: string;
@@ -301,6 +314,63 @@ describe('Knowledge', () => {
     expect(gitCard).toHaveTextContent('Branch: release');
   });
 
+  it('shows git sync status details from the API', async () => {
+    mockStore({
+      git_docs: {
+        path: './knowledge_docs/git_docs',
+        watch: true,
+        git: {
+          repo_url: 'https://github.com/org/git-docs',
+          branch: 'release',
+          startup_behavior: 'background',
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      git_docs: {
+        status: {
+          base_id: 'git_docs',
+          folder_path: './knowledge_docs/git_docs',
+          watch: true,
+          file_count: 4,
+          indexed_count: 3,
+          git: {
+            repo_url: 'https://github.com/org/git-docs',
+            branch: 'release',
+            lfs: true,
+            startup_behavior: 'background',
+            syncing: true,
+            repo_present: true,
+            initial_sync_complete: false,
+            last_successful_sync_at: '2026-04-17T12:00:00+00:00',
+            last_successful_commit: 'abc123',
+            last_error: 'fetch failed',
+            pending_startup_mode: 'resume',
+          },
+        },
+        files: {
+          base_id: 'git_docs',
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText('Active: git_docs');
+
+    expect(screen.getByText('Git: background')).toBeInTheDocument();
+    expect(screen.getByText('Syncing')).toBeInTheDocument();
+    expect(screen.getByText('Repo Present')).toBeInTheDocument();
+    expect(screen.getByText('Initial Sync Pending')).toBeInTheDocument();
+    expect(screen.getByText('Pending: Resume')).toBeInTheDocument();
+    expect(screen.getByText('LFS')).toBeInTheDocument();
+    expect(screen.getByText('Git Error')).toBeInTheDocument();
+    expect(screen.getByText(/Last Commit:/)).toHaveTextContent('abc123');
+    expect(screen.getByText(/Git Error:/)).toHaveTextContent('fetch failed');
+  });
+
   it('switches source type in settings and toggles git fields', async () => {
     mockStore({
       docs: { path: './knowledge_docs/docs', watch: true },
@@ -425,15 +495,83 @@ describe('Knowledge', () => {
         expect.objectContaining({
           chunk_size: 2048,
           chunk_overlap: 256,
-          git: {
+          git: expect.objectContaining({
             repo_url: 'https://github.com/org/repo-updated',
             branch: 'release',
             poll_interval_seconds: 45,
             credentials_service: 'github-private',
+            startup_behavior: 'blocking',
+            lfs: false,
+            sync_timeout_seconds: 3600,
             skip_hidden: false,
             include_patterns: ['docs/**', 'knowledge/**'],
             exclude_patterns: ['docs/private/**'],
+          }),
+        })
+      );
+    });
+  });
+
+  it('saves advanced git settings from base settings', async () => {
+    mockStore(
+      {
+        docs: {
+          path: './knowledge_docs/docs',
+          watch: true,
+          chunk_size: 5000,
+          chunk_overlap: 0,
+          git: {
+            repo_url: 'https://github.com/org/repo',
+            branch: 'main',
+            startup_behavior: 'background',
+            lfs: true,
+            sync_timeout_seconds: 1800,
           },
+        },
+      },
+      { isDirty: true }
+    );
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: 'docs',
+          folder_path: './knowledge_docs/docs',
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: 'docs',
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText('Active: docs');
+
+    fireEvent.click(screen.getByRole('combobox', { name: 'Startup Behavior' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Blocking' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Enable Git LFS' }));
+    fireEvent.change(screen.getByLabelText('Sync Timeout (seconds)'), {
+      target: { value: '900' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }));
+    await waitFor(() => {
+      expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+      expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
+        'docs',
+        expect.objectContaining({
+          git: expect.objectContaining({
+            repo_url: 'https://github.com/org/repo',
+            branch: 'main',
+            startup_behavior: 'blocking',
+            lfs: false,
+            sync_timeout_seconds: 900,
+          }),
         })
       );
     });

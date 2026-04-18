@@ -3489,7 +3489,7 @@ class TestKnowledgeIntegration:
             )
 
         mock_init.assert_awaited_once()
-        assert mock_init.await_args.kwargs["reindex_on_create"] is True
+        assert mock_init.await_args.kwargs["reindex_on_create"] is False
 
     def test_knowledge_unavailable_returns_none(self, knowledge_app_client: TestClient) -> None:
         """When knowledge manager is not found, knowledge is None."""
