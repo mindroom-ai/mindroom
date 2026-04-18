@@ -19,7 +19,6 @@ from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
-    conversation_cache_thread_membership_access_for_client,
     fetch_event_info_for_client,
     fetch_event_info_from_conversation_cache,
     resolve_event_thread_membership,
@@ -112,13 +111,15 @@ async def resolve_event_thread_impact_for_client(
     conversation_cache: ConversationCacheProtocol | None,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one outbound client-side event payload."""
+    from mindroom.matrix.conversation_cache import _room_scan_membership_access_for_client  # noqa: PLC0415
+
     if event_type != "m.room.message":
         return MutationThreadImpact.room_level()
     event_info = EventInfo.from_event({"type": event_type, "content": dict(content)})
     resolution = await resolve_event_thread_membership(
         room_id,
         event_info,
-        access=conversation_cache_thread_membership_access_for_client(
+        access=_room_scan_membership_access_for_client(
             client,
             conversation_cache=conversation_cache,
         ),
@@ -134,6 +135,8 @@ async def resolve_redaction_thread_impact_for_client(
     conversation_cache: ConversationCacheProtocol | None,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one client-side redaction target."""
+    from mindroom.matrix.conversation_cache import _room_scan_membership_access_for_client  # noqa: PLC0415
+
     if conversation_cache is None:
         target_event_info = await fetch_event_info_for_client(
             client,
@@ -153,7 +156,7 @@ async def resolve_redaction_thread_impact_for_client(
     resolution = await resolve_related_event_thread_membership(
         room_id,
         event_id,
-        access=conversation_cache_thread_membership_access_for_client(
+        access=_room_scan_membership_access_for_client(
             client,
             conversation_cache=conversation_cache,
         ),
