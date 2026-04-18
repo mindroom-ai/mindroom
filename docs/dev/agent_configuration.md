@@ -356,7 +356,7 @@ defaults:
   show_tool_calls: true
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload
-  thread_summary_first_threshold: 5  # First automatic thread summary after 5 messages
+  thread_summary_first_threshold: 1  # First automatic thread summary after 1 message
   thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
   # num_history_runs: null  # Default: all
   # num_history_messages: null  # Mutually exclusive with num_history_runs
@@ -625,7 +625,7 @@ defaults:
   tools: [scheduler]
   markdown: true
   enable_streaming: true
-  thread_summary_first_threshold: 5
+  thread_summary_first_threshold: 1
   thread_summary_subsequent_interval: 10
 
 # Router
