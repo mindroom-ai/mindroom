@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -43,7 +45,6 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 class _DummyVectorDb:
@@ -55,6 +56,139 @@ class _DummyVectorDb:
 
     def exists(self) -> bool:
         return True
+
+
+@pytest.mark.parametrize(
+    ("consumer_path", "bad_import", "forbidden_symbol"),
+    [
+        (
+            "src/mindroom/api/knowledge.py",
+            "from mindroom.knowledge.manager import KnowledgeManager\n",
+            "mindroom.knowledge.manager.KnowledgeManager",
+        ),
+        (
+            "src/mindroom/api/openai_compat.py",
+            "from mindroom.knowledge.utils import get_agent_knowledge\n",
+            "mindroom.knowledge.utils.get_agent_knowledge",
+        ),
+        (
+            "src/mindroom/bot.py",
+            "from mindroom.knowledge.utils import MultiKnowledgeVectorDb\n",
+            "mindroom.knowledge.utils.MultiKnowledgeVectorDb",
+        ),
+        (
+            "src/mindroom/custom_tools/delegate.py",
+            "from mindroom.knowledge.utils import ensure_request_knowledge_managers\n",
+            "mindroom.knowledge.utils.ensure_request_knowledge_managers",
+        ),
+        (
+            "src/mindroom/orchestrator.py",
+            "from mindroom.knowledge.manager import initialize_shared_knowledge_managers\n",
+            "mindroom.knowledge.manager.initialize_shared_knowledge_managers",
+        ),
+        (
+            "src/mindroom/response_runner.py",
+            "from mindroom.knowledge.utils import KnowledgeAccessSupport\n",
+            "mindroom.knowledge.utils.KnowledgeAccessSupport",
+        ),
+        (
+            "src/mindroom/teams.py",
+            "from mindroom.knowledge.utils import get_agent_knowledge\n",
+            "mindroom.knowledge.utils.get_agent_knowledge",
+        ),
+    ],
+)
+def test_tach_enforces_public_knowledge_facade_for_current_consumers(
+    tmp_path: Path,
+    consumer_path: str,
+    bad_import: str,
+    forbidden_symbol: str,
+) -> None:
+    """Declared knowledge consumers should be blocked from importing private submodules."""
+    repo_root = Path(__file__).resolve().parents[1]
+    (tmp_path / "tach.toml").write_text((repo_root / "tach.toml").read_text())
+
+    src_root = tmp_path / "src" / "mindroom"
+    knowledge_root = src_root / "knowledge"
+    api_root = src_root / "api"
+    custom_tools_root = src_root / "custom_tools"
+    knowledge_root.mkdir(parents=True)
+    api_root.mkdir()
+    custom_tools_root.mkdir()
+
+    (src_root / "__init__.py").write_text("")
+    (api_root / "__init__.py").write_text("")
+    (custom_tools_root / "__init__.py").write_text("")
+    (src_root / "bot.py").write_text("")
+    (src_root / "orchestrator.py").write_text("")
+    (src_root / "response_runner.py").write_text("")
+    (src_root / "teams.py").write_text("")
+    (api_root / "knowledge.py").write_text("")
+    (api_root / "openai_compat.py").write_text("")
+    (custom_tools_root / "delegate.py").write_text("")
+    (knowledge_root / "__init__.py").write_text(
+        """from mindroom.knowledge.manager import (
+    KnowledgeManager,
+    get_shared_knowledge_manager_for_config,
+    initialize_shared_knowledge_managers,
+    shutdown_shared_knowledge_managers,
+)
+from mindroom.knowledge.utils import (
+    KnowledgeAccessSupport,
+    MultiKnowledgeVectorDb,
+    ensure_request_knowledge_managers,
+    get_agent_knowledge,
+)
+""",
+    )
+    (knowledge_root / "manager.py").write_text(
+        """class KnowledgeManager:
+    pass
+
+
+def get_shared_knowledge_manager_for_config(*args, **kwargs):
+    return None
+
+
+async def initialize_shared_knowledge_managers(*args, **kwargs):
+    return {}
+
+
+async def shutdown_shared_knowledge_managers():
+    return None
+""",
+    )
+    (knowledge_root / "utils.py").write_text(
+        """class KnowledgeAccessSupport:
+    pass
+
+
+class MultiKnowledgeVectorDb:
+    pass
+
+
+async def ensure_request_knowledge_managers(*args, **kwargs):
+    return {}
+
+
+def get_agent_knowledge(*args, **kwargs):
+    return None
+""",
+    )
+    (knowledge_root / "chunking.py").write_text("")
+    (tmp_path / consumer_path).write_text(bad_import)
+
+    tach = Path(sys.executable).with_name("tach")
+    result = subprocess.run(
+        [str(tach), "check"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert forbidden_symbol in f"{result.stdout}\n{result.stderr}"
 
 
 class _DummyCollection:

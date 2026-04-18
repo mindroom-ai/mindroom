@@ -26,6 +26,70 @@ depends_on = [
     "mindroom.matrix.client",
 ]
 
+# Keep the current knowledge facade consumers explicit so Tach can enforce the
+# package surface instead of silently allowing direct private imports.
+[[modules]]
+path = "mindroom.api.knowledge"
+depends_on = ["mindroom.knowledge"]
+
+[[modules]]
+path = "mindroom.api.openai_compat"
+depends_on = [
+    "mindroom.knowledge",
+    "mindroom.matrix.client",
+    "mindroom.teams",
+]
+
+[[modules]]
+path = "mindroom.bot"
+depends_on = [
+    "mindroom.bot_runtime_view",
+    "mindroom.conversation_resolver",
+    "mindroom.hooks.sender",
+    "mindroom.knowledge",
+    "mindroom.matrix.client",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.post_response_effects",
+    "mindroom.response_runner",
+    "mindroom.scheduling",
+    "mindroom.teams",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.delegate"
+depends_on = [
+    "mindroom.knowledge",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.orchestrator"
+depends_on = [
+    "mindroom.bot",
+    "mindroom.knowledge",
+    "mindroom.matrix.client",
+    "mindroom.runtime_support",
+    "mindroom.scheduling",
+]
+
+[[modules]]
+path = "mindroom.response_runner"
+depends_on = [
+    "mindroom.knowledge",
+    "mindroom.matrix.client",
+    "mindroom.post_response_effects",
+    "mindroom.streaming",
+    "mindroom.teams",
+    "mindroom.thread_summary",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.teams"
+depends_on = ["mindroom.knowledge"]
+
 [[modules]]
 path = "mindroom.matrix.cache"
 depends_on = [
@@ -185,8 +249,8 @@ depends_on = [
 expose = [
     "KnowledgeAccessSupport",
     "KnowledgeManager",
-    "ensure_request_knowledge_managers",
     "ensure_shared_knowledge_manager",
+    "ensure_request_knowledge_managers",
     "get_agent_knowledge",
     "get_shared_knowledge_manager_for_config",
     "initialize_shared_knowledge_managers",

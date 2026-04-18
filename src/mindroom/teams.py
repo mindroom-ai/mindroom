@@ -51,7 +51,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.knowledge import KnowledgeManager, ensure_request_knowledge_managers, get_agent_knowledge
+from mindroom.knowledge import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionOutcome
+    from mindroom.knowledge import KnowledgeManager
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
