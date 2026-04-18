@@ -13,7 +13,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
-from mindroom.matrix.thread_membership import resolve_thread_root_event_id_for_client
+from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     ThreadTagRecord,
     ThreadTagsError,

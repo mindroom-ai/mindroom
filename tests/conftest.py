@@ -23,11 +23,8 @@ from mindroom.edit_regenerator import EditRegenerator
 from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
-from mindroom.matrix.client import (
-    DeliveredMatrixEvent,
-    ResolvedVisibleMessage,
-    build_edit_event_content,
-)
+from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry

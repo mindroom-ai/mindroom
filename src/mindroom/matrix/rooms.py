@@ -10,7 +10,7 @@ import nio
 from mindroom.constants import resolve_avatar_path
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import check_and_set_avatar
-from mindroom.matrix.client import (
+from mindroom.matrix.client_room_admin import (
     add_room_to_space,
     create_room,
     create_space,
@@ -21,6 +21,8 @@ from mindroom.matrix.client import (
     get_joined_rooms,
     join_room,
     leave_room,
+)
+from mindroom.matrix.client_session import (
     matrix_client,
 )
 from mindroom.matrix.identity import (

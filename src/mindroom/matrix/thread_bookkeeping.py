@@ -19,12 +19,15 @@ from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
-    conversation_cache_thread_membership_access_for_client,
     fetch_event_info_for_client,
-    fetch_event_info_from_conversation_cache,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
-    resolve_thread_ids_for_event_infos,
+)
+from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
+from mindroom.matrix.thread_room_scan import (
+    RoomScanConversationCache,
+    _fetch_event_info_from_conversation_cache,
+    _room_scan_membership_access_for_client,
 )
 
 if TYPE_CHECKING:
@@ -34,7 +37,6 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 
 def is_thread_affecting_relation(event_info: EventInfo) -> bool:
@@ -109,7 +111,7 @@ async def resolve_event_thread_impact_for_client(
     *,
     event_type: str,
     content: Mapping[str, object],
-    conversation_cache: ConversationCacheProtocol | None,
+    conversation_cache: RoomScanConversationCache | None,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one outbound client-side event payload."""
     if event_type != "m.room.message":
@@ -118,7 +120,7 @@ async def resolve_event_thread_impact_for_client(
     resolution = await resolve_event_thread_membership(
         room_id,
         event_info,
-        access=conversation_cache_thread_membership_access_for_client(
+        access=_room_scan_membership_access_for_client(
             client,
             conversation_cache=conversation_cache,
         ),
@@ -131,7 +133,7 @@ async def resolve_redaction_thread_impact_for_client(
     room_id: str,
     *,
     event_id: str,
-    conversation_cache: ConversationCacheProtocol | None,
+    conversation_cache: RoomScanConversationCache | None,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one client-side redaction target."""
     if conversation_cache is None:
@@ -142,7 +144,7 @@ async def resolve_redaction_thread_impact_for_client(
             strict=True,
         )
     else:
-        target_event_info = await fetch_event_info_from_conversation_cache(
+        target_event_info = await _fetch_event_info_from_conversation_cache(
             conversation_cache,
             room_id,
             event_id,
@@ -153,7 +155,7 @@ async def resolve_redaction_thread_impact_for_client(
     resolution = await resolve_related_event_thread_membership(
         room_id,
         event_id,
-        access=conversation_cache_thread_membership_access_for_client(
+        access=_room_scan_membership_access_for_client(
             client,
             conversation_cache=conversation_cache,
         ),

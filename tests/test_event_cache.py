@@ -16,7 +16,7 @@ from nio.api import RelationshipType
 import mindroom.matrix.cache.event_cache as event_cache_module
 from mindroom.matrix.cache import event_cache_events, event_cache_threads
 from mindroom.matrix.cache.event_cache import _EventCache
-from mindroom.matrix.client import fetch_thread_history
+from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
@@ -1343,7 +1343,7 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
 
     assert latest_edit is None
     assert cached_original is None
-    assert schema_version == event_cache_module._EVENT_CACHE_SCHEMA_VERSION
+    assert schema_version == event_cache_module.EVENT_CACHE_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio

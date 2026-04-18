@@ -25,15 +25,15 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     edit_message_result,
     get_joined_rooms,
-    resolve_latest_visible_messages,
     send_message_result,
 )
+from mindroom.matrix.client_visible_messages import resolve_latest_visible_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
-from mindroom.matrix.thread_membership import (
+from mindroom.matrix.thread_projection import (
     SupportsVisibleThreadMessage,
     latest_visible_thread_event_id_by_thread,
     ordered_event_ids_from_scanned_event_sources,

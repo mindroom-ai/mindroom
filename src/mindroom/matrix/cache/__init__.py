@@ -8,7 +8,7 @@ Developer note:
 
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
-- `_EventCache` and `_EventCacheWriteCoordinator` remain private concrete implementations used by `runtime_support.py` as the composition-root exception.
+- `_EventCache` and `_EventCacheWriteCoordinator` remain private concrete implementations used by `runtime_support.py` through their concrete owner modules.
 - `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package and may use specific cache helper submodules through narrow Tach visibility.
 
 Main invariants:
@@ -17,10 +17,11 @@ Main invariants:
 - Thread invalidation is durable state first, with fail-closed deletion only when stale markers cannot be written.
 """
 
-from .event_cache import ConversationEventCache, ThreadCacheState, _EventCache
+from .event_cache import ConversationEventCache, ThreadCacheState
 from .event_cache_events import normalize_nio_event_for_cache
-from .thread_cache_helpers import thread_cache_state_is_usable
+from .thread_cache_helpers import thread_cache_rejection_reason, thread_cache_state_is_usable
 from .thread_history_result import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_CACHE,
@@ -30,9 +31,10 @@ from .thread_history_result import (
     ThreadHistoryResult,
     thread_history_result,
 )
-from .write_coordinator import EventCacheWriteCoordinator, _EventCacheWriteCoordinator
+from .write_coordinator import EventCacheWriteCoordinator
 
 __all__ = [
+    "THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC",
     "THREAD_HISTORY_DEGRADED_DIAGNOSTIC",
     "THREAD_HISTORY_ERROR_DIAGNOSTIC",
     "THREAD_HISTORY_SOURCE_CACHE",
@@ -43,9 +45,8 @@ __all__ = [
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
-    "_EventCache",
-    "_EventCacheWriteCoordinator",
     "normalize_nio_event_for_cache",
+    "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",
     "thread_history_result",
 ]

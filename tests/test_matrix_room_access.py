@@ -12,6 +12,7 @@ from mindroom import topic_generator
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
+from mindroom.matrix import client_room_admin as matrix_room_admin
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.presence import is_user_online
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
@@ -255,7 +256,7 @@ async def test_create_room_seeds_thread_tags_power_level(
     mock_client.user_id = "@router:example.com"
     mock_client.room_create.return_value = nio.RoomCreateResponse(room_id="!lobby:example.com")
     invite_to_room = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_client, "invite_to_room", invite_to_room)
+    monkeypatch.setattr(matrix_room_admin, "invite_to_room", invite_to_room)
 
     room_id = await matrix_client.create_room(
         client=mock_client,
@@ -396,11 +397,11 @@ async def test_ensure_thread_tags_power_level_idempotent() -> None:
 async def test_ensure_room_join_rule_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Join-rule reconciliation should be idempotent when already in desired state."""
     mock_client = AsyncMock()
-    monkeypatch.setattr(matrix_client, "_get_room_join_rule", AsyncMock(return_value="public"))
+    monkeypatch.setattr(matrix_room_admin, "_get_room_join_rule", AsyncMock(return_value="public"))
     set_room_join_rule = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_client, "_set_room_join_rule", set_room_join_rule)
+    monkeypatch.setattr(matrix_room_admin, "_set_room_join_rule", set_room_join_rule)
 
-    result = await matrix_client.ensure_room_join_rule(mock_client, "!room:example.com", "public")
+    result = await matrix_room_admin.ensure_room_join_rule(mock_client, "!room:example.com", "public")
 
     assert result is True
     set_room_join_rule.assert_not_awaited()
@@ -418,7 +419,7 @@ async def test_get_room_join_rule_falls_back_to_state_event_when_room_missing() 
         room_id="!room:example.com",
     )
 
-    result = await matrix_client._get_room_join_rule(mock_client, "!room:example.com")
+    result = await matrix_room_admin._get_room_join_rule(mock_client, "!room:example.com")
 
     assert result == "public"
     mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.join_rules")
@@ -437,7 +438,7 @@ async def test_get_room_join_rule_falls_back_to_state_event_when_room_not_synced
         room_id="!room:example.com",
     )
 
-    result = await matrix_client._get_room_join_rule(mock_client, "!room:example.com")
+    result = await matrix_room_admin._get_room_join_rule(mock_client, "!room:example.com")
 
     assert result == "public"
     mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.join_rules")
@@ -447,11 +448,11 @@ async def test_get_room_join_rule_falls_back_to_state_event_when_room_not_synced
 async def test_ensure_room_directory_visibility_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Directory visibility reconciliation should be idempotent when already in desired state."""
     mock_client = AsyncMock()
-    monkeypatch.setattr(matrix_client, "_get_room_directory_visibility", AsyncMock(return_value="private"))
+    monkeypatch.setattr(matrix_room_admin, "_get_room_directory_visibility", AsyncMock(return_value="private"))
     set_room_directory_visibility = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_client, "_set_room_directory_visibility", set_room_directory_visibility)
+    monkeypatch.setattr(matrix_room_admin, "_set_room_directory_visibility", set_room_directory_visibility)
 
-    result = await matrix_client.ensure_room_directory_visibility(mock_client, "!room:example.com", "private")
+    result = await matrix_room_admin.ensure_room_directory_visibility(mock_client, "!room:example.com", "private")
 
     assert result is True
     set_room_directory_visibility.assert_not_awaited()
@@ -464,9 +465,9 @@ async def test_set_room_join_rule_logs_actionable_permission_error(monkeypatch: 
     mock_client.room_put_state.return_value = nio.RoomPutStateError("Not allowed", "M_FORBIDDEN")
 
     warning = MagicMock()
-    monkeypatch.setattr(matrix_client.logger, "warning", warning)
+    monkeypatch.setattr(matrix_room_admin.logger, "warning", warning)
 
-    result = await matrix_client._set_room_join_rule(mock_client, "!room:example.com", "public")
+    result = await matrix_room_admin._set_room_join_rule(mock_client, "!room:example.com", "public")
 
     assert result is False
     assert warning.call_count == 1
@@ -687,9 +688,9 @@ async def test_set_room_directory_visibility_logs_actionable_permission_error(
     )
 
     warning = MagicMock()
-    monkeypatch.setattr(matrix_client.logger, "warning", warning)
+    monkeypatch.setattr(matrix_room_admin.logger, "warning", warning)
 
-    result = await matrix_client._set_room_directory_visibility(mock_client, "!room:example.com", "public")
+    result = await matrix_room_admin._set_room_directory_visibility(mock_client, "!room:example.com", "public")
 
     assert result is False
     assert warning.call_count == 1
@@ -706,7 +707,7 @@ async def test_set_room_directory_visibility_releases_response_on_success() -> N
     response = _FakeHttpResponse(status=200, body="")
     mock_client.send.return_value = response
 
-    result = await matrix_client._set_room_directory_visibility(mock_client, "!room:example.com", "public")
+    result = await matrix_room_admin._set_room_directory_visibility(mock_client, "!room:example.com", "public")
 
     assert result is True
     assert response.released is True
@@ -810,7 +811,7 @@ async def test_set_room_directory_visibility_releases_response_on_error() -> Non
     )
     mock_client.send.return_value = response
 
-    result = await matrix_client._set_room_directory_visibility(mock_client, "!room:example.com", "public")
+    result = await matrix_room_admin._set_room_directory_visibility(mock_client, "!room:example.com", "public")
 
     assert result is False
     assert response.released is True

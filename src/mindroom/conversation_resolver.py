@@ -21,6 +21,7 @@ from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
     resolve_event_thread_id_best_effort,
+    resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
@@ -327,6 +328,20 @@ class ConversationResolver:
             ),
         )
 
+    async def resolve_related_event_thread_id_best_effort(
+        self,
+        room_id: str,
+        related_event_id: str,
+        *,
+        access: ThreadMembershipAccess,
+    ) -> str | None:
+        """Return best-effort canonical thread membership for one related target event."""
+        return await resolve_related_event_thread_id_best_effort(
+            room_id,
+            related_event_id,
+            access=access,
+        )
+
     def thread_membership_access(
         self,
         *,
@@ -385,7 +400,7 @@ class ConversationResolver:
         event_info: EventInfo,
         *,
         event_id: str | None = None,
-    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage]]:
+    ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]:
         """Derive conversation context from canonical Matrix thread membership."""
         is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
             room_id,
@@ -404,7 +419,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
-    ) -> tuple[bool, str | None, list[ResolvedVisibleMessage], bool]:
+    ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage], bool]:
         """Resolve one thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(
             room_id,
@@ -423,9 +438,9 @@ class ConversationResolver:
             dispatch_safe=dispatch_safe,
         )
         if full_history:
-            return True, thread_id, list(thread_messages), False
+            return True, thread_id, thread_messages, False
 
-        return True, thread_id, list(thread_messages), not thread_messages.is_full_history
+        return True, thread_id, thread_messages, not thread_messages.is_full_history
 
     async def extract_dispatch_context(
         self,
@@ -606,7 +621,7 @@ class ConversationResolver:
         _client: nio.AsyncClient,
         room_id: str,
         thread_id: str,
-    ) -> list[ResolvedVisibleMessage]:
+    ) -> ThreadReadResult:
         """Fetch strict post-lock thread history through the shared conversation-cache policy."""
         return await self._read_thread_messages(
             room_id,
