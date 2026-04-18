@@ -1,6 +1,17 @@
 exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
 source_roots = ["src"]
 
+# Keep the current memory facade consumers visible to Tach so the public
+# interface is enforced without widening dependency enforcement repo-wide.
+[[modules]]
+paths = [
+    "mindroom.ai",
+    "mindroom.bot",
+    "mindroom.custom_tools.memory",
+    "mindroom.orchestrator",
+    "mindroom.response_runner",
+]
+
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
@@ -10,6 +21,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.memory"
 depends_on = [
+    "mindroom.ai",
     "mindroom.config.memory",
     "mindroom.matrix.client",
 ]
@@ -94,6 +106,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.scheduling"
 depends_on = [
+    "mindroom.ai",
     "mindroom.hooks.sender",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
@@ -105,7 +118,11 @@ depends_on = ["mindroom.matrix.conversation_cache", "mindroom.scheduling"]
 
 [[modules]]
 path = "mindroom.thread_summary"
-depends_on = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+depends_on = [
+    "mindroom.ai",
+    "mindroom.matrix.client",
+    "mindroom.matrix.conversation_cache",
+]
 
 [[modules]]
 path = "mindroom.streaming"
@@ -125,6 +142,7 @@ depends_on = [
     "mindroom.commands.handler",
     "mindroom.matrix.cache",
     "mindroom.matrix.conversation_cache",
+    "mindroom.response_runner",
 ]
 
 [[modules]]
