@@ -13,6 +13,7 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.knowledge.manager import (
     KnowledgeManager,
+    ensure_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
     initialize_shared_knowledge_managers,
 )
@@ -118,6 +119,24 @@ async def _ensure_manager(
         return existing
     managers = await _ensure_managers(config, runtime_paths)
     return managers.get(base_id)
+
+
+async def _ensure_manager_for_explicit_reindex(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> KnowledgeManager | None:
+    existing = _get_existing_manager(config, base_id, runtime_paths)
+    if existing is not None:
+        return existing
+    return await ensure_shared_knowledge_manager(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        start_watchers=False,
+        reindex_on_create=False,
+        initialize_on_create=False,
+    )
 
 
 def _rollback_uploaded_files(uploaded_paths: list[Path]) -> None:
@@ -329,7 +348,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
 
-    manager = await _ensure_manager(config, base_id, runtime_paths)
+    manager = await _ensure_manager_for_explicit_reindex(config, base_id, runtime_paths)
     if manager is None:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
 

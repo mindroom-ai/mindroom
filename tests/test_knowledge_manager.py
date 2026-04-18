@@ -3814,3 +3814,47 @@ async def test_start_watcher_starts_git_sync_even_when_file_watch_disabled(
 
     await manager.stop_watcher()
     assert manager._git_sync_task is None
+
+
+@pytest.mark.asyncio
+async def test_git_sync_loop_rereads_poll_interval_after_settings_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running Git sync loops should pick up a new poll interval after config refresh."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge")
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    updated_config = _make_git_config(tmp_path / "knowledge")
+    updated_config.knowledge_bases["research"].git.poll_interval_seconds = 5
+    timeouts: list[float] = []
+
+    async def _run_pending_background_git_startup() -> dict[str, object]:
+        return {}
+
+    async def _fake_wait_for(awaitable: object, **kwargs: float) -> None:
+        timeouts.append(kwargs["timeout"])
+        awaitable.close()
+        if len(timeouts) == 1:
+            manager._refresh_settings(
+                updated_config,
+                runtime_paths_for(updated_config),
+                manager.storage_path,
+                manager.knowledge_path,
+            )
+            raise TimeoutError
+        manager._git_sync_stop_event.set()
+
+    monkeypatch.setattr(manager, "_run_pending_background_git_startup", _run_pending_background_git_startup)
+    monkeypatch.setattr("mindroom.knowledge.manager.asyncio.wait_for", _fake_wait_for)
+
+    await manager._git_sync_loop()
+
+    assert timeouts == [30.0, 5.0]

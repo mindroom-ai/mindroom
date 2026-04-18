@@ -39,7 +39,7 @@ type KnowledgeApiPayloads = {
       last_successful_sync_at: string | null;
       last_successful_commit: string | null;
       last_error: string | null;
-      pending_startup_mode: 'full_reindex' | 'resume' | 'incremental' | null;
+      pending_startup_mode: 'resume' | 'incremental' | null;
     };
   };
   files: {

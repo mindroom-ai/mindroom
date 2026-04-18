@@ -55,6 +55,38 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
+class _DummyCollection:
+    def get(self, *, limit: int | None = None, include: list[str] | None = None) -> dict[str, object]:
+        _ = limit, include
+        return {"ids": []}
+
+
+class _DummyClient:
+    def get_collection(self, name: str) -> _DummyCollection:
+        _ = name
+        return _DummyCollection()
+
+
+class _DummyChromaDb:
+    def __init__(self, **_: object) -> None:
+        self.collection_name = "mindroom_knowledge"
+        self.client = _DummyClient()
+
+    def delete(self) -> bool:
+        return True
+
+    def create(self) -> None:
+        return None
+
+    def exists(self) -> bool:
+        return True
+
+
+class _DummyKnowledge:
+    def __init__(self, vector_db: _DummyChromaDb) -> None:
+        self.vector_db = vector_db
+
+
 @pytest.fixture
 def test_client(tmp_path: Path) -> TestClient:
     """Create an API client bound to explicit runtime paths for this test file."""
@@ -439,8 +471,8 @@ def test_reindex_uses_git_startup_finisher_for_git_bases(test_client: TestClient
 
     with (
         patch(
-            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
+            "mindroom.api.knowledge._ensure_manager_for_explicit_reindex",
+            new=AsyncMock(return_value=manager),
         ),
     ):
         response = test_client.post("/api/knowledge/bases/research/reindex")
@@ -464,7 +496,7 @@ def test_reindex_finishes_pending_background_startup_for_git_bases(
     manager.reindex_all = AsyncMock()
     _publish_committed_runtime_config(test_client.app, config)
 
-    with patch("mindroom.api.knowledge._ensure_manager", new=AsyncMock(return_value=manager)):
+    with patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)):
         response = test_client.post("/api/knowledge/bases/research/reindex")
 
     assert response.status_code == 200
@@ -472,6 +504,57 @@ def test_reindex_finishes_pending_background_startup_for_git_bases(
     manager.finish_pending_background_git_startup.assert_awaited_once_with(force_full_reindex=True)
     manager.sync_git_repository.assert_not_awaited()
     manager.reindex_all.assert_not_awaited()
+
+
+def test_reindex_cold_local_base_reindexes_only_once(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Cold manual reindex should not do an eager create-time rebuild before the explicit reindex."""
+    config = _knowledge_config(tmp_path)
+    _publish_committed_runtime_config(test_client.app, config)
+    reindex_all = AsyncMock(return_value=4)
+
+    try:
+        with (
+            patch("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb),
+            patch("mindroom.knowledge.manager.Knowledge", _DummyKnowledge),
+            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_all", new=reindex_all),
+        ):
+            response = test_client.post("/api/knowledge/bases/research/reindex")
+
+        assert response.status_code == 200
+        assert response.json()["indexed_count"] == 4
+        reindex_all.assert_awaited_once_with()
+    finally:
+        asyncio.run(shutdown_shared_knowledge_managers())
+
+
+def test_reindex_cold_git_base_syncs_and_reindexes_only_once(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Cold manual Git reindex should perform one explicit sync/rebuild pass, not two."""
+    config = _knowledge_config(tmp_path, with_git=True)
+    _publish_committed_runtime_config(test_client.app, config)
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    reindex_all = AsyncMock(return_value=6)
+
+    try:
+        with (
+            patch("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb),
+            patch("mindroom.knowledge.manager.Knowledge", _DummyKnowledge),
+            patch("mindroom.knowledge.manager.KnowledgeManager.sync_git_repository", new=sync_git_repository),
+            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_all", new=reindex_all),
+        ):
+            response = test_client.post("/api/knowledge/bases/research/reindex")
+
+        assert response.status_code == 200
+        assert response.json()["indexed_count"] == 6
+        sync_git_repository.assert_awaited_once_with(index_changes=False)
+        reindex_all.assert_awaited_once_with()
+    finally:
+        asyncio.run(shutdown_shared_knowledge_managers())
 
 
 def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClient) -> None:

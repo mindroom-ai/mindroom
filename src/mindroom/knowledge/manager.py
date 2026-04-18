@@ -388,7 +388,7 @@ class KnowledgeManager:
     _git_last_successful_sync_at: datetime | None = field(default=None, init=False)
     _git_last_successful_commit: str | None = field(default=None, init=False)
     _git_last_error: str | None = field(default=None, init=False)
-    _git_background_startup_mode: Literal["full_reindex", "resume", "incremental"] | None = field(
+    _git_background_startup_mode: Literal["resume", "incremental"] | None = field(
         default=None,
         init=False,
     )
@@ -1199,8 +1199,6 @@ class KnowledgeManager:
 
             for relative_path in sorted(changed_files):
                 await self.index_file(relative_path, upsert=True)
-
-        if index_changes:
             self._mark_git_initial_sync_complete()
 
         if updated:
@@ -1221,11 +1219,10 @@ class KnowledgeManager:
 
     async def _git_sync_loop(self) -> None:
         """Poll the configured Git repository and keep the knowledge folder up to date."""
-        git_config = self._git_config()
-        if git_config is None:
-            return
-
         while not self._git_sync_stop_event.is_set():
+            git_config = self._git_config()
+            if git_config is None:
+                return
             try:
                 await self._run_pending_background_git_startup()
             except Exception:
@@ -1477,8 +1474,8 @@ async def _sync_manager_without_full_reindex(
     manager: KnowledgeManager,
 ) -> dict[str, Any]:
     if manager._git_config() is not None:
-        return await manager.sync_git_repository()
-    return await manager.sync_indexed_files()
+        return {"git": await manager.sync_git_repository(), "index": None}
+    return {"git": None, "index": await manager.sync_indexed_files()}
 
 
 async def _resume_manager_without_full_reindex(
@@ -1488,13 +1485,8 @@ async def _resume_manager_without_full_reindex(
         git_result = await manager.sync_git_repository(index_changes=False)
         sync_result = await manager.sync_indexed_files()
         manager._mark_git_initial_sync_complete()
-        return {
-            "git_updated": git_result["updated"],
-            "git_changed_count": git_result["changed_count"],
-            "git_removed_count": git_result["removed_count"],
-            **sync_result,
-        }
-    return await manager.sync_indexed_files()
+        return {"git": git_result, "index": sync_result}
+    return {"git": None, "index": await manager.sync_indexed_files()}
 
 
 def _shared_knowledge_manager_init_lock(base_id: str) -> asyncio.Lock:
@@ -1607,6 +1599,7 @@ async def _create_knowledge_manager_for_target(
     config: Config,
     runtime_paths: RuntimePaths,
     reindex_on_create: bool,
+    initialize_on_create: bool = True,
     start_runtime: bool = True,
 ) -> KnowledgeManager:
     binding = target.binding
@@ -1618,6 +1611,8 @@ async def _create_knowledge_manager_for_target(
         knowledge_path=binding.knowledge_path,
         git_background_startup_allowed=not binding.request_scoped,
     )
+    if not initialize_on_create:
+        return manager
     startup_mode: Literal["full_reindex", "resume", "incremental"] = (
         "full_reindex" if reindex_on_create else manager._startup_index_mode()
     )
@@ -1643,30 +1638,18 @@ async def _create_knowledge_manager_for_target(
             "path": str(manager.knowledge_path),
             "startup_mode": startup_mode,
         }
-        if "git_updated" in sync_result:
+        git_result = sync_result["git"]
+        if git_result is not None:
             sync_log_context.update(
                 {
-                    "git_updated": sync_result["git_updated"],
-                    "git_changed_count": sync_result["git_changed_count"],
-                    "git_removed_count": sync_result["git_removed_count"],
+                    "git_updated": git_result["updated"],
+                    "git_changed_count": git_result["changed_count"],
+                    "git_removed_count": git_result["removed_count"],
                 },
             )
-        elif manager._git_config() is not None:
-            sync_log_context.update(
-                {
-                    "updated": sync_result["updated"],
-                    "changed_count": sync_result["changed_count"],
-                    "removed_count": sync_result["removed_count"],
-                },
-            )
-        if "loaded_count" in sync_result:
-            sync_log_context.update(
-                {
-                    "loaded_count": sync_result["loaded_count"],
-                    "indexed_count": sync_result["indexed_count"],
-                    "removed_count": sync_result["removed_count"],
-                },
-            )
+        index_result = sync_result["index"]
+        if index_result is not None:
+            sync_log_context.update(index_result)
         logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
 
     if start_runtime:
@@ -1685,6 +1668,7 @@ async def _ensure_shared_knowledge_manager_for_target(
     runtime_paths: RuntimePaths,
     reindex_on_create: bool,
     reconcile_existing_runtime: bool,
+    initialize_on_create: bool = True,
 ) -> KnowledgeManager:
     if target.binding.request_scoped:
         msg = f"Shared knowledge manager target '{target.key.base_id}' must not be request-scoped"
@@ -1707,9 +1691,11 @@ async def _ensure_shared_knowledge_manager_for_target(
                     config=config,
                     runtime_paths=runtime_paths,
                     reindex_on_create=True,
-                    start_runtime=reconcile_existing_runtime,
+                    initialize_on_create=initialize_on_create,
+                    start_runtime=reconcile_existing_runtime and initialize_on_create,
                 )
-                await _start_shared_manager_runtime_mode(manager, preserved_runtime_mode)
+                if initialize_on_create:
+                    await _start_shared_manager_runtime_mode(manager, preserved_runtime_mode)
                 _shared_knowledge_managers[target.key.base_id] = manager
                 return manager
 
@@ -1733,6 +1719,8 @@ async def _ensure_shared_knowledge_manager_for_target(
             config=config,
             runtime_paths=runtime_paths,
             reindex_on_create=reindex_on_create,
+            initialize_on_create=initialize_on_create,
+            start_runtime=initialize_on_create,
         )
         _shared_knowledge_managers[target.key.base_id] = manager
         return manager
@@ -1815,27 +1803,52 @@ async def initialize_shared_knowledge_managers(
     managers: dict[str, KnowledgeManager] = {}
 
     for base_id in sorted(configured_base_ids):
-        target = _resolve_knowledge_manager_target(
-            config,
-            runtime_paths,
+        manager = await ensure_shared_knowledge_manager(
             base_id,
-            start_watchers=start_watchers,
-            create=True,
-        )
-        if target.binding.request_scoped:
-            continue
-        managers[base_id] = await _ensure_shared_knowledge_manager_for_target(
-            target=target,
             config=config,
             runtime_paths=runtime_paths,
+            start_watchers=start_watchers,
             reindex_on_create=reindex_on_create,
             reconcile_existing_runtime=reconcile_existing_runtime,
         )
+        if manager is None:
+            continue
+        managers[base_id] = manager
 
     for base_id in [candidate for candidate in list(_shared_knowledge_managers) if candidate not in managers]:
         await _stop_and_remove_shared_manager(base_id)
 
     return managers
+
+
+async def ensure_shared_knowledge_manager(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    start_watchers: bool = False,
+    reindex_on_create: bool = True,
+    reconcile_existing_runtime: bool = False,
+    initialize_on_create: bool = True,
+) -> KnowledgeManager | None:
+    """Ensure one process-global shared knowledge manager exists for the given base."""
+    target = _resolve_knowledge_manager_target(
+        config,
+        runtime_paths,
+        base_id,
+        start_watchers=start_watchers,
+        create=True,
+    )
+    if target.binding.request_scoped:
+        return None
+    return await _ensure_shared_knowledge_manager_for_target(
+        target=target,
+        config=config,
+        runtime_paths=runtime_paths,
+        reindex_on_create=reindex_on_create,
+        reconcile_existing_runtime=reconcile_existing_runtime,
+        initialize_on_create=initialize_on_create,
+    )
 
 
 def _get_shared_knowledge_manager(base_id: str) -> KnowledgeManager | None:

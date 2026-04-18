@@ -55,7 +55,7 @@ interface KnowledgeStatus {
     last_successful_sync_at: string | null;
     last_successful_commit: string | null;
     last_error: string | null;
-    pending_startup_mode: 'full_reindex' | 'resume' | 'incremental' | null;
+    pending_startup_mode: 'resume' | 'incremental' | null;
   };
 }
 
@@ -99,10 +99,8 @@ function formatModifiedDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function formatStartupMode(value: 'full_reindex' | 'resume' | 'incremental'): string {
+function formatStartupMode(value: 'resume' | 'incremental'): string {
   switch (value) {
-    case 'full_reindex':
-      return 'Full Reindex';
     case 'resume':
       return 'Resume';
     case 'incremental':
