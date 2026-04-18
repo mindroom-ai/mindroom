@@ -26,8 +26,8 @@ from mindroom.matrix.thread_membership import (
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.thread_room_scan import (
     RoomScanConversationCache,
-    _fetch_event_info_from_conversation_cache,
-    _room_scan_membership_access_for_client,
+    fetch_event_info_from_room_scan_cache,
+    room_scan_membership_access_for_client,
 )
 
 if TYPE_CHECKING:
@@ -120,7 +120,7 @@ async def resolve_event_thread_impact_for_client(
     resolution = await resolve_event_thread_membership(
         room_id,
         event_info,
-        access=_room_scan_membership_access_for_client(
+        access=room_scan_membership_access_for_client(
             client,
             conversation_cache=conversation_cache,
         ),
@@ -144,7 +144,7 @@ async def resolve_redaction_thread_impact_for_client(
             strict=True,
         )
     else:
-        target_event_info = await _fetch_event_info_from_conversation_cache(
+        target_event_info = await fetch_event_info_from_room_scan_cache(
             conversation_cache,
             room_id,
             event_id,
@@ -155,7 +155,7 @@ async def resolve_redaction_thread_impact_for_client(
     resolution = await resolve_related_event_thread_membership(
         room_id,
         event_id,
-        access=_room_scan_membership_access_for_client(
+        access=room_scan_membership_access_for_client(
             client,
             conversation_cache=conversation_cache,
         ),

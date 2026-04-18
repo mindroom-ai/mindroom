@@ -19,7 +19,7 @@ from mindroom.attachments import (
 from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
-from mindroom.matrix.client import send_file_message
+from mindroom.matrix.client_delivery import send_file_message
 from mindroom.tool_system.runtime_context import (
     append_tool_runtime_attachment_id,
     attachment_id_available_in_tool_runtime_context,

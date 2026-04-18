@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
     from ._shared import ScopedMemoryCrud

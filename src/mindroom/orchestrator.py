@@ -31,12 +31,8 @@ from mindroom.knowledge import (
     initialize_shared_knowledge_managers,
     shutdown_shared_knowledge_managers,
 )
-from mindroom.matrix.client import (
-    PermanentMatrixStartupError,
-    get_joined_rooms,
-    get_room_members,
-    invite_to_room,
-)
+from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
+from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import (

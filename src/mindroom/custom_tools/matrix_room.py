@@ -14,7 +14,7 @@ from aiohttp import ClientError
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit, message_preview
-from mindroom.matrix.client import RoomThreadsPageError, get_room_threads_page
+from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 

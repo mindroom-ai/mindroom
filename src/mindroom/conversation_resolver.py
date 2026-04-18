@@ -333,13 +333,17 @@ class ConversationResolver:
         room_id: str,
         related_event_id: str,
         *,
-        access: ThreadMembershipAccess,
+        full_history: bool,
+        dispatch_safe: bool,
     ) -> str | None:
         """Return best-effort canonical thread membership for one related target event."""
         return await resolve_related_event_thread_id_best_effort(
             room_id,
             related_event_id,
-            access=access,
+            access=self.thread_membership_access(
+                full_history=full_history,
+                dispatch_safe=dispatch_safe,
+            ),
         )
 
     def thread_membership_access(

@@ -95,7 +95,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 

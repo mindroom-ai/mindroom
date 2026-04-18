@@ -36,7 +36,7 @@ from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.types import EVENT_SESSION_STARTED
 from mindroom.knowledge import KnowledgeAccessSupport, ensure_request_knowledge_managers
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.client import replace_visible_message
+from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.typing import typing_indicator
@@ -93,7 +93,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.history.types import CompactionOutcome
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager

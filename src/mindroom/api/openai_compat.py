@@ -37,7 +37,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.knowledge import get_agent_knowledge, initialize_shared_knowledge_managers
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
 from mindroom.teams import (
     TeamMode,
