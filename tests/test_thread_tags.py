@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.matrix.thread_membership import resolve_thread_root_event_id_for_client
+from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
     ThreadTagsError,
