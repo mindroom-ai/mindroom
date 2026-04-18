@@ -377,7 +377,7 @@ class DefaultsConfig(BaseModel):
         description="Model config name for generating thread summaries (e.g., 'haiku'). Uses 'default' if not set.",
     )
     thread_summary_first_threshold: int = Field(
-        default=5,
+        default=1,
         ge=1,
         description="Message count required before the first automatic thread summary is generated.",
     )

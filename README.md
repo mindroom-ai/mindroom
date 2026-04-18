@@ -285,7 +285,7 @@ defaults:
   #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   num_history_runs: null             # Number of prior runs to include (null = all)
-  thread_summary_first_threshold: 5  # First automatic summary after 5 thread messages
+  thread_summary_first_threshold: 1  # First automatic summary after 1 thread message
   thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
 ```
 
