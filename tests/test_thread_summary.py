@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
 from pydantic import ValidationError
 
+from mindroom.constants import RuntimePaths
+from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
+    _SUMMARY_INSTRUCTIONS,
+    _SUMMARY_TEMPERATURE,
     _TRUNCATION_SAMPLE_SIZE,
     THREAD_SUMMARY_MAX_LENGTH,
     ThreadSummaryWriteError,
@@ -36,6 +41,9 @@ from mindroom.thread_summary import (
     update_last_summary_count,
 )
 from tests.conftest import make_matrix_client_mock
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
@@ -336,6 +344,48 @@ def _mock_runtime_paths() -> MagicMock:
     rp = MagicMock()
     rp.storage_root = "/var/empty/test_storage"
     return rp
+
+
+def _logging_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    """Build real runtime paths for logging tests that use caplog."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    return RuntimePaths(
+        config_path=config_path,
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "mindroom_data",
+    )
+
+
+class _TemperatureAwareModel:
+    """Tiny real model stub that advertises a temperature attribute."""
+
+    def __init__(self, temperature: float | None = None) -> None:
+        self.temperature = temperature
+
+
+class _ModelWithoutTemperature:
+    """Tiny real model stub for providers that do not expose temperature."""
+
+
+_EXPECTED_GOOD_PROMPT_EXAMPLES = (
+    "\U0001f9f5 Review of PR #548 session persistence hooks",
+    "\U0001f9ea ISSUE-148 matrix cache invalidate-and-refetch live test",
+    "\U0001f9ea Attachment cache live test",
+    "\U0001f9ea ISSUE-083 thread-goal plugin end-to-end test",
+    "\U0001f501 Bot echo/reply verification test",
+)
+_TRANSIENT_STATUS_TERMS = (
+    "approved",
+    "merged",
+    "round",
+    "retry",
+    "passed",
+    "in progress",
+    "awaiting",
+    "confirmed working",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1302,7 +1352,7 @@ class TestGenerateSummary:
         history = _make_thread_history(3)
         config = _mock_config()
         rp = _mock_runtime_paths()
-        mock_model = object()
+        mock_model = _TemperatureAwareModel()
         mock_response = MagicMock()
         mock_response.content = _ThreadSummary(summary="🧵 ISSUE-133 prompt preserved")
 
@@ -1314,13 +1364,94 @@ class TestGenerateSummary:
             result = await _generate_summary(history, config, rp)
 
         assert result == "🧵 ISSUE-133 prompt preserved"
+        assert mock_agent_cls.call_args is not None
         instructions = "\n".join(mock_agent_cls.call_args.kwargs["instructions"])
+        assert "DURABLE TOPIC" in instructions
+        assert "It must remain accurate whether the thread has 5 messages or 50+." in instructions
+        assert "Prefer stable noun phrases" in instructions
+        assert "Do NOT include transient state." in instructions
+        assert "approval or merge status" in instructions
+        assert "round or attempt numbers" in instructions
+        assert "test counts or pass/fail tallies" in instructions
+        assert "progress markers like" in instructions
+        assert "plain text only" in instructions
         assert "NOVEL summary" in instructions
         assert "Do NOT copy" in instructions
+        assert "current status or outcome" not in instructions
 
+        assert mock_run.await_args is not None
         conversation = _build_conversation_text(history)
         prompt = mock_run.await_args.kwargs["full_prompt"]
         assert prompt == f"<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
+
+    async def test_generate_summary_forces_low_temperature(self) -> None:
+        """Summary generation should override model temperature with the fixed summary value."""
+        history = _make_thread_history(3)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        mock_model = _TemperatureAwareModel(temperature=0.9)
+        mock_response = MagicMock()
+        mock_response.content = _ThreadSummary(summary="🧪 ISSUE-148 matrix cache invalidate-and-refetch live test")
+
+        with (
+            patch("mindroom.thread_summary.get_model_instance", return_value=mock_model),
+            patch("mindroom.thread_summary.Agent"),
+            patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
+        ):
+            result = await _generate_summary(history, config, rp)
+
+        assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
+        assert mock_model.temperature == _SUMMARY_TEMPERATURE
+
+    async def test_generate_summary_warns_when_model_lacks_temperature(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Unsupported providers should warn and still complete summary generation."""
+        history = _make_thread_history(3)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        mock_model = _ModelWithoutTemperature()
+        mock_response = MagicMock()
+        mock_response.content = _ThreadSummary(summary="🧵 ISSUE-153 unsupported provider summary")
+        monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+        setup_logging(level="WARNING", runtime_paths=_logging_runtime_paths(tmp_path))
+        caplog.clear()
+        root_logger = logging.getLogger()
+        root_logger.addHandler(caplog.handler)
+
+        try:
+            with (
+                caplog.at_level("WARNING", logger="mindroom.thread_summary"),
+                patch("mindroom.thread_summary.get_model_instance", return_value=mock_model),
+                patch("mindroom.thread_summary.Agent"),
+                patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
+            ):
+                result = await _generate_summary(history, config, rp)
+        finally:
+            root_logger.removeHandler(caplog.handler)
+
+        assert result == "🧵 ISSUE-153 unsupported provider summary"
+        warning_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "does not support a runtime temperature override" in record.getMessage()
+        ]
+        assert len(warning_messages) == 1
+        assert "_ModelWithoutTemperature" in warning_messages[0]
+        assert "does not support a runtime temperature override" in warning_messages[0]
+
+    async def test_prompt_good_examples_are_stable_and_within_hard_limit(self) -> None:
+        """Prompt GOOD examples should be short and avoid transient-status wording."""
+        instructions = "\n".join(_SUMMARY_INSTRUCTIONS)
+
+        for example in _EXPECTED_GOOD_PROMPT_EXAMPLES:
+            assert example in instructions
+            assert len(example) <= THREAD_SUMMARY_MAX_LENGTH
+            lowered = example.lower()
+            assert not any(term in lowered for term in _TRANSIENT_STATUS_TERMS)
 
     async def test_summary_returned(self) -> None:
         """A valid summary is returned directly."""

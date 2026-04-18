@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import nio
 from agno.agent import Agent
@@ -40,6 +40,7 @@ _MARKDOWN_HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
 _MARKDOWN_BLOCKQUOTE_RE = re.compile(r"(?m)^\s{0,3}>\s?")
 _MARKDOWN_LIST_ITEM_RE = re.compile(r"(?m)^\s*(?:[-+*]|\d+\.)\s+")
 _PREQUEUE_CONCURRENCY_MARGIN = 2
+_SUMMARY_TEMPERATURE = 0.2
 
 # In-memory tracking of last summarized message count per thread.
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
@@ -67,6 +68,13 @@ class _ThreadSummary(BaseModel):
         max_length=THREAD_SUMMARY_MAX_LENGTH,
         description="One-line summary of the thread conversation",
     )
+
+
+@runtime_checkable
+class _SupportsTemperature(Protocol):
+    """Protocol for model instances that accept a temperature override."""
+
+    temperature: float | None
 
 
 def normalize_thread_summary_text(raw_text: str) -> str:
@@ -210,39 +218,44 @@ async def _recover_last_summary_count(
 
 
 _SUMMARY_INSTRUCTIONS = [
-    "You are a thread summary writer. Produce a single concise summary line for a chat thread conversation.",
+    "You are a thread summary writer.",
+    "Produce a single concise summary line describing the DURABLE TOPIC of a chat thread.",
+    "",
+    "GOAL:",
+    "The summary must describe what the thread is fundamentally about: its subject, goal, or work item.",
+    "It must remain accurate whether the thread has 5 messages or 50+.",
     "",
     "RULES:",
-    "- One line only, under 120 characters",
-    "- Start with 1-2 emojis that meaningfully represent the topic — the emoji should "
-    "help a reader scanning a list of threads instantly understand what the thread is about",
-    "- Capture the main topic AND the current status or outcome",
-    "- Plain text only — no markdown formatting (no bold, headers, bullets, links)",
-    "- If the conversation references a ticket, issue number, or any identifier "
-    "(e.g. PROJ-123, #42, BUG-7), include it near the start after the emoji",
-    "- Be consistent: similar threads should produce similar-style summaries",
-    "- No quotes, no prefixes like 'Summary:', no trailing punctuation",
-    "- Write a NOVEL summary in your own words. Do NOT copy, quote, or truncate any "
-    "message from the thread. Synthesize the key topic and outcome.",
+    "- One line only, plain text only.",
+    "- Under 160 characters is preferred.",
+    "- Hard max 300 characters after normalization.",
+    '- Prefer stable noun phrases such as "Fixing X", "Review of Y", "Discussion of Z", '
+    '"Live test of A", or "Investigation of B".',
+    "- Start with 1-2 emojis representing the topic category.",
+    "- Include a ticket, issue, or PR number when it helps identify the enduring subject.",
+    "- Lead with the main work item or topic, not the latest state update.",
+    "- Do NOT include transient state.",
+    "- Specifically avoid approval or merge status, round or attempt numbers, test counts "
+    'or pass/fail tallies, progress markers like "in progress" or "awaiting review", and '
+    'temporal phrases like "currently" or "just landed".',
+    "- If the thread is a test or review, say what is being tested or reviewed, not "
+    "whether it passed.",
+    "- Write a NOVEL summary in your own words.",
+    "- Do NOT copy, quote, or truncate any message from the thread.",
+    '- No quotes, no prefixes like "Summary:", and no trailing punctuation.',
     "",
-    "GOOD EXAMPLES:",
-    "- \U0001f41b PROJ-42: fix login crash on expired tokens — merged",
-    "- \u2705 Database migration to v3 completed successfully",
-    "- \U0001f4ac Discussing vacation schedule for July",
-    "- \U0001f527 Nginx config updated for new subdomain",
-    "- \U0001f6a8 Production outage — root cause identified, fix deployed",
-    "- \U0001f4e6 #127: add CSV export to reports — in progress",
-    "- \U0001f3a8 Redesigning sidebar navigation — wireframes shared",
-    "- \U0001f4b0 Q2 budget review — approved with minor adjustments",
-    "",
-    "BAD EXAMPLES (do NOT produce these):",
-    "- 'Thread about fixing a bug' (too vague, no emoji, quoted)",
-    "- 'Summary: The team discussed the login issue' (has prefix, no emoji, no outcome)",
-    "- '\U0001f4ac Discussion' (way too vague, no topic)",
-    "- '\U0001f41b\U0001f527\u2705\U0001f680\U0001f525 Fixed the thing' (too many emojis, vague)",
-    "- 'The conversation was about updating the configuration files for nginx' (too long, no emoji, no outcome)",
-    "- 'I wanted to discuss the implementation plan for the new auth system' "
-    "(verbatim copy of a message — summarize the topic, don't quote it)",
+    "BAD -> GOOD EXAMPLES:",
+    '- "\u2705 PR #548 approved after round 13 fixes, 25 bugs found" -> '
+    '"\U0001f9f5 Review of PR #548 session persistence hooks"',
+    '- "\U0001f9ec ISSUE-148: live e2e test of matrix cache invalidate-and-refetch \u2014 '
+    'thread context and post-restart cache persistence confirmed working" -> '
+    '"\U0001f9ea ISSUE-148 matrix cache invalidate-and-refetch live test"',
+    '- "\U0001f9ea Attachment cache test in progress \u2014 bot retrieving first line of '
+    'uploaded test file" -> "\U0001f9ea Attachment cache live test"',
+    '- "\u2705 ISSUE-083: thread-goal plugin e2e test \u2014 all 4 operations passed '
+    'successfully" -> "\U0001f9ea ISSUE-083 thread-goal plugin end-to-end test"',
+    '- "\U0001f331 Bot echo test \u2014 three seed prompts sent and correctly replied" '
+    '-> "\U0001f501 Bot echo/reply verification test"',
 ]
 
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
@@ -283,6 +296,15 @@ async def _generate_summary(
     """Generate a one-line summary of a thread conversation via LLM."""
     model_name = config.defaults.thread_summary_model or "default"
     model = get_model_instance(config, runtime_paths, model_name)
+    if isinstance(model, _SupportsTemperature):
+        model.temperature = _SUMMARY_TEMPERATURE
+    else:
+        model_class = type(model).__name__
+        logger.warning(
+            f"Thread summary model class {model_class} does not support a runtime temperature override; continuing with provider defaults",
+            model_class=model_class,
+            model_name=model_name,
+        )
 
     conversation = _build_conversation_text(thread_history)
     session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
