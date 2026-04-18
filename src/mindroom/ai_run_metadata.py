@@ -71,10 +71,17 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
 def build_model_request_metrics_fallback(
     totals: dict[str, int],
     first_token_latency: float | None,
+    observed_fields: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Build aggregate usage metadata from streamed request events."""
-    payload: dict[str, Any] = {key: value for key, value in totals.items() if value > 0}
-    if payload.get("total_tokens") is None:
+    if observed_fields is None:
+        payload: dict[str, Any] = {key: value for key, value in totals.items() if value > 0}
+    else:
+        payload = {key: totals[key] for key in observed_fields if key in totals}
+    total_tokens = payload.get("total_tokens")
+    if isinstance(total_tokens, int) and total_tokens <= 0:
+        payload.pop("total_tokens")
+    if "total_tokens" not in payload:
         input_tokens = payload.get("input_tokens")
         output_tokens = payload.get("output_tokens")
         if isinstance(input_tokens, int) and isinstance(output_tokens, int):

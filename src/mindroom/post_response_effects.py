@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 class ResponseOutcome:
     """Terminal response facts needed for post-delivery side effects."""
 
+    strip_transient_enrichment_after_run: bool = False
     response_run_id: str | None = None
     session_id: str | None = None
     session_type: SessionType | None = None

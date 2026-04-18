@@ -43,6 +43,7 @@ from mindroom.history import (
     HistoryScope,
     PreparedHistoryState,
     ScopeSessionContext,
+    agent_tool_definition_payloads_for_logging,
     apply_replay_plan,
     close_agent_runtime_state_dbs,
     compute_prompt_token_breakdown,
@@ -54,7 +55,11 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.llm_request_logging import bind_llm_request_log_context, build_llm_request_log_context
+from mindroom.llm_request_logging import (
+    bind_llm_request_log_context,
+    build_llm_request_log_context,
+    model_params_payload,
+)
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
@@ -87,6 +92,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "AIStreamChunk",
+    "PreparedAgentRun",
     "ai_response",
     "build_matrix_run_metadata",
     "stream_agent_response",
@@ -110,33 +116,23 @@ def _compose_current_turn_prompt(
 ) -> str:
     """Build the current-turn user message without rewriting persisted history."""
     prompt_chunks: list[str] = []
-    normalized_raw_prompt = raw_prompt.strip()
-    normalized_model_prompt = model_prompt.strip() if model_prompt else ""
-    normalized_model_prompt_without_time = (
-        strip_user_turn_time_prefix(normalized_model_prompt) if normalized_model_prompt else ""
-    )
-
-    if normalized_raw_prompt:
+    if raw_prompt:
         prompt_chunks.append(raw_prompt)
-        if normalized_model_prompt == normalized_raw_prompt:
-            normalized_model_prompt = ""
-        elif normalized_model_prompt.startswith(f"{normalized_raw_prompt}\n\n"):
-            normalized_model_prompt = normalized_model_prompt[len(normalized_raw_prompt) + 2 :].lstrip()
-        elif normalized_model_prompt_without_time == normalized_raw_prompt:
-            normalized_model_prompt = ""
-        elif normalized_model_prompt_without_time.startswith(f"{normalized_raw_prompt}\n\n"):
-            normalized_model_prompt = normalized_model_prompt_without_time[len(normalized_raw_prompt) + 2 :].lstrip()
-
     if prompt_parts.turn_context:
         prompt_chunks.append(prompt_parts.turn_context)
-    if normalized_model_prompt:
-        prompt_chunks.append(normalized_model_prompt)
+    model_tail = raw_prompt if not model_prompt else strip_user_turn_time_prefix(model_prompt)
+    if raw_prompt and model_tail == raw_prompt:
+        model_tail = ""
+    elif raw_prompt and model_tail.startswith(f"{raw_prompt}\n\n"):
+        model_tail = model_tail[len(raw_prompt) + 2 :].lstrip()
+    if model_tail:
+        prompt_chunks.append(model_tail)
 
-    return "\n\n".join(chunk for chunk in prompt_chunks if chunk)
+    return "\n\n".join(prompt_chunks)
 
 
 @dataclass(frozen=True)
-class _PreparedAgentRun:
+class PreparedAgentRun:
     """Prepared agent invocation state after history planning."""
 
     agent: Agent
@@ -153,6 +149,9 @@ class _PreparedAgentRun:
     def run_input(self) -> list[Message]:
         """Return a deep-copied mutable message list for one provider call."""
         return ai_runtime.copy_run_input(self.messages)
+
+
+_PreparedAgentRun = PreparedAgentRun
 
 
 def _next_retry_run_id(run_id: str | None) -> str | None:
@@ -209,6 +208,7 @@ class _StreamingAttemptState:
     full_response: str = ""
     tool_count: int = 0
     observed_tool_calls: int = 0
+    observed_request_metric_fields: set[str] = field(default_factory=set)
     pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
@@ -364,29 +364,55 @@ def build_matrix_run_metadata(
     reply_to_event_id: str | None,
     unseen_event_ids: list[str],
     *,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+    requester_id: str | None = None,
+    correlation_id: str | None = None,
+    tools_schema: list[dict[str, object]] | None = None,
+    model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build metadata dict for a run, tracking consumed Matrix event ids."""
-    if not reply_to_event_id:
-        return dict(extra_metadata) if extra_metadata else None
     metadata = dict(extra_metadata or {})
+    metadata["room_id"] = room_id
+    metadata["thread_id"] = thread_id
+    metadata["reply_to_event_id"] = reply_to_event_id
+    metadata["requester_id"] = requester_id
+    metadata["correlation_id"] = correlation_id
+    metadata["tools_schema"] = tools_schema if tools_schema is not None else []
+    metadata["model_params"] = model_params if model_params is not None else {}
     source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
-    seen_event_ids = _normalized_string_list(
-        [
-            reply_to_event_id,
-            *source_event_ids,
-            *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
-            *unseen_event_ids,
-        ],
-    )
-    metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
-    metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = seen_event_ids
+    if reply_to_event_id:
+        seen_event_ids = _normalized_string_list(
+            [
+                reply_to_event_id,
+                *source_event_ids,
+                *_normalized_string_list(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)),
+                *unseen_event_ids,
+            ],
+        )
+        metadata[MATRIX_EVENT_ID_METADATA_KEY] = reply_to_event_id
+        metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = seen_event_ids
     if MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in metadata and not isinstance(
         metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY],
         dict,
     ):
         metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
     return metadata or None
+
+
+def _resolved_requester_id(user_id: str | None) -> str | None:
+    return user_id
+
+
+def _resolved_correlation_id(reply_to_event_id: str | None) -> str:
+    if reply_to_event_id:
+        return reply_to_event_id
+    return uuid4().hex
+
+
+def _agent_tools_schema(agent: Agent) -> list[dict[str, object]]:
+    return agent_tool_definition_payloads_for_logging(agent)
 
 
 def _request_stream_retry(
@@ -484,19 +510,24 @@ def _track_model_request_metrics(
         state.latest_model_id = event.model
     if event.model_provider:
         state.latest_model_provider = event.model_provider
-    request_input_tokens = event.input_tokens if isinstance(event.input_tokens, int) else None
-    if request_input_tokens is not None:
-        state.latest_request_input_tokens = request_input_tokens
-        state.request_metric_totals["input_tokens"] += request_input_tokens
+    if isinstance(event.input_tokens, int):
+        state.observed_request_metric_fields.add("input_tokens")
+        state.latest_request_input_tokens = event.input_tokens
+        state.request_metric_totals["input_tokens"] += event.input_tokens
     if isinstance(event.output_tokens, int):
+        state.observed_request_metric_fields.add("output_tokens")
         state.request_metric_totals["output_tokens"] += event.output_tokens
     if isinstance(event.total_tokens, int):
+        state.observed_request_metric_fields.add("total_tokens")
         state.request_metric_totals["total_tokens"] += event.total_tokens
     if isinstance(event.reasoning_tokens, int):
+        state.observed_request_metric_fields.add("reasoning_tokens")
         state.request_metric_totals["reasoning_tokens"] += event.reasoning_tokens
     if isinstance(event.cache_read_tokens, int):
+        state.observed_request_metric_fields.add("cache_read_tokens")
         state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
     if isinstance(event.cache_write_tokens, int):
+        state.observed_request_metric_fields.add("cache_write_tokens")
         state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
     state.latest_request_cache_read_tokens = (
         event.cache_read_tokens if isinstance(event.cache_read_tokens, int) else None
@@ -508,12 +539,19 @@ def _track_model_request_metrics(
         state.first_token_latency = float(event.time_to_first_token)
 
 
+def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> bool:
+    return state.completed_run_event is not None and not state.full_response.strip() and state.observed_tool_calls == 0
+
+
 def _attempt_request_log_context(
     *,
+    agent_id: str,
     session_id: str,
     room_id: str | None,
     thread_id: str | None,
     reply_to_event_id: str | None,
+    requester_id: str | None,
+    correlation_id: str,
     prompt: str,
     model_prompt: str | None,
     attempt_prompt: ai_runtime.ModelRunInput,
@@ -521,10 +559,13 @@ def _attempt_request_log_context(
 ) -> dict[str, object]:
     """Build request-log context for the exact prompt used by one provider attempt."""
     return build_llm_request_log_context(
+        agent_id=agent_id,
         session_id=session_id,
         room_id=room_id,
         thread_id=thread_id,
         reply_to_event_id=reply_to_event_id,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
         prompt=prompt,
         model_prompt=model_prompt,
         full_prompt=render_prepared_messages_text(ai_runtime.copy_run_input(attempt_prompt)),
@@ -587,17 +628,6 @@ def _assert_agent_target(agent_name: str, config: Config) -> None:
         raise ValueError(msg)
 
 
-def _prompt_current_sender_id(
-    user_id: str | None,
-    *,
-    include_openai_compat_guidance: bool,
-) -> str | None:
-    """Return the sender label to embed in prompt history, if any."""
-    if include_openai_compat_guidance:
-        return None
-    return user_id
-
-
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     agent_name: str,
@@ -619,10 +649,10 @@ async def _prepare_agent_and_prompt(
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
-    current_sender_id: str | None = None,
     include_openai_compat_guidance: bool = False,
     timing_scope: str | None = None,
     model_prompt: str | None = None,
+    current_sender_id: str | None = None,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
@@ -669,6 +699,7 @@ async def _prepare_agent_and_prompt(
         refresh_scheduler=refresh_scheduler,
         timing_scope=timing_scope,
     )
+    _append_additional_context(agent, prompt_parts.session_preamble)
     if system_enrichment_items:
         _append_additional_context(
             agent,
@@ -677,7 +708,6 @@ async def _prepare_agent_and_prompt(
                 timing_scope=timing_scope,
             ),
         )
-    _append_additional_context(agent, prompt_parts.session_preamble)
 
     prepared_execution = await prepare_agent_execution_context(
         scope_context=scope_context,
@@ -786,8 +816,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
-        model_prompt: Optional model-facing prompt after caller-side prompt shaping
-        thread_id: Optional resolved Matrix thread target for the request
+        model_prompt: Optional model-facing current-turn prompt additions.
+        thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
@@ -797,8 +827,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether to include OpenAI-compatible
-            history-format guidance in the shared identity prompt.
+        include_openai_compat_guidance: Whether to omit Matrix-style sender
+            attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
@@ -840,6 +870,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         agent_name=agent_name,
     )
     media_inputs = media or MediaInputs()
+    resolved_requester_id = _resolved_requester_id(user_id)
+    resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
@@ -886,10 +918,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=_prompt_current_sender_id(
-                        user_id,
-                        include_openai_compat_guidance=include_openai_compat_guidance,
-                    ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
@@ -908,6 +936,12 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=resolved_requester_id,
+                correlation_id=resolved_correlation_id,
+                tools_schema=_agent_tools_schema(agent) if agent.model is not None else [],
+                model_params=model_params_payload(agent.model) if agent.model is not None else {},
                 extra_metadata=matrix_run_metadata,
             )
             if turn_recorder is not None:
@@ -925,10 +959,13 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         with bind_llm_request_log_context(
                             **_attempt_request_log_context(
+                                agent_id=agent_name,
                                 session_id=session_id,
                                 room_id=room_id,
                                 thread_id=thread_id,
                                 reply_to_event_id=reply_to_event_id,
+                                requester_id=resolved_requester_id,
+                                correlation_id=resolved_correlation_id,
                                 prompt=prompt,
                                 model_prompt=model_prompt,
                                 attempt_prompt=attempt_prompt,
@@ -1244,8 +1281,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
-        model_prompt: Optional model-facing prompt after caller-side prompt shaping
-        thread_id: Optional resolved Matrix thread target for the request
+        model_prompt: Optional model-facing current-turn prompt additions.
+        thread_id: Optional resolved Matrix thread ID for request-log correlation and run metadata.
         room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
@@ -1255,8 +1292,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether to include OpenAI-compatible
-            history-format guidance in the shared identity prompt.
+        include_openai_compat_guidance: Whether to omit Matrix-style sender
+            attribution for OpenAI-compatible prompt formatting.
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
@@ -1296,6 +1333,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         agent_name=agent_name,
     )
     media_inputs = media or MediaInputs()
+    resolved_requester_id = _resolved_requester_id(user_id)
+    resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
@@ -1345,10 +1384,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=_prompt_current_sender_id(
-                        user_id,
-                        include_openai_compat_guidance=include_openai_compat_guidance,
-                    ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
@@ -1368,6 +1403,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=resolved_requester_id,
+                correlation_id=resolved_correlation_id,
+                tools_schema=_agent_tools_schema(agent) if agent.model is not None else [],
+                model_params=model_params_payload(agent.model) if agent.model is not None else {},
                 extra_metadata=matrix_run_metadata,
             )
             if turn_recorder is not None:
@@ -1396,10 +1437,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             pipeline_timing.mark("model_request_sent", overwrite=True)
                         _note_attempt_run_id(run_id_callback, attempt_run_id)
                         request_context = _attempt_request_log_context(
+                            agent_id=agent_name,
                             session_id=session_id,
                             room_id=room_id,
                             thread_id=thread_id,
                             reply_to_event_id=reply_to_event_id,
+                            requester_id=resolved_requester_id,
+                            correlation_id=resolved_correlation_id,
                             prompt=prompt,
                             model_prompt=model_prompt,
                             attempt_prompt=attempt_prompt,
@@ -1478,6 +1522,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             fallback_metrics = build_model_request_metrics_fallback(
                                 state.request_metric_totals,
                                 state.first_token_latency,
+                                state.observed_request_metric_fields,
                             )
                             cancelled_metadata = build_ai_run_metadata_content(
                                 agent_name=agent_name,
@@ -1518,6 +1563,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     fallback_metrics = build_model_request_metrics_fallback(
                         state.request_metric_totals,
                         state.first_token_latency,
+                        state.observed_request_metric_fields,
+                    )
+                    final_status = (
+                        RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
                     )
                     run_metadata = build_ai_run_metadata_content(
                         agent_name=agent_name,
@@ -1530,7 +1579,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             and state.completed_run_event.session_id is not None
                             else session_id
                         ),
-                        status=RunStatus.completed,
+                        status=final_status,
                         model=state.latest_model_id,
                         model_provider=state.latest_model_provider,
                         room_id=room_id,

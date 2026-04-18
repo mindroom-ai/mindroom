@@ -715,6 +715,29 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_startup_thread_prewarm_refresh_waits_for_background_warm(tmp_path: Path) -> None:
+    """Startup prewarm should complete a real background refresh instead of timing out quickly."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
+
+    async def slow_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        await asyncio.sleep(0.35)
+        return thread_history_result([], is_full_history=False)
+
+    with patch(
+        "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+        new=AsyncMock(side_effect=slow_refresh),
+    ) as fetch_dispatch_thread_snapshot:
+        result = await bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+            "!room:localhost",
+            "$thread-root",
+        )
+
+    assert result.messages == []
+    fetch_dispatch_thread_snapshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_startup_thread_prewarm_joined_rooms_failure_is_fail_open(tmp_path: Path) -> None:
     """Startup thread prewarm should log and stop cleanly when joined room lookup fails."""
     bot = _agent_bot(tmp_path)

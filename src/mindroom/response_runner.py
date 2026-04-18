@@ -6,19 +6,20 @@ import asyncio
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
 
+from mindroom import interactive
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import run_post_response_compaction_check
+from mindroom.history import HistoryScope, run_post_response_compaction_check
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -60,6 +61,7 @@ from .delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
+    SendTextRequest,
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
@@ -83,7 +85,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.history import CompactionOutcome, HistoryScope, PostResponseCompactionCheck
+    from mindroom.history import CompactionOutcome, PostResponseCompactionCheck
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -272,6 +274,19 @@ def prepare_memory_and_model_context(
         runtime_paths=runtime_paths,
     )
     return prompt, thread_history, model_prompt_text, model_thread_history
+
+
+def _should_strip_transient_enrichment(request: ResponseRequest) -> bool:
+    """Return whether per-turn model context should be scrubbed after delivery."""
+    return bool(request.system_enrichment_items) or (
+        request.model_prompt is not None and request.model_prompt != request.prompt
+    )
+
+
+class _ReplyEventWithSource(Protocol):
+    """Minimal reply event surface needed for skill command responses."""
+
+    source: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -1297,6 +1312,7 @@ class ResponseRunner:
         final_outcome = await lifecycle.finalize(
             final_delivery_outcome,
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(
+                strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request),
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=SessionType.TEAM,
@@ -1990,6 +2006,246 @@ class ResponseRunner:
             post_response_compaction_checks_collector.extend(post_response_compaction_checks)
         return delivery
 
+    async def send_skill_command_response(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: Sequence[ResolvedVisibleMessage],
+        prompt: str,
+        agent_name: str,
+        user_id: str | None,
+        reply_to_event: _ReplyEventWithSource | None = None,
+        source_envelope: MessageEnvelope | None = None,
+    ) -> str | None:
+        """Send a skill command response using a specific agent."""
+        target = self.deps.resolver.build_message_target(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
+        skill_request = ResponseRequest(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            thread_history=thread_history,
+            prompt=prompt,
+            user_id=user_id,
+            response_envelope=source_envelope,
+            correlation_id=reply_to_event_id,
+            target=target,
+        )
+        return await self._run_locked_response_lifecycle(
+            skill_request,
+            locked_operation=lambda _resolved_target: self.send_skill_command_response_locked(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                thread_history=thread_history,
+                prompt=prompt,
+                agent_name=agent_name,
+                user_id=user_id,
+                reply_to_event=reply_to_event,
+                source_envelope=source_envelope,
+            ),
+        )
+
+    async def send_skill_command_response_locked(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: Sequence[ResolvedVisibleMessage],
+        prompt: str,
+        agent_name: str,
+        user_id: str | None,
+        reply_to_event: _ReplyEventWithSource | None = None,
+        source_envelope: MessageEnvelope | None = None,
+    ) -> str | None:
+        """Send a skill command response after acquiring the per-thread lock."""
+        if not prompt.strip():
+            return None
+        memory_prompt, memory_thread_history, model_prompt, thread_history = prepare_memory_and_model_context(
+            prompt,
+            thread_history,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
+
+        resolved_target = self.deps.resolver.build_message_target(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            event_source=reply_to_event.source if reply_to_event is not None else None,
+        )
+        session_id = resolved_target.session_id
+        model_prompt = _append_matrix_prompt_context(
+            model_prompt,
+            target=resolved_target,
+            include_context=_agent_has_matrix_messaging_tool(self.deps.runtime.config, agent_name),
+        )
+        tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
+            resolved_target,
+            user_id=user_id,
+            session_id=session_id,
+            agent_name=agent_name,
+            source_envelope=source_envelope,
+        )
+        skill_request = ResponseRequest(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            thread_history=memory_thread_history,
+            prompt=memory_prompt,
+            model_prompt=model_prompt,
+            user_id=user_id,
+            response_envelope=source_envelope,
+            correlation_id=reply_to_event_id,
+            target=resolved_target,
+        )
+        lifecycle = self._build_lifecycle(
+            response_kind="skill_command",
+            request=skill_request,
+        )
+        session_scope = HistoryScope(kind="agent", scope_id=agent_name)
+
+        def history_storage_factory() -> BaseDb:
+            return self.deps.state_writer.create_storage(tool_dispatch.execution_identity, scope=session_scope)
+
+        session_started_watch = lifecycle.setup_session_watch(
+            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+            session_id=session_id,
+            session_type=self.deps.state_writer.session_type_for_scope(session_scope),
+            scope=session_scope,
+            room_id=room_id,
+            thread_id=resolved_target.resolved_thread_id,
+            create_storage=history_storage_factory,
+        )
+        reprioritize_auto_flush_sessions(
+            self.deps.storage_path,
+            self.deps.runtime.config,
+            agent_name=agent_name,
+            active_session_id=session_id,
+            execution_identity=tool_dispatch.execution_identity,
+        )
+        show_tool_calls = self._show_tool_calls(agent_name)
+        tool_trace: list[Any] = []
+        run_metadata_content: dict[str, Any] = {}
+        active_event_ids = self._active_response_event_ids(room_id)
+        async with typing_indicator(self._client(), room_id):
+
+            async def build_response_text() -> str:
+                knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
+                    agent_name,
+                    execution_identity=tool_dispatch.execution_identity,
+                )
+                system_enrichment_items = append_knowledge_availability_enrichment(
+                    skill_request.system_enrichment_items,
+                    knowledge_resolution.unavailable,
+                )
+                return await ai_response(
+                    agent_name=agent_name,
+                    prompt=memory_prompt,
+                    session_id=session_id,
+                    runtime_paths=self.deps.runtime_paths,
+                    config=self.deps.runtime.config,
+                    thread_history=thread_history,
+                    model_prompt=model_prompt,
+                    thread_id=resolved_target.resolved_thread_id,
+                    room_id=room_id,
+                    knowledge=knowledge_resolution.knowledge,
+                    user_id=user_id,
+                    reply_to_event_id=reply_to_event_id,
+                    active_event_ids=active_event_ids,
+                    show_tool_calls=show_tool_calls,
+                    tool_trace_collector=tool_trace,
+                    run_metadata_collector=run_metadata_content,
+                    execution_identity=tool_dispatch.execution_identity,
+                    refresh_scheduler=(
+                        self.deps.runtime.orchestrator.knowledge_refresh_scheduler
+                        if self.deps.runtime.orchestrator is not None
+                        else None
+                    ),
+                    system_enrichment_items=system_enrichment_items,
+                )
+
+            try:
+                response_text = await self._run_in_tool_context(
+                    tool_dispatch=tool_dispatch,
+                    operation=build_response_text,
+                )
+            finally:
+                await lifecycle.emit_session_started(session_started_watch)
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        event_id = await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                target=resolved_target,
+                response_text=response.formatted_text,
+                skip_mentions=True,
+                tool_trace=tool_trace if show_tool_calls else None,
+                extra_content=run_metadata_content or None,
+            ),
+        )
+
+        def queue_memory_persistence() -> None:
+            try:
+                mark_auto_flush_dirty_session(
+                    self.deps.storage_path,
+                    self.deps.runtime.config,
+                    agent_name=agent_name,
+                    session_id=session_id,
+                    execution_identity=tool_dispatch.execution_identity,
+                )
+                if self.deps.runtime.config.get_agent_memory_backend(agent_name) == "mem0":
+                    create_background_task(
+                        store_conversation_memory(
+                            memory_prompt,
+                            agent_name,
+                            self.deps.storage_path,
+                            session_id,
+                            self.deps.runtime.config,
+                            self.deps.runtime_paths,
+                            memory_thread_history,
+                            user_id,
+                            execution_identity=tool_dispatch.execution_identity,
+                        ),
+                        name=f"memory_save_{agent_name}_{session_id}",
+                        owner=self.deps.runtime,
+                    )
+            except Exception:  # pragma: no cover
+                self.deps.logger.debug("Skipping memory storage due to configuration error")
+
+        final_delivery_outcome = FinalDeliveryOutcome(
+            terminal_status="completed" if event_id is not None else "error",
+            event_id=event_id,
+            is_visible_response=event_id is not None,
+            final_visible_body=response.formatted_text if event_id is not None else None,
+            delivery_kind="sent" if event_id is not None else None,
+            interactive_metadata=response.interactive_metadata,
+        )
+        await lifecycle.apply_effects_safely(
+            final_delivery_outcome=final_delivery_outcome,
+            post_response_outcome=lambda: ResponseOutcome(
+                strip_transient_enrichment_after_run=_should_strip_transient_enrichment(skill_request),
+                session_id=session_id,
+                session_type=SessionType.AGENT,
+                execution_identity=tool_dispatch.execution_identity,
+                interactive_target=resolved_target,
+                memory_prompt=memory_prompt,
+                memory_thread_history=memory_thread_history,
+            ),
+            post_response_deps=lambda: self.deps.post_response_effects.build_deps(
+                room_id=room_id,
+                thread_id=thread_id,
+                interactive_agent_name=agent_name,
+                queue_memory_persistence=queue_memory_persistence,
+            ),
+        )
+        return event_id
+
     async def generate_response(self, request: ResponseRequest) -> str | None:
         """Generate and send/edit an agent response with lifecycle locking."""
         return await self._run_locked_response_lifecycle(
@@ -2287,6 +2543,7 @@ class ResponseRunner:
                 )
         assert final_delivery_outcome is not None
         post_response_outcome = ResponseOutcome(
+            strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request),
             response_run_id=response_run_id,
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),

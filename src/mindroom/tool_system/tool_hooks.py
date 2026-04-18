@@ -24,6 +24,7 @@ from mindroom.hooks import (
     emit,
     emit_gate,
 )
+from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
@@ -36,7 +37,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     resolve_tool_runtime_hook_bindings,
 )
-from mindroom.tool_system.tool_failures import record_tool_failure
+from mindroom.tool_system.tool_failures import record_tool_failure, record_tool_success
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -86,6 +87,7 @@ class _ResolvedToolContext:
     agent_name: str
     room_id: str | None
     thread_id: str | None
+    reply_to_event_id: str | None
     requester_id: str | None
     session_id: str | None
     channel: str | None
@@ -130,6 +132,10 @@ class _ToolHookBridgeContext:
 def _correlation_id_for_runtime_context(runtime_context: ToolRuntimeContext | None) -> str:
     if runtime_context is not None and runtime_context.correlation_id:
         return runtime_context.correlation_id
+    request_context = current_llm_request_log_context()
+    correlation_id = request_context.get("correlation_id")
+    if isinstance(correlation_id, str) and correlation_id:
+        return correlation_id
     return "tool-hook:" + uuid4().hex
 
 
@@ -173,6 +179,7 @@ def _resolve_tool_context(
             room_id=dispatch_context.execution_identity.room_id,
             thread_id=dispatch_context.execution_identity.resolved_thread_id
             or dispatch_context.execution_identity.thread_id,
+            reply_to_event_id=runtime_context.reply_to_event_id,
             requester_id=dispatch_context.execution_identity.requester_id,
             session_id=dispatch_context.execution_identity.session_id,
             channel=dispatch_context.execution_identity.channel,
@@ -188,11 +195,14 @@ def _resolve_tool_context(
 
     if dispatch_context is not None:
         resolved_runtime_paths = bridge_context.runtime_paths
+        request_context = current_llm_request_log_context()
+        reply_to_event_id = request_context.get("reply_to_event_id")
         return _ResolvedToolContext(
             agent_name=bridge_context.agent_name or dispatch_context.execution_identity.agent_name,
             room_id=dispatch_context.execution_identity.room_id,
             thread_id=dispatch_context.execution_identity.resolved_thread_id
             or dispatch_context.execution_identity.thread_id,
+            reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
             requester_id=dispatch_context.execution_identity.requester_id,
             session_id=dispatch_context.execution_identity.session_id,
             channel=dispatch_context.execution_identity.channel,
@@ -206,10 +216,13 @@ def _resolve_tool_context(
             message_received_depth=0,
         )
 
+    request_context = current_llm_request_log_context()
+    reply_to_event_id = request_context.get("reply_to_event_id")
     return _ResolvedToolContext(
         agent_name=bridge_context.agent_name or "",
         room_id=None,
         thread_id=None,
+        reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
         requester_id=None,
         session_id=None,
         channel=None,
@@ -617,6 +630,7 @@ async def _execute_bridge(
                 agent_name=resolved_context.agent_name or None,
                 room_id=resolved_context.room_id,
                 thread_id=resolved_context.thread_id,
+                reply_to_event_id=resolved_context.reply_to_event_id,
                 requester_id=resolved_context.requester_id,
                 session_id=resolved_context.session_id,
                 correlation_id=resolved_context.correlation_id,
@@ -656,6 +670,24 @@ async def _execute_bridge(
             )
         raise
 
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    record_tool_success(
+        tool_name=tool_name,
+        arguments=args,
+        result=result,
+        duration_ms=duration_ms,
+        agent_name=resolved_context.agent_name or None,
+        room_id=resolved_context.room_id,
+        thread_id=resolved_context.thread_id,
+        reply_to_event_id=resolved_context.reply_to_event_id,
+        requester_id=resolved_context.requester_id,
+        session_id=resolved_context.session_id,
+        correlation_id=resolved_context.correlation_id,
+        execution_identity=effective_dispatch_context.execution_identity
+        if effective_dispatch_context is not None
+        else None,
+        runtime_paths=resolved_context.runtime_paths,
+    )
     if has_after_hooks:
         await _emit_after_call(
             hook_registry=hook_registry,
@@ -666,7 +698,7 @@ async def _execute_bridge(
             result=result,
             error=error,
             blocked=False,
-            duration_ms=(time.perf_counter() - started_at) * 1000,
+            duration_ms=duration_ms,
         )
     return result
 

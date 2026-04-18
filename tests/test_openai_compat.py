@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager
 from contextvars import Context
@@ -47,6 +48,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import (
     HistoryScope,
@@ -59,6 +61,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
 from mindroom.tool_approval import shutdown_approval_store
+from mindroom.tool_system.tool_failures import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -146,15 +149,19 @@ def _knowledge_lookup(
 def _prepared_team_execution_context(
     *,
     final_prompt: str,
+    run_metadata: dict[str, object] | None = None,
     replay_plan: ResolvedReplayPlan | None = None,
     replays_persisted_history: bool = False,
     messages: list[Message] | None = None,
     post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None,
 ) -> SimpleNamespace:
+    prepared_messages = tuple(messages) if messages is not None else (Message(role="user", content=final_prompt),)
+    prepared_prompt = render_prepared_team_messages_text(prepared_messages)
     return SimpleNamespace(
-        prepared_prompt=final_prompt,
-        final_prompt=final_prompt,
-        messages=messages or [Message(role="user", content=final_prompt)],
+        messages=prepared_messages,
+        prepared_prompt=prepared_prompt,
+        final_prompt=prepared_prompt,
+        run_metadata=run_metadata,
         replay_plan=replay_plan,
         unseen_event_ids=[],
         replays_persisted_history=replays_persisted_history,
@@ -169,6 +176,16 @@ def reset_approval_store() -> Iterator[None]:
     asyncio.run(shutdown_approval_store())
     yield
     asyncio.run(shutdown_approval_store())
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _tool_calls_path(runtime_paths: RuntimePaths) -> Path:
+    return constants.tracking_dir(runtime_paths) / "tool_calls.jsonl"
 
 
 @pytest.fixture
@@ -981,7 +998,6 @@ class TestChatCompletions:
 
             assert "include_default_tools" not in mock_ai.call_args.kwargs
             assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
-            assert mock_ai.call_args.kwargs["include_openai_compat_guidance"] is True
             assert mock_ai.call_args.kwargs["active_event_ids"] == set()
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
@@ -1591,7 +1607,6 @@ class TestStreamingCompletion:
         assert response.status_code == 200
         assert "include_default_tools" not in mock_stream_fn.call_args.kwargs
         assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
-        assert mock_stream_fn.call_args.kwargs["include_openai_compat_guidance"] is True
         assert mock_stream_fn.call_args.kwargs["active_event_ids"] == set()
 
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
@@ -2839,7 +2854,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2861,7 +2876,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert mock_prepare.await_args.kwargs["prompt"] == "Build a feature"
+        assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
         run_input = mock_team.arun.call_args.args[0]
         assert run_input == "Build a feature"
 
@@ -3021,6 +3036,98 @@ class TestTeamCompletion:
         )
         assert scheduled_base_ids == ["docs"]
 
+    @pytest.mark.asyncio
+    async def test_team_non_streaming_passes_non_matrix_metadata_to_arun(
+        self,
+        team_config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """Non-Matrix team runs should pass minted run metadata through to team.arun()."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
+        execution_identity = build_tool_execution_identity(
+            channel="openai_compat",
+            agent_name="team/super_team",
+            session_id="session-123",
+            runtime_paths=runtime_paths,
+            requester_id="@api-user:localhost",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+        )
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+        prepared_correlation_ids: list[str] = []
+
+        async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
+            correlation_id = kwargs["correlation_id"]
+            assert isinstance(correlation_id, str)
+            prepared_correlation_ids.append(correlation_id)
+            return _prepared_team_execution_context(
+                final_prompt="Build it",
+                run_metadata={"correlation_id": correlation_id},
+            )
+
+        async def mock_arun(*_args: object, **kwargs: object) -> TeamRunOutput:
+            metadata = kwargs["metadata"]
+            assert isinstance(metadata, dict)
+            correlation_id = metadata["correlation_id"]
+            assert isinstance(correlation_id, str)
+            record_tool_success(
+                tool_name="demo_tool",
+                arguments={"query": "test"},
+                result={"status": "ok"},
+                duration_ms=1.0,
+                agent_name="team/super_team",
+                room_id=None,
+                thread_id=None,
+                reply_to_event_id=None,
+                requester_id="@api-user:localhost",
+                session_id="session-123",
+                correlation_id=correlation_id,
+                execution_identity=execution_identity,
+                runtime_paths=runtime_paths,
+            )
+            return TeamRunOutput(content="Team consensus result")
+
+        mock_team.arun = AsyncMock(side_effect=mock_arun)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new=AsyncMock(side_effect=mock_prepare_team_execution),
+            ),
+        ):
+            response = await openai_compat._non_stream_team_completion(
+                "super_team",
+                "team/super_team",
+                "Build it",
+                "session-123",
+                team_config,
+                runtime_paths,
+                None,
+                "@api-user:localhost",
+                execution_identity=execution_identity,
+            )
+
+        assert response.status_code == 200
+        metadata = mock_team.arun.await_args.kwargs["metadata"]
+        assert isinstance(metadata, dict)
+        correlation_id = metadata["correlation_id"]
+        assert isinstance(correlation_id, str)
+        assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
+        assert prepared_correlation_ids == [correlation_id]
+        records = _read_jsonl(_tool_calls_path(runtime_paths))
+        assert records[0]["correlation_id"] == correlation_id
+        assert records[0]["reply_to_event_id"] is None
+
     def test_team_non_streaming_formats_plain_run_output_fallback(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should format plain RunOutput fallbacks like the main runtime."""
         mock_team = _make_test_team()
@@ -3033,7 +3140,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3063,7 +3170,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3092,7 +3199,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3126,7 +3233,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3166,8 +3273,106 @@ class TestTeamCompletion:
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        run_input = mock_team.arun.call_args.args[0]
-        assert run_input == "Build it"
+        assert mock_team.arun.call_args.args[0] == "Build it"
+
+    @pytest.mark.asyncio
+    async def test_team_streaming_passes_non_matrix_metadata_to_arun(
+        self,
+        team_config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """Non-Matrix team streams should pass minted run metadata through to team.arun()."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
+        execution_identity = build_tool_execution_identity(
+            channel="openai_compat",
+            agent_name="team/super_team",
+            session_id="session-123",
+            runtime_paths=runtime_paths,
+            requester_id="@api-user:localhost",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+        )
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+        prepared_correlation_ids: list[str] = []
+
+        async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
+            correlation_id = kwargs["correlation_id"]
+            assert isinstance(correlation_id, str)
+            prepared_correlation_ids.append(correlation_id)
+            return _prepared_team_execution_context(
+                final_prompt="Build it",
+                run_metadata={"correlation_id": correlation_id},
+            )
+
+        async def mock_stream_events(*_args: object, **kwargs: object) -> AsyncIterator[object]:
+            metadata = kwargs["metadata"]
+            assert isinstance(metadata, dict)
+            correlation_id = metadata["correlation_id"]
+            assert isinstance(correlation_id, str)
+            record_tool_success(
+                tool_name="demo_tool",
+                arguments={"query": "test"},
+                result={"status": "ok"},
+                duration_ms=1.0,
+                agent_name="team/super_team",
+                room_id=None,
+                thread_id=None,
+                reply_to_event_id=None,
+                requester_id="@api-user:localhost",
+                session_id="session-123",
+                correlation_id=correlation_id,
+                execution_identity=execution_identity,
+                runtime_paths=runtime_paths,
+            )
+            yield TeamContentEvent(content="Hello ")
+            yield TeamContentEvent(content="world!")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new=AsyncMock(side_effect=mock_prepare_team_execution),
+            ),
+        ):
+            response = await openai_compat._stream_team_completion(
+                "super_team",
+                "team/super_team",
+                "Build it",
+                "session-123",
+                team_config,
+                runtime_paths,
+                None,
+                "@api-user:localhost",
+                execution_identity=execution_identity,
+            )
+
+        assert isinstance(response, StreamingResponse)
+        body_chunks = [
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator
+        ]
+        body = "".join(body_chunks)
+        metadata = mock_team.arun.call_args.kwargs["metadata"]
+        assert isinstance(metadata, dict)
+        correlation_id = metadata["correlation_id"]
+        assert isinstance(correlation_id, str)
+        assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
+        assert prepared_correlation_ids == [correlation_id]
+        assert "Hello " in body
+        assert "world!" in body
+        records = _read_jsonl(_tool_calls_path(runtime_paths))
+        assert records[0]["correlation_id"] == correlation_id
+        assert records[0]["reply_to_event_id"] is None
 
     def test_team_streaming_runs_post_response_compaction_checks(self, team_app_client: TestClient) -> None:
         """OpenAI-compatible streaming team replies should compact after the stream completes."""
@@ -3404,7 +3609,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3444,7 +3649,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3662,7 +3867,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3749,8 +3954,8 @@ class TestTeamCompletion:
                 return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_openai_team_run_input",
-                new=AsyncMock(return_value="Build it"),
+                "mindroom.api.openai_compat._prepare_openai_team_prompt",
+                new=AsyncMock(return_value=SimpleNamespace(prompt="Build it", run_metadata=None)),
             ),
         ):
             response = await openai_compat._stream_team_completion(
@@ -4215,8 +4420,8 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        run_input = mock_team.arun.call_args.args[0]
-        assert run_input == "user: Start\n\nassistant: Ack\n\nFollow-up"
+        prompt = mock_team.arun.call_args.args[0]
+        assert prompt == "user: Start\n\nassistant: Ack\n\nFollow-up"
 
     def test_team_non_streaming_preserves_full_request_history_for_ad_hoc_team_runs(
         self,
@@ -4273,7 +4478,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -4303,11 +4508,14 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert mock_prepare.await_args.kwargs["prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
-        run_input = mock_team.arun.call_args.args[0]
-        assert run_input == "Follow-up"
+        prompt = mock_team.arun.call_args.args[0]
+        assert prompt == "Follow-up"
+        assert "Previous conversation in this thread:" not in prompt
+        assert "user: Start" not in prompt
+        assert "assistant: Ack" not in prompt
 
     def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
         """Persisted team history should suppress request-history stuffing in the streaming path too."""
@@ -4325,7 +4533,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -4347,14 +4555,15 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert mock_prepare.await_args.kwargs["prompt"] == "Follow-up"
+        assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
-        run_input = mock_team.arun.call_args.args[0]
-        assert run_input == "Follow-up"
+        prompt = mock_team.arun.call_args.args[0]
+        assert prompt == "Follow-up"
+        assert "Previous conversation in this thread:" not in prompt
 
     @pytest.mark.asyncio
-    async def test_prepare_openai_team_run_input_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
+    async def test_prepare_openai_team_prompt_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
         """OpenAI team prep should match the main team path for cleanup and assistant-role rendering."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
@@ -4403,7 +4612,7 @@ class TestTeamCompletion:
             assert scope_context is not None
             assert scope_context.session is not None
 
-            async def fake_prepare_bound_team_execution_context(**kwargs: object) -> SimpleNamespace:
+            async def fake_prepare_bound_team_run_context(**kwargs: object) -> SimpleNamespace:
                 prepared_scope_context = kwargs["scope_context"]
                 assert prepared_scope_context is not None
                 assert prepared_scope_context.session is not None
@@ -4420,10 +4629,10 @@ class TestTeamCompletion:
                 )
 
             with patch(
-                "mindroom.execution_preparation.prepare_bound_team_execution_context",
-                new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
             ):
-                run_input = await openai_compat._prepare_openai_team_run_input(
+                prepared_prompt = await openai_compat._prepare_openai_team_prompt(
                     scope_context=scope_context,
                     team_name="general",
                     agents=[agent],
@@ -4434,7 +4643,7 @@ class TestTeamCompletion:
                     thread_history=[],
                 )
 
-        assert run_input == "assistant: Previous team reply\n\nAnalyze this."
+        assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
 
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""

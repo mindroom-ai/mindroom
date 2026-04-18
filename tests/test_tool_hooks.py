@@ -496,7 +496,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
 
     assert exc_info.value is error
 
-    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_failures.jsonl"
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
 
     assert len(records) == 1
@@ -507,11 +507,13 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
         "channel",
         "room_id",
         "thread_id",
+        "reply_to_event_id",
         "requester_id",
         "session_id",
         "correlation_id",
         "duration_ms",
         "arguments",
+        "success",
         "error_type",
         "error_message",
         "traceback",
@@ -521,9 +523,11 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["channel"] == "matrix"
     assert records[0]["room_id"] == "!room:localhost"
     assert records[0]["thread_id"] == "$resolved-thread"
+    assert records[0]["reply_to_event_id"] is None
     assert records[0]["requester_id"] == "@user:localhost"
     assert records[0]["session_id"] == _SESSION_ID
     assert records[0]["correlation_id"] == "corr-runtime"
+    assert records[0]["success"] is False
     assert records[0]["error_type"] == "ValueError"
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
@@ -849,6 +853,43 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
+
+
+@pytest.mark.asyncio
+async def test_tool_after_call_hook_error_does_not_lose_success_row(tmp_path: Path) -> None:
+    """Success rows should be persisted before after-call hooks run."""
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def explode_after(_ctx: ToolAfterCallContext) -> None:
+        msg = "after failed"
+        raise RuntimeError(msg)
+
+    runtime_context = _tool_runtime_context(tmp_path)
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [explode_after])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(records) == 1
+    assert records[0]["tool_name"] == "read_file"
+    assert records[0]["success"] is True
+    assert records[0]["reply_to_event_id"] is None
+    assert records[0]["correlation_id"] == "corr-runtime"
+    assert records[0]["result"] == {"echo": "notes.txt"}
 
 
 @pytest.mark.asyncio

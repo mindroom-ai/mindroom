@@ -159,12 +159,25 @@ def _snapshot_request_log_context() -> dict[str, JSONValue]:
     return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
 
 
+def current_llm_request_log_context() -> dict[str, JSONValue]:
+    """Return the current detached request-log context for cross-sink correlation."""
+    return _snapshot_request_log_context()
+
+
+def model_params_payload(model: Model) -> dict[str, JSONValue]:
+    """Return JSON-safe model parameters suitable for durable request metadata."""
+    return _model_params(model)
+
+
 def build_llm_request_log_context(
     *,
+    agent_id: str,
     session_id: str,
     room_id: str | None,
     thread_id: str | None,
     reply_to_event_id: str | None,
+    requester_id: str | None,
+    correlation_id: str,
     prompt: str,
     model_prompt: str | None,
     full_prompt: str,
@@ -172,7 +185,9 @@ def build_llm_request_log_context(
 ) -> dict[str, object]:
     """Build explicit per-request log context for one provider call."""
     context: dict[str, object] = {
+        "agent_id": agent_id,
         "session_id": session_id,
+        "correlation_id": correlation_id,
         "current_turn_prompt": prompt,
         "full_prompt": full_prompt,
     }
@@ -182,6 +197,8 @@ def build_llm_request_log_context(
         context["thread_id"] = thread_id
     if reply_to_event_id:
         context["reply_to_event_id"] = reply_to_event_id
+    if requester_id is not None:
+        context["requester_id"] = requester_id
     if model_prompt is not None:
         context["model_prompt"] = model_prompt
     if not metadata:
@@ -225,10 +242,14 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
         _REQUEST_CONTEXT.reset(token)
 
 
+def _snapshot_request_log_context() -> dict[str, JSONValue]:
+    """Return a detached copy of the currently bound request-log context."""
+    return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
+
+
 async def write_llm_request_log(
     *,
     model: Model,
-    agent_name: str,
     messages: Sequence[Message],
     tools: list[dict[str, JSONValue]] | None,
     log_dir: str | None,
@@ -244,14 +265,13 @@ async def write_llm_request_log(
         {
             "timestamp": now.isoformat(),
             **resolved_request_context,
-            "agent_name": agent_name,
             "model_id": model.id,
             "system_prompt": _system_prompt(messages, model),
             "messages": _request_message_payloads(messages),
             "message_count": len(messages),
             "tools": _json_safe(tools),
             "tool_count": len(tools or []),
-            "model_params": _model_params(model),
+            "model_params": model_params_payload(model),
         },
     )
 
@@ -259,7 +279,6 @@ async def write_llm_request_log(
 async def _write_llm_request_log_if_present(
     *,
     model: Model,
-    agent_name: str,
     kwargs: dict[str, object],
     log_dir: str | None,
     default_log_dir: Path,
@@ -271,7 +290,6 @@ async def _write_llm_request_log_if_present(
         return
     await write_llm_request_log(
         model=model,
-        agent_name=agent_name,
         messages=messages,
         tools=_request_tools(kwargs.get("tools")),
         log_dir=log_dir,
@@ -283,7 +301,6 @@ async def _write_llm_request_log_if_present(
 def install_llm_request_logging(
     model: Model,
     *,
-    agent_name: str,
     debug_config: DebugConfig,
     default_log_dir: Path,
 ) -> None:
@@ -303,7 +320,6 @@ def install_llm_request_logging(
         async def _invoke() -> ModelResponse:
             await _write_llm_request_log_if_present(
                 model=model,
-                agent_name=agent_name,
                 kwargs=kwargs,
                 log_dir=debug_config.llm_request_log_dir,
                 default_log_dir=default_log_dir,
@@ -319,7 +335,6 @@ def install_llm_request_logging(
         async def _stream() -> AsyncIterator[ModelResponse]:
             await _write_llm_request_log_if_present(
                 model=model,
-                agent_name=agent_name,
                 kwargs=kwargs,
                 log_dir=debug_config.llm_request_log_dir,
                 default_log_dir=default_log_dir,

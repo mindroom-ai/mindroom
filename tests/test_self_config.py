@@ -36,8 +36,8 @@ def _make_config(
         defaults=defaults or DefaultsConfig(),
         models=models if models is not None else _DEFAULT_MODELS,
     )
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
-        config_path = Path(tmp.name)
+    config_dir = Path(tempfile.mkdtemp(prefix="mindroom-self-config-"))
+    config_path = config_dir / "config.yaml"
     runtime_paths = resolve_runtime_paths(config_path=config_path)
     config.save_to_yaml(config_path)
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)

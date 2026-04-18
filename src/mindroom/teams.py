@@ -46,11 +46,13 @@ from mindroom.history import (
     close_team_runtime_state_dbs,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
+    team_tool_definition_payloads_for_logging,
     update_scope_seen_event_ids,
 )
 from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
+from mindroom.llm_request_logging import model_params_payload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -88,6 +90,11 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def _team_tools_schema(team: Team) -> list[dict[str, object]]:
+    return team_tool_definition_payloads_for_logging(team)
+
 
 # Message length limits for team context and logging
 _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
@@ -1403,6 +1410,10 @@ async def _prepare_materialized_team_execution(
     active_event_ids: Collection[str],
     response_sender_id: str | None,
     current_sender_id: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+    requester_id: str | None,
+    correlation_id: str | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
     post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
@@ -1444,6 +1455,12 @@ async def _prepare_materialized_team_execution(
     run_metadata = build_matrix_run_metadata(
         reply_to_event_id,
         prepared_execution.unseen_event_ids,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
+        tools_schema=_team_tools_schema(team),
+        model_params=model_params_payload(team.model) if team.model is not None else {},
         extra_metadata=matrix_run_metadata,
     )
     return _PreparedMaterializedTeamExecution(
@@ -1484,6 +1501,14 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     requested_agent_names = _requested_team_agent_names(agent_names)
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    room_id = execution_identity.room_id if execution_identity is not None else None
+    thread_id = (
+        execution_identity.resolved_thread_id or execution_identity.thread_id
+        if execution_identity is not None
+        else None
+    )
+    requester_id = user_id or (execution_identity.requester_id if execution_identity is not None else None)
+    correlation_id = reply_to_event_id or uuid4().hex
     try:
         team_members = _materialize_team_members(
             agent_names,
@@ -1546,6 +1571,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 active_event_ids=active_event_ids,
                 response_sender_id=response_sender_id,
                 current_sender_id=user_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                 compaction_lifecycle=compaction_lifecycle,
@@ -1841,6 +1870,14 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     )
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    room_id = execution_identity.room_id if execution_identity is not None else None
+    thread_id = (
+        execution_identity.resolved_thread_id or execution_identity.thread_id
+        if execution_identity is not None
+        else None
+    )
+    requester_id = user_id or (execution_identity.requester_id if execution_identity is not None else None)
+    correlation_id = reply_to_event_id or uuid4().hex
     try:
         team_members = _materialize_team_members(
             requested_agent_names,
@@ -1911,6 +1948,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 active_event_ids=active_event_ids,
                 response_sender_id=response_sender_id,
                 current_sender_id=user_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
                 post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                 compaction_lifecycle=compaction_lifecycle,

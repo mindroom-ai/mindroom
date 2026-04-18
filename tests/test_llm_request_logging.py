@@ -55,12 +55,11 @@ def test_debug_config_parses() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
+async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa: PLR0915
     """Enabled request logging should emit one full JSONL entry per invoke path."""
     model = _FakeModel()
     install_llm_request_logging(
         model,
-        agent_name="assistant",
         debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
         default_log_dir=tmp_path / "unused",
     )
@@ -76,10 +75,13 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
     assistant_message = Message(role="assistant")
 
     with bind_llm_request_log_context(
+        agent_id="assistant",
         session_id="session-123",
         room_id="!room:example.com",
         thread_id="$thread:example.com",
         reply_to_event_id="$reply:example.com",
+        requester_id="@user:example.com",
+        correlation_id="$reply:example.com",
         current_turn_prompt="try now",
         model_prompt="try now\n\nbe explicit",
         full_prompt="system\n\nuser: try now",
@@ -94,10 +96,13 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
     assert result == {"status": "ok"}
 
     with bind_llm_request_log_context(
+        agent_id="assistant",
         session_id="session-123",
         room_id="!room:example.com",
         thread_id="$thread:example.com",
         reply_to_event_id="$reply:example.com",
+        requester_id="@user:example.com",
+        correlation_id="$reply:example.com",
         current_turn_prompt="try now",
         model_prompt="try now\n\nbe explicit",
         full_prompt="system\n\nuser: try now",
@@ -114,12 +119,14 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
 
     entries = _read_log_entries(tmp_path)
     assert len(entries) == 2
-    assert entries[0]["agent_name"] == "assistant"
+    assert entries[0]["agent_id"] == "assistant"
     assert entries[0]["model_id"] == "test-model"
     assert entries[0]["session_id"] == "session-123"
     assert entries[0]["room_id"] == "!room:example.com"
     assert entries[0]["thread_id"] == "$thread:example.com"
     assert entries[0]["reply_to_event_id"] == "$reply:example.com"
+    assert entries[0]["requester_id"] == "@user:example.com"
+    assert entries[0]["correlation_id"] == "$reply:example.com"
     assert entries[0]["current_turn_prompt"] == "try now"
     assert entries[0]["model_prompt"] == "try now\n\nbe explicit"
     assert entries[0]["full_prompt"] == "system\n\nuser: try now"
@@ -145,6 +152,8 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:
     assert entries[1]["messages"][1]["metrics"]["input_tokens"] == 2
     assert entries[1]["thread_id"] == "$thread:example.com"
     assert entries[1]["reply_to_event_id"] == "$reply:example.com"
+    assert entries[1]["requester_id"] == "@user:example.com"
+    assert entries[1]["correlation_id"] == "$reply:example.com"
     assert entries[1]["tools"] == []
     assert entries[1]["tool_count"] == 0
 
@@ -155,7 +164,6 @@ async def test_llm_request_logging_disabled_creates_no_file(tmp_path: Path) -> N
     model = _FakeModel()
     install_llm_request_logging(
         model,
-        agent_name="assistant",
         debug_config=DebugConfig(),
         default_log_dir=tmp_path,
     )

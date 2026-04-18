@@ -39,6 +39,8 @@ def _record_handled_turn(
     response_event_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
     response_owner: str | None = None,
+    requester_id: str | None = None,
+    correlation_id: str | None = None,
     history_scope: HistoryScope | None = None,
     conversation_target: MessageTarget | None = None,
 ) -> None:
@@ -49,6 +51,8 @@ def _record_handled_turn(
             response_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
             response_owner=response_owner,
+            requester_id=requester_id,
+            correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         ),
@@ -108,6 +112,24 @@ def test_handled_turn_state_preserves_response_context() -> None:
     assert handled_turn.response_owner == "test_agent"
     assert handled_turn.history_scope == history_scope
     assert handled_turn.conversation_target == conversation_target
+
+
+def test_handled_turn_state_preserves_requester_and_correlation() -> None:
+    """The handled-turn carrier should keep requester and correlation ids intact."""
+    handled_turn = HandledTurnState.create(
+        ["$event:example.com"],
+        requester_id="@user:example.com",
+        correlation_id="corr-123",
+    )
+
+    updated = handled_turn.with_response_context(
+        response_owner="agent",
+        history_scope=None,
+        conversation_target=None,
+    )
+
+    assert updated.requester_id == "@user:example.com"
+    assert updated.correlation_id == "corr-123"
 
 
 def test_record_outcome_marks_single_source_event(temp_dir: Path) -> None:
@@ -404,6 +426,44 @@ def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> No
     assert turn_record.conversation_target == conversation_target
 
 
+def test_persistence_round_trip_preserves_requester_and_correlation(temp_dir: Path) -> None:
+    """Reloaded ledgers should preserve requester and correlation ids."""
+    tracker1 = HandledTurnLedger("test_persist_request_context", base_path=temp_dir)
+    _record_handled_turn(
+        tracker1,
+        ["$original", "$reply"],
+        response_event_id="$response",
+        requester_id="@user:example.com",
+        correlation_id="corr-123",
+    )
+
+    tracker2 = HandledTurnLedger("test_persist_request_context", base_path=temp_dir)
+
+    turn_record = tracker2.get_turn_record("$reply")
+    assert turn_record is not None
+    assert turn_record.requester_id == "@user:example.com"
+    assert turn_record.correlation_id == "corr-123"
+
+
+def test_updates_preserve_requester_and_correlation_when_not_reprovided(temp_dir: Path) -> None:
+    """Later updates should keep stored requester and correlation values."""
+    tracker = HandledTurnLedger("test_request_context_updates", base_path=temp_dir)
+    _record_handled_turn(
+        tracker,
+        ["$event"],
+        response_event_id="$response-1",
+        requester_id="@user:example.com",
+        correlation_id="corr-123",
+    )
+    _record_handled_turn(tracker, ["$event"], response_event_id="$response-2")
+
+    turn_record = tracker.get_turn_record("$event")
+    assert turn_record is not None
+    assert turn_record.response_event_id == "$response-2"
+    assert turn_record.requester_id == "@user:example.com"
+    assert turn_record.correlation_id == "corr-123"
+
+
 def test_loads_legacy_response_tracker_shape(temp_dir: Path) -> None:
     """Legacy response tracker JSON should load into the new ledger."""
     legacy_file = temp_dir / "legacy_responded.json"
@@ -454,6 +514,28 @@ def test_loads_legacy_record_without_completed_flag_as_terminal(temp_dir: Path) 
     turn_record = tracker.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.completed
+
+
+def test_loads_legacy_record_without_requester_or_correlation(temp_dir: Path) -> None:
+    """Legacy records without the new request fields should still load cleanly."""
+    tracker = HandledTurnLedger("legacy_missing_request_context", base_path=temp_dir)
+    _write_responses_file(
+        tracker,
+        {
+            "$event": {
+                "timestamp": time.time(),
+                "response_event_id": "$response",
+                "completed": True,
+            },
+        },
+    )
+
+    reloaded = HandledTurnLedger("legacy_missing_request_context", base_path=temp_dir)
+    turn_record = reloaded.get_turn_record("$event")
+    assert turn_record is not None
+    assert turn_record.response_event_id == "$response"
+    assert turn_record.requester_id is None
+    assert turn_record.correlation_id is None
 
 
 def test_loads_legacy_coalesced_record_shape(temp_dir: Path) -> None:

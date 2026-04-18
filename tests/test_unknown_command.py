@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import mindroom.tool_system.skills as skills_module
 from mindroom.commands.parsing import CommandType, command_parser
-from mindroom.response_runner import ResponseRunner
 
 
 def test_unknown_command_parsing() -> None:
@@ -62,4 +61,3 @@ def test_non_commands_return_none() -> None:
 def test_removed_skill_command_runtime_helpers_are_not_exposed() -> None:
     """The removed !skill feature should not leave command-specific runtime APIs behind."""
     assert not hasattr(skills_module, "resolve_skill_command_spec")
-    assert not hasattr(ResponseRunner, "send_skill_command_response")

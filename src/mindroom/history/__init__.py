@@ -1,6 +1,10 @@
 """Persisted history compaction helpers."""
 
-from mindroom.history.compaction import compute_prompt_token_breakdown
+from mindroom.history.compaction import (
+    agent_tool_definition_payloads_for_logging,
+    compute_prompt_token_breakdown,
+    team_tool_definition_payloads_for_logging,
+)
 from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
 from mindroom.history.runtime import (
     PreparedScopeHistory,
@@ -63,6 +67,7 @@ __all__ = [
     "ResolvedReplayPlan",
     "ScopeSessionContext",
     "add_pending_force_compaction_scope",
+    "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",
     "close_agent_runtime_state_dbs",
     "close_team_runtime_state_dbs",
@@ -83,6 +88,7 @@ __all__ = [
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
     "run_post_response_compaction_check",
+    "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
     "write_scope_state",
 ]

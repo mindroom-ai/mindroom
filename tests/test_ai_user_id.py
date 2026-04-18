@@ -34,6 +34,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom.agent_storage import create_session_storage
 from mindroom.ai import (
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
@@ -58,6 +59,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState
@@ -941,6 +943,334 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
         )
 
     assert sequence == ["ai"]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_emits_session_started_after_first_persisted_session(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should emit session:started when they create a new session."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    storage = _SessionStorage()
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "send_text",
+            AsyncMock(side_effect=lambda request: sequence.append(f"send:{request.response_text}") or "$skill-reply"),
+        )
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage.session = AgentSession(
+                session_id=context.session_id or "",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+            )
+            sequence.append(f"ai:{context.session_id}")
+            return "Skill response"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    assert sequence == [
+        "ai:!test:localhost:$thread-root",
+        "started:agent:general:!test:localhost:$thread-root:$thread-root",
+        "send:Skill response",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_marks_matrix_prompt_context_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should scrub Matrix-only prompt metadata after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["matrix_message"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_uses_target_agent_storage_for_session_started(
+    tmp_path: Path,
+) -> None:
+    """Router skill-command replies should probe the target agent session storage."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name=ROUTER_AGENT_NAME)
+
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED, agents=["general"], rooms=["!test:localhost"])
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.agent_name}:{ctx.session_id}:{ctx.thread_id}")
+
+    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+
+    with (
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps = replace(
+            coordinator.deps,
+            state_writer=ConversationStateWriter(
+                ConversationStateWriterDeps(
+                    runtime=coordinator.deps.runtime,
+                    logger=coordinator.deps.logger,
+                    runtime_paths=runtime_paths,
+                    agent_name=bot.agent_name,
+                ),
+            ),
+        )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "send_text",
+            AsyncMock(side_effect=lambda request: sequence.append(f"send:{request.response_text}") or "$skill-reply"),
+        )
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            storage = create_session_storage(
+                agent_name="general",
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=kwargs["execution_identity"],
+            )
+            try:
+                storage.upsert_session(
+                    AgentSession(
+                        session_id=context.session_id or "",
+                        agent_id="general",
+                        created_at=1,
+                        updated_at=1,
+                    ),
+                )
+            finally:
+                storage.close()
+            sequence.append(f"ai:{context.session_id}")
+            return "Skill response"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    assert sequence == [
+        "ai:!test:localhost:$thread-root",
+        "started:agent:general:general:!test:localhost:$thread-root:$thread-root",
+        "send:Skill response",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_passes_current_and_model_prompt_to_ai(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should preserve raw and expanded prompt layers separately."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai:
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$skill-reply"))
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            assert kwargs["prompt"] == "Use demo skill"
+            assert kwargs["model_prompt"] != "Use demo skill"
+            assert "Use demo skill" in kwargs["model_prompt"]
+            return "Skill response"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_returns_event_id_after_post_effect_failure(
+    tmp_path: Path,
+) -> None:
+    """Skill-command replies should preserve the visible event id after late post-effect failures."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")),
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(side_effect=RuntimeError("late boom")),
+        ),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$skill-reply"))
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    coordinator.deps.logger.error.assert_called_once()
+    assert coordinator.deps.logger.error.call_args.kwargs["response_kind"] == "skill_command"
+    assert coordinator.deps.logger.error.call_args.kwargs["response_event_id"] == "$skill-reply"
+
+
+@pytest.mark.asyncio
+async def test_send_skill_command_response_passes_user_id_to_ai_response(tmp_path: Path) -> None:
+    """Skill-command replies should preserve the Matrix sender on the ai_response path."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")) as mock_ai,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$skill-reply"))
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    assert mock_ai.await_args is not None
+    assert mock_ai.await_args.kwargs["user_id"] == "@alice:localhost"
 
 
 @pytest.mark.asyncio
@@ -2270,6 +2600,188 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
         ]
         == "plain boom"
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_preserves_raw_prompt_when_model_prompt_supplies_tail(
+    tmp_path: Path,
+) -> None:
+    """Team responses should keep the raw user text when model_prompt only adds transient tails."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.response_runner.team_response",
+            new=AsyncMock(return_value="Team answer"),
+        ) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    message = mock_team_response.await_args.kwargs["message"]
+    assert "Describe this image" in message
+    assert "Available attachment IDs: att_1" in message
+
+
+@pytest.mark.asyncio
+async def test_generate_response_marks_transient_model_prompt_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Agent responses should scrub transient per-turn model tails after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Team responses should scrub transient per-turn model tails after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_response_marks_system_enrichment_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Agent responses should scrub transient system enrichment after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+            ),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_system_enrichment_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Team responses should scrub transient system enrichment after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
 
 
 @pytest.mark.asyncio
@@ -3839,7 +4351,7 @@ class TestUserIdPassthrough:
         assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
         assert mock_prepare_execution.await_args is not None
         assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt\n\nturn context\n\nmodel metadata"
-        assert mock_agent.additional_context == "existing context\n\nsystem enrichment\n\nsession preamble"
+        assert mock_agent.additional_context == "existing context\n\nsession preamble\n\nsystem enrichment"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -3892,7 +4404,7 @@ class TestUserIdPassthrough:
                 include_openai_compat_guidance=True,
             )
 
-        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
+        assert "current_sender_id" not in mock_prepare.await_args.kwargs
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
@@ -3978,40 +4490,8 @@ class TestUserIdPassthrough:
                 )
             ]
 
-        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
+        assert "current_sender_id" not in mock_prepare.await_args.kwargs
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
-
-    @pytest.mark.asyncio
-    async def test_stream_agent_response_passes_raw_prompt_separately_from_model_prompt(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Streaming should preserve the raw prompt when model_prompt is present."""
-        mock_agent = MagicMock()
-
-        async def _empty_stream() -> AsyncIterator[str]:
-            if False:
-                yield ""
-
-        mock_agent.arun = MagicMock(return_value=_empty_stream())
-
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
-
-            _ = [
-                chunk
-                async for chunk in stream_agent_response(
-                    agent_name="general",
-                    prompt="raw prompt",
-                    model_prompt="model metadata",
-                    session_id="session1",
-                    runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
-                )
-            ]
-
-        assert mock_prepare.await_args.args[1] == "raw prompt"
-        assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -4583,28 +5063,28 @@ class TestUserIdPassthrough:
         mock_prepare.assert_awaited_once()
         assert mock_prepare.await_args.args[1] == "raw prompt"
         assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
-        assert logged_contexts == [
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": prepared_prompt,
-                "metadata": None,
-            },
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
-                "metadata": None,
-            },
-        ]
+        assert len(logged_contexts) == 2
+        assert logged_contexts[0]["agent_id"] == "general"
+        assert logged_contexts[0]["session_id"] == "session1"
+        assert logged_contexts[0]["room_id"] is None
+        assert logged_contexts[0]["thread_id"] is None
+        assert logged_contexts[0]["reply_to_event_id"] is None
+        assert logged_contexts[0]["requester_id"] is None
+        assert logged_contexts[0]["prompt"] == "raw prompt"
+        assert logged_contexts[0]["model_prompt"] == "expanded prompt"
+        assert logged_contexts[0]["full_prompt"] == prepared_prompt
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
+        assert logged_contexts[0]["metadata"] == {
+            "room_id": None,
+            "thread_id": None,
+            "reply_to_event_id": None,
+            "requester_id": None,
+            "correlation_id": logged_contexts[0]["correlation_id"],
+            "tools_schema": [],
+            "model_params": {},
+        }
+        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -4814,28 +5294,28 @@ class TestUserIdPassthrough:
         mock_prepare.assert_awaited_once()
         assert mock_prepare.await_args.args[1] == "raw prompt"
         assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
-        assert logged_contexts == [
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": prepared_prompt,
-                "metadata": None,
-            },
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
-                "metadata": None,
-            },
-        ]
+        assert len(logged_contexts) == 2
+        assert logged_contexts[0]["agent_id"] == "general"
+        assert logged_contexts[0]["session_id"] == "session1"
+        assert logged_contexts[0]["room_id"] is None
+        assert logged_contexts[0]["thread_id"] is None
+        assert logged_contexts[0]["reply_to_event_id"] is None
+        assert logged_contexts[0]["requester_id"] is None
+        assert logged_contexts[0]["prompt"] == "raw prompt"
+        assert logged_contexts[0]["model_prompt"] == "expanded prompt"
+        assert logged_contexts[0]["full_prompt"] == prepared_prompt
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
+        assert logged_contexts[0]["metadata"] == {
+            "room_id": None,
+            "thread_id": None,
+            "reply_to_event_id": None,
+            "requester_id": None,
+            "correlation_id": logged_contexts[0]["correlation_id"],
+            "tools_schema": [],
+            "model_params": {},
+        }
+        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(
@@ -4870,14 +5350,10 @@ class TestUserIdPassthrough:
                 self.db = None
                 self.learning = None
 
-            async def arun(self, run_input: object, **_kwargs: object) -> AsyncIterator[object]:
-                messages = (
-                    [message.model_copy(deep=True) for message in run_input]
-                    if isinstance(run_input, list) and all(isinstance(message, Message) for message in run_input)
-                    else [Message(role="user", content=cast("str", run_input))]
-                )
+            async def arun(self, prompt: str | list[Message], **_kwargs: object) -> AsyncIterator[object]:
+                prompt_messages = prompt if isinstance(prompt, list) else [Message(role="user", content=prompt)]
                 async for _chunk in self.model.ainvoke_stream(
-                    messages=messages,
+                    messages=prompt_messages,
                     assistant_message=Message(role="assistant"),
                     tools=[],
                 ):
@@ -4888,7 +5364,6 @@ class TestUserIdPassthrough:
         model = _DeferredLoggingModel()
         install_llm_request_logging(
             model,
-            agent_name="general",
             debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
             default_log_dir=tmp_path / "unused",
         )
@@ -4899,7 +5374,10 @@ class TestUserIdPassthrough:
             },
         )
 
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._agent_tools_schema", return_value=[]),
+        ):
             mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
             chunks = [
                 chunk
@@ -4922,15 +5400,22 @@ class TestUserIdPassthrough:
         assert len(log_files) == 1
         entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
         assert len(entries) == 1
+        assert entries[0]["agent_id"] == "general"
         assert entries[0]["session_id"] == "session1"
         assert entries[0]["room_id"] == "!room:example.com"
         assert entries[0]["thread_id"] == "$thread:example.com"
         assert entries[0]["reply_to_event_id"] == "$reply:example.com"
+        assert entries[0]["correlation_id"] == "$reply:example.com"
         assert entries[0]["current_turn_prompt"] == "raw prompt"
         assert entries[0]["model_prompt"] == "expanded prompt"
         assert entries[0]["full_prompt"] == prepared_prompt
         assert entries[0]["messages"][0]["role"] == "user"
-        assert entries[0]["messages"][0]["content"] == prepared_prompt
+        logged_content = entries[0]["messages"][0]["content"]
+        if isinstance(logged_content, list):
+            assert len(logged_content) == 1
+            assert logged_content[0]["content"] == prepared_prompt
+        else:
+            assert logged_content == prepared_prompt
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -5352,6 +5837,13 @@ class TestUserIdPassthrough:
         )
 
         assert metadata == {
+            "room_id": None,
+            "thread_id": None,
+            "reply_to_event_id": "$primary",
+            "requester_id": None,
+            "correlation_id": None,
+            "tools_schema": [],
+            "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$unseen"],
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],

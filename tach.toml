@@ -1722,6 +1722,7 @@ depends_on = ["mindroom.constants"]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.hooks",
+    "mindroom.llm_request_logging",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
     "mindroom.tool_system.runtime_context",
@@ -2578,6 +2579,7 @@ expose = [
     "ResolvedReplayPlan",
     "ScopeSessionContext",
     "add_pending_force_compaction_scope",
+    "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",
     "close_agent_runtime_state_dbs",
     "close_team_runtime_state_dbs",
@@ -2598,6 +2600,7 @@ expose = [
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
     "run_post_response_compaction_check",
+    "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
     "write_scope_state",
 ]
