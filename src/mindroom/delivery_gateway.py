@@ -24,7 +24,7 @@ from mindroom.hooks.types import (
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
 )
-from mindroom.matrix.client import build_threaded_edit_content, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.streaming import StreamingResponse, send_streaming_response

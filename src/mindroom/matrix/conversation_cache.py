@@ -26,7 +26,7 @@ from mindroom.matrix.cache.thread_writes import (
     ThreadOutboundWritePolicy,
     ThreadSyncWritePolicy,
 )
-from mindroom.matrix.client import (
+from mindroom.matrix.client_thread_history import (
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,

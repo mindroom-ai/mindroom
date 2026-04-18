@@ -47,7 +47,7 @@ depends_on = [
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.cache.thread_writes",
-    "mindroom.matrix.client",
+    "mindroom.matrix.client_thread_history",
 ]
 
 [[modules]]
@@ -63,7 +63,25 @@ path = "mindroom.matrix.client"
 depends_on = [
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_history_result",
-    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.client_visible_messages",
+]
+
+[[modules]]
+path = "mindroom.matrix.client_delivery"
+depends_on = ["mindroom.matrix.conversation_cache"]
+
+[[modules]]
+path = "mindroom.matrix.client_visible_messages"
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.client_thread_history"
+depends_on = [
+    "mindroom.matrix.cache",
+    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.client_visible_messages",
 ]
 
 [[modules]]
@@ -229,6 +247,48 @@ expose = [
     "ThreadReadResult",
 ]
 from = ["mindroom.matrix.conversation_cache"]
+
+[[interfaces]]
+expose = [
+    "DeliveredMatrixEvent",
+    "build_edit_event_content",
+    "build_threaded_edit_content",
+    "cached_room",
+    "cached_rooms",
+    "edit_message_result",
+    "send_file_message",
+    "send_message_result",
+]
+from = ["mindroom.matrix.client_delivery"]
+visibility = ["mindroom.matrix.client"]
+exclusive = true
+
+[[interfaces]]
+expose = [
+    "ResolvedVisibleMessage",
+    "_apply_latest_edits_to_messages",
+    "_record_latest_thread_edit",
+    "replace_visible_message",
+    "resolve_latest_visible_messages",
+]
+from = ["mindroom.matrix.client_visible_messages"]
+visibility = ["mindroom.matrix.client", "mindroom.matrix.client_thread_history", "mindroom.matrix.stale_stream_cleanup"]
+exclusive = true
+
+[[interfaces]]
+expose = [
+    "RoomThreadsPageError",
+    "ThreadRoomScanRootNotFoundError",
+    "fetch_dispatch_thread_history",
+    "fetch_dispatch_thread_snapshot",
+    "fetch_thread_history",
+    "fetch_thread_snapshot",
+    "get_room_threads_page",
+    "refresh_thread_history_from_source",
+]
+from = ["mindroom.matrix.client_thread_history"]
+visibility = ["mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+exclusive = true
 
 [[interfaces]]
 expose = [

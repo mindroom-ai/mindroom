@@ -25,9 +25,9 @@ from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     edit_message_result,
     get_joined_rooms,
-    resolve_latest_visible_messages,
     send_message_result,
 )
+from mindroom.matrix.client_visible_messages import resolve_latest_visible_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.mentions import format_message_with_mentions
