@@ -6,10 +6,7 @@ source_roots = ["src"]
 [[modules]]
 paths = [
     "mindroom.ai",
-    "mindroom.bot",
     "mindroom.custom_tools.memory",
-    "mindroom.orchestrator",
-    "mindroom.response_runner",
 ]
 
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
@@ -35,6 +32,7 @@ depends_on = ["mindroom.knowledge"]
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
+    "mindroom.ai",
     "mindroom.knowledge",
     "mindroom.matrix.client",
     "mindroom.teams",
@@ -47,6 +45,7 @@ depends_on = [
     "mindroom.conversation_resolver",
     "mindroom.hooks.sender",
     "mindroom.knowledge",
+    "mindroom.memory",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
     "mindroom.post_response_effects",
@@ -60,6 +59,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.ai",
     "mindroom.knowledge",
     "mindroom.tool_system.runtime_context",
 ]
@@ -69,6 +69,7 @@ path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.bot",
     "mindroom.knowledge",
+    "mindroom.memory",
     "mindroom.matrix.client",
     "mindroom.runtime_support",
     "mindroom.scheduling",
@@ -77,7 +78,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.ai",
     "mindroom.knowledge",
+    "mindroom.memory",
     "mindroom.matrix.client",
     "mindroom.post_response_effects",
     "mindroom.streaming",
@@ -88,7 +91,10 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.teams"
-depends_on = ["mindroom.knowledge"]
+depends_on = [
+    "mindroom.ai",
+    "mindroom.knowledge",
+]
 
 [[modules]]
 path = "mindroom.matrix.cache"
