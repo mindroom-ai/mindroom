@@ -2136,7 +2136,7 @@ async def test_request_scoped_knowledge_manager_initialization_serializes_per_bi
         active -= 1
         return MagicMock(spec=KnowledgeManager)
 
-    monkeypatch.setattr("mindroom.knowledge.manager._create_knowledge_manager_for_target", fake_create)
+    monkeypatch.setattr("mindroom.knowledge.shared_managers._create_knowledge_manager_for_target", fake_create)
 
     await asyncio.gather(
         ensure_agent_knowledge_managers(
