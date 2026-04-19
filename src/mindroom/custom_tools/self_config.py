@@ -21,7 +21,7 @@ from mindroom.custom_tools.config_manager import (
     validate_knowledge_bases,
 )
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.metadata import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths

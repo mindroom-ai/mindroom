@@ -21,8 +21,11 @@ from mindroom.config.models import (
     ToolConfigEntry,
     validate_unique_tool_entries,
 )
-from mindroom.tool_system.metadata import TOOL_METADATA, normalize_authored_tool_overrides
-from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
+from mindroom.tool_system.catalog import TOOL_METADATA, normalize_authored_tool_overrides
+from mindroom.tool_system.worker_routing import (
+    WorkerScope,
+    agent_workspace_relative_path,
+)
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 _PrivateWorkerScope = Literal["user", "user_agent"]

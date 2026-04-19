@@ -26,13 +26,14 @@ from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.teams import materialize_exact_team_members
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
+from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.catalog import ToolConfigOverrideError
 from mindroom.tool_system.dynamic_toolkits import (
     DynamicToolkitConflictError,
     get_loaded_toolkits_for_session,
     merge_runtime_tool_configs,
     save_loaded_toolkits_for_session,
 )
-from mindroom.tool_system.metadata import ToolConfigOverrideError, ensure_tool_registry_loaded
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:

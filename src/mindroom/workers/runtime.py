@@ -31,7 +31,7 @@ def serialized_kubernetes_worker_validation_snapshot(
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot in the primary runtime."""
     from mindroom.config.main import load_config  # noqa: PLC0415
-    from mindroom.tool_system.metadata import (  # noqa: PLC0415
+    from mindroom.tool_system.catalog import (  # noqa: PLC0415
         resolved_tool_validation_snapshot_for_runtime,
         serialize_tool_validation_snapshot,
     )

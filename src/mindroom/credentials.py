@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, worker_root_path
+from mindroom.tool_system.worker_routing import worker_root_path
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 _WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"

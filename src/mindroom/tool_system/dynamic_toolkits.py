@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.models import ResolvedToolConfig
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.metadata import validate_authored_tool_entry_overrides
+from mindroom.tool_system.catalog import validate_authored_tool_entry_overrides
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -114,6 +114,36 @@ def _normalize_effective_tool_config_overrides(
     overrides: dict[str, object],
 ) -> dict[str, object]:
     return validate_authored_tool_entry_overrides(tool_name, overrides)
+
+
+def resolve_special_tool_names(
+    agent_name: str,
+    config: Config,
+    delegation_depth: int,
+    enable_dynamic_tools_manager: bool,
+) -> list[str]:
+    """Resolve the ordered special-case tool names for one agent runtime."""
+    agent_config = config.get_agent(agent_name)
+    tool_names: list[str] = []
+
+    if agent_config.delegate_to:
+        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH  # noqa: PLC0415
+
+        if delegation_depth < MAX_DELEGATION_DEPTH:
+            tool_names.append("delegate")
+
+    allow_self_config = (
+        agent_config.allow_self_config
+        if agent_config.allow_self_config is not None
+        else config.defaults.allow_self_config
+    )
+    if allow_self_config:
+        tool_names.append("self_config")
+
+    if enable_dynamic_tools_manager and agent_config.allowed_toolkits:
+        tool_names.append("dynamic_tools")
+
+    return tool_names
 
 
 def get_loaded_toolkits_for_session(
@@ -232,26 +262,16 @@ def _inject_special_tool_configs(
     enable_dynamic_tools_manager: bool,
 ) -> list[ResolvedToolConfig]:
     tool_names = [entry.name for entry in resolved_tool_configs]
-    agent_config = config.get_agent(agent_name)
-
-    if agent_config.delegate_to and "delegate" not in tool_names:
-        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH  # noqa: PLC0415
-
-        if delegation_depth < MAX_DELEGATION_DEPTH:
-            resolved_tool_configs.append(ResolvedToolConfig(name="delegate", tool_config_overrides={}))
-            tool_names.append("delegate")
-
-    allow_self_config = (
-        agent_config.allow_self_config
-        if agent_config.allow_self_config is not None
-        else config.defaults.allow_self_config
-    )
-    if allow_self_config and "self_config" not in tool_names:
-        resolved_tool_configs.append(ResolvedToolConfig(name="self_config", tool_config_overrides={}))
-        tool_names.append("self_config")
-
-    if enable_dynamic_tools_manager and agent_config.allowed_toolkits and "dynamic_tools" not in tool_names:
-        resolved_tool_configs.append(ResolvedToolConfig(name="dynamic_tools", tool_config_overrides={}))
+    for tool_name in resolve_special_tool_names(
+        agent_name=agent_name,
+        config=config,
+        delegation_depth=delegation_depth,
+        enable_dynamic_tools_manager=enable_dynamic_tools_manager,
+    ):
+        if tool_name in tool_names:
+            continue
+        resolved_tool_configs.append(ResolvedToolConfig(name=tool_name, tool_config_overrides={}))
+        tool_names.append(tool_name)
 
     return resolved_tool_configs
 

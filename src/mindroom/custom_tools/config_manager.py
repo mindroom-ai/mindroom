@@ -22,11 +22,11 @@ from mindroom.config.main import (
 )
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.metadata import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
+from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.metadata import ToolMetadata
+    from mindroom.tool_system.catalog import ToolMetadata
 
 logger = get_logger(__name__)
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."

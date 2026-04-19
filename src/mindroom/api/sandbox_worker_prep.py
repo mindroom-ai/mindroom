@@ -13,7 +13,7 @@ from fastapi import HTTPException
 
 from mindroom.api import sandbox_exec
 from mindroom.logging_config import get_logger
-from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
@@ -160,7 +160,7 @@ def prepare_worker(
             worker_id=worker_dir_name(worker_key),
             worker_key=worker_key,
             endpoint="/api/sandbox-runner/execute",
-            auth_token=runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token,
+            auth_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
             status="ready",
             backend_name="dedicated_sandbox_runner",
             last_used_at=now,

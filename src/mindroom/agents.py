@@ -32,12 +32,19 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed
-from mindroom.tool_system.dynamic_toolkits import DynamicToolkitSelection, resolve_dynamic_toolkit_selection
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.dynamic_toolkits import (
+    DynamicToolkitSelection,
+    resolve_dynamic_toolkit_selection,
+    resolve_special_tool_names,
+)
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import (
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+)
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_worker_target_from_runtime_env,
@@ -59,8 +66,11 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
-    from mindroom.tool_system.plugins import _Plugin
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.hooks.registry import HookRegistryPlugin
+    from mindroom.tool_system.worker_routing import (
+        ToolExecutionIdentity,
+        WorkerScope,
+    )
 
 logger = get_logger(__name__)
 
@@ -548,24 +558,14 @@ def get_agent_toolkit_names(
 ) -> list[str]:
     """Return the complete ordered toolkit list for an agent runtime."""
     tool_names = list(config.get_agent_tools(agent_name))
-    agent_config = config.get_agent(agent_name)
-
-    if agent_config.delegate_to and "delegate" not in tool_names:
-        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH  # noqa: PLC0415
-
-        if delegation_depth < MAX_DELEGATION_DEPTH:
-            tool_names.append("delegate")
-
-    allow_self_config = (
-        agent_config.allow_self_config
-        if agent_config.allow_self_config is not None
-        else config.defaults.allow_self_config
-    )
-    if allow_self_config and "self_config" not in tool_names:
-        tool_names.append("self_config")
-
-    if agent_config.allowed_toolkits and "dynamic_tools" not in tool_names:
-        tool_names.append("dynamic_tools")
+    for tool_name in resolve_special_tool_names(
+        agent_name=agent_name,
+        config=config,
+        delegation_depth=delegation_depth,
+        enable_dynamic_tools_manager=True,
+    ):
+        if tool_name not in tool_names:
+            tool_names.append(tool_name)
 
     return tool_names
 
@@ -584,7 +584,7 @@ def _resolve_runtime_worker_tools(
     if configured is not None:
         return config.expand_tool_names(list(configured))
 
-    from mindroom.tool_system.metadata import default_worker_routed_tools, ensure_tool_registry_loaded  # noqa: PLC0415
+    from mindroom.tool_system.catalog import default_worker_routed_tools, ensure_tool_registry_loaded  # noqa: PLC0415
 
     ensure_tool_registry_loaded(runtime_paths, config)
     return default_worker_routed_tools(runtime_tool_names)
@@ -884,15 +884,15 @@ def _resolve_agent_culture(
 
 
 @timed("system_prompt_assembly.agent_create.load_plugins")
-def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[_Plugin]:
-    return load_plugins(config, runtime_paths)
+def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
+    return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
 
 
 @timed("system_prompt_assembly.agent_create.hook_bridge")
 def _build_agent_tool_hook_bridge(
     *,
     hook_registry: HookRegistry | None,
-    plugins: list[_Plugin],
+    plugins: list[HookRegistryPlugin],
     agent_name: str,
     dispatch_context: ToolDispatchContext | None,
     config: Config,

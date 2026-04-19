@@ -29,7 +29,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import (
+        ToolExecutionIdentity,
+        WorkerScope,
+    )
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import mindroom.tool_system.metadata as metadata_module
-import mindroom.tool_system.plugins as plugin_module
+import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths

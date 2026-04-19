@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from agno.agent import Agent  # noqa: TC002
 from agno.run import RunContext  # noqa: TC002
@@ -20,7 +21,9 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     resolve_current_session_id,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity  # noqa: TC001
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 

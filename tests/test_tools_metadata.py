@@ -16,27 +16,29 @@ import mindroom.tool_system.metadata as metadata_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
-    _PLUGIN_MODULE_PREFIX,
-    _TOOL_REGISTRY,
     AUTHORED_OVERRIDE_INHERIT,
-    TOOL_METADATA,
     ConfigField,
     ToolAuthoredOverrideValidator,
     ToolCategory,
     ToolConfigOverrideError,
     ToolManagedInitArg,
-    _capture_tool_registry_snapshot,
     _execute_validation_plugin_module,
-    _restore_tool_registry_snapshot,
     deserialize_tool_validation_snapshot,
-    ensure_tool_registry_loaded,
     export_tools_metadata,
     get_tool_by_name,
     register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
     validate_authored_overrides,
+)
+from mindroom.tool_system.registry_state import (
+    _PLUGIN_MODULE_PREFIX,
+    _TOOL_REGISTRY,
+    TOOL_METADATA,
+    _capture_tool_registry_snapshot,
+    _restore_tool_registry_snapshot,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 

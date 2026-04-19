@@ -54,7 +54,7 @@ from mindroom.matrix.identity import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.catalog import (
     ToolConfigOverrideError,
     ToolMetadataValidationError,
     ToolValidationInfo,
@@ -1122,7 +1122,7 @@ class Config(BaseModel):
             configured = self.defaults.worker_tools
         if configured is None:
             # Imported lazily to avoid a circular import: tool metadata also imports Config.
-            from mindroom.tool_system.metadata import (  # noqa: PLC0415
+            from mindroom.tool_system.catalog import (  # noqa: PLC0415
                 default_worker_routed_tools,
                 ensure_tool_registry_loaded,
             )
@@ -1311,7 +1311,7 @@ class Config(BaseModel):
 
     def get_toolkit_tool_configs(self, toolkit_name: str) -> list[ResolvedToolConfig]:
         """Return effective authored tool config entries for one dynamic toolkit."""
-        from mindroom.tool_system.metadata import apply_authored_overrides  # noqa: PLC0415
+        from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
 
         toolkit = self.get_toolkit(toolkit_name)
         merged_overrides = {entry.name: apply_authored_overrides({}, entry.overrides) for entry in toolkit.tools}
@@ -1325,7 +1325,7 @@ class Config(BaseModel):
 
     def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
         """Return effective authored tool config entries for one agent."""
-        from mindroom.tool_system.metadata import apply_authored_overrides  # noqa: PLC0415
+        from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
 
         agent_config = self.get_agent(agent_name)
         merged_overrides: dict[str, dict[str, object]] = {}
@@ -1360,7 +1360,7 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths | None = None,
     ) -> dict[str, object] | None:
         """Return runtime kwargs derived from one agent's authored tool overrides."""
-        from mindroom.tool_system.metadata import (  # noqa: PLC0415
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
             authored_tool_overrides_to_runtime,
             ensure_tool_registry_loaded,
         )
