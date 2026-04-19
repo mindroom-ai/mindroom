@@ -28,11 +28,13 @@ if TYPE_CHECKING:
         "(['content.body', 'content.name', 'content.topic']) are searched via the server default. "
         "Pass `keys=[...]` to narrow, and when supplied they must only use those values. "
         "`order_by` is `rank` or `recent`; `limit` must be 1-50; `filter.rooms` must be omitted "
-        "or contain only that room; `next_batch` is sent as the Matrix search query parameter; "
+        "or contain only that room; `filter.limit` is not supported because the top-level `limit` "
+        "parameter is authoritative; `next_batch` is sent as the Matrix search query parameter; "
         "and optional `event_context` is passed through. Responses return `{count, next_batch, "
         "results}` where each result contains only `rank`, `event_id`, `room_id`, `sender`, "
-        "`origin_server_ts`, `type`, `snippet`, and optional `context`. Full event `content` is "
-        "intentionally omitted; use `get_event` when needed."
+        "`origin_server_ts`, `type`, `snippet`, and optional `context` (including `profile_info` "
+        "when `event_context.include_profile` is requested). Full event `content` is intentionally "
+        "omitted; use `get_event` when needed."
     ),
 )
 def matrix_api_tools() -> type[MatrixApiTools]:

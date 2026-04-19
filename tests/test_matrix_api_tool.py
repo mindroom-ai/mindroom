@@ -1172,6 +1172,51 @@ async def test_matrix_api_search_pagination_round_trips_next_batch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
+    """Search should preserve profile_info when include_profile is requested."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(
+        count=1,
+        next_batch=None,
+        results=[
+            _search_result(
+                context={
+                    "events_before": [],
+                    "events_after": [],
+                    "profile_info": {
+                        "@alice:localhost": {
+                            "displayname": "Alice",
+                            "avatar_url": "mxc://localhost/alice",
+                        },
+                    },
+                },
+            ),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="needle",
+                event_context={"include_profile": True},
+            ),
+        )
+
+    assert payload["results"][0]["context"] == {
+        "events_before": [],
+        "events_after": [],
+        "profile_info": {
+            "@alice:localhost": {
+                "displayname": "Alice",
+                "avatar_url": "mxc://localhost/alice",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
     """Search should scope the Matrix request body to the explicitly requested room."""
     tool = MatrixApiTools()
@@ -1209,6 +1254,10 @@ async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
             {"action": "search", "search_term": "needle", "keys": ["content.body", "content.url"]},
             "keys entries must be one of",
         ),
+        (
+            {"action": "search", "search_term": "needle", "filter": {"rooms": ["!room:localhost"], "limit": 5}},
+            "filter.limit is not supported; use the top-level limit parameter.",
+        ),
         ({"action": "search", "search_term": "needle", "limit": -1}, "limit must be an integer between"),
         ({"action": "search", "search_term": "needle", "limit": 0}, "limit must be an integer between"),
         ({"action": "search", "search_term": "needle", "limit": 51}, "limit must be an integer between"),
@@ -1237,7 +1286,6 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
     ctx = _make_context()
     raw_filter = {
         "rooms": [ctx.room_id],
-        "limit": 10,
         "not_types": ["m.reaction"],
         "senders": ["@alice:localhost"],
     }
@@ -1268,6 +1316,12 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
                     ],
                     "start": "start-token",
                     "end": "end-token",
+                    "profile_info": {
+                        "@alice:localhost": {
+                            "displayname": "Alice",
+                            "avatar_url": "mxc://localhost/alice",
+                        },
+                    },
                 },
             ),
         ],
@@ -1284,7 +1338,10 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
         )
 
     request_body = json.loads(ctx.client._send.await_args.args[3])
-    assert request_body["search_categories"]["room_events"]["filter"] == raw_filter
+    assert request_body["search_categories"]["room_events"]["filter"] == {
+        **raw_filter,
+        "limit": 10,
+    }
     assert request_body["search_categories"]["room_events"]["event_context"] == raw_event_context
     assert payload["results"][0]["context"] == {
         "events_before": [
@@ -1309,6 +1366,12 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
         ],
         "start": "start-token",
         "end": "end-token",
+        "profile_info": {
+            "@alice:localhost": {
+                "displayname": "Alice",
+                "avatar_url": "mxc://localhost/alice",
+            },
+        },
     }
 
 

@@ -432,6 +432,13 @@ class MatrixApiTools(Toolkit):
             normalized_context["start"] = context_dict["start"]
         if isinstance(context_dict.get("end"), str):
             normalized_context["end"] = context_dict["end"]
+        profile_info = cls._copy_string_keyed_dict(context_dict.get("profile_info"))
+        if profile_info is not None:
+            normalized_context["profile_info"] = {
+                user_id: normalized_profile
+                for user_id, raw_profile in profile_info.items()
+                if (normalized_profile := cls._copy_string_keyed_dict(raw_profile)) is not None
+            }
         return normalized_context
 
     @classmethod
@@ -457,10 +464,10 @@ class MatrixApiTools(Toolkit):
             error_message = "filter.rooms must be omitted or contain only the target room_id."
             raise ValueError(error_message)
 
-        if "limit" not in filter_payload:
-            filter_payload["limit"] = limit
-        else:
-            cls._validate_search_limit(filter_payload["limit"])
+        if "limit" in filter_payload:
+            error_message = "filter.limit is not supported; use the top-level limit parameter."
+            raise ValueError(error_message)
+        filter_payload["limit"] = limit
         return filter_payload
 
     @classmethod
@@ -1419,6 +1426,7 @@ class MatrixApiTools(Toolkit):
 
         `room_id` defaults to the current Matrix tool runtime context room.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
+        `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state for a small set of high-risk room-state event types.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.
