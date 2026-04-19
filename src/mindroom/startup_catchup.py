@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeGuard, cast
+from typing import TYPE_CHECKING, TypeGuard
 
 import nio
 
@@ -13,42 +13,51 @@ from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 if TYPE_CHECKING:
     from .bot import AgentBot
 
-type StartupCatchUpMediaEvent = (
+type StartupCatchUpNonAudioMediaEvent = (
     nio.RoomMessageImage
     | nio.RoomEncryptedImage
     | nio.RoomMessageFile
     | nio.RoomEncryptedFile
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
-    | nio.RoomMessageAudio
-    | nio.RoomEncryptedAudio
 )
+type StartupCatchUpAudioEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
+type StartupCatchUpMediaEvent = StartupCatchUpNonAudioMediaEvent | StartupCatchUpAudioEvent
 
 type StartupCatchUpEvent = nio.RoomMessageText | StartupCatchUpMediaEvent
-type _BotMediaDispatchEvent = (
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
+type _BotAudioDispatchEvent = StartupCatchUpAudioEvent
 
 
-STARTUP_CATCH_UP_MEDIA_EVENT_TYPES = (
+STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES = (
     nio.RoomMessageImage,
     nio.RoomEncryptedImage,
     nio.RoomMessageFile,
     nio.RoomEncryptedFile,
     nio.RoomMessageVideo,
     nio.RoomEncryptedVideo,
+)
+STARTUP_CATCH_UP_AUDIO_EVENT_TYPES = (
     nio.RoomMessageAudio,
     nio.RoomEncryptedAudio,
+)
+STARTUP_CATCH_UP_MEDIA_EVENT_TYPES = (
+    *STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES,
+    *STARTUP_CATCH_UP_AUDIO_EVENT_TYPES,
 )
 
 
 def _is_startup_catch_up_event(event: object) -> TypeGuard[StartupCatchUpEvent]:
     return isinstance(event, (nio.RoomMessageText, *STARTUP_CATCH_UP_MEDIA_EVENT_TYPES))
+
+
+def _is_startup_audio_event(event: StartupCatchUpMediaEvent) -> TypeGuard[_BotAudioDispatchEvent]:
+    return isinstance(event, STARTUP_CATCH_UP_AUDIO_EVENT_TYPES)
+
+
+def _is_startup_non_audio_media_event(
+    event: StartupCatchUpMediaEvent,
+) -> TypeGuard[StartupCatchUpNonAudioMediaEvent]:
+    return isinstance(event, STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES)
 
 
 def _should_catch_up_message(bot: AgentBot, event: object) -> bool:
@@ -92,8 +101,10 @@ async def _dispatch_catch_up_event(
     try:
         if isinstance(event, nio.RoomMessageText):
             await bot._on_message(room, event)
-        else:
-            await bot._on_media_message(room, cast("_BotMediaDispatchEvent", event))
+        elif _is_startup_audio_event(event):
+            await bot._on_audio_message(room, event)
+        elif _is_startup_non_audio_media_event(event):
+            await bot._on_media_message(room, event)
     except Exception:
         bot.logger.exception(
             "startup_catch_up_dispatch_failed",

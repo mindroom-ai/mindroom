@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
 import nio
 
@@ -142,6 +142,16 @@ type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
 type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
 
 
+def _is_audio_media_event(event: _InboundMediaEvent) -> TypeGuard[nio.RoomMessageAudio | nio.RoomEncryptedAudio]:
+    """Return whether one inbound media event is audio."""
+    return isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+
+
+def _is_non_audio_media_event(event: _InboundMediaEvent) -> TypeGuard[_MediaDispatchEvent]:
+    """Return whether one inbound media event stays on the generic media path."""
+    return not _is_audio_media_event(event)
+
+
 @dataclass(frozen=True)
 class TurnControllerDeps:
     """Collaborators needed for turn control, policy, and execution."""
@@ -270,7 +280,7 @@ class TurnController:
 
         return requester_user_id
 
-    def _precheck_dispatch_event[T: _DispatchEvent](
+    def _precheck_dispatch_event[T: _DispatchEvent | _InboundMediaEvent](
         self,
         room: nio.MatrixRoom,
         event: T,
@@ -1552,12 +1562,21 @@ class TurnController:
     ) -> None:
         """Handle one inbound media event."""
         async with self.deps.resolver.turn_thread_cache_scope():
-            await self._handle_media_message_inner(room, event)
+            await self._handle_inbound_media_message_inner(room, event)
 
-    async def _handle_media_message_inner(
+    async def handle_audio_event(
         self,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    ) -> None:
+        """Handle one inbound audio event."""
+        async with self.deps.resolver.turn_thread_cache_scope():
+            await self._handle_inbound_media_message_inner(room, event)
+
+    async def _handle_inbound_media_message_inner(
+        self,
+        room: nio.MatrixRoom,
+        event: _InboundMediaEvent,
     ) -> None:
         """Handle one media event inside the per-turn conversation lookup scope."""
         prechecked_event = self._precheck_dispatch_event(room, event)
@@ -1568,8 +1587,6 @@ class TurnController:
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
-        # Prime transitive ancestor lookups before writing advisory cache membership.
-        await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
         event_info = EventInfo.from_event(prechecked_event.event.source)
         await self._append_live_event_with_timing(
             room.room_id,
@@ -1578,9 +1595,31 @@ class TurnController:
             dispatch_timing=dispatch_timing,
         )
 
-        if await self._dispatch_special_media_as_text(room, prechecked_event):
+        if _is_audio_media_event(prechecked_event.event):
+            await self._on_audio_media_message(
+                room,
+                _PrecheckedEvent(
+                    event=prechecked_event.event,
+                    requester_user_id=prechecked_event.requester_user_id,
+                ),
+            )
             return
+
         event = prechecked_event.event
+        if not _is_non_audio_media_event(event):
+            return
+
+        # Prime transitive ancestor lookups before writing advisory cache membership.
+        await self.deps.resolver.coalescing_thread_id(room, event)
+
+        if await self._dispatch_special_media_as_text(
+            room,
+            _PrecheckedEvent(
+                event=event,
+                requester_user_id=prechecked_event.requester_user_id,
+            ),
+        ):
+            return
         await self._enqueue_for_dispatch(
             event,
             room,
@@ -1595,15 +1634,6 @@ class TurnController:
     ) -> bool:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
-        if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
-            await self._on_audio_media_message(
-                room,
-                _PrecheckedEvent(
-                    event=event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                ),
-            )
-            return True
         if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
             return await self._dispatch_file_sidecar_text_preview(
                 room,

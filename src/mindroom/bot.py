@@ -118,7 +118,8 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .startup_catchup import (
-    STARTUP_CATCH_UP_MEDIA_EVENT_TYPES,
+    STARTUP_CATCH_UP_AUDIO_EVENT_TYPES,
+    STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES,
     catch_up_missed_user_messages,
 )
 from .turn_controller import TurnController, TurnControllerDeps
@@ -268,6 +269,7 @@ type _MediaDispatchEvent = (
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
 )
+type _AudioDispatchEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 
 type _MessageContext = MessageContext
 
@@ -1054,8 +1056,11 @@ class AgentBot:
         )
 
         media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
-        for event_type in STARTUP_CATCH_UP_MEDIA_EVENT_TYPES:
+        for event_type in STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES:
             client.add_event_callback(media_callback, event_type)
+        audio_callback = _create_task_wrapper(self._on_audio_message, owner=self._runtime_view)
+        for event_type in STARTUP_CATCH_UP_AUDIO_EVENT_TYPES:
+            client.add_event_callback(audio_callback, event_type)
         client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
         client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
         self._sync_callbacks_registered = True
@@ -1354,6 +1359,14 @@ class AgentBot:
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
         await self._turn_controller.handle_media_event(room, event)
+
+    async def _on_audio_message(
+        self,
+        room: nio.MatrixRoom,
+        event: _AudioDispatchEvent,
+    ) -> None:
+        """Delegate one inbound audio event to the turn engine."""
+        await self._turn_controller.handle_audio_event(room, event)
 
     def _should_queue_follow_up_in_active_response_thread(
         self,

@@ -20,6 +20,7 @@ def _bot(tmp_path: Path):
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
     bot._on_message = AsyncMock()
     bot._on_media_message = AsyncMock()
+    bot._on_audio_message = AsyncMock()
     return bot
 
 
@@ -171,7 +172,8 @@ async def test_catchup_dispatches_media_messages(tmp_path: Path) -> None:
         _media_event(nio.RoomMessageImage, "$image", body="image.png", msgtype="m.image"),
         _media_event(nio.RoomMessageAudio, "$audio", body="audio.ogg", msgtype="m.audio"),
     )
-    assert [call.args[1].event_id for call in bot._on_media_message.await_args_list] == ["$image", "$audio"]
+    assert [call.args[1].event_id for call in bot._on_media_message.await_args_list] == ["$image"]
+    assert [call.args[1].event_id for call in bot._on_audio_message.await_args_list] == ["$audio"]
     bot._on_message.assert_not_awaited()
 
 
