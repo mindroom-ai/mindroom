@@ -51,7 +51,13 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.bot_room_lifecycle"
-depends_on = ["mindroom.matrix.client_room_admin", "mindroom.constants", "mindroom.matrix.rooms", "mindroom.commands.handler"]
+depends_on = [
+    "mindroom.commands.handler",
+    "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.rooms",
+    "mindroom.runtime_protocols",
+]
 
 [[modules]]
 path = "mindroom.custom_tools.attachments"
@@ -89,7 +95,24 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delivery_gateway"
-depends_on = ["mindroom.streaming", "mindroom.constants", "mindroom.matrix.client_delivery"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_delivery",
+    "mindroom.runtime_protocols",
+    "mindroom.streaming",
+]
+
+[[modules]]
+path = "mindroom.edit_regenerator"
+depends_on = [
+    "mindroom.coalescing",
+    "mindroom.conversation_resolver",
+    "mindroom.handled_turns",
+    "mindroom.hooks.ingress",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.message_content",
+    "mindroom.runtime_protocols",
+]
 
 [[modules]]
 path = "mindroom.execution_preparation"
@@ -266,7 +289,34 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.bot_runtime_view"
-depends_on = []
+depends_on = ["mindroom.matrix.cache"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.matrix.cache.thread_reads",
+    "mindroom.matrix.cache.thread_write_cache_ops",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.thread_bookkeeping",
+    "mindroom.response_runner",
+    "mindroom.runtime_protocols",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.runtime_protocols"
+depends_on = ["mindroom.bot_runtime_view"]
+visibility = [
+    "mindroom.bot_room_lifecycle",
+    "mindroom.conversation_resolver",
+    "mindroom.conversation_state_writer",
+    "mindroom.delivery_gateway",
+    "mindroom.edit_regenerator",
+    "mindroom.hooks.context",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.knowledge.utils",
+    "mindroom.post_response_effects",
+    "mindroom.turn_policy",
+]
 
 [[modules]]
 path = "mindroom.constants"
@@ -417,6 +467,16 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
+    "mindroom.runtime_protocols",
+]
+
+[[modules]]
+path = "mindroom.conversation_state_writer"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.history.runtime",
+    "mindroom.history.types",
+    "mindroom.runtime_protocols",
 ]
 
 [[modules]]
@@ -426,8 +486,11 @@ depends_on = [
     "mindroom.bot_room_lifecycle",
     "mindroom.constants",
     "mindroom.conversation_resolver",
+    "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
+    "mindroom.edit_regenerator",
     "mindroom.hooks.sender",
+    "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
     "mindroom.memory",
     "mindroom.matrix.client_room_admin",
@@ -439,7 +502,10 @@ depends_on = [
     "mindroom.post_response_effects",
     "mindroom.response_runner",
     "mindroom.scheduling",
-    "mindroom.turn_controller", "mindroom.tool_system.runtime_context", "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.turn_controller",
+    "mindroom.turn_policy",
 ]
 
 [[modules]]
@@ -448,6 +514,18 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.event_info",
     "mindroom.scheduling", "mindroom.tool_system.skills", "mindroom.tool_system.worker_routing", "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.hooks.context"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.hooks.matrix_admin",
+    "mindroom.hooks.state",
+    "mindroom.hooks.types",
+    "mindroom.logging_config",
+    "mindroom.runtime_protocols",
+    "mindroom.tool_system.plugin_identity",
 ]
 
 [[modules]]
@@ -582,7 +660,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.post_response_effects"
-depends_on = [ "mindroom.thread_summary", "mindroom.delivery_gateway"]
+depends_on = [
+    "mindroom.delivery_gateway",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.runtime_protocols",
+    "mindroom.thread_summary",
+]
 
 [[modules]]
 path = "mindroom.hooks.sender"
@@ -593,13 +676,46 @@ path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
     "mindroom.response_runner",
     "mindroom.routing",
-    "mindroom.delivery_gateway",
+    "mindroom.turn_policy",
+]
+
+[[modules]]
+path = "mindroom.inbound_turn_normalizer"
+depends_on = [
+    "mindroom.attachment_media",
+    "mindroom.attachments",
+    "mindroom.coalescing",
+    "mindroom.logging_config",
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.image_handler",
+    "mindroom.matrix.message_content",
+    "mindroom.media_inputs",
+    "mindroom.runtime_protocols",
+    "mindroom.voice_handler",
+]
+
+[[modules]]
+path = "mindroom.turn_policy"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.constants",
+    "mindroom.hooks",
+    "mindroom.hooks.ingress",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.identity",
+    "mindroom.runtime_protocols",
+    "mindroom.team_runtime_resolution",
+    "mindroom.teams",
+    "mindroom.thread_utils",
+    "mindroom.timing",
 ]
 
 [[modules]]
@@ -636,6 +752,7 @@ depends_on = [
 path = "mindroom.knowledge.utils"
 depends_on = [
     "mindroom.knowledge.shared_managers",
+    "mindroom.runtime_protocols",
 ]
 
 [[interfaces]]
@@ -680,6 +797,15 @@ expose = [
     "update_agent_memory",
 ]
 from = ["mindroom.memory"]
+
+[[interfaces]]
+expose = [
+    "SupportsClientConfig",
+    "SupportsClientConfigOrchestrator",
+    "SupportsConfig",
+    "SupportsConfigOrchestrator",
+]
+from = ["mindroom.runtime_protocols"]
 
 [[interfaces]]
 expose = [

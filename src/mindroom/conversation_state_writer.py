@@ -16,12 +16,12 @@ from mindroom.agents import (
 )
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
+from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     import structlog
     from agno.db.sqlite import SqliteDb
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 class ConversationStateWriterDeps:
     """Static collaborators for conversation-state persistence and cache writes."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsConfig
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

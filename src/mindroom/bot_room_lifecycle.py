@@ -19,6 +19,7 @@ from mindroom.matrix.invited_rooms_store import (
 )
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import MatrixState
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.users import AgentMatrixUser
@@ -38,7 +38,7 @@ class BotRoomLifecycleDeps:
 
     agent_name: str
     agent_user: AgentMatrixUser
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     runtime_paths: RuntimePaths
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]

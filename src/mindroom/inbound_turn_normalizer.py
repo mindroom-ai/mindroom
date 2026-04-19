@@ -27,6 +27,7 @@ from mindroom.matrix.message_content import (
     visible_body_from_event_source,
 )
 from mindroom.media_inputs import MediaInputs
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.voice_handler import prepare_voice_message
 
 if TYPE_CHECKING:
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
     import structlog
     from agno.media import Image
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -117,7 +117,7 @@ class DispatchPayloadWithAttachmentsRequest:
 class InboundTurnNormalizerDeps:
     """Explicit collaborators for inbound normalization."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     storage_path: Path
     runtime_paths: RuntimePaths

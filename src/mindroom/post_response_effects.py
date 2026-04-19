@@ -9,6 +9,7 @@ from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import (
     should_queue_thread_summary as should_queue_thread_summary_check,
@@ -22,7 +23,6 @@ if TYPE_CHECKING:
     import structlog
     from agno.db.base import SessionType
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult
     from mindroom.history.types import CompactionOutcome
@@ -83,7 +83,7 @@ class PostResponseEffectsDeps:
 class PostResponseEffectsSupport:
     """Shared support used to build per-response post-effect deps."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway
