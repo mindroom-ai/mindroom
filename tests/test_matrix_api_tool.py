@@ -1013,12 +1013,85 @@ async def test_matrix_api_search_happy_path() -> None:
         "search_categories": {
             "room_events": {
                 "filter": {"rooms": [ctx.room_id], "limit": 10},
-                "keys": ["content.body"],
                 "order_by": "rank",
                 "search_term": "needle",
             },
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_omits_keys_when_not_supplied() -> None:
+    """Search should let the homeserver default keys apply when caller omits keys."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(count=0, next_batch=None, results=[])
+
+    with tool_runtime_context(ctx):
+        await tool.matrix_api(action="search", search_term="needle")
+
+    request_body = json.loads(ctx.client._send.await_args.args[3])
+    assert "keys" not in request_body["search_categories"]["room_events"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_explicit_keys_pass_through() -> None:
+    """Search should pass through validated explicit keys when caller narrows them."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(count=0, next_batch=None, results=[])
+
+    with tool_runtime_context(ctx):
+        await tool.matrix_api(
+            action="search",
+            search_term="meeting",
+            keys=["content.name"],
+        )
+
+    request_body = json.loads(ctx.client._send.await_args.args[3])
+    assert request_body["search_categories"]["room_events"]["keys"] == ["content.name"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_snippet_falls_back_to_topic() -> None:
+    """Search should use topic text for snippet when body is absent."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(
+        count=1,
+        next_batch=None,
+        results=[
+            _search_result(
+                result=_raw_event(
+                    event_id="$topic:localhost",
+                    event_type="m.room.topic",
+                    room_id=ctx.room_id,
+                    content={"topic": "Team Meeting coordination room"},
+                ),
+            ),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="meeting",
+                keys=["content.topic"],
+            ),
+        )
+
+    assert payload["results"] == [
+        {
+            "rank": 1.0,
+            "event_id": "$topic:localhost",
+            "room_id": ctx.room_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": 123,
+            "type": "m.room.topic",
+            "snippet": "Team Meeting coordination room",
+        },
+    ]
 
 
 @pytest.mark.asyncio

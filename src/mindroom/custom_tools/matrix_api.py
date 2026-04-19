@@ -127,7 +127,6 @@ class MatrixApiTools(Toolkit):
             "m.room.third_party_invite",
         },
     )
-    _SEARCH_DEFAULT_KEYS: ClassVar[tuple[str, ...]] = ("content.body",)
     _SEARCH_ALLOWED_KEYS: ClassVar[tuple[str, ...]] = (
         "content.body",
         "content.name",
@@ -377,6 +376,14 @@ class MatrixApiTools(Toolkit):
         return f"{snippet[: cls._SEARCH_SNIPPET_MAX_CHARS - 3].rstrip()}..."
 
     @classmethod
+    def _search_snippet_text(cls, content: dict[str, object]) -> str:
+        for key in ("body", "name", "topic"):
+            value = content.get(key)
+            if isinstance(value, str):
+                return cls._truncate_snippet(value)
+        return ""
+
+    @classmethod
     def _normalize_search_event_payload(
         cls,
         raw_event: object,
@@ -395,7 +402,7 @@ class MatrixApiTools(Toolkit):
             "sender": sender if isinstance(sender, str) else "",
             "origin_server_ts": origin_server_ts if isinstance(origin_server_ts, int) else 0,
             "type": event_type if isinstance(event_type, str) else "",
-            "snippet": cls._truncate_snippet(normalized_content.get("body")),
+            "snippet": cls._search_snippet_text(normalized_content),
         }
 
     @classmethod
@@ -475,7 +482,6 @@ class MatrixApiTools(Toolkit):
         if search_term_error is not None:
             raise ValueError(search_term_error)
 
-        resolved_keys = list(cls._SEARCH_DEFAULT_KEYS) if keys is None else cls._validate_search_keys(keys)
         resolved_order_by = cls._validate_search_order_by(order_by)
         resolved_limit = cls._validate_search_limit(limit)
         resolved_filter = cls._validate_optional_dict(search_filter, field_name="filter")
@@ -483,10 +489,11 @@ class MatrixApiTools(Toolkit):
 
         room_events: dict[str, object] = {
             "search_term": normalized_search_term,
-            "keys": resolved_keys,
             "filter": cls._build_search_filter(room_id=room_id, raw_filter=resolved_filter, limit=resolved_limit),
             "order_by": resolved_order_by,
         }
+        if keys is not None:
+            room_events["keys"] = cls._validate_search_keys(keys)
         if resolved_event_context is not None:
             room_events["event_context"] = resolved_event_context
         return {"search_categories": {"room_events": room_events}}
