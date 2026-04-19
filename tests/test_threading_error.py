@@ -2116,6 +2116,68 @@ class TestThreadingBehavior:
         bot.client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_cache_sync_timeline_unknown_redactions_invalidate_room_threads_once(self, bot: AgentBot) -> None:
+        """Sync redaction fallback should stale-mark the room once even when multiple lookups miss in one batch."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        event_cache.redact_event = AsyncMock(return_value=True)
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(return_value=None)
+        bot.event_cache = event_cache
+        bot.client = _make_client_mock()
+        bot.client.room_get_event = AsyncMock(return_value=MagicMock())
+        _install_runtime_write_coordinator(bot)
+
+        first_redaction_event = MagicMock(spec=nio.RedactionEvent)
+        first_redaction_event.event_id = "$redaction-1:localhost"
+        first_redaction_event.redacts = "$missing-room-msg-1:localhost"
+        first_redaction_event.sender = "@user:localhost"
+        first_redaction_event.server_timestamp = 1234567891
+        first_redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction-1:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$missing-room-msg-1:localhost",
+            "room_id": "!test:localhost",
+            "type": "m.room.redaction",
+        }
+        second_redaction_event = MagicMock(spec=nio.RedactionEvent)
+        second_redaction_event.event_id = "$redaction-2:localhost"
+        second_redaction_event.redacts = "$missing-room-msg-2:localhost"
+        second_redaction_event.sender = "@user:localhost"
+        second_redaction_event.server_timestamp = 1234567892
+        second_redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction-2:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567892,
+            "redacts": "$missing-room-msg-2:localhost",
+            "room_id": "!test:localhost",
+            "type": "m.room.redaction",
+        }
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(
+                timeline=MagicMock(events=[first_redaction_event, second_redaction_event]),
+            ),
+        }
+
+        bot._conversation_cache.cache_sync_timeline(sync_response)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        assert event_cache.redact_event.await_args_list == [
+            call("!test:localhost", "$missing-room-msg-1:localhost"),
+            call("!test:localhost", "$missing-room-msg-2:localhost"),
+        ]
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="sync_redaction_lookup_unavailable",
+        )
+
+    @pytest.mark.asyncio
     async def test_cache_sync_timeline_serializes_same_room_updates_in_order(self, bot: AgentBot) -> None:
         """Later sync updates for one room should wait for earlier queued cache writes."""
         store_started = asyncio.Event()
@@ -2758,6 +2820,120 @@ class TestThreadingBehavior:
         allow_resolve.set()
         await live_task
         await coordinator.wait_for_room_idle("!test:localhost")
+
+    @pytest.mark.asyncio
+    async def test_live_redaction_resolution_does_not_block_same_room_read(self) -> None:
+        """A same-room read must not wait on live redaction resolution before the queued cache write starts."""
+        coordinator = _runtime_write_coordinator()
+        event_cache = _runtime_event_cache()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        resolve_started = asyncio.Event()
+        allow_resolve = asyncio.Event()
+        read_finished = asyncio.Event()
+
+        async def slow_resolve(*_args: object, **_kwargs: object) -> MutationThreadImpact:
+            resolve_started.set()
+            await allow_resolve.wait()
+            return MutationThreadImpact.room_level()
+
+        async def quick_snapshot(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+            read_finished.set()
+            return thread_history_result(
+                [_message(event_id="$other-thread:localhost", body="Root")],
+                is_full_history=True,
+            )
+
+        access._live._resolver.resolve_redaction_thread_impact = AsyncMock(side_effect=slow_resolve)
+        access._reads.fetch_thread_snapshot_from_client = AsyncMock(side_effect=quick_snapshot)
+        event_cache.redact_event = AsyncMock(return_value=True)
+
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$room-message:localhost"
+        redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$room-message:localhost",
+            "room_id": "!test:localhost",
+            "sender": "@user:localhost",
+            "type": "m.room.redaction",
+        }
+
+        live_task = asyncio.create_task(access.apply_redaction("!test:localhost", redaction_event))
+        await asyncio.wait_for(resolve_started.wait(), timeout=1.0)
+
+        read_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$other-thread:localhost"))
+        await asyncio.wait_for(read_finished.wait(), timeout=1.0)
+        await asyncio.wait_for(asyncio.shield(read_task), timeout=0.1)
+
+        allow_resolve.set()
+        await live_task
+        await coordinator.wait_for_room_idle("!test:localhost")
+
+        event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$room-message:localhost")
+
+    @pytest.mark.asyncio
+    async def test_live_room_level_redaction_waits_for_same_room_write_barrier(self) -> None:
+        """Live room-level redactions should still run under the room write barrier."""
+        coordinator = _runtime_write_coordinator()
+        event_cache = _runtime_event_cache()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        prior_write_started = asyncio.Event()
+        allow_prior_write_finish = asyncio.Event()
+
+        async def slow_prior_room_update() -> None:
+            prior_write_started.set()
+            await allow_prior_write_finish.wait()
+
+        access._live._resolver.resolve_redaction_thread_impact = AsyncMock(
+            return_value=MutationThreadImpact.room_level(),
+        )
+        event_cache.redact_event = AsyncMock(return_value=True)
+
+        coordinator.queue_room_update(
+            "!test:localhost",
+            slow_prior_room_update,
+            name="matrix_cache_prior_update",
+        )
+        await asyncio.wait_for(prior_write_started.wait(), timeout=1.0)
+
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$room-message:localhost"
+        redaction_event.source = {
+            "content": {},
+            "event_id": "$redaction:localhost",
+            "origin_server_ts": 1234567891,
+            "redacts": "$room-message:localhost",
+            "room_id": "!test:localhost",
+            "sender": "@user:localhost",
+            "type": "m.room.redaction",
+        }
+
+        live_task = asyncio.create_task(access.apply_redaction("!test:localhost", redaction_event))
+        await asyncio.sleep(0)
+        event_cache.redact_event.assert_not_awaited()
+
+        allow_prior_write_finish.set()
+        await live_task
+        await coordinator.wait_for_room_idle("!test:localhost")
+
+        event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$room-message:localhost")
 
     @pytest.mark.asyncio
     async def test_live_plain_reply_to_threaded_event_persists_event_thread_membership(

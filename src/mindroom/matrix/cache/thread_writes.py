@@ -562,15 +562,6 @@ class ThreadLiveWritePolicy:
             event_id=event.event_id,
             context="live",
         )
-        if impact.state is not MutationThreadImpactState.THREADED:
-            await _apply_thread_redaction_mutation(
-                cache_ops=self._cache_ops,
-                room_id=room_id,
-                redacted_event_id=event.redacts,
-                impact=impact,
-                context="live",
-            )
-            return
 
         async def redact_and_invalidate() -> bool:
             return await _apply_thread_redaction_mutation(
