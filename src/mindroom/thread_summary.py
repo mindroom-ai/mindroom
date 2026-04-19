@@ -238,8 +238,7 @@ _SUMMARY_INSTRUCTIONS = [
     "- Specifically avoid approval or merge status, round or attempt numbers, test counts "
     'or pass/fail tallies, progress markers like "in progress" or "awaiting review", and '
     'temporal phrases like "currently" or "just landed".',
-    "- If the thread is a test or review, say what is being tested or reviewed, not "
-    "whether it passed.",
+    "- If the thread is a test or review, say what is being tested or reviewed, not whether it passed.",
     "- Write a NOVEL summary in your own words.",
     "- Do NOT copy, quote, or truncate any message from the thread.",
     '- No quotes, no prefixes like "Summary:", and no trailing punctuation.',

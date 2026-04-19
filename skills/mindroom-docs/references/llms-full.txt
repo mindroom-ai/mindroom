@@ -987,7 +987,7 @@ defaults:
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
-  thread_summary_first_threshold: 5  # Default: 5 (first automatic thread summary)
+  thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.

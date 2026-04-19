@@ -2537,7 +2537,7 @@ class TestThreadingBehavior:
         self,
         bot: AgentBot,
     ) -> None:
-        """Cold-start audio ingress should persist the same transitive thread membership used at runtime."""
+        """Cold-start media ingress should persist the same transitive thread membership used at runtime."""
         room_id = "!test:localhost"
         thread_root_id = "$thread_root:localhost"
         thread_reply_id = "$thread_reply:localhost"
@@ -2569,7 +2569,7 @@ class TestThreadingBehavior:
         )
         prechecked_event = MagicMock(event=audio_event, requester_user_id="@user:localhost")
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._on_audio_media_message = AsyncMock()
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
         def room_get_event_response(event_id: str, content: dict[str, object]) -> nio.RoomGetEventResponse:
@@ -2611,37 +2611,12 @@ class TestThreadingBehavior:
             raise AssertionError(msg)
 
         bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
-        bot.client.room_messages = AsyncMock(
-            return_value=nio.RoomMessagesResponse(
-                room_id=room_id,
-                chunk=[
-                    _text_event(
-                        event_id=thread_reply_id,
-                        body="thread reply",
-                        sender="@user:localhost",
-                        server_timestamp=1234567894,
-                        room_id=room_id,
-                        thread_id=thread_root_id,
-                    ),
-                    _text_event(
-                        event_id=thread_root_id,
-                        body="thread root",
-                        sender="@user:localhost",
-                        server_timestamp=1234567893,
-                        room_id=room_id,
-                    ),
-                ],
-                start="",
-                end=None,
-            ),
-        )
 
         try:
-            await bot._turn_controller.handle_audio_event(room, audio_event)
+            await bot._turn_controller.handle_media_event(room, audio_event)
             await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
-            bot._turn_controller._on_audio_media_message.assert_awaited_once()
         finally:
             await real_event_cache.close()
 

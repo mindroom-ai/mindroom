@@ -53,6 +53,7 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 ToolHookResult = Any
+# Agno upgrade landmine — see ARCH-000.md for context.
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
 logger = get_logger(__name__)

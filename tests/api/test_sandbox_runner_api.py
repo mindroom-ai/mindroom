@@ -31,6 +31,7 @@ from mindroom.constants import (
     serialize_runtime_paths,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ConfigField,
@@ -38,7 +39,6 @@ from mindroom.tool_system.metadata import (
     ToolCategory,
     ToolMetadata,
     ToolStatus,
-    ensure_tool_registry_loaded,
     get_tool_by_name,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,

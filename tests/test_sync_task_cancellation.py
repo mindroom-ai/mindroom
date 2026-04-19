@@ -342,7 +342,6 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = False
-    bot._sync_callbacks_registered = True
     bot._sync_shutting_down = False
     bot.client = FakeClient()
 
@@ -382,7 +381,6 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.agent_name = "test_agent"
     bot.last_sync_time = None
     bot._first_sync_done = False
-    bot._sync_callbacks_registered = True
     bot._sync_shutting_down = False
     bot.client = FakeClient()
     bot._runtime_view = BotRuntimeState(

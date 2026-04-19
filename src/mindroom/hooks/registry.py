@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.logging_config import get_logger
 
@@ -14,9 +14,18 @@ from .types import HookCallback, RegisteredHook
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from mindroom.tool_system.plugins import _Plugin
+    from mindroom.config.plugin import PluginEntryConfig
 
 logger = get_logger(__name__)
+
+
+class HookRegistryPlugin(Protocol):
+    """Structural plugin shape consumed by hook-registry compilation."""
+
+    name: str
+    entry_config: PluginEntryConfig
+    plugin_order: int
+    discovered_hooks: tuple[HookCallback, ...]
 
 
 def _callback_source_lineno(callback: HookCallback) -> int:
@@ -35,7 +44,7 @@ class HookRegistry:
         return cls(_hooks_by_event={})
 
     @classmethod
-    def from_plugins(cls, plugins: Iterable[_Plugin]) -> HookRegistry:
+    def from_plugins(cls, plugins: Iterable[HookRegistryPlugin]) -> HookRegistry:
         """Compile one immutable snapshot from loaded plugins."""
         hooks_by_event: defaultdict[str, list[RegisteredHook]] = defaultdict(list)
         seen_hook_names: set[tuple[str, str]] = set()

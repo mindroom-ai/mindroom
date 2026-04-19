@@ -27,8 +27,7 @@ from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
 from mindroom.config.main import Config, ConfigRuntimeValidationError, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
@@ -41,7 +40,10 @@ from mindroom.tool_system.metadata import (
     validate_authored_tool_entry_overrides,
 )
 from mindroom.tool_system.plugins import PluginValidationError
-from mindroom.tool_system.sandbox_proxy import to_json_compatible
+from mindroom.tool_system.sandbox_proxy import (
+    sandbox_proxy_config,
+    to_json_compatible,
+)
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -56,7 +58,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.metadata import ToolValidationInfo
+    from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.workers.models import WorkerHandle
 
 logger = get_logger(__name__)
@@ -178,7 +180,7 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
     if not config.plugins:
         return config
 
-    from mindroom.tool_system import plugins as plugin_module  # noqa: PLC0415
+    from mindroom.tool_system import plugin_imports  # noqa: PLC0415
 
     available_plugins = []
     skipped_plugin_paths: list[str] = []
@@ -188,7 +190,7 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
             continue
 
         try:
-            plugin_root = plugin_module._resolve_plugin_root(plugin_entry.path, runtime_paths)
+            plugin_root = plugin_imports._resolve_plugin_root(plugin_entry.path, runtime_paths)
         except Exception:
             skipped_plugin_paths.append(plugin_entry.path)
             continue
@@ -228,7 +230,7 @@ def initialize_sandbox_runner_app(
         runtime_paths=runtime_paths,
         config=committed_config,
         tool_metadata=TOOL_METADATA.copy(),
-        runner_token=runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token,
+        runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
 
 

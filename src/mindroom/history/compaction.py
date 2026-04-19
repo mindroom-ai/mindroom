@@ -32,7 +32,10 @@ from mindroom.hooks.types import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
+from mindroom.tool_system.runtime_context import (
+    get_tool_runtime_context,
+    resolve_tool_runtime_hook_bindings,
+)
 
 if TYPE_CHECKING:
     from agno.agent import Agent

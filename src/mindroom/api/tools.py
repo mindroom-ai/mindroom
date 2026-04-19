@@ -23,7 +23,7 @@ from mindroom.credentials import (
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
-from mindroom.tool_system.metadata import export_tools_metadata, resolved_tool_metadata_for_runtime
+from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     build_worker_target_from_runtime_env,

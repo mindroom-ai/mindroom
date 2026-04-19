@@ -19,9 +19,10 @@ from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
+from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
 
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
@@ -554,9 +555,6 @@ class MCPServerManager:
     @staticmethod
     def _partition_tool_names(
         tool_names: list[str],
-        *,
-        tool_registry: Mapping[str, object],
-        mcp_tool_factory_marker: str,
     ) -> tuple[set[str], set[str]]:
         """Split tool names into local tool names and visible MCP server ids."""
         local_tool_names: set[str] = set()
@@ -565,8 +563,7 @@ class MCPServerManager:
             if server_id := mcp_server_id_from_tool_name(tool_name):
                 mcp_server_ids.add(server_id)
                 continue
-            if not getattr(tool_registry.get(tool_name), mcp_tool_factory_marker, False):
-                local_tool_names.add(tool_name)
+            local_tool_names.add(tool_name)
         return local_tool_names, mcp_server_ids
 
     @staticmethod
@@ -613,19 +610,10 @@ class MCPServerManager:
         if config is None:
             return set(), set()
 
-        from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER  # noqa: PLC0415
-        from mindroom.tool_system.metadata import (  # noqa: PLC0415
-            _TOOL_REGISTRY,
-            ensure_tool_registry_loaded,
-            get_tool_by_name,
-        )
-
         ensure_tool_registry_loaded(self.runtime_paths, config)
         agent_config = config.get_agent(agent_name)
         local_tool_names, mcp_server_ids = self._partition_tool_names(
             self._configured_agent_tool_names(agent_name),
-            tool_registry=_TOOL_REGISTRY,
-            mcp_tool_factory_marker=_MCP_TOOL_FACTORY_MARKER,
         )
         function_names = self._agent_special_function_names(
             agent_config,

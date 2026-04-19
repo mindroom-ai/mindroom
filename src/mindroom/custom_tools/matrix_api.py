@@ -18,7 +18,10 @@ from mindroom.matrix.thread_bookkeeping import (
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    get_tool_runtime_context,
+)
 
 logger = get_logger(__name__)
 

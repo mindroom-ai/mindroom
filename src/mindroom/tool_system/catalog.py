@@ -1,0 +1,57 @@
+"""Public catalog facade for tool metadata and registry access."""
+
+from __future__ import annotations
+
+from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    ConfigField,
+    SetupType,
+    ToolAuthoredOverrideValidator,
+    ToolCategory,
+    ToolConfigOverrideError,
+    ToolInitOverrideError,
+    ToolMetadata,
+    ToolMetadataValidationError,
+    ToolStatus,
+    ToolValidationInfo,
+    apply_authored_overrides,
+    authored_tool_overrides_to_runtime,
+    default_worker_routed_tools,
+    deserialize_tool_validation_snapshot,
+    export_tools_metadata,
+    get_tool_by_name,
+    normalize_authored_tool_overrides,
+    resolved_tool_metadata_for_runtime,
+    resolved_tool_validation_snapshot_for_runtime,
+    sanitize_tool_init_overrides,
+    serialize_tool_validation_snapshot,
+    validate_authored_tool_entry_overrides,
+)
+
+__all__ = [
+    "TOOL_METADATA",
+    "ConfigField",
+    "SetupType",
+    "ToolAuthoredOverrideValidator",
+    "ToolCategory",
+    "ToolConfigOverrideError",
+    "ToolInitOverrideError",
+    "ToolMetadata",
+    "ToolMetadataValidationError",
+    "ToolStatus",
+    "ToolValidationInfo",
+    "apply_authored_overrides",
+    "authored_tool_overrides_to_runtime",
+    "default_worker_routed_tools",
+    "deserialize_tool_validation_snapshot",
+    "ensure_tool_registry_loaded",
+    "export_tools_metadata",
+    "get_tool_by_name",
+    "normalize_authored_tool_overrides",
+    "resolved_tool_metadata_for_runtime",
+    "resolved_tool_validation_snapshot_for_runtime",
+    "sanitize_tool_init_overrides",
+    "serialize_tool_validation_snapshot",
+    "validate_authored_tool_entry_overrides",
+]

@@ -100,7 +100,10 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
+    from mindroom.tool_system.runtime_context import (
+        ToolRuntimeContext,
+        ToolRuntimeSupport,
+    )
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"

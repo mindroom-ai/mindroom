@@ -52,7 +52,10 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
-from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
+from mindroom.tool_system.dependencies import (
+    auto_install_enabled,
+    auto_install_tool_extra,
+)
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import (
     get_primary_worker_manager,

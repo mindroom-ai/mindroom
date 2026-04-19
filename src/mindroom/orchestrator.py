@@ -65,7 +65,10 @@ from mindroom.runtime_state import (
 )
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.tool_system.skills import (
+    clear_skill_cache,
+    get_skill_snapshot,
+)
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
