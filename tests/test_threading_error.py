@@ -39,7 +39,12 @@ from mindroom.matrix.cache.thread_history_result import (
 from mindroom.matrix.cache.thread_history_result import (
     thread_history_result as _thread_history_result_impl,
 )
-from mindroom.matrix.cache.thread_writes import _collect_sync_timeline_cache_updates
+from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
+from mindroom.matrix.cache.thread_writes import (
+    _apply_thread_message_mutation,
+    _apply_thread_redaction_mutation,
+    _collect_sync_timeline_cache_updates,
+)
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import (
     DeliveredMatrixEvent,
@@ -49,6 +54,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
+from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadRootProof,
@@ -262,6 +268,40 @@ def _runtime_write_coordinator() -> _EventCacheWriteCoordinator:
     )
 
 
+def _thread_mutation_cache_ops() -> tuple[ThreadMutationCacheOps, MagicMock, MagicMock]:
+    """Return concrete thread cache ops backed by one async-mock event cache."""
+    logger = MagicMock()
+    event_cache = MagicMock()
+    event_cache.append_event = AsyncMock(return_value=True)
+    event_cache.disable = Mock()
+    event_cache.invalidate_room_threads = AsyncMock()
+    event_cache.invalidate_thread = AsyncMock()
+    event_cache.mark_room_threads_stale = AsyncMock()
+    event_cache.mark_thread_stale = AsyncMock()
+    event_cache.redact_event = AsyncMock(return_value=True)
+    event_cache.revalidate_thread_after_incremental_update = AsyncMock()
+    runtime = MagicMock()
+    runtime.event_cache = event_cache
+    runtime.event_cache_write_coordinator = _runtime_write_coordinator()
+    runtime.runtime_started_at = 1234567890.0
+    return ThreadMutationCacheOps(logger_getter=lambda: logger, runtime=runtime), logger, event_cache
+
+
+def _message_mutation_event_info(*, original_event_id: str = "$target:localhost") -> EventInfo:
+    """Return one thread-affecting event info for direct mutation-helper tests."""
+    return EventInfo.from_event(
+        {
+            "type": "m.room.message",
+            "content": {
+                "body": "* updated",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
+            },
+        },
+    )
+
+
 async def _reopen_event_cache(event_cache: _EventCache) -> _EventCache:
     """Close and reopen one SQLite cache against the same database file."""
     db_path = event_cache.db_path
@@ -335,6 +375,276 @@ def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
     assert not hasattr(matrix_cache, "_ThreadOutboundWritePolicy")
     assert not hasattr(matrix_cache, "_ThreadLiveWritePolicy")
     assert not hasattr(matrix_cache, "_ThreadSyncWritePolicy")
+
+
+class TestThreadMutationHelpers:
+    """Direct mutation-helper coverage for outbound/live/sync message and redaction paths."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("context", "invalidate_on_append_failure"),
+        [
+            ("outbound", False),
+            ("live", True),
+            ("sync", True),
+        ],
+    )
+    async def test_thread_message_mutation_room_level_skips_invalidation(
+        self,
+        context: str,
+        invalidate_on_append_failure: bool,
+    ) -> None:
+        """Room-level message mutations should only log and leave thread state untouched."""
+        cache_ops, logger, event_cache = _thread_mutation_cache_ops()
+
+        result = await _apply_thread_message_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            event_info=_message_mutation_event_info(),
+            impact=MutationThreadImpact.room_level(),
+            event_source=None,
+            event_id="$event:localhost",
+            context=context,
+            room_level_skip_message=f"skip-{context}",
+            invalidate_on_append_failure=invalidate_on_append_failure,
+        )
+
+        assert result is False
+        logger.debug.assert_called_once_with(
+            f"skip-{context}",
+            room_id="!room:localhost",
+            event_id="$event:localhost",
+            original_event_id="$target:localhost",
+        )
+        event_cache.append_event.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("context", "invalidate_on_append_failure"),
+        [
+            ("outbound", False),
+            ("live", True),
+            ("sync", True),
+        ],
+    )
+    async def test_thread_message_mutation_unknown_invalidates_room_once(
+        self,
+        context: str,
+        invalidate_on_append_failure: bool,
+    ) -> None:
+        """Unknown message mutations should fail closed with one room-thread invalidation."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+
+        result = await _apply_thread_message_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            event_info=_message_mutation_event_info(),
+            impact=MutationThreadImpact.unknown(),
+            event_source=None,
+            event_id="$event:localhost",
+            context=context,
+            room_level_skip_message=f"skip-{context}",
+            invalidate_on_append_failure=invalidate_on_append_failure,
+        )
+
+        assert result is True
+        event_cache.append_event.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!room:localhost",
+            reason=f"{context}_thread_lookup_unavailable",
+        )
+        event_cache.mark_thread_stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("context", "invalidate_on_append_failure"),
+        [
+            ("outbound", False),
+            ("live", True),
+            ("sync", True),
+        ],
+    )
+    async def test_thread_message_mutation_threaded_success_uses_context_reasons(
+        self,
+        context: str,
+        invalidate_on_append_failure: bool,
+    ) -> None:
+        """Threaded message mutations should stale-mark once, append, and avoid room invalidation."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+        event_source = {"event_id": "$event:localhost"}
+
+        result = await _apply_thread_message_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            event_info=_message_mutation_event_info(),
+            impact=MutationThreadImpact.threaded("$thread:localhost"),
+            event_source=event_source,
+            event_id="$event:localhost",
+            context=context,
+            room_level_skip_message=f"skip-{context}",
+            invalidate_on_append_failure=invalidate_on_append_failure,
+        )
+
+        assert result is False
+        event_cache.append_event.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread:localhost",
+            event_source,
+        )
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread:localhost",
+            reason=f"{context}_thread_mutation",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("context", "invalidate_on_append_failure", "expected_reasons"),
+        [
+            ("outbound", False, ["outbound_thread_mutation"]),
+            ("live", True, ["live_thread_mutation", "live_append_failed"]),
+            ("sync", True, ["sync_thread_mutation", "sync_append_failed"]),
+        ],
+    )
+    async def test_thread_message_mutation_threaded_append_failure_uses_path_policy(
+        self,
+        context: str,
+        invalidate_on_append_failure: bool,
+        expected_reasons: list[str],
+    ) -> None:
+        """Append failures should only add the extra stale mark on the live and sync paths."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+        event_cache.append_event = AsyncMock(return_value=False)
+
+        result = await _apply_thread_message_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            event_info=_message_mutation_event_info(),
+            impact=MutationThreadImpact.threaded("$thread:localhost"),
+            event_source={"event_id": "$event:localhost"},
+            event_id="$event:localhost",
+            context=context,
+            room_level_skip_message=f"skip-{context}",
+            invalidate_on_append_failure=invalidate_on_append_failure,
+        )
+
+        assert result is False
+        assert event_cache.mark_thread_stale.await_args_list == [
+            call("!room:localhost", "$thread:localhost", reason=reason) for reason in expected_reasons
+        ]
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("context", "redact_room_level_event"),
+        [
+            ("outbound", False),
+            ("live", True),
+            ("sync", True),
+        ],
+    )
+    async def test_thread_redaction_mutation_room_level_skips_thread_invalidations(
+        self,
+        context: str,
+        redact_room_level_event: bool,
+    ) -> None:
+        """Room-level redactions should never stale-mark thread state."""
+        cache_ops, logger, event_cache = _thread_mutation_cache_ops()
+
+        result = await _apply_thread_redaction_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            redacted_event_id="$target:localhost",
+            impact=MutationThreadImpact.room_level(),
+            context=context,
+            redact_room_level_event=redact_room_level_event,
+        )
+
+        assert result is False
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_not_awaited()
+        if redact_room_level_event:
+            event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
+            logger.debug.assert_not_called()
+        else:
+            event_cache.redact_event.assert_not_awaited()
+            logger.debug.assert_called_once_with(
+                "Skipping outbound thread cache bookkeeping for non-threaded redaction",
+                room_id="!room:localhost",
+                redacted_event_id="$target:localhost",
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    async def test_thread_redaction_mutation_unknown_invalidates_room_once(self, context: str) -> None:
+        """Unknown redactions should fail closed with one room-thread invalidation."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+
+        result = await _apply_thread_redaction_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            redacted_event_id="$target:localhost",
+            impact=MutationThreadImpact.unknown(),
+            context=context,
+        )
+
+        assert result is True
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!room:localhost",
+            reason=f"{context}_redaction_lookup_unavailable",
+        )
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    async def test_thread_redaction_mutation_threaded_success_uses_context_reason(self, context: str) -> None:
+        """Threaded redactions should stale-mark the owning thread once on success."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+
+        result = await _apply_thread_redaction_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            redacted_event_id="$target:localhost",
+            impact=MutationThreadImpact.threaded("$thread:localhost"),
+            context=context,
+        )
+
+        assert result is False
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread:localhost",
+            reason=f"{context}_redaction",
+        )
+        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    async def test_thread_redaction_mutation_threaded_failure_uses_failure_reason(self, context: str) -> None:
+        """Threaded redaction failures should stale-mark once with the failure reason."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+        event_cache.redact_event = AsyncMock(return_value=False)
+
+        result = await _apply_thread_redaction_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            redacted_event_id="$target:localhost",
+            impact=MutationThreadImpact.threaded("$thread:localhost"),
+            context=context,
+        )
+
+        assert result is False
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            "!room:localhost",
+            "$thread:localhost",
+            reason=f"{context}_redaction_failed",
+        )
+        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
 
 
 class TestMatrixConversationCacheThreadReads:
@@ -2384,6 +2694,70 @@ class TestThreadingBehavior:
             reason="live_thread_lookup_unavailable",
         )
         event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_message_resolution_does_not_block_same_room_read(self) -> None:
+        """A same-room read must not wait on live mutation resolution before the write is queued."""
+        coordinator = _runtime_write_coordinator()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=_runtime_event_cache(),
+                coordinator=coordinator,
+            ),
+        )
+        resolve_started = asyncio.Event()
+        allow_resolve = asyncio.Event()
+        read_finished = asyncio.Event()
+
+        async def slow_resolve(*_args: object, **_kwargs: object) -> MutationThreadImpact:
+            resolve_started.set()
+            await allow_resolve.wait()
+            return MutationThreadImpact.threaded("$mutated-thread:localhost")
+
+        async def quick_snapshot(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+            read_finished.set()
+            return thread_history_result(
+                [_message(event_id="$other-thread:localhost", body="Root")],
+                is_full_history=True,
+            )
+
+        access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=slow_resolve)
+        access._reads.fetch_thread_snapshot_from_client = AsyncMock(side_effect=quick_snapshot)
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-msg:localhost"},
+                },
+                "event_id": "$edit-event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        live_task = asyncio.create_task(
+            access.append_live_event(
+                "!test:localhost",
+                edit_event,
+                event_info=EventInfo.from_event(edit_event.source),
+            ),
+        )
+        await asyncio.wait_for(resolve_started.wait(), timeout=1.0)
+
+        read_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$other-thread:localhost"))
+        await asyncio.wait_for(read_finished.wait(), timeout=1.0)
+        await asyncio.wait_for(asyncio.shield(read_task), timeout=0.1)
+
+        allow_resolve.set()
+        await live_task
+        await coordinator.wait_for_room_idle("!test:localhost")
 
     @pytest.mark.asyncio
     async def test_live_plain_reply_to_threaded_event_persists_event_thread_membership(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
@@ -16,6 +16,7 @@ from mindroom.matrix.cache.event_cache_events import (
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
+    MutationThreadImpact,
     MutationThreadImpactState,
     ThreadMutationResolver,
     is_thread_affecting_relation,
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 
 __all__ = ["_collect_sync_timeline_cache_updates"]
+
+
+MutationWriteContext = Literal["outbound", "live", "sync"]
 
 
 def _collect_sync_timeline_cache_updates(
@@ -82,34 +86,47 @@ def _threaded_sync_event_cache_update(
     return room_id, normalize_nio_event_for_cache(event)
 
 
-async def _apply_thread_message_mutation(
+def _mutation_reason(
+    context: MutationWriteContext,
+    suffix: str,
+) -> str:
+    return f"{context}_{suffix}"
+
+
+async def _resolve_thread_message_mutation_impact(
     *,
-    cache_ops: ThreadMutationCacheOps,
     resolver: ThreadMutationResolver,
     room_id: str,
     event_info: EventInfo,
-    event_source: dict[str, Any],
     event_id: str | None,
-    context: str,
-    reason_prefix: str,
-    invalidate_on_append_failure: bool,
+    context: MutationWriteContext,
     resolution_context: MutationResolutionContext | None = None,
-    allow_room_invalidation: bool = True,
-) -> bool:
-    impact = await resolver.resolve_thread_impact_for_mutation(
+) -> MutationThreadImpact:
+    return await resolver.resolve_thread_impact_for_mutation(
         room_id,
         event_info=event_info,
         event_id=event_id,
         context=context,
         resolution_context=resolution_context,
     )
+
+
+async def _apply_thread_message_mutation(
+    *,
+    cache_ops: ThreadMutationCacheOps,
+    room_id: str,
+    event_info: EventInfo,
+    impact: MutationThreadImpact,
+    event_source: dict[str, Any] | None,
+    event_id: str | None,
+    context: MutationWriteContext,
+    room_level_skip_message: str,
+    invalidate_on_append_failure: bool,
+    allow_room_invalidation: bool = True,
+) -> bool:
     if impact.state is MutationThreadImpactState.ROOM_LEVEL:
         cache_ops.logger.debug(
-            (
-                "Skipping outbound thread cache bookkeeping for non-threaded event mutation"
-                if context == "outbound"
-                else f"Skipping {context} thread cache bookkeeping for known non-threaded message mutation"
-            ),
+            room_level_skip_message,
             room_id=room_id,
             event_id=event_id,
             original_event_id=event_info.original_event_id,
@@ -120,14 +137,15 @@ async def _apply_thread_message_mutation(
             return False
         await cache_ops.invalidate_room_threads(
             room_id,
-            reason=f"{reason_prefix}_thread_lookup_unavailable",
+            reason=_mutation_reason(context, "thread_lookup_unavailable"),
         )
         return True
     assert impact.thread_id is not None
+    assert event_source is not None
     await cache_ops.invalidate_known_thread(
         room_id,
         impact.thread_id,
-        reason=f"{reason_prefix}_thread_mutation",
+        reason=_mutation_reason(context, "thread_mutation"),
     )
     appended = await cache_ops.append_event_to_cache(
         room_id,
@@ -139,41 +157,49 @@ async def _apply_thread_message_mutation(
         await cache_ops.invalidate_known_thread(
             room_id,
             impact.thread_id,
-            reason=f"{reason_prefix}_append_failed",
+            reason=_mutation_reason(context, "append_failed"),
         )
     return False
 
 
-async def _apply_thread_redaction_mutation(
+async def _resolve_thread_redaction_mutation_impact(
     *,
-    cache_ops: ThreadMutationCacheOps,
     resolver: ThreadMutationResolver,
     room_id: str,
     redacted_event_id: str,
-    context: str,
-    reason_prefix: str,
+    context: MutationWriteContext,
     event_id: str | None = None,
     resolution_context: MutationResolutionContext | None = None,
-    allow_room_invalidation: bool = True,
-    redact_room_level_event: bool = True,
-) -> bool:
+) -> MutationThreadImpact:
     lookup_failure_message = {
         "outbound": "Ignoring outbound Matrix redaction cache lookup failure after successful redact",
         "live": "Failed to resolve cached thread for redaction",
         "sync": "Failed to resolve cached thread for sync redaction",
     }[context]
-    redact_failure_message = {
-        "outbound": "Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
-        "live": "Failed to apply live redaction to cache",
-        "sync": "Failed to apply sync redaction to cache",
-    }[context]
-    impact = await resolver.resolve_redaction_thread_impact(
+    return await resolver.resolve_redaction_thread_impact(
         room_id,
         redacted_event_id,
         failure_message=lookup_failure_message,
         event_id=event_id,
         resolution_context=resolution_context,
     )
+
+
+async def _apply_thread_redaction_mutation(
+    *,
+    cache_ops: ThreadMutationCacheOps,
+    room_id: str,
+    redacted_event_id: str,
+    impact: MutationThreadImpact,
+    context: MutationWriteContext,
+    allow_room_invalidation: bool = True,
+    redact_room_level_event: bool = True,
+) -> bool:
+    redact_failure_message = {
+        "outbound": "Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
+        "live": "Failed to apply live redaction to cache",
+        "sync": "Failed to apply sync redaction to cache",
+    }[context]
     if impact.state is MutationThreadImpactState.ROOM_LEVEL and not redact_room_level_event:
         cache_ops.logger.debug(
             "Skipping outbound thread cache bookkeeping for non-threaded redaction",
@@ -193,9 +219,9 @@ async def _apply_thread_redaction_mutation(
         room_id,
         impact=impact,
         redacted=redacted,
-        success_reason=f"{reason_prefix}_redaction",
-        failure_reason=f"{reason_prefix}_redaction_failed",
-        lookup_unavailable_reason=f"{reason_prefix}_redaction_lookup_unavailable",
+        success_reason=_mutation_reason(context, "redaction"),
+        failure_reason=_mutation_reason(context, "redaction_failed"),
+        lookup_unavailable_reason=_mutation_reason(context, "redaction_lookup_unavailable"),
     )
     return impact.state is MutationThreadImpactState.UNKNOWN and redacted
 
@@ -221,15 +247,22 @@ class ThreadOutboundWritePolicy:
         event_source: dict[str, Any],
         event_info: EventInfo,
     ) -> None:
-        await _apply_thread_message_mutation(
-            cache_ops=self._cache_ops,
+        impact = await _resolve_thread_message_mutation_impact(
             resolver=self._resolver,
             room_id=room_id,
             event_info=event_info,
+            event_id=event_id,
+            context="outbound",
+        )
+        await _apply_thread_message_mutation(
+            cache_ops=self._cache_ops,
+            room_id=room_id,
+            event_info=event_info,
+            impact=impact,
             event_source=event_source,
             event_id=event_id,
             context="outbound",
-            reason_prefix="outbound",
+            room_level_skip_message="Skipping outbound thread cache bookkeeping for non-threaded event mutation",
             invalidate_on_append_failure=False,
         )
 
@@ -351,13 +384,18 @@ class ThreadOutboundWritePolicy:
         room_id: str,
         redacted_event_id: str,
     ) -> None:
-        await _apply_thread_redaction_mutation(
-            cache_ops=self._cache_ops,
+        impact = await _resolve_thread_redaction_mutation_impact(
             resolver=self._resolver,
             room_id=room_id,
             redacted_event_id=redacted_event_id,
             context="outbound",
-            reason_prefix="outbound",
+        )
+        await _apply_thread_redaction_mutation(
+            cache_ops=self._cache_ops,
+            room_id=room_id,
+            redacted_event_id=redacted_event_id,
+            impact=impact,
+            context="outbound",
             redact_room_level_event=False,
         )
 
@@ -469,18 +507,40 @@ class ThreadLiveWritePolicy:
         if not self._cache_ops.cache_runtime_available():
             return
 
+        impact = await _resolve_thread_message_mutation_impact(
+            resolver=self._resolver,
+            room_id=room_id,
+            event_info=event_info,
+            event_id=event.event_id,
+            context="live",
+        )
+        room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
+        if impact.state is not MutationThreadImpactState.THREADED:
+            await _apply_thread_message_mutation(
+                cache_ops=self._cache_ops,
+                room_id=room_id,
+                event_info=event_info,
+                impact=impact,
+                event_source=None,
+                event_id=event.event_id,
+                context="live",
+                room_level_skip_message=room_level_skip_message,
+                invalidate_on_append_failure=True,
+            )
+            return
+
         event_source = normalize_nio_event_for_cache(event)
 
         async def append_and_invalidate() -> bool:
             return await _apply_thread_message_mutation(
                 cache_ops=self._cache_ops,
-                resolver=self._resolver,
                 room_id=room_id,
                 event_info=event_info,
+                impact=impact,
                 event_source=event_source,
                 event_id=event.event_id,
                 context="live",
-                reason_prefix="live",
+                room_level_skip_message=room_level_skip_message,
                 invalidate_on_append_failure=True,
             )
 
@@ -495,15 +555,30 @@ class ThreadLiveWritePolicy:
         if not self._cache_ops.cache_runtime_available():
             return
 
+        impact = await _resolve_thread_redaction_mutation_impact(
+            resolver=self._resolver,
+            room_id=room_id,
+            redacted_event_id=event.redacts,
+            event_id=event.event_id,
+            context="live",
+        )
+        if impact.state is not MutationThreadImpactState.THREADED:
+            await _apply_thread_redaction_mutation(
+                cache_ops=self._cache_ops,
+                room_id=room_id,
+                redacted_event_id=event.redacts,
+                impact=impact,
+                context="live",
+            )
+            return
+
         async def redact_and_invalidate() -> bool:
             return await _apply_thread_redaction_mutation(
                 cache_ops=self._cache_ops,
-                resolver=self._resolver,
                 room_id=room_id,
                 redacted_event_id=event.redacts,
-                event_id=event.event_id,
+                impact=impact,
                 context="live",
-                reason_prefix="live",
             )
 
         await self._cache_ops.queue_room_cache_update(
@@ -536,18 +611,25 @@ class ThreadSyncWritePolicy:
         for event_source in threaded_events:
             event_info = EventInfo.from_event(event_source)
             event_id = event_source.get("event_id")
+            impact = await _resolve_thread_message_mutation_impact(
+                resolver=self._resolver,
+                room_id=room_id,
+                event_info=event_info,
+                event_id=event_id if isinstance(event_id, str) else None,
+                context="sync",
+                resolution_context=resolution_context,
+            )
             room_threads_invalidated = (
                 await _apply_thread_message_mutation(
                     cache_ops=self._cache_ops,
-                    resolver=self._resolver,
                     room_id=room_id,
                     event_info=event_info,
+                    impact=impact,
                     event_source=event_source,
                     event_id=event_id if isinstance(event_id, str) else None,
                     context="sync",
-                    reason_prefix="sync",
+                    room_level_skip_message="Skipping sync thread cache bookkeeping for known non-threaded message mutation",
                     invalidate_on_append_failure=True,
-                    resolution_context=resolution_context,
                     allow_room_invalidation=not room_threads_invalidated,
                 )
                 or room_threads_invalidated
@@ -562,15 +644,20 @@ class ThreadSyncWritePolicy:
     ) -> None:
         room_threads_invalidated = False
         for redacted_event_id in redacted_event_ids:
+            impact = await _resolve_thread_redaction_mutation_impact(
+                resolver=self._resolver,
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+                context="sync",
+                resolution_context=resolution_context,
+            )
             room_threads_invalidated = (
                 await _apply_thread_redaction_mutation(
                     cache_ops=self._cache_ops,
-                    resolver=self._resolver,
                     room_id=room_id,
                     redacted_event_id=redacted_event_id,
+                    impact=impact,
                     context="sync",
-                    reason_prefix="sync",
-                    resolution_context=resolution_context,
                     allow_room_invalidation=not room_threads_invalidated,
                 )
                 or room_threads_invalidated
