@@ -178,20 +178,27 @@ async def test_catchup_dispatches_media_messages(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_catchup_continues_after_dispatch_error_and_still_advances_token(tmp_path: Path) -> None:
+async def test_catchup_raises_after_dispatch_error_and_does_not_advance_token(tmp_path: Path) -> None:
     bot = _bot(tmp_path)
+    bot.client.next_batch = "s_prev"
     bot._on_message = AsyncMock(side_effect=[None, RuntimeError("boom"), None])
-    with patch.object(bot.logger, "exception") as log_exception:
-        save_sync_token = await _run_catchup(
-            bot,
-            _text_event("$ok"),
-            _text_event("$boom"),
-            _text_event("$later"),
-            next_batch="s_after",
-        )
-    assert [call.args[1].event_id for call in bot._on_message.await_args_list] == ["$ok", "$boom", "$later"]
-    assert bot.client.next_batch == "s_after"
-    save_sync_token.assert_called_once_with(bot.storage_path, bot.agent_name, "s_after")
+    response = _sync_response(
+        _text_event("$ok"),
+        _text_event("$boom"),
+        _text_event("$later"),
+        next_batch="s_after",
+    )
+    with (
+        patch.object(bot.logger, "exception") as log_exception,
+        patch("mindroom.startup_catchup.load_sync_token", return_value="s_prev"),
+        patch("mindroom.startup_catchup.save_sync_token") as save_sync_token,
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        bot.client.sync = AsyncMock(return_value=response)
+        await catch_up_missed_user_messages(bot)
+    assert [call.args[1].event_id for call in bot._on_message.await_args_list] == ["$ok", "$boom"]
+    assert bot.client.next_batch == "s_prev"
+    save_sync_token.assert_not_called()
     log_exception.assert_called_once()
 
 

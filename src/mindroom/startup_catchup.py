@@ -111,6 +111,7 @@ async def _dispatch_catch_up_event(
             room_id=room_id,
             event_id=event.event_id,
         )
+        raise
 
 
 async def catch_up_missed_user_messages(bot: AgentBot) -> None:
