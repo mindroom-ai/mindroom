@@ -359,6 +359,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.startup_catchup"
+depends_on = [
+    "mindroom.commands.parsing",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.sync_tokens",
+]
+
+[[modules]]
 path = "mindroom.bot"
 depends_on = [
     "mindroom.bot_runtime_view",
@@ -381,6 +389,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.runtime_support",
     "mindroom.scheduling",
+    "mindroom.startup_catchup",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
 ]

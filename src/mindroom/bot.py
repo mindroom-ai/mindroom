@@ -117,6 +117,11 @@ from .scheduling import (
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
+from .startup_catchup import (
+    STARTUP_CATCH_UP_AUDIO_EVENT_TYPES,
+    STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES,
+    catch_up_missed_user_messages,
+)
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import (
     IngressHookRunner,
@@ -264,6 +269,7 @@ type _MediaDispatchEvent = (
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
 )
+type _AudioDispatchEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 
 type _MessageContext = MessageContext
 
@@ -309,6 +315,7 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _invited_rooms: set[str]
+    _sync_callbacks_registered: bool
 
     def __init__(
         self,
@@ -333,6 +340,7 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._sync_callbacks_registered = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._runtime_view = BotRuntimeState(
             client=None,
@@ -1022,6 +1030,41 @@ class AgentBot:
             return
         raise PermanentMatrixStartupError(self._runtime_support_injection_error())
 
+    def _register_sync_callbacks(self) -> None:
+        """Register nio sync callbacks exactly once per client instance."""
+        if self._sync_callbacks_registered:
+            return
+
+        client = self.client
+        assert client is not None
+
+        client.add_event_callback(
+            _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+            nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_message, owner=self._runtime_view),
+            nio.RoomMessageText,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
+            nio.RedactionEvent,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
+            nio.ReactionEvent,
+        )
+
+        media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
+        for event_type in STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES:
+            client.add_event_callback(media_callback, event_type)
+        audio_callback = _create_task_wrapper(self._on_audio_message, owner=self._runtime_view)
+        for event_type in STARTUP_CATCH_UP_AUDIO_EVENT_TYPES:
+            client.add_event_callback(audio_callback, event_type)
+        client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+        client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
+        self._sync_callbacks_registered = True
+
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         self._validate_runtime_support_injection_contract_for_startup()
@@ -1039,41 +1082,6 @@ class AgentBot:
             interactive.init_persistence(self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
-
-            # Register event callbacks - wrap them to run as background tasks
-            # This ensures the sync loop is never blocked, allowing stop reactions to work
-            client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
-                nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view),
-                nio.RoomMessageText,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
-                nio.RedactionEvent,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
-                nio.ReactionEvent,
-            )
-
-            # Register media callbacks on all agents (each agent handles its own routing)
-            media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
-            for event_type in (
-                nio.RoomMessageImage,
-                nio.RoomEncryptedImage,
-                nio.RoomMessageFile,
-                nio.RoomEncryptedFile,
-                nio.RoomMessageVideo,
-                nio.RoomEncryptedVideo,
-                nio.RoomMessageAudio,
-                nio.RoomEncryptedAudio,
-            ):
-                client.add_event_callback(media_callback, event_type)
-            client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
-            client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
             self.running = True
 
@@ -1253,6 +1261,9 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
+        if not self._sync_callbacks_registered:
+            await catch_up_missed_user_messages(self)
+            self._register_sync_callbacks()
         await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=not self._first_sync_done)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
@@ -1348,6 +1359,14 @@ class AgentBot:
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
         await self._turn_controller.handle_media_event(room, event)
+
+    async def _on_audio_message(
+        self,
+        room: nio.MatrixRoom,
+        event: _AudioDispatchEvent,
+    ) -> None:
+        """Delegate one inbound audio event to the turn engine."""
+        await self._turn_controller.handle_audio_event(room, event)
 
     def _should_queue_follow_up_in_active_response_thread(
         self,

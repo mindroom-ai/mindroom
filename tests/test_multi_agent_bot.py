@@ -581,8 +581,10 @@ class TestAgentBot:
         """Invoke the target handler by name."""
         if handler_name == "message":
             await bot._on_message(room, event)
-        elif handler_name in {"image", "voice", "file"}:
+        elif handler_name in {"image", "file"}:
             await bot._on_media_message(room, event)
+        elif handler_name == "voice":
+            await bot._on_audio_message(room, event)
         elif handler_name == "reaction":
             await bot._on_reaction(room, event)
         else:  # pragma: no cover - defensive guard for test helper misuse
@@ -937,6 +939,7 @@ class TestAgentBot:
         # add_event_callback is a sync method, not async
         mock_client.add_event_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
+        mock_client.sync_forever = AsyncMock()
         mock_login.return_value = mock_client
 
         # Mock ensure_user_account to not change the agent_user
@@ -955,9 +958,17 @@ class TestAgentBot:
         # and then login with whatever user account was ensured
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
+        assert mock_client.add_event_callback.call_count == 0
+        assert mock_client.add_response_callback.call_count == 0
+
+        with patch("mindroom.bot.catch_up_missed_user_messages", new=AsyncMock(), create=True) as mock_catchup:
+            await bot.sync_forever()
+
+        mock_catchup.assert_awaited_once_with(bot)
         assert (
             mock_client.add_event_callback.call_count == 12
         )  # invite, message, redaction, reaction, audio, image/file/video callbacks
+        assert mock_client.add_response_callback.call_count == 2
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -990,6 +1001,57 @@ class TestAgentBot:
         await bot.sync_forever()
 
         assert call_order == ["sync"]
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_sync_registers_callbacks_after_startup_catchup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """AgentBot should defer callback registration until startup catch-up finishes."""
+        config = self._config_for_storage(tmp_path)
+        mock_client = AsyncMock()
+        mock_client.event_callbacks = []
+        mock_client.response_callbacks = []
+        mock_client.add_event_callback = MagicMock(
+            side_effect=lambda callback, event_type: mock_client.event_callbacks.append((callback, event_type)),
+        )
+        mock_client.add_response_callback = MagicMock(
+            side_effect=lambda callback, event_type: mock_client.response_callbacks.append((callback, event_type)),
+        )
+        sync_order: list[str] = []
+
+        async def _sync_forever(*_args: object, **_kwargs: object) -> None:
+            sync_order.append("sync")
+
+        mock_client.sync_forever = AsyncMock(side_effect=_sync_forever)
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = mock_client
+        bot.running = True
+
+        async def _fake_catchup(_bot: AgentBot) -> None:
+            assert mock_client.event_callbacks == []
+            assert mock_client.response_callbacks == []
+            sync_order.append("catchup")
+
+        with patch("mindroom.bot.catch_up_missed_user_messages", new=AsyncMock(side_effect=_fake_catchup), create=True):
+            await bot.sync_forever()
+
+        assert sync_order == ["catchup", "sync"]
+        assert len(mock_client.event_callbacks) == 12
+        assert len(mock_client.response_callbacks) == 2
+        callbacks_by_event_type = {event_type: callback for callback, event_type in mock_client.event_callbacks}
+        image_callback = callbacks_by_event_type[nio.RoomMessageImage]
+        assert callbacks_by_event_type[nio.RoomEncryptedImage] is image_callback
+        assert callbacks_by_event_type[nio.RoomMessageFile] is image_callback
+        assert callbacks_by_event_type[nio.RoomEncryptedFile] is image_callback
+        assert callbacks_by_event_type[nio.RoomMessageVideo] is image_callback
+        assert callbacks_by_event_type[nio.RoomEncryptedVideo] is image_callback
+        audio_callback = callbacks_by_event_type[nio.RoomMessageAudio]
+        assert callbacks_by_event_type[nio.RoomEncryptedAudio] is audio_callback
+        assert audio_callback is not image_callback
 
     @pytest.mark.asyncio
     async def test_agent_bot_try_start_reraises_permanent_startup_error(
@@ -4939,7 +5001,7 @@ class TestAgentBot:
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
-        await bot._turn_controller._handle_media_message_inner(room, event)
+        await bot._turn_controller.handle_media_event(room, event)
 
         bot._conversation_cache.append_live_event.assert_awaited_once()
         append_args = bot._conversation_cache.append_live_event.await_args
@@ -4954,7 +5016,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Audio dispatch should update live cache before special-media short-circuiting."""
+        """Audio dispatch should update live cache before audio normalization runs."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -4962,20 +5024,27 @@ class TestAgentBot:
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         bot._conversation_cache.append_live_event = AsyncMock()
-
-        async def record_coalescing(_room: object, _event: object) -> None:
-            assert bot._conversation_cache.append_live_event.await_count == 0
-
-        bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_coalescing)
+        bot._conversation_resolver.coalescing_thread_id = AsyncMock()
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock()
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        bot._turn_controller._on_audio_media_message = AsyncMock()
 
-        await bot._turn_controller._handle_media_message_inner(room, event)
+        async def assert_live_cache_appended(
+            _room: object,
+            _prechecked_event: object,
+        ) -> None:
+            assert bot._conversation_cache.append_live_event.await_count == 1
+
+        bot._turn_controller._on_audio_media_message.side_effect = assert_live_cache_appended
+
+        await bot._turn_controller.handle_audio_event(room, event)
 
         bot._conversation_cache.append_live_event.assert_awaited_once()
-        bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
+        bot._conversation_resolver.coalescing_thread_id.assert_not_awaited()
+        bot._turn_controller._dispatch_special_media_as_text.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
+        bot._turn_controller._on_audio_media_message.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_media_message_merges_thread_history_attachment_ids(
