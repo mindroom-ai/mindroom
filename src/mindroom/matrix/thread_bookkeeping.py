@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
@@ -37,6 +37,9 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
+
+
+MutationWriteContext = Literal["outbound", "live", "sync"]
 
 
 def is_thread_affecting_relation(event_info: EventInfo) -> bool:
@@ -254,7 +257,7 @@ class ThreadMutationResolver:
         *,
         event_info: EventInfo,
         event_id: str | None,
-        context: str,
+        context: MutationWriteContext,
         resolution_context: MutationResolutionContext | None = None,
     ) -> MutationThreadImpact:
         """Resolve how one message mutation should affect thread cache state."""
