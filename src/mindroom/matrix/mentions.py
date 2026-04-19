@@ -205,7 +205,9 @@ def _resolve_explicit_matrix_id_token(
         msg = "Explicit MXID token is missing explicit_user_id"
         raise ValueError(msg)
 
-    if agent_name := _find_matching_agent_name_for_explicit_localpart(token.localpart, config, runtime_paths):
+    if token.localpart.lower().startswith(MatrixID.AGENT_PREFIX) and (
+        agent_name := _find_matching_agent_name_for_localpart(token.localpart, config, runtime_paths)
+    ):
         return _agent_mention_resolution(
             agent_name,
             sender_domain=sender_domain,
@@ -226,7 +228,7 @@ def _resolve_agent_alias_token(
     """Resolve one alias-style token to a local configured agent, if any."""
     if has_server_name and not localpart.lower().startswith(MatrixID.AGENT_PREFIX):
         return None
-    if agent_name := _find_matching_agent_name_for_alias_localpart(localpart, config, runtime_paths):
+    if agent_name := _find_matching_agent_name_for_localpart(localpart, config, runtime_paths):
         return _agent_mention_resolution(
             agent_name,
             sender_domain=sender_domain,
@@ -338,26 +340,6 @@ def _is_valid_dns_name(host: str) -> bool:
     """Return whether one host string is a valid DNS name."""
     labels = host.split(".")
     return bool(host) and all(label and _DNS_LABEL_PATTERN.fullmatch(label) for label in labels)
-
-
-def _find_matching_agent_name_for_alias_localpart(
-    localpart: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> str | None:
-    """Return the configured agent name for one alias-style localpart."""
-    return _find_matching_agent_name_for_localpart(localpart, config, runtime_paths)
-
-
-def _find_matching_agent_name_for_explicit_localpart(
-    localpart: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> str | None:
-    """Return the configured agent name for one explicit MXID localpart when it is agent-shaped."""
-    if not localpart.lower().startswith(MatrixID.AGENT_PREFIX):
-        return None
-    return _find_matching_agent_name_for_localpart(localpart, config, runtime_paths)
 
 
 def _find_matching_agent_name_for_localpart(
