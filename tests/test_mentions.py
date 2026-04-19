@@ -336,6 +336,20 @@ class TestMentionParsing:
             == '<p>Please ask <a href="https://matrix.to/#/@code:matrix.org">@code:matrix.org</a> to review this.</p>\n'
         )
 
+    def test_format_message_with_uppercase_matrix_user_id_does_not_create_mention(self) -> None:
+        """Non-compliant uppercase MXIDs should remain plain text."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Please ask @Code:matrix.org to review this.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Please ask @Code:matrix.org to review this."
+        assert "m.mentions" not in content
+        assert content["formatted_body"] == "<p>Please ask @Code:matrix.org to review this.</p>\n"
+
     def test_format_message_with_plus_in_matrix_user_id_creates_clickable_mention(self) -> None:
         """Matrix user IDs with a plus in the localpart should be linked."""
         config = _make_config(_default_runtime_paths())

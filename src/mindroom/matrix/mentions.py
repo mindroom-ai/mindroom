@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 _AGENT_MENTION_PATTERN = re.compile(r"@(mindroom_)?(\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
 _DNS_LABEL_PATTERN = re.compile(r"[A-Za-z0-9-]+")
-_MATRIX_USER_ID_LOCALPART_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._=/-+")
+_MATRIX_USER_ID_LOCALPART_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._=/-+")
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class _MentionToken:
     start: int
     end: int
     localpart: str
+    has_server_name: bool = False
     explicit_user_id: str | None = None
 
 
@@ -104,6 +105,7 @@ def _scan_explicit_matrix_id_tokens(text: str) -> list[_MentionToken]:
                 start=match.start(),
                 end=match.start() + len(user_id),
                 localpart=matrix_id.username,
+                has_server_name=True,
                 explicit_user_id=matrix_id.full_id,
             ),
         )
@@ -125,6 +127,7 @@ def _scan_agent_alias_tokens(
                 start=match.start(),
                 end=match.end(),
                 localpart=_mention_localpart(match.group(0)),
+                has_server_name=":" in match.group(0),
             ),
         )
     return tokens
@@ -182,6 +185,7 @@ def _resolve_mention_token(
         )
     return _resolve_agent_alias_token(
         token.localpart,
+        has_server_name=token.has_server_name,
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
@@ -214,11 +218,14 @@ def _resolve_explicit_matrix_id_token(
 def _resolve_agent_alias_token(
     localpart: str,
     *,
+    has_server_name: bool,
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
     """Resolve one alias-style token to a local configured agent, if any."""
+    if has_server_name and not localpart.lower().startswith(MatrixID.AGENT_PREFIX):
+        return None
     if agent_name := _find_matching_agent_name_for_alias_localpart(localpart, config, runtime_paths):
         return _agent_mention_resolution(
             agent_name,
