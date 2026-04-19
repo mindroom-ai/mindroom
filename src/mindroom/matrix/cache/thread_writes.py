@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import nio
 
@@ -18,6 +18,7 @@ from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
     MutationThreadImpact,
     MutationThreadImpactState,
+    MutationWriteContext,
     ThreadMutationResolver,
     is_thread_affecting_relation,
 )
@@ -26,9 +27,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 
 __all__ = ["_collect_sync_timeline_cache_updates"]
-
-
-MutationWriteContext = Literal["outbound", "live", "sync"]
 
 
 def _collect_sync_timeline_cache_updates(
@@ -91,24 +89,6 @@ def _mutation_reason(
     suffix: str,
 ) -> str:
     return f"{context}_{suffix}"
-
-
-async def _resolve_thread_message_mutation_impact(
-    *,
-    resolver: ThreadMutationResolver,
-    room_id: str,
-    event_info: EventInfo,
-    event_id: str | None,
-    context: MutationWriteContext,
-    resolution_context: MutationResolutionContext | None = None,
-) -> MutationThreadImpact:
-    return await resolver.resolve_thread_impact_for_mutation(
-        room_id,
-        event_info=event_info,
-        event_id=event_id,
-        context=context,
-        resolution_context=resolution_context,
-    )
 
 
 async def _apply_thread_message_mutation(
@@ -247,9 +227,8 @@ class ThreadOutboundWritePolicy:
         event_source: dict[str, Any],
         event_info: EventInfo,
     ) -> None:
-        impact = await _resolve_thread_message_mutation_impact(
-            resolver=self._resolver,
-            room_id=room_id,
+        impact = await self._resolver.resolve_thread_impact_for_mutation(
+            room_id,
             event_info=event_info,
             event_id=event_id,
             context="outbound",
@@ -507,9 +486,8 @@ class ThreadLiveWritePolicy:
         if not self._cache_ops.cache_runtime_available():
             return
 
-        impact = await _resolve_thread_message_mutation_impact(
-            resolver=self._resolver,
-            room_id=room_id,
+        impact = await self._resolver.resolve_thread_impact_for_mutation(
+            room_id,
             event_info=event_info,
             event_id=event.event_id,
             context="live",
@@ -602,9 +580,8 @@ class ThreadSyncWritePolicy:
         for event_source in threaded_events:
             event_info = EventInfo.from_event(event_source)
             event_id = event_source.get("event_id")
-            impact = await _resolve_thread_message_mutation_impact(
-                resolver=self._resolver,
-                room_id=room_id,
+            impact = await self._resolver.resolve_thread_impact_for_mutation(
+                room_id,
                 event_info=event_info,
                 event_id=event_id if isinstance(event_id, str) else None,
                 context="sync",

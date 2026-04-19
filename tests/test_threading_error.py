@@ -28,7 +28,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix import thread_bookkeeping
+from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_CACHE,
@@ -375,6 +376,16 @@ def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
     assert not hasattr(matrix_cache, "_ThreadOutboundWritePolicy")
     assert not hasattr(matrix_cache, "_ThreadLiveWritePolicy")
     assert not hasattr(matrix_cache, "_ThreadSyncWritePolicy")
+
+
+def test_thread_writes_uses_shared_mutation_write_context_alias() -> None:
+    """Thread writes should reuse the shared mutation-write context alias."""
+    assert thread_writes.MutationWriteContext is thread_bookkeeping.MutationWriteContext
+
+
+def test_thread_writes_does_not_keep_message_impact_wrapper() -> None:
+    """Message-impact resolution should call the resolver directly instead of wrapping it."""
+    assert not hasattr(thread_writes, "_resolve_thread_message_mutation_impact")
 
 
 class TestThreadMutationHelpers:

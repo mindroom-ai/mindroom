@@ -39,6 +39,9 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
 
 
+MutationWriteContext = Literal["outbound", "live", "sync"]
+
+
 def is_thread_affecting_relation(event_info: EventInfo) -> bool:
     """Return whether one room message relation can affect thread-scoped cache state."""
     return (
@@ -254,7 +257,7 @@ class ThreadMutationResolver:
         *,
         event_info: EventInfo,
         event_id: str | None,
-        context: Literal["outbound", "live", "sync"],
+        context: MutationWriteContext,
         resolution_context: MutationResolutionContext | None = None,
     ) -> MutationThreadImpact:
         """Resolve how one message mutation should affect thread cache state."""
