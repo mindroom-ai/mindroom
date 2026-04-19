@@ -85,7 +85,6 @@ from mindroom.hooks import (
     build_hook_matrix_admin,
     hook,
 )
-from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
 from mindroom.teams import TeamMode, _create_team_instance
@@ -290,13 +289,6 @@ def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             continue
         seen_storage_ids.add(storage_id)
         storage.close()
-
-
-@pytest.fixture(autouse=True)
-def _reset_execution_state() -> Iterator[None]:
-    reset_hook_execution_state()
-    yield
-    reset_hook_execution_state()
 
 
 def _team_session(

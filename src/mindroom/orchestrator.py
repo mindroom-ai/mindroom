@@ -25,7 +25,6 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import EVENT_CONFIG_RELOADED
 from mindroom.knowledge import (
     KnowledgeManager,
@@ -66,16 +65,18 @@ from mindroom.runtime_state import (
 )
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import initialize_approval_store, shutdown_approval_store
-from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.skills import (
-    clear_skill_cache,
-    get_skill_snapshot,
+from mindroom.tool_system.plugins import (
+    PluginReloadResult,
+    get_configured_plugin_roots,
+    load_plugins,
+    reload_plugins,
 )
+from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
-from .file_watcher import watch_file
+from .file_watcher import watch_file, watch_tree
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_updates import (
     ConfigUpdatePlan,
@@ -866,9 +867,36 @@ class MultiAgentOrchestrator:
 
     def _activate_hook_registry(self, hook_registry: HookRegistry) -> None:
         """Commit one hook-registry snapshot to the live runtime."""
-        reset_hook_execution_state()
         set_scheduling_hook_registry(hook_registry)
         self.hook_registry = hook_registry
+        for bot in self.agent_bots.values():
+            bot.hook_registry = hook_registry
+
+    async def reload_plugins_now(
+        self,
+        *,
+        source: str,
+        changed_paths: tuple[Path, ...] = (),
+    ) -> PluginReloadResult:
+        """Rebuild and atomically swap the live plugin registry snapshot."""
+        if not self.running:
+            msg = "Plugin reload unavailable until startup finishes."
+            raise RuntimeError(msg)
+        config = self._require_config()
+        logger.info(
+            "Reloading plugins",
+            source=source,
+            changed_paths=[str(path) for path in changed_paths],
+        )
+        result = reload_plugins(config, self.runtime_paths)
+        self._activate_hook_registry(result.hook_registry)
+        logger.info(
+            "Plugin reload complete",
+            source=source,
+            active_plugins=list(result.active_plugin_names),
+            cancelled_task_count=result.cancelled_task_count,
+        )
+        return result
 
     async def _start_entities_once(
         self,
@@ -1678,6 +1706,31 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
     await watch_file(config_path, on_config_change)
 
 
+async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
+    """Watch configured local plugin roots and hot-reload them after debounced edits."""
+    plugin_tree_root = (orchestrator.runtime_paths.config_dir / "plugins").resolve()
+
+    async def on_plugin_change(changed_paths: tuple[Path, ...]) -> None:
+        config = orchestrator.config
+        if config is None or not orchestrator.running:
+            return
+        configured_roots = tuple(
+            root
+            for root in get_configured_plugin_roots(config, orchestrator.runtime_paths)
+            if root.is_relative_to(plugin_tree_root)
+        )
+        relevant_paths = tuple(
+            path
+            for path in changed_paths
+            if any(path == root or path.is_relative_to(root) for root in configured_roots)
+        )
+        if not relevant_paths:
+            return
+        await orchestrator.reload_plugins_now(source="watcher", changed_paths=relevant_paths)
+
+    await watch_tree(plugin_tree_root, on_plugin_change)
+
+
 async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
     """Watch skill roots for changes and clear cached skills."""
     while not orchestrator.running:  # noqa: ASYNC110
@@ -1780,6 +1833,7 @@ async def main(
                 lambda: _watch_config_task(orchestrator.config_path, orchestrator),
                 "config_watcher_supervisor",
             ),
+            ("plugins watcher", lambda: _watch_plugins_task(orchestrator), "plugins_watcher_supervisor"),
             ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
         ]
 

@@ -66,7 +66,6 @@ from mindroom.hooks import (
     SessionHookContext,
     hook,
 )
-from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.llm_request_logging import install_llm_request_logging
@@ -96,7 +95,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Generator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
 
@@ -182,13 +181,6 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
         entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
         plugin_order=0,
     )
-
-
-@pytest.fixture(autouse=True)
-def _reset_execution_state() -> Generator[None, None, None]:
-    reset_hook_execution_state()
-    yield
-    reset_hook_execution_state()
 
 
 def _make_bot(

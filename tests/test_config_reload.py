@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,10 +15,12 @@ from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.hooks import HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestration.runtime import create_logged_task
-from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState
+from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState, _watch_plugins_task
+from mindroom.tool_system.plugins import PluginReloadResult
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -97,6 +100,130 @@ def test_config_reload_drain_state_tracks_wait_warning_force_and_reset() -> None
 
     assert state.waiting_for_idle is False
     assert state.should_reset_for_request(2.0) is False
+
+
+@pytest.mark.asyncio
+async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Plugin watcher should coalesce local edits and ignore unconfigured plugin roots."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
+    ignored_root = tmp_path / "plugins" / "ignored"
+    ignored_root.mkdir(parents=True)
+    (ignored_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    reload_calls: list[tuple[str, tuple[Path, ...]]] = []
+    reload_seen = asyncio.Event()
+
+    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+        reload_calls.append((source, changed_paths))
+        reload_seen.set()
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        (ignored_root / "hooks.py").write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.sleep(0.08)
+        assert reload_calls == []
+
+        (plugin_root / "hooks.py").write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.sleep(0.005)
+        (plugin_root / "helper.py").write_text("VALUE = 3\n", encoding="utf-8")
+        await asyncio.wait_for(reload_seen.wait(), timeout=1)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    assert len(reload_calls) == 1
+    source, changed_paths = reload_calls[0]
+    assert source == "watcher"
+    assert (plugin_root / "hooks.py") in changed_paths
+    assert (plugin_root / "helper.py") in changed_paths
+    assert all(path.is_relative_to(plugin_root) for path in changed_paths)
+
+
+@pytest.mark.asyncio
+async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Plugin watcher should not self-trigger on cache artifacts created during reload."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    reload_calls: list[tuple[str, tuple[Path, ...]]] = []
+    reload_seen = asyncio.Event()
+
+    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+        reload_calls.append((source, changed_paths))
+        if len(reload_calls) == 1:
+            pycache_dir = plugin_root / "__pycache__"
+            pycache_dir.mkdir(exist_ok=True)
+            (pycache_dir / "hooks.cpython-312.pyc").write_bytes(b"compiled")
+            ruff_cache_dir = plugin_root / ".ruff_cache"
+            ruff_cache_dir.mkdir(exist_ok=True)
+            (ruff_cache_dir / "hooks.json").write_text("{}", encoding="utf-8")
+            mypy_cache_dir = plugin_root / ".mypy_cache"
+            mypy_cache_dir.mkdir(exist_ok=True)
+            (mypy_cache_dir / "meta.json").write_text("{}", encoding="utf-8")
+            pytest_cache_dir = plugin_root / ".pytest_cache" / "v" / "cache"
+            pytest_cache_dir.mkdir(parents=True, exist_ok=True)
+            (pytest_cache_dir / "nodeids").write_text("[]", encoding="utf-8")
+            reload_seen.set()
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.wait_for(reload_seen.wait(), timeout=1)
+        await asyncio.sleep(0.08)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    assert len(reload_calls) == 1
+    source, changed_paths = reload_calls[0]
+    assert source == "watcher"
+    assert hooks_path in changed_paths
+    assert all("__pycache__" not in path.parts for path in changed_paths)
+    assert all(".ruff_cache" not in path.parts for path in changed_paths)
+    assert all(".mypy_cache" not in path.parts for path in changed_paths)
+    assert all(".pytest_cache" not in path.parts for path in changed_paths)
 
 
 @pytest.mark.asyncio

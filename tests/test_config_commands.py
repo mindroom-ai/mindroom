@@ -25,7 +25,9 @@ from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
+from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.plugins import PluginReloadResult
 from tests.conftest import make_event_cache_mock
 
 
@@ -315,6 +317,63 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
             response_event_id="$reply",
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tmp_path: Path) -> None:
+    """Reload-plugins should be admin-only and call the injected reload callback once."""
+    command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@admin:example.org",
+        event_id="$event",
+        source={"content": {"body": "!reload-plugins"}},
+    )
+    reload_plugins = AsyncMock(
+        return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 1),
+    )
+
+    admin_context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=SimpleNamespace(authorization=SimpleNamespace(global_users=["@admin:example.org"])),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        storage_path=tmp_path,
+        logger=MagicMock(),
+        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
+        requester_user_id_for_event=MagicMock(return_value="@admin:example.org"),
+        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        record_handled_turn=MagicMock(),
+        send_response=AsyncMock(return_value="$reply"),
+        send_skill_command_response=AsyncMock(return_value=None),
+        run_skill_command_tool=AsyncMock(return_value=""),
+        reload_plugins=reload_plugins,
+    )
+    await handle_command(
+        context=admin_context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id="@admin:example.org",
+    )
+
+    reload_plugins.assert_awaited_once()
+    assert "demo-plugin" in admin_context.send_response.await_args.args[2]
+
+    user_context = CommandHandlerContext(
+        **{**admin_context.__dict__, "config": SimpleNamespace(authorization=SimpleNamespace(global_users=[]))},
+    )
+    await handle_command(
+        context=user_context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id="@user:example.org",
+    )
+
+    reload_plugins.assert_awaited_once()
+    assert user_context.send_response.await_args.args[2] == "❌ Admin only."
 
 
 @pytest.mark.asyncio

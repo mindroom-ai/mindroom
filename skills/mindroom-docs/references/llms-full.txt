@@ -8546,30 +8546,53 @@ Plugins can ship typed event hooks for message enrichment, response transformati
 
 ## Live development (hot reload)
 
-Plugins hot-reload automatically. When you edit any file inside a configured plugin directory, MindRoom detects the change within ~1 second, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code. No service restart, no agent session disruption.
+Plugins hot-reload automatically. When you edit any file inside a configured plugin directory under `~/.mindroom-chat/plugins/<name>/`, MindRoom detects the change within about one second, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code. No service restart and no agent session disruption.
 
 ### How it works
 
 - A background watcher polls each configured plugin root every ~1s and debounces saves over a ~1s window.
-- On change: the synthetic plugin package subtree is evicted from `sys.modules`, `load_plugins()` re-runs, a fresh `HookRegistry` is built, and the live registry is swapped atomically.
-- Module-level `asyncio.Task` objects on the old module are best-effort cancelled before the swap.
+- On change, the synthetic plugin package subtree is evicted from `sys.modules`, `load_plugins()` re-runs, a fresh `HookRegistry` is built, and the live registry is swapped atomically.
+- Module-level `asyncio.Task` objects, and one-level containers like `dict[..., Task]`, on the old module are best-effort cancelled before the swap.
 - The watcher ignores `__pycache__/`, `*.pyc`, `*.pyo`, editor swap files (`*.swp`, `*~`, `.#*`, `*.tmp`), and tool caches (`.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`).
+
+### Iterating on a plugin
+
+```
+# 1. Edit any file under your plugin
+$EDITOR ~/.mindroom-chat/plugins/my-plugin/hooks.py
+
+# 2. Save. Watch the journal:
+journalctl -u mindroom-chat.service -f | grep -E 'Reloading plugins|Plugin reload complete'
+
+# 3. Trigger your hook (send a message, fire the matching event, etc.)
+#    The new code path is live.
+```
+
+You can break and fix a plugin freely. A broken save can raise an import or runtime error, and the next valid save reloads the plugin successfully. There is no quarantine, failure threshold, or cooldown. Each save just reloads.
 
 ### Manual reload
 
-An admin user can force a reload by sending the chat command:
+If you need to force a reload, for example because the watcher missed something or you want to confirm a swap explicitly, an admin user can send the chat command:
 
 ```
 !reload-plugins
 ```
 
-The bot replies with the active plugin set and the count of cancelled background tasks.
+The bot replies with the active plugin set and the count of cancelled background tasks. Admin gating uses `authorization.global_users` from `config.yaml`.
 
-### Caveats
+### Caveats and tradeoffs
 
-- **In-flight turns keep their old code.** A reload swaps the registry for new events; any callback already running on the old module finishes there.
-- **No partial-write detection.** If your editor saves in two writes, the watcher may briefly load a half-written state, log an import error, and reload again on the second write.
-- **New plugins added to disk are not auto-enabled.** You still have to add them under `plugins:` in `config.yaml`. The watcher only reloads plugins that are already configured. (Editing `config.yaml` triggers its own separate hot-reload path.)
+The hot-reload path is intentionally best-effort, not transactional.
+
+- **In-flight turns keep their old code.** A reload swaps the registry for new events, but any callback already running on the old module finishes there, and only new events use the new module.
+- **No partial-write detection.** If your editor saves the file in two writes, the watcher may briefly load the half-written first state, log an import error, and then reload again on the second write.
+- **CPU-bound infinite loops still wedge the event loop.** The hook dispatcher uses `asyncio.timeout()` for cooperative cancellation, so truly blocking CPU code is not preempted.
+- **Background resources held by the old module can leak until natural cleanup.** Only `asyncio.Task` objects directly attached to module globals are cancelled, so plugins that hold long-lived non-task resources need their own cleanup bookkeeping.
+- **New plugins added to disk are not auto-enabled.** You still have to add them under `plugins:` in `config.yaml`, because the watcher only reloads plugins that are already configured.
+
+### Production tip
+
+Hot reload is enabled by default in production. Edit `~/.mindroom-chat/plugins/<name>/` directly while `mindroom-chat.service` is running, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
 
 ## Community plugins
 
@@ -9570,16 +9593,17 @@ MindRoom provides chat commands that users can type in any Matrix room where Min
 
 ## Quick Reference
 
-| Command                      | Description                              |
-| ---------------------------- | ---------------------------------------- |
-| `!help [topic]`              | Get help on commands or a specific topic |
-| `!hi`                        | Show the welcome message again           |
-| `!schedule <task>`           | Schedule a task or reminder              |
-| `!list_schedules`            | List pending scheduled tasks             |
-| `!cancel_schedule <id>`      | Cancel a scheduled task                  |
-| `!edit_schedule <id> <task>` | Edit an existing scheduled task          |
-| `!config <operation>`        | View and modify configuration            |
-| `!skill <name> [args]`       | Run a skill by name                      |
+| Command                      | Description                                      |
+| ---------------------------- | ------------------------------------------------ |
+| `!help [topic]`              | Get help on commands or a specific topic         |
+| `!hi`                        | Show the welcome message again                   |
+| `!schedule <task>`           | Schedule a task or reminder                      |
+| `!list_schedules`            | List pending scheduled tasks                     |
+| `!cancel_schedule <id>`      | Cancel a scheduled task                          |
+| `!edit_schedule <id> <task>` | Edit an existing scheduled task                  |
+| `!config <operation>`        | View and modify configuration                    |
+| `!skill <name> [args]`       | Run a skill by name                              |
+| `!reload-plugins`            | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
 
@@ -9758,6 +9782,24 @@ Run a user-invocable skill by name.
 - If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
 
 See [Skills](https://docs.mindroom.chat/skills/index.md) for skill configuration details.
+
+### `!reload-plugins`
+
+Force-reload every configured plugin from disk. Admin-only.
+
+```
+!reload-plugins
+```
+
+Plugins are also auto-reloaded on file save (~1s after save) — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details. This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
+
+**Reply format:**
+
+```
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+```
+
+**Permission:** Caller must be in `authorization.global_users`. Aliases: `!reload-plugins`, `!reload_plugins`.
 
 ## Stop Button
 
