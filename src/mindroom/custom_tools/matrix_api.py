@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from threading import Lock
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import nio
 from agno.tools import Toolkit
@@ -26,6 +27,70 @@ from mindroom.tool_system.runtime_context import (
 logger = get_logger(__name__)
 
 
+class MatrixSearchError(nio.ErrorResponse):
+    """Matrix search request failed or returned malformed data."""
+
+
+@dataclass
+class MatrixSearchResponse(nio.Response):
+    """Parsed subset of Matrix room-event search results."""
+
+    count: int
+    next_batch: str | None
+    results: list[dict[str, object]]
+
+    @staticmethod
+    def _malformed_response_error() -> MatrixSearchError:
+        return MatrixSearchError("Malformed Matrix search response.")
+
+    @staticmethod
+    def _matrix_error_from_dict(parsed_dict: dict[Any, Any]) -> MatrixSearchError:
+        error_response = nio.ErrorResponse.from_dict(parsed_dict)
+        return MatrixSearchError(
+            error_response.message,
+            error_response.status_code,
+            error_response.retry_after_ms,
+            error_response.soft_logout,
+        )
+
+    @classmethod
+    def from_dict(
+        cls,
+        parsed_dict: dict[Any, Any],
+    ) -> MatrixSearchResponse | MatrixSearchError:
+        """Parse one Matrix search payload or normalize one Matrix error payload."""
+        if not isinstance(parsed_dict, dict):
+            return cls._malformed_response_error()
+
+        search_categories = parsed_dict.get("search_categories")
+        if search_categories is None:
+            return cls._matrix_error_from_dict(parsed_dict)
+        if not isinstance(search_categories, dict):
+            return cls._malformed_response_error()
+
+        room_events = search_categories.get("room_events")
+        if not isinstance(room_events, dict):
+            return cls._malformed_response_error()
+
+        count = room_events.get("count")
+        next_batch = room_events.get("next_batch")
+        results = room_events.get("results", [])
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or (next_batch is not None and not isinstance(next_batch, str))
+            or not isinstance(results, list)
+            or any(not isinstance(result, dict) for result in results)
+        ):
+            return cls._malformed_response_error()
+
+        return cls(
+            count=count,
+            next_batch=next_batch,
+            results=results,
+        )
+
+
 class MatrixApiTools(Toolkit):
     """Expose a small low-level Matrix API surface to agents."""
 
@@ -39,6 +104,7 @@ class MatrixApiTools(Toolkit):
         "put_state",
         "redact",
         "get_event",
+        "search",
     )
     _VALID_ACTIONS_SET: ClassVar[frozenset[str]] = frozenset(_VALID_ACTIONS)
     _WRITE_ACTION_WEIGHTS: ClassVar[dict[str, int]] = {
@@ -61,6 +127,10 @@ class MatrixApiTools(Toolkit):
             "m.room.third_party_invite",
         },
     )
+    _SEARCH_DEFAULT_KEYS: ClassVar[tuple[str, ...]] = ("content.body",)
+    _SEARCH_ALLOWED_ORDER_BY: ClassVar[frozenset[str]] = frozenset({"rank", "recent"})
+    _SEARCH_LIMIT_CAP: ClassVar[int] = 50
+    _SEARCH_SNIPPET_MAX_CHARS: ClassVar[int] = 200
 
     def __init__(self) -> None:
         super().__init__(
@@ -111,13 +181,7 @@ class MatrixApiTools(Toolkit):
             return None, None
         if isinstance(
             response,
-            (
-                nio.RoomSendError,
-                nio.RoomGetStateEventError,
-                nio.RoomPutStateError,
-                nio.RoomRedactError,
-                nio.RoomGetEventError,
-            ),
+            nio.ErrorResponse,
         ):
             return cls._normalize_matrix_error(response)
         if isinstance(response, Exception):
@@ -130,17 +194,13 @@ class MatrixApiTools(Toolkit):
 
     @staticmethod
     def _normalize_matrix_error(
-        response: nio.RoomSendError
-        | nio.RoomGetStateEventError
-        | nio.RoomPutStateError
-        | nio.RoomRedactError
-        | nio.RoomGetEventError,
+        response: nio.ErrorResponse,
     ) -> tuple[str, str | None]:
         return str(response), response.status_code
 
     @classmethod
     def _supported_actions_message(cls) -> str:
-        return "Unsupported action. Use send_event, get_state, put_state, redact, or get_event."
+        return "Unsupported action. Use send_event, get_state, put_state, redact, get_event, or search."
 
     @staticmethod
     def _normalize_action(action: str) -> str:
@@ -175,7 +235,7 @@ class MatrixApiTools(Toolkit):
 
     @staticmethod
     def _validate_non_empty_string(
-        value: str | None,
+        value: object,
         *,
         field_name: str,
     ) -> tuple[str | None, str | None]:
@@ -220,6 +280,213 @@ class MatrixApiTools(Toolkit):
             "content_keys": sorted(str(key) for key in content),
             "content_bytes": len(serialized.encode("utf-8")),
         }
+
+    @staticmethod
+    def _copy_string_keyed_dict(value: object) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+
+        normalized_value: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                return None
+            normalized_value[key] = item
+        return normalized_value
+
+    @staticmethod
+    def _validate_string_list(
+        value: object,
+        *,
+        field_name: str,
+    ) -> list[str]:
+        error_message = f"{field_name} must be a list of non-empty strings."
+        if not isinstance(value, list):
+            raise ValueError(error_message)  # noqa: TRY004
+
+        normalized_items: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(error_message)
+            normalized_items.append(item.strip())
+        return normalized_items
+
+    @classmethod
+    def _validate_search_order_by(cls, order_by: object) -> str:
+        error_message = "order_by must be one of: rank, recent."
+        normalized_order_by = order_by.strip().lower() if isinstance(order_by, str) else ""
+        if normalized_order_by not in cls._SEARCH_ALLOWED_ORDER_BY:
+            raise ValueError(error_message)
+        return normalized_order_by
+
+    @classmethod
+    def _validate_search_limit(cls, limit: object) -> int:
+        error_message = f"limit must be an integer between 1 and {cls._SEARCH_LIMIT_CAP}."
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 0 < limit <= cls._SEARCH_LIMIT_CAP:
+            raise ValueError(error_message)
+        return limit
+
+    @staticmethod
+    def _validate_optional_dict(
+        value: object,
+        *,
+        field_name: str,
+    ) -> dict[str, object] | None:
+        if value is None:
+            return None
+        normalized_value = MatrixApiTools._copy_string_keyed_dict(value)
+        if normalized_value is None:
+            error_message = f"{field_name} must be a JSON object (dict) when provided."
+            raise ValueError(error_message)
+        return normalized_value
+
+    @staticmethod
+    def _validate_optional_string(
+        value: object,
+        *,
+        field_name: str,
+    ) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            error_message = f"{field_name} must be omitted or a non-empty string."
+            raise ValueError(error_message)
+        return value.strip()
+
+    @classmethod
+    def _truncate_snippet(cls, text: object) -> str:
+        if not isinstance(text, str):
+            return ""
+        snippet = " ".join(text.split())
+        if len(snippet) <= cls._SEARCH_SNIPPET_MAX_CHARS:
+            return snippet
+        return f"{snippet[: cls._SEARCH_SNIPPET_MAX_CHARS - 3].rstrip()}..."
+
+    @classmethod
+    def _normalize_search_event_payload(
+        cls,
+        raw_event: object,
+    ) -> dict[str, object]:
+        raw_event_dict = cls._copy_string_keyed_dict(raw_event) or {}
+        event_id = raw_event_dict.get("event_id")
+        event_room_id = raw_event_dict.get("room_id")
+        sender = raw_event_dict.get("sender")
+        event_type = raw_event_dict.get("type")
+        content = raw_event_dict.get("content")
+        normalized_content = cls._copy_string_keyed_dict(content) or {}
+        origin_server_ts = raw_event_dict.get("origin_server_ts")
+        return {
+            "event_id": event_id if isinstance(event_id, str) else "",
+            "room_id": event_room_id if isinstance(event_room_id, str) else "",
+            "sender": sender if isinstance(sender, str) else "",
+            "origin_server_ts": origin_server_ts if isinstance(origin_server_ts, int) else 0,
+            "type": event_type if isinstance(event_type, str) else "",
+            "snippet": cls._truncate_snippet(normalized_content.get("body")),
+            "content": normalized_content,
+        }
+
+    @classmethod
+    def _normalize_search_context_payload(
+        cls,
+        raw_context: object,
+    ) -> dict[str, object] | None:
+        context_dict = cls._copy_string_keyed_dict(raw_context)
+        if context_dict is None:
+            return None
+
+        events_before = context_dict.get("events_before")
+        events_after = context_dict.get("events_after")
+        normalized_context: dict[str, object] = {
+            "events_before": (
+                [cls._normalize_search_event_payload(event) for event in events_before]
+                if isinstance(events_before, list)
+                else []
+            ),
+            "events_after": (
+                [cls._normalize_search_event_payload(event) for event in events_after]
+                if isinstance(events_after, list)
+                else []
+            ),
+        }
+        if isinstance(context_dict.get("start"), str):
+            normalized_context["start"] = context_dict["start"]
+        if isinstance(context_dict.get("end"), str):
+            normalized_context["end"] = context_dict["end"]
+        return normalized_context
+
+    @classmethod
+    def _build_search_filter(
+        cls,
+        *,
+        room_id: str,
+        raw_filter: dict[str, object] | None,
+        limit: int,
+    ) -> dict[str, object]:
+        if raw_filter is None:
+            return {"rooms": [room_id], "limit": limit}
+
+        filter_payload = dict(raw_filter)
+        rooms = filter_payload.get("rooms")
+        if rooms is None:
+            filter_payload["rooms"] = [room_id]
+        elif (
+            not isinstance(rooms, list)
+            or any(not isinstance(entry, str) for entry in rooms)
+            or any(entry != room_id for entry in rooms)
+        ):
+            error_message = "filter.rooms must be omitted or contain only the target room_id."
+            raise ValueError(error_message)
+
+        if "limit" not in filter_payload:
+            filter_payload["limit"] = limit
+        else:
+            cls._validate_search_limit(filter_payload["limit"])
+        return filter_payload
+
+    @classmethod
+    def _build_search_request_body(
+        cls,
+        *,
+        room_id: str,
+        search_term: object,
+        keys: object,
+        order_by: object,
+        limit: object,
+        next_batch: object,
+        search_filter: object,
+        event_context: object,
+    ) -> dict[str, object]:
+        normalized_search_term, search_term_error = cls._validate_non_empty_string(
+            search_term,
+            field_name="search_term",
+        )
+        if search_term_error is not None:
+            raise ValueError(search_term_error)
+
+        resolved_keys = (
+            list(cls._SEARCH_DEFAULT_KEYS)
+            if keys is None
+            else cls._validate_string_list(
+                keys,
+                field_name="keys",
+            )
+        )
+        resolved_order_by = cls._validate_search_order_by(order_by)
+        resolved_limit = cls._validate_search_limit(limit)
+        resolved_next_batch = cls._validate_optional_string(next_batch, field_name="next_batch")
+        resolved_filter = cls._validate_optional_dict(search_filter, field_name="filter")
+        resolved_event_context = cls._validate_optional_dict(event_context, field_name="event_context")
+
+        room_events: dict[str, object] = {
+            "search_term": normalized_search_term,
+            "keys": resolved_keys,
+            "filter": cls._build_search_filter(room_id=room_id, raw_filter=resolved_filter, limit=resolved_limit),
+            "order_by": resolved_order_by,
+        }
+        if resolved_next_batch is not None:
+            room_events["next_batch"] = resolved_next_batch
+        if resolved_event_context is not None:
+            room_events["event_context"] = resolved_event_context
+        return {"search_categories": {"room_events": room_events}}
 
     @classmethod
     def _check_rate_limit(
@@ -1024,6 +1291,79 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
+    async def _search(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        search_term: object,
+        keys: object,
+        order_by: object,
+        limit: object,
+        next_batch: object,
+        search_filter: object,
+        event_context: object,
+    ) -> str:
+        request_body = self._build_search_request_body(
+            room_id=room_id,
+            search_term=search_term,
+            keys=keys,
+            order_by=order_by,
+            limit=limit,
+            next_batch=next_batch,
+            search_filter=search_filter,
+            event_context=event_context,
+        )
+        method = "POST"
+        path = nio.Api._build_path(["search"])
+
+        try:
+            response = await context.client._send(
+                MatrixSearchResponse,
+                method,
+                path,
+                nio.Api.to_json(request_body),
+            )
+        except Exception as exc:
+            return self._error_payload(
+                action="search",
+                room_id=room_id,
+                message="Failed to search Matrix room events.",
+                response=exc,
+            )
+
+        if isinstance(response, MatrixSearchResponse):
+            normalized_results: list[dict[str, object]] = []
+            include_context = event_context is not None
+            for raw_result in response.results:
+                event_payload = self._normalize_search_event_payload(raw_result.get("result"))
+                rank = raw_result.get("rank")
+                normalized_result: dict[str, object] = {
+                    "rank": float(rank) if isinstance(rank, (int, float)) else 0.0,
+                    **event_payload,
+                }
+                if include_context:
+                    context_payload = self._normalize_search_context_payload(raw_result.get("context"))
+                    if context_payload is not None:
+                        normalized_result["context"] = context_payload
+                normalized_results.append(normalized_result)
+
+            return self._payload(
+                "ok",
+                action="search",
+                room_id=room_id,
+                count=response.count,
+                next_batch=response.next_batch,
+                results=normalized_results,
+            )
+
+        return self._error_payload(
+            action="search",
+            room_id=room_id,
+            message="Failed to search Matrix room events.",
+            response=response,
+        )
+
     async def matrix_api(  # noqa: C901, PLR0911
         self,
         action: str = "send_event",
@@ -1033,6 +1373,13 @@ class MatrixApiTools(Toolkit):
         state_key: str | None = None,
         event_id: str | None = None,
         reason: str | None = None,
+        search_term: str | None = None,
+        keys: list[str] | None = None,
+        order_by: str = "rank",
+        limit: int = 10,
+        next_batch: str | None = None,
+        filter: dict[str, object] | None = None,  # noqa: A002
+        event_context: dict[str, object] | None = None,
         dry_run: bool = False,
         allow_dangerous: bool = False,
     ) -> str:
@@ -1044,8 +1391,10 @@ class MatrixApiTools(Toolkit):
         - put_state: Write one state event by `event_type`, optional `state_key`, and `content`.
         - redact: Redact an event by `event_id`.
         - get_event: Fetch one event by `event_id`.
+        - search: Full-text search one room's events with `search_term`, optional `keys`, pagination, and context.
 
         `room_id` defaults to the current Matrix tool runtime context room.
+        `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state for a small set of high-risk room-state event types.
         """
@@ -1132,8 +1481,20 @@ class MatrixApiTools(Toolkit):
                 reason=reason,
                 dry_run=normalized_dry_run,
             )
-        return await self._get_event(
+        if normalized_action == "get_event":
+            return await self._get_event(
+                context,
+                room_id=resolved_room_id,
+                event_id=event_id,
+            )
+        return await self._search(
             context,
             room_id=resolved_room_id,
-            event_id=event_id,
+            search_term=search_term,
+            keys=keys,
+            order_by=order_by,
+            limit=limit,
+            next_batch=next_batch,
+            search_filter=filter,
+            event_context=event_context,
         )

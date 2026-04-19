@@ -97,7 +97,7 @@
       "description": "Tool for interacting with Discord channels and servers",
       "display_name": "Discord",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/discord",
-      "helper_text": null,
+      "helper_text": "Search uses action='search' with required `search_term`. `room_id` defaults to the current room. Optional `keys` defaults to ['content.body'], `order_by` is `rank` or `recent`, `limit` must be 1-50, and `next_batch`, `filter`, and `event_context` are passed through to Matrix room-event search.",
       "icon": "SiDiscord",
       "icon_color": "text-indigo-500",
       "name": "discord",
@@ -113,7 +113,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Low-level Matrix event and state operations (send_event, get_state, put_state, redact, get_event)",
+      "description": "Low-level Matrix event, state, and room search operations (send_event, get_state, put_state, redact, get_event, search)",
       "display_name": "Matrix API",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "helper_text": null,
