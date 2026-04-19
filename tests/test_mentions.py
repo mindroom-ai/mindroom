@@ -134,6 +134,22 @@ class TestMentionParsing:
         assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
         assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
 
+    def test_parse_with_unnamespaced_agent_full_mxid_in_namespaced_install(self, tmp_path: Path) -> None:
+        """Explicit agent-shaped MXIDs should still map to local namespaced agents."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"MINDROOM_NAMESPACE": "a1b2c3d4"},
+        )
+        config = _make_config(runtime_paths)
+
+        text = "Ask @mindroom_calculator:matrix.org for help"
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
+
+        assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
+        assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
+
     def test_custom_domain(self) -> None:
         """Test with custom sender domain."""
         config = _make_config(_default_runtime_paths())

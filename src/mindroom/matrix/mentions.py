@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
-from mindroom.matrix.identity import MatrixID, agent_username_localpart, mindroom_namespace
+from mindroom.matrix.identity import MatrixID, mindroom_namespace
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.tool_system.events import build_tool_trace_content
 
@@ -21,12 +21,24 @@ _MATRIX_USER_ID_LOCALPART_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcd
 
 
 @dataclass(frozen=True)
-class _MentionReplacement:
+class _MentionToken:
     start: int
     end: int
+    localpart: str
+    explicit_user_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _MentionResolution:
     plain_text: str
     markdown_text: str
     user_id: str
+
+
+@dataclass(frozen=True)
+class _MentionReplacement(_MentionResolution):
+    start: int
+    end: int
 
 
 def parse_mentions_in_text(
@@ -47,94 +59,200 @@ def parse_mentions_in_text(
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
 
     """
-    replacements = _collect_full_matrix_id_replacements(
-        text,
+    tokens = _scan_mention_tokens(text)
+    replacements = _resolve_mention_tokens(
+        tokens,
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
     )
-    replacements.extend(
-        _collect_agent_mention_replacements(
-            text,
-            sender_domain=sender_domain,
-            config=config,
-            runtime_paths=runtime_paths,
-            occupied_ranges=[(replacement.start, replacement.end) for replacement in replacements],
-        ),
-    )
-    ordered_replacements = sorted(replacements, key=lambda replacement: replacement.start)
 
     mentioned_user_ids: list[str] = []
-    for replacement in ordered_replacements:
+    for replacement in replacements:
         if replacement.user_id not in mentioned_user_ids:
             mentioned_user_ids.append(replacement.user_id)
 
     return (
-        _apply_replacements(text, ordered_replacements, use_markdown=False),
+        _apply_replacements(text, replacements, use_markdown=False),
         mentioned_user_ids,
-        _apply_replacements(text, ordered_replacements, use_markdown=True),
+        _apply_replacements(text, replacements, use_markdown=True),
     )
 
 
-def _collect_agent_mention_replacements(
-    text: str,
-    *,
-    sender_domain: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    occupied_ranges: list[tuple[int, int]],
-) -> list[_MentionReplacement]:
-    """Return replacement data for configured agent mentions in text."""
-    replacements: list[_MentionReplacement] = []
-    for match in _AGENT_MENTION_PATTERN.finditer(text):
-        if _range_overlaps_existing(match.start(), match.end(), occupied_ranges):
-            continue
-        mention_info = _process_mention(match, config, sender_domain, runtime_paths)
-        if mention_info is None:
-            continue
-        _original, user_id, display_name = mention_info
-        replacements.append(
-            _MentionReplacement(
-                start=match.start(),
-                end=match.end(),
-                plain_text=user_id,
-                markdown_text=f"[@{display_name}](https://matrix.to/#/{user_id})",
-                user_id=user_id,
-            ),
-        )
-    return replacements
+def _scan_mention_tokens(text: str) -> list[_MentionToken]:
+    """Return ordered mention tokens from one message body."""
+    tokens = _scan_explicit_matrix_id_tokens(text)
+    tokens.extend(
+        _scan_agent_alias_tokens(
+            text,
+            occupied_ranges=[(token.start, token.end) for token in tokens],
+        ),
+    )
+    return sorted(tokens, key=lambda token: token.start)
 
 
-def _collect_full_matrix_id_replacements(
-    text: str,
-    *,
-    sender_domain: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> list[_MentionReplacement]:
-    """Return replacement data for explicit full Matrix user IDs in text."""
-    replacements: list[_MentionReplacement] = []
+def _scan_explicit_matrix_id_tokens(text: str) -> list[_MentionToken]:
+    """Return explicit full-MXID tokens from text."""
+    tokens: list[_MentionToken] = []
     for match in _FULL_MATRIX_ID_CANDIDATE_PATTERN.finditer(text):
         user_id = _extract_longest_valid_matrix_user_id(match.group(0))
         if user_id is None:
             continue
         matrix_id = MatrixID.parse(user_id)
-        replacement = _replacement_for_explicit_matrix_id(
-            matrix_id,
+        tokens.append(
+            _MentionToken(
+                start=match.start(),
+                end=match.start() + len(user_id),
+                localpart=matrix_id.username,
+                explicit_user_id=matrix_id.full_id,
+            ),
+        )
+    return tokens
+
+
+def _scan_agent_alias_tokens(
+    text: str,
+    *,
+    occupied_ranges: list[tuple[int, int]],
+) -> list[_MentionToken]:
+    """Return non-overlapping alias-style mention tokens from text."""
+    tokens: list[_MentionToken] = []
+    for match in _AGENT_MENTION_PATTERN.finditer(text):
+        if _range_overlaps_existing(match.start(), match.end(), occupied_ranges):
+            continue
+        tokens.append(
+            _MentionToken(
+                start=match.start(),
+                end=match.end(),
+                localpart=_mention_localpart(match.group(0)),
+            ),
+        )
+    return tokens
+
+
+def _mention_localpart(mention_text: str) -> str:
+    """Return the localpart-like segment from one raw mention token."""
+    return mention_text[1:].split(":", 1)[0]
+
+
+def _resolve_mention_tokens(
+    tokens: list[_MentionToken],
+    *,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[_MentionReplacement]:
+    """Resolve scanned tokens into render-ready replacements."""
+    replacements: list[_MentionReplacement] = []
+    for token in tokens:
+        resolution = _resolve_mention_token(
+            token,
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
         )
+        if resolution is None:
+            continue
         replacements.append(
             _MentionReplacement(
-                start=match.start(),
-                end=match.start() + len(user_id),
-                plain_text=replacement.plain_text,
-                markdown_text=replacement.markdown_text,
-                user_id=replacement.user_id,
+                start=token.start,
+                end=token.end,
+                plain_text=resolution.plain_text,
+                markdown_text=resolution.markdown_text,
+                user_id=resolution.user_id,
             ),
         )
     return replacements
+
+
+def _resolve_mention_token(
+    token: _MentionToken,
+    *,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _MentionResolution | None:
+    """Resolve one scanned mention token into an agent or literal-user target."""
+    if token.explicit_user_id is not None:
+        return _resolve_explicit_matrix_id_token(
+            token,
+            sender_domain=sender_domain,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    return _resolve_agent_alias_token(
+        token.localpart,
+        sender_domain=sender_domain,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+
+def _resolve_explicit_matrix_id_token(
+    token: _MentionToken,
+    *,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _MentionResolution:
+    """Resolve one explicit full MXID token."""
+    explicit_user_id = token.explicit_user_id
+    if explicit_user_id is None:
+        msg = "Explicit MXID token is missing explicit_user_id"
+        raise ValueError(msg)
+
+    if agent_name := _find_matching_agent_name_for_explicit_localpart(token.localpart, config, runtime_paths):
+        return _agent_mention_resolution(
+            agent_name,
+            sender_domain=sender_domain,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    return _literal_user_resolution(explicit_user_id)
+
+
+def _resolve_agent_alias_token(
+    localpart: str,
+    *,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _MentionResolution | None:
+    """Resolve one alias-style token to a local configured agent, if any."""
+    if agent_name := _find_matching_agent_name_for_alias_localpart(localpart, config, runtime_paths):
+        return _agent_mention_resolution(
+            agent_name,
+            sender_domain=sender_domain,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    return None
+
+
+def _agent_mention_resolution(
+    agent_name: str,
+    *,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _MentionResolution:
+    """Return rendering data for one resolved local agent mention."""
+    agent_config = config.agents[agent_name]
+    resolved_user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
+    return _MentionResolution(
+        plain_text=resolved_user_id,
+        markdown_text=f"[@{agent_config.display_name}](https://matrix.to/#/{resolved_user_id})",
+        user_id=resolved_user_id,
+    )
+
+
+def _literal_user_resolution(user_id: str) -> _MentionResolution:
+    """Return rendering data for one literal Matrix user mention."""
+    return _MentionResolution(
+        plain_text=user_id,
+        markdown_text=f"[{user_id}](https://matrix.to/#/{user_id})",
+        user_id=user_id,
+    )
 
 
 def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
@@ -215,45 +333,70 @@ def _is_valid_dns_name(host: str) -> bool:
     return bool(host) and all(label and _DNS_LABEL_PATTERN.fullmatch(label) for label in labels)
 
 
-def _replacement_for_explicit_matrix_id(
-    matrix_id: MatrixID,
-    *,
-    sender_domain: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> _MentionReplacement:
-    """Return replacement data for one explicit Matrix user ID."""
-    user_id = matrix_id.full_id
-    if agent_name := _agent_name_for_explicit_matrix_id(matrix_id, config, runtime_paths):
-        agent_config = config.agents[agent_name]
-        resolved_user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
-        return _MentionReplacement(
-            start=0,
-            end=0,
-            plain_text=resolved_user_id,
-            markdown_text=f"[@{agent_config.display_name}](https://matrix.to/#/{resolved_user_id})",
-            user_id=resolved_user_id,
-        )
-    return _MentionReplacement(
-        start=0,
-        end=0,
-        plain_text=user_id,
-        markdown_text=f"[{user_id}](https://matrix.to/#/{user_id})",
-        user_id=user_id,
-    )
-
-
-def _agent_name_for_explicit_matrix_id(
-    matrix_id: MatrixID,
+def _find_matching_agent_name_for_alias_localpart(
+    localpart: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
-    """Return the agent name for an explicit MXID only when the localpart is the full agent localpart."""
-    matrix_username = matrix_id.username.lower()
-    for agent_name in config.agents:
-        if agent_username_localpart(agent_name, runtime_paths).lower() == matrix_username:
-            return agent_name
+    """Return the configured agent name for one alias-style localpart."""
+    return _find_matching_agent_name_for_localpart(localpart, config, runtime_paths)
+
+
+def _find_matching_agent_name_for_explicit_localpart(
+    localpart: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the configured agent name for one explicit MXID localpart when it is agent-shaped."""
+    if not localpart.lower().startswith(MatrixID.AGENT_PREFIX):
+        return None
+    return _find_matching_agent_name_for_localpart(localpart, config, runtime_paths)
+
+
+def _find_matching_agent_name_for_localpart(
+    localpart: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the configured agent name matched by one localpart string, if any."""
+    for candidate_name in _localpart_candidate_names(localpart, runtime_paths):
+        candidate_lower = candidate_name.lower()
+        for config_agent_name in config.agents:
+            if config_agent_name.lower() == candidate_lower:
+                return config_agent_name
     return None
+
+
+def _localpart_candidate_names(localpart: str, runtime_paths: RuntimePaths) -> list[str]:
+    """Build ordered candidate agent names from one mention localpart."""
+    name = localpart
+    prefix: str | None = None
+
+    if localpart.lower().startswith(MatrixID.AGENT_PREFIX):
+        prefix = MatrixID.AGENT_PREFIX
+        name = localpart[len(prefix) :]
+
+    if name.lower().startswith("user_"):
+        return []
+
+    candidate_names = [name]
+    stripped_name: str | None = None
+
+    namespace = mindroom_namespace(runtime_paths)
+    if namespace:
+        suffix = f"_{namespace}"
+        if name.lower().endswith(suffix):
+            stripped_name = name[: -len(suffix)]
+            if stripped_name:
+                candidate_names.append(stripped_name)
+            else:
+                stripped_name = None
+
+    if prefix:
+        candidate_names.append(f"{prefix}{name}")
+        if stripped_name:
+            candidate_names.append(f"{prefix}{stripped_name}")
+    return candidate_names
 
 
 def _range_overlaps_existing(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
@@ -279,85 +422,6 @@ def _apply_replacements(
         last_end = replacement.end
     parts.append(text[last_end:])
     return "".join(parts)
-
-
-def _process_mention(
-    match: re.Match,
-    config: Config,
-    sender_domain: str,
-    runtime_paths: RuntimePaths,
-) -> tuple[str, str, str] | None:
-    """Process a single mention match and return replacement data.
-
-    Args:
-        match: The regex match object
-        config: The loaded config
-        sender_domain: Domain for constructing Matrix IDs
-        runtime_paths: Explicit runtime context for namespace-aware agent lookup
-
-    Returns:
-        Tuple of (original_text, matrix_user_id, display_name) or None if not a valid agent
-
-    """
-    original = match.group(0)
-    name = match.group(2)
-
-    # Skip user-like mentions (e.g. mindroom_user_*)
-    if name.lower().startswith("user_"):
-        return None
-
-    agent_name = _find_matching_agent_name(match, config, runtime_paths)
-    if agent_name is None:
-        return None
-
-    agent_config = config.agents[agent_name]
-    user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
-    return (original, user_id, agent_config.display_name)
-
-
-def _find_matching_agent_name(
-    match: re.Match,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> str | None:
-    """Return the configured agent name matched by one mention, if any."""
-    for candidate_name in _mention_candidate_names(match, runtime_paths):
-        candidate_lower = candidate_name.lower()
-        for config_agent_name in config.agents:
-            if config_agent_name.lower() == candidate_lower:
-                return config_agent_name
-    return None
-
-
-def _mention_candidate_names(match: re.Match, runtime_paths: RuntimePaths) -> list[str]:
-    """Build ordered candidate agent names for one mention match."""
-    name = match.group(2)
-    prefix = match.group(1)
-
-    # Prefer exact/base forms first, then prefix-reconstructed variants.
-    candidate_names = [name]
-    stripped_name: str | None = None
-
-    namespace = mindroom_namespace(runtime_paths)
-    if namespace:
-        suffix = f"_{namespace}"
-        if name.lower().endswith(suffix):
-            stripped_name = name[: -len(suffix)]
-            if stripped_name:
-                candidate_names.append(stripped_name)
-            else:
-                stripped_name = None
-
-    # When the regex captured a "mindroom_" prefix (group 1), the original mention
-    # was e.g. "@mindroom_dev" but group(2) is just "dev". The config key might
-    # be "mindroom_dev", so we must also try the un-stripped form. For namespaced
-    # mentions like "@mindroom_dev_ns123", we also need the combined
-    # prefix-plus-namespace-stripped candidate "mindroom_dev".
-    if prefix:
-        candidate_names.append(f"{prefix}{name}")
-        if stripped_name:
-            candidate_names.append(f"{prefix}{stripped_name}")
-    return candidate_names
 
 
 def format_message_with_mentions(
