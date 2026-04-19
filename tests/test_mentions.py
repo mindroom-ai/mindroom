@@ -134,6 +134,22 @@ class TestMentionParsing:
         assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
         assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
 
+    def test_parse_with_unnamespaced_agent_full_mxid_in_namespaced_install(self, tmp_path: Path) -> None:
+        """Explicit agent-shaped MXIDs should still map to local namespaced agents."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"MINDROOM_NAMESPACE": "a1b2c3d4"},
+        )
+        config = _make_config(runtime_paths)
+
+        text = "Ask @mindroom_calculator:matrix.org for help"
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
+
+        assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
+        assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
+
     def test_custom_domain(self) -> None:
         """Test with custom sender domain."""
         config = _make_config(_default_runtime_paths())
@@ -240,6 +256,133 @@ class TestMentionParsing:
         )
 
         assert content["m.mentions"]["user_ids"] == ["@mindroom_research:matrix.org"]
+
+    def test_format_message_with_full_matrix_user_id_creates_clickable_mention(self) -> None:
+        """Non-agent full Matrix IDs should be rendered as clickable mentions."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Yes, @bas.nijholt:chat-mindroom.example.com -- noted.",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == "Yes, @bas.nijholt:chat-mindroom.example.com -- noted."
+        assert content["m.mentions"]["user_ids"] == ["@bas.nijholt:chat-mindroom.example.com"]
+        assert (
+            content["formatted_body"] == '<p>Yes, <a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a> -- noted.</p>\n"
+        )
+
+    def test_format_message_with_agent_and_full_matrix_user_id_preserves_both_mentions(self) -> None:
+        """Agent mentions and explicit full Matrix user IDs should coexist cleanly."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "@calculator please follow up with @bas.nijholt:chat-mindroom.example.com",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == (
+            "@mindroom_calculator:matrix.org please follow up with @bas.nijholt:chat-mindroom.example.com"
+        )
+        assert content["m.mentions"]["user_ids"] == [
+            "@mindroom_calculator:matrix.org",
+            "@bas.nijholt:chat-mindroom.example.com",
+        ]
+        assert (
+            content["formatted_body"]
+            == '<p><a href="https://matrix.to/#/@mindroom_calculator:matrix.org">@Calculator</a> '
+            'please follow up with <a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a></p>\n"
+        )
+
+    def test_format_message_with_duplicate_full_matrix_user_ids_deduplicates_mentions(self) -> None:
+        """Repeated full Matrix user IDs should appear once in m.mentions."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "@bas.nijholt:chat-mindroom.example.com and again @bas.nijholt:chat-mindroom.example.com",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == (
+            "@bas.nijholt:chat-mindroom.example.com and again @bas.nijholt:chat-mindroom.example.com"
+        )
+        assert content["m.mentions"]["user_ids"] == ["@bas.nijholt:chat-mindroom.example.com"]
+        assert (
+            content["formatted_body"] == '<p><a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a> and again "
+            '<a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
+            "@bas.nijholt:chat-mindroom.example.com</a></p>\n"
+        )
+
+    def test_format_message_with_full_matrix_id_matching_agent_name_keeps_explicit_user(self) -> None:
+        """A fully qualified MXID should not be reinterpreted as an agent shorthand."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Please ask @code:matrix.org to review this.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Please ask @code:matrix.org to review this."
+        assert content["m.mentions"]["user_ids"] == ["@code:matrix.org"]
+        assert (
+            content["formatted_body"]
+            == '<p>Please ask <a href="https://matrix.to/#/@code:matrix.org">@code:matrix.org</a> to review this.</p>\n'
+        )
+
+    def test_format_message_with_uppercase_matrix_user_id_does_not_create_mention(self) -> None:
+        """Non-compliant uppercase MXIDs should remain plain text."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Please ask @Code:matrix.org to review this.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Please ask @Code:matrix.org to review this."
+        assert "m.mentions" not in content
+        assert content["formatted_body"] == "<p>Please ask @Code:matrix.org to review this.</p>\n"
+
+    def test_format_message_with_plus_in_matrix_user_id_creates_clickable_mention(self) -> None:
+        """Matrix user IDs with a plus in the localpart should be linked."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Ping @alice+ops:matrix.org please.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Ping @alice+ops:matrix.org please."
+        assert content["m.mentions"]["user_ids"] == ["@alice+ops:matrix.org"]
+        assert (
+            content["formatted_body"]
+            == '<p>Ping <a href="https://matrix.to/#/@alice+ops:matrix.org">@alice+ops:matrix.org</a> please.</p>\n'
+        )
+
+    def test_format_message_with_ipv6_matrix_user_id_creates_clickable_mention(self) -> None:
+        """Matrix user IDs with bracketed IPv6 server names should be linked."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Ping @alice:[2001:db8::1] please.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Ping @alice:[2001:db8::1] please."
+        assert content["m.mentions"]["user_ids"] == ["@alice:[2001:db8::1]"]
+        assert (
+            content["formatted_body"]
+            == '<p>Ping <a href="https://matrix.to/#/@alice:%5B2001:db8::1%5D">@alice:[2001:db8::1]</a> please.</p>\n'
+        )
 
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""
