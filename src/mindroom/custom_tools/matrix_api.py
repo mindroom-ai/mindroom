@@ -128,6 +128,11 @@ class MatrixApiTools(Toolkit):
         },
     )
     _SEARCH_DEFAULT_KEYS: ClassVar[tuple[str, ...]] = ("content.body",)
+    _SEARCH_ALLOWED_KEYS: ClassVar[tuple[str, ...]] = (
+        "content.body",
+        "content.name",
+        "content.topic",
+    )
     _SEARCH_ALLOWED_ORDER_BY: ClassVar[frozenset[str]] = frozenset({"rank", "recent"})
     _SEARCH_LIMIT_CAP: ClassVar[int] = 50
     _SEARCH_SNIPPET_MAX_CHARS: ClassVar[int] = 200
@@ -319,6 +324,16 @@ class MatrixApiTools(Toolkit):
         return normalized_order_by
 
     @classmethod
+    def _validate_search_keys(cls, keys: object) -> list[str]:
+        normalized_keys = cls._validate_string_list(keys, field_name="keys")
+        invalid_keys = [key for key in normalized_keys if key not in cls._SEARCH_ALLOWED_KEYS]
+        if invalid_keys:
+            allowed_keys = ", ".join(cls._SEARCH_ALLOWED_KEYS)
+            error_message = f"keys entries must be one of: {allowed_keys}."
+            raise ValueError(error_message)
+        return normalized_keys
+
+    @classmethod
     def _validate_search_limit(cls, limit: object) -> int:
         error_message = f"limit must be an integer between 1 and {cls._SEARCH_LIMIT_CAP}."
         if not isinstance(limit, int) or isinstance(limit, bool) or not 0 < limit <= cls._SEARCH_LIMIT_CAP:
@@ -381,7 +396,6 @@ class MatrixApiTools(Toolkit):
             "origin_server_ts": origin_server_ts if isinstance(origin_server_ts, int) else 0,
             "type": event_type if isinstance(event_type, str) else "",
             "snippet": cls._truncate_snippet(normalized_content.get("body")),
-            "content": normalized_content,
         }
 
     @classmethod
@@ -451,7 +465,6 @@ class MatrixApiTools(Toolkit):
         keys: object,
         order_by: object,
         limit: object,
-        next_batch: object,
         search_filter: object,
         event_context: object,
     ) -> dict[str, object]:
@@ -462,17 +475,9 @@ class MatrixApiTools(Toolkit):
         if search_term_error is not None:
             raise ValueError(search_term_error)
 
-        resolved_keys = (
-            list(cls._SEARCH_DEFAULT_KEYS)
-            if keys is None
-            else cls._validate_string_list(
-                keys,
-                field_name="keys",
-            )
-        )
+        resolved_keys = list(cls._SEARCH_DEFAULT_KEYS) if keys is None else cls._validate_search_keys(keys)
         resolved_order_by = cls._validate_search_order_by(order_by)
         resolved_limit = cls._validate_search_limit(limit)
-        resolved_next_batch = cls._validate_optional_string(next_batch, field_name="next_batch")
         resolved_filter = cls._validate_optional_dict(search_filter, field_name="filter")
         resolved_event_context = cls._validate_optional_dict(event_context, field_name="event_context")
 
@@ -482,11 +487,16 @@ class MatrixApiTools(Toolkit):
             "filter": cls._build_search_filter(room_id=room_id, raw_filter=resolved_filter, limit=resolved_limit),
             "order_by": resolved_order_by,
         }
-        if resolved_next_batch is not None:
-            room_events["next_batch"] = resolved_next_batch
         if resolved_event_context is not None:
             room_events["event_context"] = resolved_event_context
         return {"search_categories": {"room_events": room_events}}
+
+    @classmethod
+    def _build_search_path(cls, next_batch: object) -> str:
+        resolved_next_batch = cls._validate_optional_string(next_batch, field_name="next_batch")
+        if resolved_next_batch is None:
+            return nio.Api._build_path(["search"])
+        return nio.Api._build_path(["search"], {"next_batch": resolved_next_batch})
 
     @classmethod
     def _check_rate_limit(
@@ -1304,18 +1314,25 @@ class MatrixApiTools(Toolkit):
         search_filter: object,
         event_context: object,
     ) -> str:
-        request_body = self._build_search_request_body(
-            room_id=room_id,
-            search_term=search_term,
-            keys=keys,
-            order_by=order_by,
-            limit=limit,
-            next_batch=next_batch,
-            search_filter=search_filter,
-            event_context=event_context,
-        )
+        try:
+            request_body = self._build_search_request_body(
+                room_id=room_id,
+                search_term=search_term,
+                keys=keys,
+                order_by=order_by,
+                limit=limit,
+                search_filter=search_filter,
+                event_context=event_context,
+            )
+            path = self._build_search_path(next_batch)
+        except ValueError as exc:
+            return self._error_payload(
+                action="search",
+                room_id=room_id,
+                message=str(exc),
+            )
+
         method = "POST"
-        path = nio.Api._build_path(["search"])
 
         try:
             response = await context.client._send(
@@ -1364,7 +1381,7 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
-    async def matrix_api(  # noqa: C901, PLR0911
+    async def matrix_api(  # noqa: C901, PLR0911, PLR0912
         self,
         action: str = "send_event",
         room_id: str | None = None,
@@ -1397,6 +1414,7 @@ class MatrixApiTools(Toolkit):
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state for a small set of high-risk room-state event types.
+        `search` rejects `dry_run` and `allow_dangerous` because it is read-only.
         """
         context = get_tool_runtime_context()
         if context is None:
@@ -1440,6 +1458,13 @@ class MatrixApiTools(Toolkit):
         assert normalized_dry_run is not None
         assert normalized_allow_dangerous is not None
         assert resolved_room_id is not None
+
+        if normalized_action == "search" and (normalized_dry_run or normalized_allow_dangerous):
+            return self._error_payload(
+                action="search",
+                room_id=resolved_room_id,
+                message="dry_run/allow_dangerous not applicable to read-only search action",
+            )
 
         if not room_access_allowed(context, resolved_room_id):
             return self._error_payload(

@@ -968,14 +968,16 @@ async def test_matrix_api_search_happy_path() -> None:
     """Search should call the Matrix search endpoint and normalize results."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    content = {"body": "Needle in a haystack", "msgtype": "m.text"}
     ctx.client._send.return_value = MatrixSearchResponse(
         count=1,
         next_batch=None,
         results=[
             _search_result(
                 rank=12.5,
-                result=_raw_event(room_id=ctx.room_id, content=content),
+                result=_raw_event(
+                    room_id=ctx.room_id,
+                    content={"body": "Needle in a haystack", "msgtype": "m.text"},
+                ),
             ),
         ],
     )
@@ -996,7 +998,6 @@ async def test_matrix_api_search_happy_path() -> None:
                 "origin_server_ts": 123,
                 "type": "m.room.message",
                 "snippet": "Needle in a haystack",
-                "content": content,
             },
         ],
         "room_id": ctx.room_id,
@@ -1025,27 +1026,76 @@ async def test_matrix_api_search_pagination_round_trips_next_batch() -> None:
     """Search should forward pagination tokens to the homeserver and return the next token."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client._send.return_value = MatrixSearchResponse(
-        count=3,
-        next_batch="batch-2",
-        results=[_search_result()],
-    )
+    ctx.client._send.side_effect = [
+        MatrixSearchResponse(
+            count=3,
+            next_batch="batch-1",
+            results=[
+                _search_result(
+                    result=_raw_event(
+                        event_id="$first:localhost",
+                        room_id=ctx.room_id,
+                        content={"body": "First page", "msgtype": "m.text"},
+                    ),
+                ),
+            ],
+        ),
+        MatrixSearchResponse(
+            count=3,
+            next_batch=None,
+            results=[
+                _search_result(
+                    result=_raw_event(
+                        event_id="$second:localhost",
+                        room_id=ctx.room_id,
+                        content={"body": "Second page", "msgtype": "m.text"},
+                    ),
+                ),
+            ],
+        ),
+    ]
 
     with tool_runtime_context(ctx):
-        payload = json.loads(
+        first_payload = json.loads(
             await tool.matrix_api(
                 action="search",
                 search_term="needle",
                 limit=1,
-                next_batch="batch-1",
+            ),
+        )
+        second_payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="needle",
+                limit=1,
+                next_batch=first_payload["next_batch"],
             ),
         )
 
-    assert payload["count"] == 3
-    assert payload["next_batch"] == "batch-2"
-    request_body = json.loads(ctx.client._send.await_args.args[3])
-    assert request_body["search_categories"]["room_events"]["filter"]["limit"] == 1
-    assert request_body["search_categories"]["room_events"]["next_batch"] == "batch-1"
+    assert first_payload["count"] == 3
+    assert first_payload["next_batch"] == "batch-1"
+    assert first_payload["results"][0]["event_id"] == "$first:localhost"
+
+    first_request_body = json.loads(ctx.client._send.await_args_list[0].args[3])
+    assert first_request_body["search_categories"]["room_events"]["filter"]["limit"] == 1
+    assert "next_batch" not in first_request_body["search_categories"]["room_events"]
+
+    _, _, second_path, second_data = ctx.client._send.await_args_list[1].args
+    assert second_path == nio.Api._build_path(["search"], {"next_batch": "batch-1"})
+    assert "next_batch" not in json.loads(second_data)["search_categories"]["room_events"]
+    assert second_payload["count"] == 3
+    assert second_payload["next_batch"] is None
+    assert second_payload["results"] == [
+        {
+            "rank": 1.0,
+            "event_id": "$second:localhost",
+            "room_id": ctx.room_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": 123,
+            "type": "m.room.message",
+            "snippet": "Second page",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -1082,21 +1132,28 @@ async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
     ("kwargs", "expected_message"),
     [
         ({"action": "search", "search_term": "needle", "order_by": "score"}, "order_by must be one of"),
+        (
+            {"action": "search", "search_term": "needle", "keys": ["content.body", "content.url"]},
+            "keys entries must be one of",
+        ),
+        ({"action": "search", "search_term": "needle", "limit": -1}, "limit must be an integer between"),
         ({"action": "search", "search_term": "needle", "limit": 0}, "limit must be an integer between"),
+        ({"action": "search", "search_term": "needle", "limit": 51}, "limit must be an integer between"),
         ({"action": "search"}, "search_term is required"),
     ],
 )
 async def test_matrix_api_search_validation_errors(kwargs: dict[str, object], expected_message: str) -> None:
-    """Search should raise ValueError for invalid search-specific parameters."""
+    """Search should return structured errors for invalid search-specific parameters."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
-    with (
-        tool_runtime_context(ctx),
-        pytest.raises(ValueError, match=expected_message),
-    ):
-        await tool.matrix_api(**kwargs)
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_api(**kwargs))
 
+    assert payload["status"] == "error"
+    assert payload["action"] == "search"
+    assert payload["room_id"] == ctx.room_id
+    assert expected_message in payload["message"]
     ctx.client._send.assert_not_awaited()
 
 
@@ -1165,7 +1222,6 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
                 "origin_server_ts": 123,
                 "type": "m.room.message",
                 "snippet": "Before",
-                "content": {"body": "Before", "msgtype": "m.text"},
             },
         ],
         "events_after": [
@@ -1176,12 +1232,37 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
                 "origin_server_ts": 123,
                 "type": "m.room.message",
                 "snippet": "After",
-                "content": {"body": "After", "msgtype": "m.text"},
             },
         ],
         "start": "start-token",
         "end": "end-token",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"action": "search", "search_term": "needle", "dry_run": True},
+        {"action": "search", "search_term": "needle", "allow_dangerous": True},
+    ],
+)
+async def test_matrix_api_search_rejects_write_only_flags(kwargs: dict[str, object]) -> None:
+    """Search should reject write-only flags that do not apply to read-only actions."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_api(**kwargs))
+
+    assert payload == {
+        "action": "search",
+        "message": "dry_run/allow_dangerous not applicable to read-only search action",
+        "room_id": ctx.room_id,
+        "status": "error",
+        "tool": "matrix_api",
+    }
+    ctx.client._send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

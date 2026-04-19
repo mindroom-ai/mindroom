@@ -24,9 +24,14 @@ if TYPE_CHECKING:
     helper_text=(
         "Search uses action='search' with required `search_term`. "
         "`room_id` defaults to the current room. "
-        "Optional `keys` defaults to ['content.body'], `order_by` is `rank` or `recent`, "
-        "`limit` must be 1-50, and `next_batch`, `filter`, and `event_context` are passed through "
-        "to Matrix room-event search."
+        "`keys` defaults to ['content.body'] and, when supplied, must only use "
+        "['content.body', 'content.name', 'content.topic']; `order_by` is `rank` or `recent`; "
+        "`limit` must be 1-50; `filter.rooms` must be omitted or contain only that room; "
+        "`next_batch` is sent as the Matrix search query parameter; and optional `event_context` "
+        "is passed through. Responses return `{count, next_batch, results}` where each result "
+        "contains only `rank`, `event_id`, `room_id`, `sender`, `origin_server_ts`, `type`, "
+        "`snippet`, and optional `context`. Full event `content` is intentionally omitted; use "
+        "`get_event` when needed."
     ),
 )
 def matrix_api_tools() -> type[MatrixApiTools]:
