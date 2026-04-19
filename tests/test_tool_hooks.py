@@ -1199,6 +1199,83 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_sync_tool_approval_send_uses_main_loop(tmp_path: Path) -> None:
+    """Sync-tool approval sends should hop back to the main runtime loop."""
+    request_thread = threading.get_ident()
+    request_loop = asyncio.get_running_loop()
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "echo", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_main_loop()
+
+    async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> nio.RoomSendResponse:
+        current_loop = asyncio.get_running_loop()
+        current_thread = threading.get_ident()
+        assert current_thread == request_thread
+        assert current_loop is request_loop
+        assert room_id == "!room:localhost"
+        assert message_type == "io.mindroom.tool_approval"
+        assert content["status"] == "pending"
+        return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+    client = MagicMock()
+    client.room_send = AsyncMock(side_effect=mock_room_send)
+    bot = MagicMock()
+    bot.client = client
+    orchestrator.agent_bots = {"code": bot}
+    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=AsyncMock())
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    result = await asyncio.to_thread(
+        lambda: FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute(),
+    )
+
+    assert result.status == "success"
+    assert result.result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: echo\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_context(tmp_path: Path) -> None:
     """Nested tool execution should stay attributed to the bridge agent, not the parent runtime context."""
     before_seen: list[str] = []
