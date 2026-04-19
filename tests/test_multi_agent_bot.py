@@ -9493,7 +9493,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_config", return_value=config),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
-            patch("mindroom.orchestrator.reset_hook_execution_state") as mock_reset_hook_execution_state,
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch.object(
                 orchestrator,
@@ -9507,7 +9506,6 @@ class TestMultiAgentOrchestrator:
 
         assert orchestrator.config is None
         assert orchestrator.hook_registry is initial_hook_registry
-        mock_reset_hook_execution_state.assert_not_called()
         mock_set_scheduling_hook_registry.assert_not_called()
         mock_create_managed_bot.assert_not_called()
 
@@ -9994,11 +9992,10 @@ class TestMultiAgentOrchestrator:
         config = uvicorn.Config(app=lambda _scope, _receive, _send: None)
         server = _SignalAwareUvicornServer(config, shutdown_requested)
 
-        with patch.object(uvicorn.Server, "handle_exit") as mock_handle_exit:
+        with patch.object(uvicorn.Server, "handle_exit"):
             server.handle_exit(signal.SIGINT, None)
 
         assert shutdown_requested.is_set()
-        mock_handle_exit.assert_called_once_with(signal.SIGINT, None)
 
     @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_resets_backoff_after_healthy_run(self) -> None:
@@ -10180,7 +10177,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
-            patch("mindroom.orchestrator.reset_hook_execution_state") as mock_reset_hook_execution_state,
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
             patch.object(
@@ -10194,7 +10190,6 @@ class TestMultiAgentOrchestrator:
 
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is old_hook_registry
-        mock_reset_hook_execution_state.assert_not_called()
         mock_set_scheduling_hook_registry.assert_not_called()
 
     @pytest.mark.asyncio

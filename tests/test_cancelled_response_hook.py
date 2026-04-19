@@ -31,14 +31,13 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
-from mindroom.hooks.execution import emit, reset_hook_execution_state
+from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -94,13 +93,6 @@ def _response_hook_service(tmp_path: Path, registry: HookRegistry) -> tuple[Conf
         hook_send_message=AsyncMock(),
     )
     return config, ResponseHookService(hook_context=hook_context)
-
-
-@pytest.fixture(autouse=True)
-def _reset_execution_state() -> Generator[None, None, None]:
-    reset_hook_execution_state()
-    yield
-    reset_hook_execution_state()
 
 
 @pytest.mark.asyncio

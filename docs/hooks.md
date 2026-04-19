@@ -444,11 +444,9 @@ Failure semantics are mode-aware:
 - **Collector** failures lose only that hook's contributed items
 - **Transformer** failures lose only that hook's draft changes; the previous draft continues
 
-### Circuit breaker
+### No quarantine, no cooldown
 
-The runtime tracks consecutive failures per `(plugin_name, hook_name)`.
-After **5 consecutive failures**, the hook enters a **5-minute cooldown** where it is skipped entirely.
-The next successful invocation clears the failure count.
+A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
 
 ### No automatic retries
 

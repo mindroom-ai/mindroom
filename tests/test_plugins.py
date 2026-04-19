@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -16,7 +18,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
-from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.plugins import load_plugins, reload_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -1793,3 +1795,110 @@ def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_pat
 
     assert len(plugins[0].discovered_hooks) == 1
     assert counter_path.read_text(encoding="utf-8") == "1"
+
+
+@pytest.mark.asyncio
+async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_path: Path) -> None:
+    """Reloads should evict helper modules, not just the top-level hooks file cache."""
+    plugin_root = tmp_path / "plugins" / "helper-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "helper-reload", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "helper.py").write_text("VALUE = 'before'\n", encoding="utf-8")
+    (plugin_root / "hooks.py").write_text(
+        "from .helper import VALUE\n"
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received', name='helper-value')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return VALUE\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/helper-reload"]), config_path)
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        initial = reload_plugins(config, runtime_paths_for(config))
+        assert await initial.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "before"
+
+        (plugin_root / "helper.py").write_text("VALUE = 'after'\n", encoding="utf-8")
+        reloaded = reload_plugins(config, runtime_paths_for(config))
+
+        assert await reloaded.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "after"
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -> None:
+    """Reloads should cancel deduped task globals across module-level holders."""
+    plugin_root = tmp_path / "plugins" / "task-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "task-reload", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "helper.py").write_text("MARKER = True\n", encoding="utf-8")
+    (plugin_root / "hooks.py").write_text(
+        "from . import helper\n"
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return helper.MARKER\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/task-reload"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    shared_task = asyncio.create_task(asyncio.Event().wait())
+    extra_task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        reload_plugins(config, runtime_paths)
+        hooks_path = (plugin_root / "hooks.py").resolve()
+        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+        helper_module = sys.modules[
+            f"{plugin_module._MODULE_IMPORT_CACHE[hooks_path].module_name.rsplit('.', 1)[0]}.helper"
+        ]
+        hooks_module._AUTO_POKE_TASK = shared_task
+        hooks_module._snooze_tasks = {"shared": shared_task, "extra": extra_task}
+        helper_module._AUTO_POKE_TASK = shared_task
+
+        result = reload_plugins(config, runtime_paths)
+        await asyncio.sleep(0)
+
+        assert result.cancelled_task_count == 2
+        assert shared_task.cancelled()
+        assert extra_task.cancelled()
+    finally:
+        await asyncio.gather(shared_task, extra_task, return_exceptions=True)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)

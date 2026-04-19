@@ -17,6 +17,7 @@ class CommandType(Enum):
     """Types of commands supported."""
 
     HELP = "help"
+    RELOAD_PLUGINS = "reload_plugins"
     SCHEDULE = "schedule"
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
@@ -34,6 +35,7 @@ _COMMAND_DOCS = {
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.EDIT_SCHEDULE: ("!edit_schedule <id> <task>", "Edit an existing scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
+    CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.HI: ("!hi", "Show welcome message"),
     CommandType.SKILL: ("!skill <name> [args]", "Run a skill by name"),
@@ -86,6 +88,7 @@ class _CommandParser:
 
     # Command patterns
     HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
+    RELOAD_PLUGINS_PATTERN = re.compile(r"^!reload(?:-|_)plugins$", re.IGNORECASE)
     SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
     LIST_SCHEDULES_PATTERN = re.compile(r"^!(?:list|inspect)[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
@@ -130,6 +133,9 @@ class _CommandParser:
                 args={"topic": topic},
                 raw_text=message,
             )
+
+        if self.RELOAD_PLUGINS_PATTERN.match(message):
+            return Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text=message)
 
         # !schedule command
         match = self.SCHEDULE_PATTERN.match(message)
