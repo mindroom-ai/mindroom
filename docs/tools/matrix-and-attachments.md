@@ -162,17 +162,19 @@ set_thread_summary(
 
 ## [`matrix_api`]
 
-`matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations.
+`matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations, including room-scoped search.
 
 ### What It Does
 
-`matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, and `get_event`.
+`matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, `get_event`, and `search`.
 It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 Hard-blocked state event types like `m.room.create` remain blocked.
+`search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
+When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
 
 ### Configuration
 
@@ -197,11 +199,18 @@ matrix_api(
     content={"value": "ready"},
 )
 matrix_api(action="redact", event_id="$event123", reason="Cleanup")
+matrix_api(
+    action="search",
+    search_term="deployment incident",
+    keys=["content.body"],
+    event_context={"before_limit": 1, "after_limit": 1, "include_profile": True},
+)
 ```
 
 ### Notes
 
 - Use this tool when you need exact Matrix event or state control rather than the higher-level `matrix_message` convenience actions.
+- Use `action="search"` when you need one-room full-text event search without falling back to homeserver-wide or ad-hoc history scans.
 - The tool returns structured JSON payloads for both success and error cases.
 - Because it is intentionally low-level, it requires explicit IDs instead of deriving them from reply or thread context.
 

@@ -2266,7 +2266,7 @@ Some entries are config-only presets rather than runtime toolkits. `openclaw_com
 
 ## Tool Runtime Context
 
-When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable. This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths. `thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied. Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs. `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state. `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`. `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread. `thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only. `thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag. Both can be combined. Unlike `tag` (which narrows the output payload), these filter which threads appear at all. `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`. `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers. `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, and never infers event IDs or state keys from thread context.
+When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable. This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths. `thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied. Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs. `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state. `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`. `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread. `thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only. `thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag. Both can be combined. Unlike `tag` (which narrows the output payload), these filter which threads appear at all. `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`. `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers. `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
 
 ## Worker-Routed Execution
 
@@ -5544,11 +5544,11 @@ set_thread_summary(
 
 ## \[`matrix_api`\]
 
-`matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations.
+`matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations, including room-scoped search.
 
 ### What It Does
 
-`matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, and `get_event`. It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there. It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations. `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs. Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default. Pass `allow_dangerous=true` only when you intentionally want to change critical room state. Hard-blocked state event types like `m.room.create` remain blocked.
+`matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, `get_event`, and `search`. It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there. It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations. `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs. Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default. Pass `allow_dangerous=true` only when you intentionally want to change critical room state. Hard-blocked state event types like `m.room.create` remain blocked. `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`. When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
 
 ### Configuration
 
@@ -5573,11 +5573,18 @@ matrix_api(
     content={"value": "ready"},
 )
 matrix_api(action="redact", event_id="$event123", reason="Cleanup")
+matrix_api(
+    action="search",
+    search_term="deployment incident",
+    keys=["content.body"],
+    event_context={"before_limit": 1, "after_limit": 1, "include_profile": True},
+)
 ```
 
 ### Notes
 
 - Use this tool when you need exact Matrix event or state control rather than the higher-level `matrix_message` convenience actions.
+- Use `action="search"` when you need one-room full-text event search without falling back to homeserver-wide or ad-hoc history scans.
 - The tool returns structured JSON payloads for both success and error cases.
 - Because it is intentionally low-level, it requires explicit IDs instead of deriving them from reply or thread context.
 
