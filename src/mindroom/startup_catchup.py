@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
 
 import nio
@@ -12,6 +13,8 @@ from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 
 if TYPE_CHECKING:
     from .bot import AgentBot
+    from .config.main import Config
+    from .constants import RuntimePaths
 
 type StartupCatchUpNonAudioMediaEvent = (
     nio.RoomMessageImage
@@ -26,10 +29,18 @@ type StartupCatchUpMediaEvent = StartupCatchUpNonAudioMediaEvent | StartupCatchU
 
 type StartupCatchUpEvent = nio.RoomMessageText | StartupCatchUpMediaEvent
 type _BotAudioDispatchEvent = StartupCatchUpAudioEvent
+type _IsHandled = Callable[[str], bool]
+type _TextCatchUpHandler = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[object]]
+type _AudioCatchUpHandler = Callable[[nio.MatrixRoom, _BotAudioDispatchEvent], Awaitable[object]]
+type _NonAudioMediaCatchUpHandler = Callable[
+    [nio.MatrixRoom, StartupCatchUpNonAudioMediaEvent],
+    Awaitable[object],
+]
 
 
 class _StartupCatchUpLogger(Protocol):
     def warning(self, event: str, /, **kw: object) -> object: ...
+    def exception(self, event: str, /, **kw: object) -> object: ...
 
 
 STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES = (
@@ -64,14 +75,20 @@ def _is_startup_non_audio_media_event(
     return isinstance(event, STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES)
 
 
-def _should_catch_up_message(bot: AgentBot, event: object) -> bool:
+def _should_catch_up_message(
+    event: object,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    is_handled: _IsHandled,
+) -> bool:
     if not _is_startup_catch_up_event(event):
         return False
 
-    if is_agent_id(event.sender, bot.config, bot.runtime_paths):
+    if is_agent_id(event.sender, config, runtime_paths):
         return False
 
-    if bot._turn_store.is_handled(event.event_id):
+    if is_handled(event.event_id):
         return False
 
     if not isinstance(event, nio.RoomMessageText):
@@ -101,20 +118,24 @@ def _require_catch_up_sync_response(
 
 
 async def _dispatch_catch_up_event(
-    bot: AgentBot,
     room: nio.MatrixRoom,
     room_id: str,
     event: StartupCatchUpEvent,
+    *,
+    on_message: _TextCatchUpHandler,
+    on_audio_message: _AudioCatchUpHandler,
+    on_media_message: _NonAudioMediaCatchUpHandler,
+    logger: _StartupCatchUpLogger,
 ) -> None:
     try:
         if isinstance(event, nio.RoomMessageText):
-            await bot._on_message(room, event)
+            await on_message(room, event)
         elif _is_startup_audio_event(event):
-            await bot._on_audio_message(room, event)
+            await on_audio_message(room, event)
         elif _is_startup_non_audio_media_event(event):
-            await bot._on_media_message(room, event)
+            await on_media_message(room, event)
     except Exception:
-        bot.logger.exception(
+        logger.exception(
             "startup_catch_up_dispatch_failed",
             room_id=room_id,
             event_id=event.event_id,
@@ -127,11 +148,18 @@ async def catch_up_missed_user_messages(bot: AgentBot) -> None:
     client = bot.client
     if client is None:
         return
+    config = bot.config
+    runtime_paths = bot.runtime_paths
+    is_handled = bot._turn_store.is_handled
+    on_message = bot._on_message
+    on_audio_message = bot._on_audio_message
+    on_media_message = bot._on_media_message
+    logger = bot.logger
 
     try:
         token = load_sync_token(bot.storage_path, bot.agent_name)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
-        bot.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+        logger.warning("matrix_sync_token_load_failed", error=str(exc))
         return
 
     if token is None:
@@ -141,15 +169,28 @@ async def catch_up_missed_user_messages(bot: AgentBot) -> None:
         response = _require_catch_up_sync_response(
             await client.sync(timeout=0, since=token, full_state=False),
             agent_name=bot.agent_name,
-            logger=bot.logger,
+            logger=logger,
         )
 
         for room_id, room_info in response.rooms.join.items():
             room = client.rooms.get(room_id) or nio.MatrixRoom(room_id, client.user_id or bot.agent_user.user_id or "")
             for event in room_info.timeline.events:
-                if not _should_catch_up_message(bot, event):
+                if not _should_catch_up_message(
+                    event,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    is_handled=is_handled,
+                ):
                     continue
-                await _dispatch_catch_up_event(bot, room, room_id, event)
+                await _dispatch_catch_up_event(
+                    room,
+                    room_id,
+                    event,
+                    on_message=on_message,
+                    on_audio_message=on_audio_message,
+                    on_media_message=on_media_message,
+                    logger=logger,
+                )
     except Exception:
         client.next_batch = token
         raise
