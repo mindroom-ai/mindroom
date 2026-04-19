@@ -303,6 +303,57 @@ class TestMentionParsing:
             "@bas.nijholt:chat-mindroom.example.com</a></p>\n"
         )
 
+    def test_format_message_with_full_matrix_id_matching_agent_name_keeps_explicit_user(self) -> None:
+        """A fully qualified MXID should not be reinterpreted as an agent shorthand."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Please ask @code:matrix.org to review this.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Please ask @code:matrix.org to review this."
+        assert content["m.mentions"]["user_ids"] == ["@code:matrix.org"]
+        assert (
+            content["formatted_body"]
+            == '<p>Please ask <a href="https://matrix.to/#/@code:matrix.org">@code:matrix.org</a> to review this.</p>\n'
+        )
+
+    def test_format_message_with_plus_in_matrix_user_id_creates_clickable_mention(self) -> None:
+        """Matrix user IDs with a plus in the localpart should be linked."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Ping @alice+ops:matrix.org please.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Ping @alice+ops:matrix.org please."
+        assert content["m.mentions"]["user_ids"] == ["@alice+ops:matrix.org"]
+        assert (
+            content["formatted_body"]
+            == '<p>Ping <a href="https://matrix.to/#/@alice+ops:matrix.org">@alice+ops:matrix.org</a> please.</p>\n'
+        )
+
+    def test_format_message_with_ipv6_matrix_user_id_creates_clickable_mention(self) -> None:
+        """Matrix user IDs with bracketed IPv6 server names should be linked."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Ping @alice:[2001:db8::1] please.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Ping @alice:[2001:db8::1] please."
+        assert content["m.mentions"]["user_ids"] == ["@alice:[2001:db8::1]"]
+        assert (
+            content["formatted_body"]
+            == '<p>Ping <a href="https://matrix.to/#/@alice:%5B2001:db8::1%5D">@alice:[2001:db8::1]</a> please.</p>\n'
+        )
+
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""
         config = _make_config(_default_runtime_paths())

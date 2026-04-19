@@ -1,12 +1,13 @@
 """Matrix mention utilities."""
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
-from mindroom.matrix.identity import MatrixID, mindroom_namespace
+from mindroom.matrix.identity import MatrixID, agent_username_localpart, mindroom_namespace
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.tool_system.events import build_tool_trace_content
 
@@ -14,9 +15,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
 _AGENT_MENTION_PATTERN = re.compile(r"@(mindroom_)?(\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
-_FULL_MATRIX_ID_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9._=/-])@([A-Za-z0-9._=/-]+):((?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+(?::\d+)?)",
-)
+_FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
+_DNS_LABEL_PATTERN = re.compile(r"[A-Za-z0-9-]+")
+_MATRIX_USER_ID_LOCALPART_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._=/-+")
 
 
 @dataclass(frozen=True)
@@ -46,15 +47,18 @@ def parse_mentions_in_text(
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
 
     """
-    replacements = _collect_agent_mention_replacements(
+    replacements = _collect_full_matrix_id_replacements(
         text,
         sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
     )
     replacements.extend(
-        _collect_full_matrix_id_replacements(
+        _collect_agent_mention_replacements(
             text,
+            sender_domain=sender_domain,
+            config=config,
+            runtime_paths=runtime_paths,
             occupied_ranges=[(replacement.start, replacement.end) for replacement in replacements],
         ),
     )
@@ -78,10 +82,13 @@ def _collect_agent_mention_replacements(
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    occupied_ranges: list[tuple[int, int]],
 ) -> list[_MentionReplacement]:
     """Return replacement data for configured agent mentions in text."""
     replacements: list[_MentionReplacement] = []
     for match in _AGENT_MENTION_PATTERN.finditer(text):
+        if _range_overlaps_existing(match.start(), match.end(), occupied_ranges):
+            continue
         mention_info = _process_mention(match, config, sender_domain, runtime_paths)
         if mention_info is None:
             continue
@@ -101,24 +108,152 @@ def _collect_agent_mention_replacements(
 def _collect_full_matrix_id_replacements(
     text: str,
     *,
-    occupied_ranges: list[tuple[int, int]],
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
 ) -> list[_MentionReplacement]:
     """Return replacement data for explicit full Matrix user IDs in text."""
     replacements: list[_MentionReplacement] = []
-    for match in _FULL_MATRIX_ID_PATTERN.finditer(text):
-        if _range_overlaps_existing(match.start(), match.end(), occupied_ranges):
+    for match in _FULL_MATRIX_ID_CANDIDATE_PATTERN.finditer(text):
+        user_id = _extract_longest_valid_matrix_user_id(match.group(0))
+        if user_id is None:
             continue
-        user_id = match.group(0)
+        matrix_id = MatrixID.parse(user_id)
+        replacement = _replacement_for_explicit_matrix_id(
+            matrix_id,
+            sender_domain=sender_domain,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
         replacements.append(
             _MentionReplacement(
                 start=match.start(),
-                end=match.end(),
-                plain_text=user_id,
-                markdown_text=f"[{user_id}](https://matrix.to/#/{user_id})",
-                user_id=user_id,
+                end=match.start() + len(user_id),
+                plain_text=replacement.plain_text,
+                markdown_text=replacement.markdown_text,
+                user_id=replacement.user_id,
             ),
         )
     return replacements
+
+
+def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
+    """Return the longest valid Matrix user ID prefix from one non-whitespace token."""
+    for end in range(len(token), 0, -1):
+        candidate = token[:end]
+        if _is_valid_explicit_matrix_user_id(candidate):
+            return candidate
+    return None
+
+
+def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
+    """Return whether one candidate string is a valid explicit Matrix user ID."""
+    try:
+        matrix_id = MatrixID.parse(candidate)
+    except ValueError:
+        return False
+
+    if not matrix_id.username or len(candidate.encode("utf-8")) > 255:
+        return False
+    if any(character not in _MATRIX_USER_ID_LOCALPART_CHARACTERS for character in matrix_id.username):
+        return False
+    return _is_valid_matrix_server_name(matrix_id.domain)
+
+
+def _is_valid_matrix_server_name(server_name: str) -> bool:
+    """Return whether one Matrix server name matches hostname/IP plus optional port."""
+    split = _split_server_name_and_port(server_name)
+    if split is None:
+        return False
+    host, port = split
+    if port is not None and (not port.isdigit() or len(port) > 5):
+        return False
+    if host.startswith("["):
+        is_valid_ipv6_host = host.endswith("]")
+        if is_valid_ipv6_host:
+            try:
+                ipaddress.IPv6Address(host[1:-1])
+            except ValueError:
+                is_valid_ipv6_host = False
+        return is_valid_ipv6_host
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        is_valid_host = _is_valid_dns_name(host)
+    else:
+        is_valid_host = True
+    return is_valid_host
+
+
+def _split_server_name_and_port(server_name: str) -> tuple[str, str | None] | None:
+    """Split a Matrix server name into host and optional port."""
+    if not server_name:
+        return None
+
+    if server_name.startswith("["):
+        closing_index = server_name.find("]")
+        if closing_index == -1:
+            return None
+        host = server_name[: closing_index + 1]
+        remainder = server_name[closing_index + 1 :]
+        port = remainder[1:] if remainder.startswith(":") else None
+        if remainder and port is None:
+            return None
+    elif ":" in server_name:
+        host, port = server_name.rsplit(":", 1)
+    else:
+        host, port = server_name, None
+
+    if not host or port == "":
+        return None
+    return host, port
+
+
+def _is_valid_dns_name(host: str) -> bool:
+    """Return whether one host string is a valid DNS name."""
+    labels = host.split(".")
+    return bool(host) and all(label and _DNS_LABEL_PATTERN.fullmatch(label) for label in labels)
+
+
+def _replacement_for_explicit_matrix_id(
+    matrix_id: MatrixID,
+    *,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _MentionReplacement:
+    """Return replacement data for one explicit Matrix user ID."""
+    user_id = matrix_id.full_id
+    if agent_name := _agent_name_for_explicit_matrix_id(matrix_id, config, runtime_paths):
+        agent_config = config.agents[agent_name]
+        resolved_user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
+        return _MentionReplacement(
+            start=0,
+            end=0,
+            plain_text=resolved_user_id,
+            markdown_text=f"[@{agent_config.display_name}](https://matrix.to/#/{resolved_user_id})",
+            user_id=resolved_user_id,
+        )
+    return _MentionReplacement(
+        start=0,
+        end=0,
+        plain_text=user_id,
+        markdown_text=f"[{user_id}](https://matrix.to/#/{user_id})",
+        user_id=user_id,
+    )
+
+
+def _agent_name_for_explicit_matrix_id(
+    matrix_id: MatrixID,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the agent name for an explicit MXID only when the localpart is the full agent localpart."""
+    matrix_username = matrix_id.username.lower()
+    for agent_name in config.agents:
+        if agent_username_localpart(agent_name, runtime_paths).lower() == matrix_username:
+            return agent_name
+    return None
 
 
 def _range_overlaps_existing(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
