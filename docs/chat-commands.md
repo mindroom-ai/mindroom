@@ -19,6 +19,7 @@ Commands start with `!` and are handled by the router agent.
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!config <operation>` | View and modify configuration |
 | `!skill <name> [args]` | Run a skill by name |
+| `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
 
@@ -210,6 +211,24 @@ Run a user-invocable skill by name.
 - If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
 
 See [Skills](skills.md) for skill configuration details.
+
+### `!reload-plugins`
+
+Force-reload every configured plugin from disk. Admin-only.
+
+```
+!reload-plugins
+```
+
+Plugins are also auto-reloaded on file save (~1s after save) — see [plugins.md / Live development](plugins.md#live-development-hot-reload) for details. This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
+
+**Reply format:**
+
+```
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+```
+
+**Permission:** Caller must be in `authorization.global_users`. Aliases: `!reload-plugins`, `!reload_plugins`.
 
 ## Stop Button
 

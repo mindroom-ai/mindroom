@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from dataclasses import dataclass
 from importlib import util
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks.decorators import iter_module_hooks
+from mindroom.hooks.registry import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.registry_state import (
@@ -50,6 +52,15 @@ class _Plugin:
     hooks_module_path: Path | None
     skill_dirs: list[Path]
     discovered_hooks: tuple[HookCallback, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PluginReloadResult:
+    """Fresh plugin snapshot built from the current config."""
+
+    hook_registry: HookRegistry
+    active_plugin_names: tuple[str, ...]
+    cancelled_task_count: int
 
 
 def _hook_display_name(callback: HookCallback) -> str:
@@ -116,6 +127,94 @@ def load_plugins(
             raise
 
         return plugins
+
+
+def get_configured_plugin_roots(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[Path, ...]:
+    """Resolve the enabled plugin roots for one config snapshot."""
+    roots: list[Path] = []
+    for plugin_entry in config.plugins:
+        if not plugin_entry.enabled:
+            continue
+        try:
+            roots.append(plugin_imports._resolve_plugin_root(plugin_entry.path, runtime_paths))
+        except PluginValidationError:
+            continue
+    return tuple(dict.fromkeys(roots))
+
+
+def reload_plugins(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> PluginReloadResult:
+    """Evict cached plugin imports and rebuild the live hook snapshot."""
+    roots = get_configured_plugin_roots(config, runtime_paths)
+    package_roots = {
+        cached.module_name.split(".", 1)[0]
+        for module_path, cached in plugin_imports._MODULE_IMPORT_CACHE.items()
+        if any(module_path.is_relative_to(root) for root in roots)
+    }
+    cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
+    _clear_plugin_reload_caches(roots)
+    _evict_synthetic_plugin_subtrees(package_roots)
+    plugins = load_plugins(config, runtime_paths)
+    return PluginReloadResult(
+        hook_registry=HookRegistry.from_plugins(plugins),
+        active_plugin_names=tuple(plugin.name for plugin in plugins),
+        cancelled_task_count=cancelled_task_count,
+    )
+
+
+def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
+    """Best-effort cancel module-global tasks owned by one synthetic plugin subtree."""
+    if not package_roots:
+        return 0
+
+    cancelled_task_ids: set[int] = set()
+    for module_name, module in tuple(sys.modules.items()):
+        if module is None or not any(
+            module_name == root or module_name.startswith(f"{root}.") for root in package_roots
+        ):
+            continue
+        for value in vars(module).values():
+            for task in _iter_module_tasks(value):
+                if task.done() or id(task) in cancelled_task_ids:
+                    continue
+                task.cancel()
+                cancelled_task_ids.add(id(task))
+    return len(cancelled_task_ids)
+
+
+def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
+    """Return task globals or one-level container-held tasks from one module value."""
+    if isinstance(value, asyncio.Task):
+        return (value,)
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, tuple | list | set):
+        values = value
+    else:
+        return ()
+    return tuple(item for item in values if isinstance(item, asyncio.Task))
+
+
+def _clear_plugin_reload_caches(roots: tuple[Path, ...]) -> None:
+    """Drop manifest and module cache entries under the configured plugin roots."""
+    for manifest_path in tuple(plugin_imports._PLUGIN_CACHE):
+        if any(manifest_path.parent.is_relative_to(root) for root in roots):
+            plugin_imports._PLUGIN_CACHE.pop(manifest_path, None)
+    for module_path in tuple(plugin_imports._MODULE_IMPORT_CACHE):
+        if any(module_path.is_relative_to(root) for root in roots):
+            plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
+
+
+def _evict_synthetic_plugin_subtrees(package_roots: set[str]) -> None:
+    """Remove all imported synthetic plugin modules for the targeted roots."""
+    for module_name in tuple(sys.modules):
+        if any(module_name == root or module_name.startswith(f"{root}.") for root in package_roots):
+            sys.modules.pop(module_name, None)
 
 
 def _materialize_plugin(

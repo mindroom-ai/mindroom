@@ -66,6 +66,15 @@ def test_invalid_commands() -> None:
         assert command is None
 
 
+def test_reload_plugins_command() -> None:
+    """Test reload-plugins command parsing."""
+    for cmd_text in ("!reload-plugins", "!reload_plugins", "!RELOAD-PLUGINS"):
+        command = command_parser.parse(cmd_text)
+        assert command is not None
+        assert command.type == CommandType.RELOAD_PLUGINS
+        assert command.args == {}
+
+
 def test_schedule_command() -> None:
     """Test schedule command parsing."""
     # Basic schedule with time and message

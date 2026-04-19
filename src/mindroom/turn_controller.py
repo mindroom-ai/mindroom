@@ -669,6 +669,9 @@ class TurnController:
             matrix_admin = orchestrator._hook_matrix_admin()
         elif self.deps.agent_name == ROUTER_AGENT_NAME:
             matrix_admin = build_hook_matrix_admin(self._client(), self.deps.runtime_paths)
+        reload_plugins = (
+            (lambda: orchestrator.reload_plugins_now(source="command")) if orchestrator is not None else None
+        )
 
         context = CommandHandlerContext(
             client=self._client(),
@@ -686,6 +689,7 @@ class TurnController:
             send_response=send_response,
             send_skill_command_response=send_skill_command_response,
             run_skill_command_tool=run_skill_command_tool,
+            reload_plugins=reload_plugins,
         )
         await handle_command(
             context=context,
