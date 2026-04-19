@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 
 from .state import (
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
     import structlog
     from agno.models.message import Message
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
@@ -128,7 +128,7 @@ async def _put_bound_room_state(
 class HookContextSupport:
     """Own live hook bindings and shared hook-context base fields."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

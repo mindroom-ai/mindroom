@@ -25,12 +25,12 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
 
 if TYPE_CHECKING:
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -78,7 +78,7 @@ class MessageContext:
 class ConversationResolverDeps:
     """Explicit collaborators for conversation resolution."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

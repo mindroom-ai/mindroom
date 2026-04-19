@@ -13,6 +13,7 @@ from mindroom.knowledge.shared_managers import (
     get_shared_knowledge_manager_for_config,
 )
 from mindroom.logging_config import get_logger
+from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -20,7 +21,6 @@ if TYPE_CHECKING:
     from agno.knowledge.document import Document
     from structlog.stdlib import BoundLogger
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.manager import KnowledgeManager
@@ -126,7 +126,7 @@ def get_agent_knowledge(
 class KnowledgeAccessSupport:
     """Resolve live knowledge access for one runtime without routing through AgentBot."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsConfigOrchestrator
     logger: BoundLogger
     runtime_paths: RuntimePaths
 
