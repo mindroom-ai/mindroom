@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING, Protocol, TypeGuard, assert_never
 
 import nio
 
@@ -26,6 +26,10 @@ type StartupCatchUpMediaEvent = StartupCatchUpNonAudioMediaEvent | StartupCatchU
 
 type StartupCatchUpEvent = nio.RoomMessageText | StartupCatchUpMediaEvent
 type _BotAudioDispatchEvent = StartupCatchUpAudioEvent
+
+
+class _StartupCatchUpLogger(Protocol):
+    def warning(self, event: str, /, **kw: object) -> object: ...
 
 
 STARTUP_CATCH_UP_NON_AUDIO_MEDIA_EVENT_TYPES = (
@@ -81,15 +85,19 @@ def _should_catch_up_message(bot: AgentBot, event: object) -> bool:
     return command_parser.parse(event.body) is None
 
 
-def _require_catch_up_sync_response(bot: AgentBot, response: object) -> nio.SyncResponse:
+def _require_catch_up_sync_response(
+    response: nio.SyncResponse | nio.SyncError,
+    *,
+    agent_name: str,
+    logger: _StartupCatchUpLogger,
+) -> nio.SyncResponse:
     if isinstance(response, nio.SyncResponse):
         return response
     if isinstance(response, nio.SyncError):
-        bot.logger.warning("startup_catch_up_sync_failed", status_code=response.status_code)
-        msg = f"Startup catch-up sync failed for {bot.agent_name}"
+        logger.warning("startup_catch_up_sync_failed", status_code=response.status_code)
+        msg = f"Startup catch-up sync failed for {agent_name}"
         raise RuntimeError(msg)  # noqa: TRY004
-    msg = f"Unexpected startup catch-up response for {bot.agent_name}: {type(response).__name__}"
-    raise TypeError(msg)
+    assert_never(response)
 
 
 async def _dispatch_catch_up_event(
@@ -131,8 +139,9 @@ async def catch_up_missed_user_messages(bot: AgentBot) -> None:
 
     try:
         response = _require_catch_up_sync_response(
-            bot,
             await client.sync(timeout=0, since=token, full_state=False),
+            agent_name=bot.agent_name,
+            logger=bot.logger,
         )
 
         for room_id, room_info in response.rooms.join.items():
