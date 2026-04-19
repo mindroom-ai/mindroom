@@ -13,7 +13,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.custom_tools.matrix_api import MatrixApiTools
+from mindroom.custom_tools.matrix_api import MatrixApiTools, MatrixSearchResponse
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -48,6 +48,7 @@ def _make_context(
     client.room_put_state = AsyncMock()
     client.room_redact = AsyncMock()
     client.room_get_event = AsyncMock()
+    client._send = AsyncMock()
     resolved_conversation_cache = make_conversation_cache_mock() if conversation_cache is None else conversation_cache
     resolved_conversation_cache.get_event = AsyncMock(
         return_value=_event_response(
@@ -124,6 +125,37 @@ def _event_response(
     )
 
 
+def _raw_event(
+    *,
+    event_id: str = "$evt:localhost",
+    event_type: str = "m.room.message",
+    room_id: str = "!room:localhost",
+    sender: str = "@alice:localhost",
+    origin_server_ts: int = 123,
+    content: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "content": content or {"body": "hello", "msgtype": "m.text"},
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": origin_server_ts,
+        "room_id": room_id,
+        "type": event_type,
+    }
+
+
+def _search_result(
+    *,
+    rank: float = 1.0,
+    result: dict[str, object] | None = None,
+    context: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"rank": rank, "result": result or _raw_event()}
+    if context is not None:
+        payload["context"] = context
+    return payload
+
+
 def test_matrix_api_tool_registered_and_instantiates() -> None:
     """Matrix API tool should be available from the metadata registry."""
     runtime_root = Path(tempfile.mkdtemp())
@@ -137,6 +169,25 @@ def test_matrix_api_tool_registered_and_instantiates() -> None:
         get_tool_by_name("matrix_api", runtime_paths_for(config), worker_target=None),
         MatrixApiTools,
     )
+
+
+def test_matrix_search_response_zero_results_without_results_key() -> None:
+    """Matrix search should accept homeserver responses that omit results for zero matches."""
+    response = MatrixSearchResponse.from_dict(
+        {
+            "search_categories": {
+                "room_events": {
+                    "count": 0,
+                    "highlights": ["needle"],
+                },
+            },
+        },
+    )
+
+    assert isinstance(response, MatrixSearchResponse)
+    assert response.count == 0
+    assert response.next_batch is None
+    assert response.results == []
 
 
 @pytest.mark.asyncio
@@ -910,6 +961,444 @@ async def test_matrix_api_get_event_happy_path() -> None:
     }
     ctx.conversation_cache.get_event.assert_not_awaited()
     ctx.client.room_get_event.assert_awaited_once_with(ctx.room_id, "$evt:localhost")
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_happy_path() -> None:
+    """Search should call the Matrix search endpoint and normalize results."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(
+        count=1,
+        next_batch=None,
+        results=[
+            _search_result(
+                rank=12.5,
+                result=_raw_event(
+                    room_id=ctx.room_id,
+                    content={"body": "Needle in a haystack", "msgtype": "m.text"},
+                ),
+            ),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_api(action="search", search_term="needle"))
+
+    assert payload == {
+        "action": "search",
+        "count": 1,
+        "next_batch": None,
+        "results": [
+            {
+                "rank": 12.5,
+                "event_id": "$evt:localhost",
+                "room_id": ctx.room_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": 123,
+                "type": "m.room.message",
+                "snippet": "Needle in a haystack",
+            },
+        ],
+        "room_id": ctx.room_id,
+        "status": "ok",
+        "tool": "matrix_api",
+    }
+    ctx.client._send.assert_awaited_once()
+    response_class, method, path, data = ctx.client._send.await_args.args
+    assert response_class is MatrixSearchResponse
+    assert method == "POST"
+    assert path == "/_matrix/client/v3/search"
+    assert json.loads(data) == {
+        "search_categories": {
+            "room_events": {
+                "filter": {"rooms": [ctx.room_id], "limit": 10},
+                "order_by": "rank",
+                "search_term": "needle",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_omits_keys_when_not_supplied() -> None:
+    """Search should let the homeserver default keys apply when caller omits keys."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(count=0, next_batch=None, results=[])
+
+    with tool_runtime_context(ctx):
+        await tool.matrix_api(action="search", search_term="needle")
+
+    request_body = json.loads(ctx.client._send.await_args.args[3])
+    assert "keys" not in request_body["search_categories"]["room_events"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_explicit_keys_pass_through() -> None:
+    """Search should pass through validated explicit keys when caller narrows them."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(count=0, next_batch=None, results=[])
+
+    with tool_runtime_context(ctx):
+        await tool.matrix_api(
+            action="search",
+            search_term="meeting",
+            keys=["content.name"],
+        )
+
+    request_body = json.loads(ctx.client._send.await_args.args[3])
+    assert request_body["search_categories"]["room_events"]["keys"] == ["content.name"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_snippet_falls_back_to_topic() -> None:
+    """Search should use topic text for snippet when body is absent."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(
+        count=1,
+        next_batch=None,
+        results=[
+            _search_result(
+                result=_raw_event(
+                    event_id="$topic:localhost",
+                    event_type="m.room.topic",
+                    room_id=ctx.room_id,
+                    content={"topic": "Team Meeting coordination room"},
+                ),
+            ),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="meeting",
+                keys=["content.topic"],
+            ),
+        )
+
+    assert payload["results"] == [
+        {
+            "rank": 1.0,
+            "event_id": "$topic:localhost",
+            "room_id": ctx.room_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": 123,
+            "type": "m.room.topic",
+            "snippet": "Team Meeting coordination room",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_pagination_round_trips_next_batch() -> None:
+    """Search should forward pagination tokens to the homeserver and return the next token."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.side_effect = [
+        MatrixSearchResponse(
+            count=3,
+            next_batch="batch-1",
+            results=[
+                _search_result(
+                    result=_raw_event(
+                        event_id="$first:localhost",
+                        room_id=ctx.room_id,
+                        content={"body": "First page", "msgtype": "m.text"},
+                    ),
+                ),
+            ],
+        ),
+        MatrixSearchResponse(
+            count=3,
+            next_batch=None,
+            results=[
+                _search_result(
+                    result=_raw_event(
+                        event_id="$second:localhost",
+                        room_id=ctx.room_id,
+                        content={"body": "Second page", "msgtype": "m.text"},
+                    ),
+                ),
+            ],
+        ),
+    ]
+
+    with tool_runtime_context(ctx):
+        first_payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="needle",
+                limit=1,
+            ),
+        )
+        second_payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="needle",
+                limit=1,
+                next_batch=first_payload["next_batch"],
+            ),
+        )
+
+    assert first_payload["count"] == 3
+    assert first_payload["next_batch"] == "batch-1"
+    assert first_payload["results"][0]["event_id"] == "$first:localhost"
+
+    first_request_body = json.loads(ctx.client._send.await_args_list[0].args[3])
+    assert first_request_body["search_categories"]["room_events"]["filter"]["limit"] == 1
+    assert "next_batch" not in first_request_body["search_categories"]["room_events"]
+
+    _, _, second_path, second_data = ctx.client._send.await_args_list[1].args
+    assert second_path == nio.Api._build_path(["search"], {"next_batch": "batch-1"})
+    assert "next_batch" not in json.loads(second_data)["search_categories"]["room_events"]
+    assert second_payload["count"] == 3
+    assert second_payload["next_batch"] is None
+    assert second_payload["results"] == [
+        {
+            "rank": 1.0,
+            "event_id": "$second:localhost",
+            "room_id": ctx.room_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": 123,
+            "type": "m.room.message",
+            "snippet": "Second page",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
+    """Search should preserve profile_info when include_profile is requested."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(
+        count=1,
+        next_batch=None,
+        results=[
+            _search_result(
+                context={
+                    "events_before": [],
+                    "events_after": [],
+                    "profile_info": {
+                        "@alice:localhost": {
+                            "displayname": "Alice",
+                            "avatar_url": "mxc://localhost/alice",
+                        },
+                    },
+                },
+            ),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="needle",
+                event_context={"include_profile": True},
+            ),
+        )
+
+    assert payload["results"][0]["context"] == {
+        "events_before": [],
+        "events_after": [],
+        "profile_info": {
+            "@alice:localhost": {
+                "displayname": "Alice",
+                "avatar_url": "mxc://localhost/alice",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
+    """Search should scope the Matrix request body to the explicitly requested room."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    ctx.client._send.return_value = MatrixSearchResponse(
+        count=1,
+        next_batch=None,
+        results=[_search_result(result=_raw_event(room_id="!other:localhost"))],
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.room_access_allowed", return_value=True),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                room_id="!other:localhost",
+                search_term="needle",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == "!other:localhost"
+    request_body = json.loads(ctx.client._send.await_args.args[3])
+    assert request_body["search_categories"]["room_events"]["filter"]["rooms"] == ["!other:localhost"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected_message"),
+    [
+        ({"action": "search", "search_term": "needle", "order_by": "score"}, "order_by must be one of"),
+        (
+            {"action": "search", "search_term": "needle", "keys": ["content.body", "content.url"]},
+            "keys entries must be one of",
+        ),
+        (
+            {"action": "search", "search_term": "needle", "filter": {"rooms": ["!room:localhost"], "limit": 5}},
+            "filter.limit is not supported; use the top-level limit parameter.",
+        ),
+        ({"action": "search", "search_term": "needle", "limit": -1}, "limit must be an integer between"),
+        ({"action": "search", "search_term": "needle", "limit": 0}, "limit must be an integer between"),
+        ({"action": "search", "search_term": "needle", "limit": 51}, "limit must be an integer between"),
+        ({"action": "search"}, "search_term is required"),
+    ],
+)
+async def test_matrix_api_search_validation_errors(kwargs: dict[str, object], expected_message: str) -> None:
+    """Search should return structured errors for invalid search-specific parameters."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_api(**kwargs))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "search"
+    assert payload["room_id"] == ctx.room_id
+    assert expected_message in payload["message"]
+    ctx.client._send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_search_filter_and_event_context_pass_through() -> None:
+    """Search should preserve caller-supplied filter and event_context payloads."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    raw_filter = {
+        "rooms": [ctx.room_id],
+        "not_types": ["m.reaction"],
+        "senders": ["@alice:localhost"],
+    }
+    raw_event_context = {
+        "before_limit": 1,
+        "after_limit": 1,
+        "include_profile": True,
+    }
+    ctx.client._send.return_value = MatrixSearchResponse(
+        count=1,
+        next_batch=None,
+        results=[
+            _search_result(
+                context={
+                    "events_before": [
+                        _raw_event(
+                            event_id="$before:localhost",
+                            room_id=ctx.room_id,
+                            content={"body": "Before", "msgtype": "m.text"},
+                        ),
+                    ],
+                    "events_after": [
+                        _raw_event(
+                            event_id="$after:localhost",
+                            room_id=ctx.room_id,
+                            content={"body": "After", "msgtype": "m.text"},
+                        ),
+                    ],
+                    "start": "start-token",
+                    "end": "end-token",
+                    "profile_info": {
+                        "@alice:localhost": {
+                            "displayname": "Alice",
+                            "avatar_url": "mxc://localhost/alice",
+                        },
+                    },
+                },
+            ),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="search",
+                search_term="needle",
+                filter=raw_filter,
+                event_context=raw_event_context,
+            ),
+        )
+
+    request_body = json.loads(ctx.client._send.await_args.args[3])
+    assert request_body["search_categories"]["room_events"]["filter"] == {
+        **raw_filter,
+        "limit": 10,
+    }
+    assert request_body["search_categories"]["room_events"]["event_context"] == raw_event_context
+    assert payload["results"][0]["context"] == {
+        "events_before": [
+            {
+                "event_id": "$before:localhost",
+                "room_id": ctx.room_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": 123,
+                "type": "m.room.message",
+                "snippet": "Before",
+            },
+        ],
+        "events_after": [
+            {
+                "event_id": "$after:localhost",
+                "room_id": ctx.room_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": 123,
+                "type": "m.room.message",
+                "snippet": "After",
+            },
+        ],
+        "start": "start-token",
+        "end": "end-token",
+        "profile_info": {
+            "@alice:localhost": {
+                "displayname": "Alice",
+                "avatar_url": "mxc://localhost/alice",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"action": "search", "search_term": "needle", "dry_run": True},
+        {"action": "search", "search_term": "needle", "allow_dangerous": True},
+    ],
+)
+async def test_matrix_api_search_rejects_write_only_flags(kwargs: dict[str, object]) -> None:
+    """Search should reject write-only flags that do not apply to read-only actions."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_api(**kwargs))
+
+    assert payload == {
+        "action": "search",
+        "message": "dry_run/allow_dangerous not applicable to read-only search action",
+        "room_id": ctx.room_id,
+        "status": "error",
+        "tool": "matrix_api",
+    }
+    ctx.client._send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
