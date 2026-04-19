@@ -192,14 +192,22 @@ async def test_catchup_raises_after_dispatch_error_and_does_not_advance_token(tm
         patch.object(bot.logger, "exception") as log_exception,
         patch("mindroom.startup_catchup.load_sync_token", return_value="s_prev"),
         patch("mindroom.startup_catchup.save_sync_token") as save_sync_token,
-        pytest.raises(RuntimeError, match="boom"),
+        patch("mindroom.bot.save_sync_token") as persist_sync_token,
     ):
-        bot.client.sync = AsyncMock(return_value=response)
-        await catch_up_missed_user_messages(bot)
-    assert [call.args[1].event_id for call in bot._on_message.await_args_list] == ["$ok", "$boom"]
-    assert bot.client.next_batch == "s_prev"
-    save_sync_token.assert_not_called()
-    log_exception.assert_called_once()
+
+        async def fake_sync(*_args, **_kwargs):
+            bot.client.next_batch = response.next_batch
+            return response
+
+        bot.client.sync = AsyncMock(side_effect=fake_sync)
+        with pytest.raises(RuntimeError, match="boom"):
+            await catch_up_missed_user_messages(bot)
+        assert [call.args[1].event_id for call in bot._on_message.await_args_list] == ["$ok", "$boom"]
+        assert bot.client.next_batch == "s_prev"
+        save_sync_token.assert_not_called()
+        await bot.prepare_for_sync_shutdown()
+        persist_sync_token.assert_called_once_with(bot.storage_path, bot.agent_name, "s_prev")
+        log_exception.assert_called_once()
 
 
 @pytest.mark.asyncio

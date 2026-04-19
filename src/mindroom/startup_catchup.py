@@ -129,17 +129,21 @@ async def catch_up_missed_user_messages(bot: AgentBot) -> None:
     if token is None:
         return
 
-    response = _require_catch_up_sync_response(
-        bot,
-        await client.sync(timeout=0, since=token, full_state=False),
-    )
+    try:
+        response = _require_catch_up_sync_response(
+            bot,
+            await client.sync(timeout=0, since=token, full_state=False),
+        )
 
-    for room_id, room_info in response.rooms.join.items():
-        room = client.rooms.get(room_id) or nio.MatrixRoom(room_id, client.user_id or bot.agent_user.user_id or "")
-        for event in room_info.timeline.events:
-            if not _should_catch_up_message(bot, event):
-                continue
-            await _dispatch_catch_up_event(bot, room, room_id, event)
+        for room_id, room_info in response.rooms.join.items():
+            room = client.rooms.get(room_id) or nio.MatrixRoom(room_id, client.user_id or bot.agent_user.user_id or "")
+            for event in room_info.timeline.events:
+                if not _should_catch_up_message(bot, event):
+                    continue
+                await _dispatch_catch_up_event(bot, room, room_id, event)
+    except Exception:
+        client.next_batch = token
+        raise
 
     client.next_batch = response.next_batch
     save_sync_token(bot.storage_path, bot.agent_name, response.next_batch)
