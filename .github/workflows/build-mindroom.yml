@@ -2,6 +2,9 @@ name: Build MindRoom
 # Builds MindRoom instance images in parallel using native ARM64 runners
 
 on:
+  # Publish branch-tagged images on direct pushes to main.
+  push:
+    branches: [ main ]
   # Build (no push) on PRs to validate Dockerfiles
   pull_request:
     branches: [ main ]
@@ -12,7 +15,7 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/build-mindroom.yml'
-  # Push images only on releases
+  # Push images on releases
   release:
     types: [ published ]
   # Manual trigger with push option
@@ -100,7 +103,7 @@ jobs:
         context: .
         file: ${{ matrix.target.dockerfile }}
         platforms: ${{ matrix.platform }}
-        push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
+        push: ${{ github.event_name == 'push' || github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
         tags: |
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ matrix.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-${{ matrix.platform_suffix }}
@@ -112,10 +115,10 @@ jobs:
         provenance: false
         sbom: false
 
-  # Create multi-arch manifests after all builds complete (only on release/manual push)
+  # Create multi-arch manifests after all builds complete when publishing is enabled.
   manifest:
     needs: build
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images)
+    if: github.event_name == 'push' || github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images)
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -139,9 +142,11 @@ jobs:
       run: |
         echo "safe_ref=${GITHUB_REF_NAME//\//-}" >> $GITHUB_OUTPUT
 
-    - name: Create and push manifest
+    - name: Create and push latest manifest
+      if: github.event_name != 'release'
       run: |
-        # Create multi-arch manifest with both amd64 and arm64
+        # Keep latest aligned with direct branch/manual publishes instead of
+        # rebuilding it again during release fan-out.
         docker manifest create \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:amd64 \
@@ -149,7 +154,9 @@ jobs:
 
         docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest
 
-        # Also create branch-tagged manifest
+    - name: Create and push ref manifest
+      run: |
+        # Publish the event-specific tag (e.g. main or a release version).
         docker manifest create \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }} \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-amd64 \
@@ -158,4 +165,4 @@ jobs:
         docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}
 
         echo "✅ Multi-arch manifest created for ${{ matrix.target.image_name }}"
-        echo "Pull with: docker pull ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest"
+        echo "Pull with: docker pull ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}"
