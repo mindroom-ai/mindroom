@@ -1,0 +1,5 @@
+## Verdict: CHANGES REQUIRED
+## Findings
+1. [MAJOR] src/mindroom/workers/backends/kubernetes.py:252 - `ensure_worker()` takes the per-worker lock before any shared progress fan-out exists, so when two tool calls hit the same cold `worker_key` concurrently only the first caller's `progress_sink` ever receives events and the second tool label never appears, which breaks the D8 worker-key coalescing behavior in real production lock-contention paths. Concrete fix: register progress listeners per `worker_key` outside the lock and have the single cold-start waiter fan out its progress events to every concurrent caller until the worker becomes ready or fails.
+## Final summary
+The protocol threading itself is clean and backend-neutral: `progress_sink` is on the `WorkerBackend` protocol, forwarded by `WorkerManager`, ignored by the local/static backends, and the Kubernetes-specific reporting logic stays inside the Kubernetes backend/resources layer. The remaining merge blocker is that same-worker concurrent callers do not actually coalesce in the real backend path because the per-worker lock allows only the first caller to attach to the warmup reporter.
