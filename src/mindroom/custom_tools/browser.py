@@ -1,7 +1,6 @@
-"""OpenClaw-style browser tool for MindRoom.
+"""Browser tool for MindRoom.
 
-This exposes a single ``browser`` function with an ``action`` parameter,
-matching OpenClaw's tool surface at a high level.
+This exposes a single ``browser`` function with an ``action`` parameter.
 """
 # ruff: noqa: N803, A002
 
@@ -9,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,20 +17,23 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.tools import Toolkit
-from playwright.async_api import Browser, BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-_DEFAULT_PROFILE = "openclaw"
+DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
-_VIEWPORT_WIDTH = 1280
-_VIEWPORT_HEIGHT = 720
+VIEWPORT_WIDTH = 1280
+VIEWPORT_HEIGHT = 720
+
+logger = get_logger(__name__)
 
 _BROWSER_ACTIONS = {
     "status",
@@ -170,7 +174,6 @@ class _BrowserProfileState:
     """State for one browser profile."""
 
     playwright: Playwright
-    browser: Browser
     context: BrowserContext
     tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
@@ -184,8 +187,69 @@ def _clean_str(value: object) -> str | None:
     return cleaned if cleaned else None
 
 
+def profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:
+    """Return the persistent Playwright profile directory for one browser profile."""
+    normalized_profile = _clean_str(profile_name) or DEFAULT_PROFILE
+    profile_slug = re.sub(r"[^a-zA-Z0-9._+-]+", "_", normalized_profile).strip("_") or DEFAULT_PROFILE
+    profile_dir = (runtime_paths.storage_root / "browser-profiles" / profile_slug).resolve()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir.chmod(0o700)
+    return profile_dir
+
+
+def persistent_launch_kwargs(
+    runtime_paths: RuntimePaths,
+    profile_name: str,
+    *,
+    headless: bool,
+    executable_override: str | None = None,
+) -> dict[str, Any]:
+    """Return the shared persistent-context launch kwargs for one browser profile."""
+    executable = (
+        executable_override
+        or runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
+        or shutil.which("chromium")
+        or shutil.which("google-chrome-stable")
+    )
+    launch_kwargs: dict[str, Any] = {
+        "headless": headless,
+        # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
+        # Revisit if PWA targets matter.
+        "service_workers": "block",
+        "user_data_dir": str(profile_dir(runtime_paths, profile_name)),
+        "viewport": {"height": VIEWPORT_HEIGHT, "width": VIEWPORT_WIDTH},
+    }
+    if executable:
+        launch_kwargs["executable_path"] = executable
+    return launch_kwargs
+
+
+def clear_stale_singleton_locks(profile_dir: Path) -> None:
+    """Best-effort cleanup for stale Chromium singleton lock symlinks."""
+    for entry_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        entry = profile_dir / entry_name
+        try:
+            if not entry.is_symlink():
+                continue
+            target = entry.readlink()
+            match = re.fullmatch(r".+-(\d+)", target.name)
+            if match is None:
+                continue
+            pid = int(match.group(1))
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                entry.unlink()
+        except OSError as exc:
+            logger.warning(
+                "Failed to clean Chromium singleton lock",
+                entry=str(entry),
+                error=str(exc),
+            )
+
+
 class BrowserTools(Toolkit):
-    """OpenClaw-style browser control for MindRoom agents."""
+    """Browser control for MindRoom agents."""
 
     def __init__(self, runtime_paths: RuntimePaths, *, output_dir: Path | str | None = None) -> None:
         super().__init__(name="browser", tools=[self.browser])
@@ -247,8 +311,8 @@ class BrowserTools(Toolkit):
         Args:
             action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act)
             target: Browser target location. Only ``host`` is currently supported.
-            node: Node id (OpenClaw compatibility field; unsupported in MindRoom runtime).
-            profile: Browser profile name (defaults to ``openclaw``).
+            node: Node id compatibility field; unsupported in MindRoom runtime.
+            profile: Browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
             targetId: Tab target id for actions that address a specific tab.
             limit: Snapshot item limit.
@@ -284,7 +348,7 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
 
         self._validate_target(target=target, node=node)
-        profile_name = _clean_str(profile) or _DEFAULT_PROFILE
+        profile_name = _clean_str(profile) or DEFAULT_PROFILE
 
         if normalized_action == "status":
             return json.dumps(await self._status_payload(profile_name), sort_keys=True)
@@ -432,7 +496,7 @@ class BrowserTools(Toolkit):
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
         async with self._lock:
             running = sorted(self._profiles.keys())
-        advertised = sorted({_DEFAULT_PROFILE, "chrome", *running})
+        advertised = sorted({DEFAULT_PROFILE, "chrome", *running})
         return {
             "action": "profiles",
             "profiles": advertised,
@@ -933,32 +997,30 @@ class BrowserTools(Toolkit):
                 return state
 
             playwright = await async_playwright().start()
-            executable = (
-                self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
-                or shutil.which("chromium")
-                or shutil.which("google-chrome-stable")
-            )
-            launch_kwargs: dict[str, Any] = {"headless": True}
-            if executable:
-                launch_kwargs["executable_path"] = executable
-            browser = await playwright.chromium.launch(**launch_kwargs)
-            context = await browser.new_context(viewport={"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH})
-            state = _BrowserProfileState(playwright=playwright, browser=browser, context=context)
+            launch_kwargs = persistent_launch_kwargs(self._runtime_paths, profile_name, headless=True)
+            user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
+            clear_stale_singleton_locks(user_data_dir)
+            context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
+            state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
-            page = await context.new_page()
-            target_id = self._register_tab(state, page)
-            state.active_target_id = target_id
+            for page in context.pages:
+                target_id = self._register_tab(state, page)
+                if state.active_target_id is None:
+                    state.active_target_id = target_id
+            if state.active_target_id is None:
+                page = await context.new_page()
+                target_id = self._register_tab(state, page)
+                state.active_target_id = target_id
             return state
 
     async def _stop_profile(self, profile_name: str) -> None:
         async with self._lock:
             state = self._profiles.pop(profile_name, None)
-        if state is None:
-            return
-        await state.context.close()
-        await state.browser.close()
-        await state.playwright.stop()
+            if state is None:
+                return
+            await state.context.close()
+            await state.playwright.stop()
 
     async def _resolve_tab(
         self,
