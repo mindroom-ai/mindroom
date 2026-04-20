@@ -147,6 +147,38 @@ def _approval_room() -> MagicMock:
     return room
 
 
+def _custom_response_event(
+    *,
+    approval_event_id: str,
+    status: str,
+    reason: str | None = None,
+    room_id: str = "!room:localhost",
+    sender: str = "@user:localhost",
+    thread_event_id: str = "$thread",
+) -> nio.UnknownEvent:
+    content: dict[str, object] = {
+        "status": status,
+        "m.relates_to": {
+            "rel_type": "m.thread",
+            "event_id": thread_event_id,
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": approval_event_id},
+        },
+    }
+    if reason is not None:
+        content["reason"] = reason
+    return nio.UnknownEvent.from_dict(
+        {
+            "type": "io.mindroom.tool_approval_response",
+            "event_id": "$response",
+            "sender": sender,
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "content": content,
+        },
+    )
+
+
 def test_config_rejects_invalid_tool_approval_rules() -> None:
     """Config validation should reject malformed tool-approval settings."""
     with pytest.raises(ValidationError, match="tool_approval.default must be"):
@@ -640,6 +672,7 @@ async def test_handle_reaction_approves_by_event_id(tmp_path: Path) -> None:
 
     handled = await store.handle_reaction(
         approval_event_id="$approval",
+        room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@user:localhost",
     )
@@ -661,6 +694,7 @@ async def test_handle_reaction_requires_original_requester(tmp_path: Path) -> No
 
     handled = await store.handle_reaction(
         approval_event_id="$approval",
+        room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@other:localhost",
     )
@@ -670,6 +704,7 @@ async def test_handle_reaction_requires_original_requester(tmp_path: Path) -> No
 
     handled = await store.handle_reaction(
         approval_event_id="$approval",
+        room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@user:localhost",
     )
@@ -689,6 +724,7 @@ async def test_handle_reply_denies_by_event_id(tmp_path: Path) -> None:
 
     handled = await store.handle_reply(
         approval_event_id="$approval",
+        room_id="!room:localhost",
         reason="No destructive commands",
         resolved_by="@user:localhost",
     )
@@ -1035,19 +1071,10 @@ async def test_bot_custom_approval_response_event_resolves_pending_call(tmp_path
 
     assert pending is not None
     room = _approval_room()
-    event = nio.UnknownEvent.from_dict(
-        {
-            "type": "io.mindroom.tool_approval_response",
-            "event_id": "$response",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "content": {
-                "approval_id": pending.id,
-                "status": "denied",
-                "denial_reason": "Use a safer command",
-            },
-        },
+    event = _custom_response_event(
+        approval_event_id="$approval",
+        status="denied",
+        reason="Use a safer command",
     )
 
     with (
@@ -1059,3 +1086,42 @@ async def test_bot_custom_approval_response_event_resolves_pending_call(tmp_path
     decision = await task
     assert decision.status == "denied"
     assert decision.reason == "Use a safer command"
+
+
+@pytest.mark.asyncio
+async def test_handle_custom_response_requires_matching_room_and_event_id(tmp_path: Path) -> None:
+    """Custom approval responses should anchor to the original approval card in the original room."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+
+    handled_wrong_room = await store.handle_custom_response(
+        approval_event_id="$approval",
+        room_id="!other:localhost",
+        status="denied",
+        reason="Wrong room",
+        resolved_by="@user:localhost",
+    )
+    handled_wrong_event = await store.handle_custom_response(
+        approval_event_id="$other-approval",
+        room_id="!room:localhost",
+        status="denied",
+        reason="Wrong event",
+        resolved_by="@user:localhost",
+    )
+
+    assert handled_wrong_room is False
+    assert handled_wrong_event is False
+    assert task.done() is False
+
+    await store.handle_approval_resolution(
+        approval_id=pending.id,
+        status="denied",
+        reason="cleanup",
+        resolved_by="@user:localhost",
+    )
+    decision = await task
+    assert decision.status == "denied"

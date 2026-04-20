@@ -125,10 +125,6 @@ class ApprovalManager:
         pending = [approval for approval in self._pending_by_id.values() if approval.status == "pending"]
         return sorted(pending, key=lambda approval: approval.requested_at)
 
-    def approval_id_for_event(self, event_id: str) -> str | None:
-        """Return the approval ID for one Matrix approval event."""
-        return self._approval_id_by_event_id.get(event_id)
-
     def _preflight_request_decision(
         self,
         *,
@@ -256,21 +252,53 @@ class ApprovalManager:
             is not None
         )
 
+    async def _handle_anchored_resolution(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+        status: Literal["approved", "denied"],
+        reason: str | None,
+        resolved_by: str,
+    ) -> bool:
+        """Resolve one Matrix-anchored approval action against the original approval card."""
+        approval_id = self._approval_id_by_event_id.get(approval_event_id)
+        if approval_id is None:
+            return False
+
+        pending = self._pending_by_id.get(approval_id)
+        if (
+            pending is None
+            or pending.event_id != approval_event_id
+            or pending.room_id != room_id
+            or pending.approver_user_id != resolved_by
+        ):
+            return False
+
+        return (
+            await self._resolve_pending(
+                approval_id,
+                status=status,
+                reason=reason,
+                resolved_by=resolved_by,
+            )
+            is not None
+        )
+
     async def handle_reaction(
         self,
         *,
         approval_event_id: str,
+        room_id: str,
         reaction_key: str,
         resolved_by: str,
     ) -> bool:
         """Approve one request from a reaction on the approval card."""
         if reaction_key not in _APPROVE_REACTION_KEYS:
             return False
-        approval_id = self._approval_id_by_event_id.get(approval_event_id)
-        if approval_id is None:
-            return False
-        return await self.handle_approval_resolution(
-            approval_id=approval_id,
+        return await self._handle_anchored_resolution(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
             status="approved",
             reason=None,
             resolved_by=resolved_by,
@@ -280,17 +308,35 @@ class ApprovalManager:
         self,
         *,
         approval_event_id: str,
+        room_id: str,
         reason: str | None,
         resolved_by: str,
     ) -> bool:
         """Deny one request from a reply to the approval card."""
-        approval_id = self._approval_id_by_event_id.get(approval_event_id)
-        if approval_id is None:
-            return False
         trimmed_reason = reason.strip() if isinstance(reason, str) else ""
-        return await self.handle_approval_resolution(
-            approval_id=approval_id,
+        return await self._handle_anchored_resolution(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
             status="denied",
+            reason=trimmed_reason or None,
+            resolved_by=resolved_by,
+        )
+
+    async def handle_custom_response(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+        status: Literal["approved", "denied"],
+        reason: str | None,
+        resolved_by: str,
+    ) -> bool:
+        """Resolve one custom approval response anchored to the original approval card."""
+        trimmed_reason = reason.strip() if isinstance(reason, str) else ""
+        return await self._handle_anchored_resolution(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
+            status=status,
             reason=trimmed_reason or None,
             resolved_by=resolved_by,
         )

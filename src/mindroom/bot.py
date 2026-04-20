@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import nio
@@ -1390,21 +1390,21 @@ class AgentBot:
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 
-    async def _on_unknown_event(self, _room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""
         if event.type != "io.mindroom.tool_approval_response":
             return
-
-        approval_id, status, reason = self._approval_response_payload(event)
-        if approval_id is None or status is None:
+        approval_event_id, status, reason = self._approval_response_payload(event)
+        if approval_event_id is None or status is None:
             return
 
         approval_manager = get_approval_store()
         if approval_manager is None:
             return
 
-        await approval_manager.handle_approval_resolution(
-            approval_id=approval_id,
+        await approval_manager.handle_custom_response(
+            approval_event_id=approval_event_id,
+            room_id=room.room_id,
             status=status,
             reason=reason,
             resolved_by=event.sender,
@@ -1414,32 +1414,26 @@ class AgentBot:
     def _approval_response_payload(
         event: nio.UnknownEvent,
     ) -> tuple[str | None, Literal["approved", "denied"] | None, str | None]:
-        """Parse one custom approval response event."""
+        """Parse one custom approval response event anchored to the approval card."""
         content = event.source.get("content", {})
         if not isinstance(content, dict):
             return None, None, None
 
-        approval_id = content.get("approval_id")
-        if not isinstance(approval_id, str) or not approval_id:
+        approval_event_id = _reply_to_event_id_from_event_source(event.source)
+        if approval_event_id is None:
             return None, None, None
 
         raw_status = content.get("status")
         if raw_status not in {"approved", "denied"}:
-            approved = content.get("approved")
-            if isinstance(approved, bool):
-                raw_status = "approved" if approved else "denied"
-        if raw_status not in {"approved", "denied"}:
-            return approval_id, None, None
+            return approval_event_id, None, None
 
-        raw_reason = content.get("denial_reason")
-        if not isinstance(raw_reason, str) or not raw_reason.strip():
-            raw_reason = content.get("reason")
+        raw_reason = content.get("reason")
         reason = raw_reason.strip() if isinstance(raw_reason, str) and raw_reason.strip() else None
-        return approval_id, cast("Literal['approved', 'denied']", raw_status), reason
+        return approval_event_id, raw_status, reason
 
     async def _maybe_handle_tool_approval_reply(
         self,
-        _room: nio.MatrixRoom,
+        room: nio.MatrixRoom,
         event: nio.RoomMessageText,
     ) -> bool:
         """Consume reply-to-approval messages as denial actions."""
@@ -1448,11 +1442,12 @@ class AgentBot:
             return False
 
         reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
-        if reply_to_event_id is None or approval_manager.approval_id_for_event(reply_to_event_id) is None:
+        if reply_to_event_id is None:
             return False
 
         return await approval_manager.handle_reply(
             approval_event_id=reply_to_event_id,
+            room_id=room.room_id,
             reason=event.body,
             resolved_by=event.sender,
         )
@@ -1464,6 +1459,7 @@ class AgentBot:
         approval_manager = get_approval_store()
         if approval_manager is not None and await approval_manager.handle_reaction(
             approval_event_id=event.reacts_to,
+            room_id=room.room_id,
             reaction_key=event.key,
             resolved_by=event.sender,
         ):
