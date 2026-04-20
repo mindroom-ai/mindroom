@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -30,7 +31,12 @@ def main() -> int:
         # Isolate from shell MINDROOM_* env so the script only follows --config-path/--storage-path.
         process_env={},
     )
-    launch_kwargs = persistent_launch_kwargs(runtime_paths, args.profile, headless=False)
+    launch_kwargs = persistent_launch_kwargs(
+        runtime_paths,
+        args.profile,
+        headless=False,
+        executable_override=os.environ.get("BROWSER_EXECUTABLE_PATH"),
+    )
     user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
 
     print(f"user_data_dir: {user_data_dir}", flush=True)

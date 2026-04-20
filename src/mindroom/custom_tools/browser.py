@@ -203,10 +203,11 @@ def persistent_launch_kwargs(
     profile_name: str,
     *,
     headless: bool,
+    executable_override: str | None = None,
 ) -> dict[str, Any]:
     """Return the shared persistent-context launch kwargs for one browser profile."""
     executable = (
-        os.environ.get("BROWSER_EXECUTABLE_PATH")
+        executable_override
         or runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
         or shutil.which("chromium")
         or shutil.which("google-chrome-stable")

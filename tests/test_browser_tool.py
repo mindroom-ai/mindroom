@@ -19,6 +19,7 @@ from mindroom.custom_tools.browser import (
     _BrowserTabState,
     _clean_str,
     _clear_stale_singleton_locks,
+    persistent_launch_kwargs,
     profile_dir,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -82,6 +83,23 @@ def test_clear_stale_singleton_locks_keeps_live_pid_symlink(tmp_path: Path) -> N
     _clear_stale_singleton_locks(profile_dir)
 
     assert lock.is_symlink()
+
+
+def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit runtime env should beat ambient shell env for browser executable resolution."""
+    monkeypatch.setenv("BROWSER_EXECUTABLE_PATH", "/wrong")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": "/right"},
+    )
+
+    launch_kwargs = persistent_launch_kwargs(runtime_paths, "openclaw", headless=True)
+
+    assert launch_kwargs["executable_path"] == "/right"
 
 
 def test_validate_target_accepts_none_and_host() -> None:
