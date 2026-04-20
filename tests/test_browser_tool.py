@@ -19,7 +19,7 @@ from mindroom.custom_tools.browser import (
     _BrowserProfileState,
     _BrowserTabState,
     _clean_str,
-    _clear_stale_singleton_locks,
+    clear_stale_singleton_locks,
     persistent_launch_kwargs,
     profile_dir,
 )
@@ -69,7 +69,7 @@ def test_clear_stale_singleton_locks_unlinks_stale_symlink(tmp_path: Path) -> No
     lock = profile_dir / "SingletonLock"
     lock.symlink_to("mindroom-999999999")
 
-    _clear_stale_singleton_locks(profile_dir)
+    clear_stale_singleton_locks(profile_dir)
 
     assert not lock.is_symlink()
 
@@ -81,9 +81,20 @@ def test_clear_stale_singleton_locks_keeps_live_pid_symlink(tmp_path: Path) -> N
     lock = profile_dir / "SingletonLock"
     lock.symlink_to(f"mindroom-{os.getpid()}")
 
-    _clear_stale_singleton_locks(profile_dir)
+    clear_stale_singleton_locks(profile_dir)
 
     assert lock.is_symlink()
+
+
+def test_clear_stale_singleton_locks_is_idempotent_for_empty_dir(tmp_path: Path) -> None:
+    """The exported singleton-lock cleanup helper should be safe for empty profiles."""
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+
+    clear_stale_singleton_locks(profile_dir)
+    clear_stale_singleton_locks(profile_dir)
+
+    assert list(profile_dir.iterdir()) == []
 
 
 def test_persistent_launch_kwargs_runtime_env_wins_over_shell(

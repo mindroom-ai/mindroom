@@ -10,7 +10,11 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.browser import DEFAULT_PROFILE, persistent_launch_kwargs
+from mindroom.custom_tools.browser import (
+    DEFAULT_PROFILE,
+    clear_stale_singleton_locks,
+    persistent_launch_kwargs,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -41,6 +45,7 @@ def main() -> int:
 
     print(f"user_data_dir: {user_data_dir}", flush=True)
     with sync_playwright() as playwright:
+        clear_stale_singleton_locks(user_data_dir)
         context = playwright.chromium.launch_persistent_context(**launch_kwargs)
         try:
             page = context.pages[0] if context.pages else context.new_page()

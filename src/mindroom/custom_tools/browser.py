@@ -225,7 +225,7 @@ def persistent_launch_kwargs(
     return launch_kwargs
 
 
-def _clear_stale_singleton_locks(profile_dir: Path) -> None:
+def clear_stale_singleton_locks(profile_dir: Path) -> None:
     """Best-effort cleanup for stale Chromium singleton lock symlinks."""
     for entry_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
         entry = profile_dir / entry_name
@@ -1000,7 +1000,7 @@ class BrowserTools(Toolkit):
             playwright = await async_playwright().start()
             launch_kwargs = persistent_launch_kwargs(self._runtime_paths, profile_name, headless=True)
             user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
-            _clear_stale_singleton_locks(user_data_dir)
+            clear_stale_singleton_locks(user_data_dir)
             context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
