@@ -1,3 +1,6 @@
-## Verdict: CHANGES REQUIRED
+# REVIEW-F.md (Round 3)
+## Verdict: APPROVE
 ## Findings
-1. [MAJOR] [tests/test_workloop_thread_scope.py](/srv/mindroom-worktrees/issue-183/tests/test_workloop_thread_scope.py:87) - This new skip guard is both out of scope for ISSUE-183 and wrong for the current workloop checkout: it requires `types.py`, but the installed plugin now exposes `runtime.py`, so `_plugin_checkout_available()` returns false and the entire regression file is skipped instead of exercising the real checkout. Remove this hunk from the PR. If the workloop fixture needs modernization, do that in dedicated workloop test work by replacing the stale `types.py` assumptions with `runtime.py` end-to-end rather than silently disabling coverage here.
+None.
+## Final summary
+APPROVE - the round 2 fix removed the prior out-of-scope test change, and the current streaming payloads keep the warmup suffix consistent across `body`, `formatted_body`, and `m.replace` cleanup without leaking stale state.
