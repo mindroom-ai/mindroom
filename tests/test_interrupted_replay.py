@@ -224,6 +224,47 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
     assert snapshot.interruption_reason == "user_cancelled"
 
 
+def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() -> None:
+    """TurnRecorder helper methods should capture canonical completed/interrupted state."""
+    completed_tool = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="run_shell_command",
+        args_preview="cmd=pwd",
+        result_preview="/app",
+    )
+    interrupted_tool = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="save_file",
+        args_preview="file_name=main.py",
+    )
+    recorder = TurnRecorder(user_message="Please continue")
+
+    recorder.record_completed(
+        run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
+        assistant_text="Half done",
+        completed_tools=[completed_tool],
+    )
+    assert recorder.outcome == "completed"
+    assert recorder.assistant_text == "Half done"
+    assert [tool.tool_name for tool in recorder.completed_tools] == ["run_shell_command"]
+    assert recorder.interrupted_tools == []
+
+    recorder.record_interrupted(
+        run_metadata={"matrix_event_id": "e2", "matrix_seen_event_ids": ["e2"]},
+        assistant_text="Still working",
+        completed_tools=[completed_tool],
+        interrupted_tools=[interrupted_tool],
+        interruption_reason="Run interrupted",
+    )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert recorder.outcome == "interrupted"
+    assert snapshot.source_event_id == "e2"
+    assert snapshot.partial_text == "Still working"
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+    assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
+
+
 def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_path: Path) -> None:
     """Even hard-cancelled turns with no observed assistant state should persist one interrupted record."""
     storage = create_state_storage_db(

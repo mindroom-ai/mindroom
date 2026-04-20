@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
     from agno.db.sqlite import SqliteDb
 
+    from mindroom.history.runtime import ScopeSessionContext
+
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
@@ -192,6 +194,40 @@ def persist_interrupted_replay_snapshot(
         assert isinstance(persisted_run, RunOutput)
         persisted_session.upsert_run(persisted_run)
     storage.upsert_session(persisted_session)
+
+
+def persist_interrupted_replay(
+    *,
+    scope_context: ScopeSessionContext | None,
+    session_id: str,
+    run_id: str,
+    user_message: str | None,
+    partial_text: str | None,
+    completed_tools: Sequence[ToolTraceEntry],
+    interrupted_tools: Sequence[ToolTraceEntry],
+    run_metadata: Mapping[str, object] | None,
+    interruption_reason: str,
+    is_team: bool,
+) -> None:
+    """Persist one interrupted top-level turn from trusted runtime state."""
+    if scope_context is None:
+        return
+    persist_interrupted_replay_snapshot(
+        storage=scope_context.storage,
+        session=scope_context.session,
+        session_id=session_id,
+        scope_id=scope_context.scope.scope_id,
+        run_id=run_id,
+        snapshot=build_interrupted_replay_snapshot(
+            user_message=user_message,
+            partial_text=partial_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
+            run_metadata=run_metadata,
+            interruption_reason=interruption_reason,
+        ),
+        is_team=is_team,
+    )
 
 
 def _load_persisted_session(

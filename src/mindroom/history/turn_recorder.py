@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -44,6 +46,36 @@ class TurnRecorder:
     def set_interrupted_tools(self, tools: list[ToolTraceEntry]) -> None:
         """Replace the in-flight interrupted tool list."""
         self.interrupted_tools = list(tools)
+
+    def record_completed(
+        self,
+        *,
+        run_metadata: Mapping[str, Any] | None,
+        assistant_text: str,
+        completed_tools: Sequence[ToolTraceEntry],
+    ) -> None:
+        """Record one completed top-level turn."""
+        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        self.set_assistant_text(assistant_text)
+        self.set_completed_tools(list(completed_tools))
+        self.set_interrupted_tools([])
+        self.mark_completed()
+
+    def record_interrupted(
+        self,
+        *,
+        run_metadata: Mapping[str, Any] | None,
+        assistant_text: str,
+        completed_tools: Sequence[ToolTraceEntry],
+        interrupted_tools: Sequence[ToolTraceEntry],
+        interruption_reason: str | None,
+    ) -> None:
+        """Record one interrupted top-level turn."""
+        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        self.set_assistant_text(assistant_text)
+        self.set_completed_tools(list(completed_tools))
+        self.set_interrupted_tools(list(interrupted_tools))
+        self.mark_interrupted(interruption_reason)
 
     def mark_completed(self) -> None:
         """Record successful completion."""

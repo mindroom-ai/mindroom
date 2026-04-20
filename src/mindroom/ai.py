@@ -61,8 +61,7 @@ from mindroom.history import (
 )
 from mindroom.history.compaction import compute_prompt_token_breakdown
 from mindroom.history.interrupted_replay import (
-    build_interrupted_replay_snapshot,
-    persist_interrupted_replay_snapshot,
+    persist_interrupted_replay,
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -610,40 +609,6 @@ def _extract_interrupted_partial_text(
     if normalized.startswith("run ") and "cancel" in normalized:
         return ""
     return stripped
-
-
-def _persist_interrupted_agent_replay(
-    *,
-    scope_context: ScopeSessionContext | None,
-    session_id: str,
-    run_id: str,
-    user_message: str,
-    partial_text: str,
-    completed_tools: list[ToolTraceEntry],
-    interrupted_tools: list[ToolTraceEntry],
-    run_metadata: dict[str, Any] | None,
-    interruption_reason: str,
-) -> None:
-    """Persist one interrupted top-level agent turn into canonical replay history."""
-    if scope_context is None:
-        return
-    snapshot = build_interrupted_replay_snapshot(
-        user_message=user_message,
-        partial_text=partial_text,
-        completed_tools=completed_tools,
-        interrupted_tools=interrupted_tools,
-        run_metadata=run_metadata,
-        interruption_reason=interruption_reason,
-    )
-    persist_interrupted_replay_snapshot(
-        storage=scope_context.storage,
-        session=scope_context.session,
-        session_id=session_id,
-        scope_id=scope_context.scope.scope_id,
-        run_id=run_id,
-        snapshot=snapshot,
-        is_team=False,
-    )
 
 
 def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
@@ -1617,12 +1582,14 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 )
                 completed_tools = _extract_tool_trace(response)
                 if turn_recorder is not None:
-                    turn_recorder.set_run_metadata(metadata)
-                    turn_recorder.set_assistant_text(partial_text)
-                    turn_recorder.set_completed_tools(completed_tools)
-                    turn_recorder.set_interrupted_tools([])
-                    turn_recorder.mark_interrupted(str(response.content or "Run cancelled"))
-                _persist_interrupted_agent_replay(
+                    turn_recorder.record_interrupted(
+                        run_metadata=metadata,
+                        assistant_text=partial_text,
+                        completed_tools=completed_tools,
+                        interrupted_tools=[],
+                        interruption_reason=str(response.content or "Run cancelled"),
+                    )
+                persist_interrupted_replay(
                     scope_context=scope_context,
                     session_id=response.session_id or session_id,
                     run_id=response.run_id or attempt_run_id or str(uuid4()),
@@ -1632,6 +1599,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     interrupted_tools=[],
                     run_metadata=metadata,
                     interruption_reason=str(response.content or "Run cancelled"),
+                    is_team=False,
                 )
                 interrupted_replay_persisted = True
                 if turn_recorder is not None:
@@ -1645,24 +1613,27 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
             response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
             if turn_recorder is not None:
-                turn_recorder.set_run_metadata(metadata)
-                turn_recorder.set_assistant_text(response_text)
-                turn_recorder.set_completed_tools(_extract_tool_trace(response))
-                turn_recorder.set_interrupted_tools([])
-                turn_recorder.mark_completed()
+                turn_recorder.record_completed(
+                    run_metadata=metadata,
+                    assistant_text=response_text,
+                    completed_tools=_extract_tool_trace(response),
+                )
             return response_text
     except asyncio.CancelledError:
         if turn_recorder is not None:
-            turn_recorder.set_run_metadata(
-                build_matrix_run_metadata(
+            turn_recorder.record_interrupted(
+                run_metadata=build_matrix_run_metadata(
                     reply_to_event_id,
                     unseen_event_ids,
                     extra_metadata=matrix_run_metadata,
                 ),
+                assistant_text=turn_recorder.assistant_text,
+                completed_tools=turn_recorder.completed_tools,
+                interrupted_tools=turn_recorder.interrupted_tools,
+                interruption_reason="Run interrupted",
             )
-            turn_recorder.mark_interrupted("Run interrupted")
         elif not interrupted_replay_persisted:
-            _persist_interrupted_agent_replay(
+            persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
                 run_id=run_id or str(uuid4()),
@@ -1676,6 +1647,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     extra_metadata=matrix_run_metadata,
                 ),
                 interruption_reason="Run interrupted",
+                is_team=False,
             )
         raise
     finally:
@@ -2015,12 +1987,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
                     if state.cancelled_run_event is not None:
                         if turn_recorder is not None:
-                            turn_recorder.set_run_metadata(metadata)
-                            turn_recorder.set_assistant_text(state.assistant_text)
-                            turn_recorder.set_completed_tools(state.completed_tools)
-                            turn_recorder.set_interrupted_tools(state.pending_tools)
-                            turn_recorder.mark_interrupted(
-                                state.cancelled_run_event.reason or "Run cancelled",
+                            turn_recorder.record_interrupted(
+                                run_metadata=metadata,
+                                assistant_text=state.assistant_text,
+                                completed_tools=state.completed_tools,
+                                interrupted_tools=state.pending_tools,
+                                interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
                             )
                         if run_metadata_collector is not None:
                             fallback_metrics = _build_model_request_metrics_fallback(
@@ -2043,7 +2015,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
-                        _persist_interrupted_agent_replay(
+                        persist_interrupted_replay(
                             scope_context=scope_context,
                             session_id=state.cancelled_run_event.session_id or session_id,
                             run_id=state.cancelled_run_event.run_id or attempt_run_id or str(uuid4()),
@@ -2053,6 +2025,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             interrupted_tools=state.pending_tools,
                             run_metadata=metadata,
                             interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
+                            is_team=False,
                         )
                         interrupted_replay_persisted = True
                         if turn_recorder is not None:
@@ -2093,11 +2066,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)
                 if turn_recorder is not None:
-                    turn_recorder.set_run_metadata(metadata)
-                    turn_recorder.set_assistant_text(state.assistant_text)
-                    turn_recorder.set_completed_tools(state.completed_tools)
-                    turn_recorder.set_interrupted_tools([])
-                    turn_recorder.mark_completed()
+                    turn_recorder.record_completed(
+                        run_metadata=metadata,
+                        assistant_text=state.assistant_text,
+                        completed_tools=state.completed_tools,
+                    )
             finally:
                 cleanup_queued_notice_state(
                     run_output=None,
@@ -2108,19 +2081,19 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         if turn_recorder is not None:
-            turn_recorder.set_run_metadata(
-                build_matrix_run_metadata(
+            turn_recorder.record_interrupted(
+                run_metadata=build_matrix_run_metadata(
                     reply_to_event_id,
                     unseen_event_ids,
                     extra_metadata=matrix_run_metadata,
                 ),
+                assistant_text=state.assistant_text,
+                completed_tools=state.completed_tools,
+                interrupted_tools=state.pending_tools,
+                interruption_reason="Run interrupted",
             )
-            turn_recorder.set_assistant_text(state.assistant_text)
-            turn_recorder.set_completed_tools(state.completed_tools)
-            turn_recorder.set_interrupted_tools(state.pending_tools)
-            turn_recorder.mark_interrupted("Run interrupted")
         elif not interrupted_replay_persisted:
-            _persist_interrupted_agent_replay(
+            persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
                 run_id=run_id or str(uuid4()),
@@ -2134,6 +2107,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     extra_metadata=matrix_run_metadata,
                 ),
                 interruption_reason="Run interrupted",
+                is_team=False,
             )
         raise
     finally:
