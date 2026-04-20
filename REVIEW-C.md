@@ -1,7 +1,6 @@
-## Verdict: CHANGES REQUIRED
-## Findings
-1. [MAJOR] src/mindroom/workers/backends/kubernetes.py:243, src/mindroom/streaming.py:446 - Late-joining concurrent waiters still miss the warmup notice. `ensure_worker()` registers new sinks, but `_fanout_progress_sink()` only forwards future emissions; if caller B attaches after caller A already emitted `cold_start` and the pod becomes ready before the next 5 s `waiting` tick, B receives only `ready`. `StreamingResponse.apply_worker_progress_event()` drops `ready` for unknown workers, so B's reply stays silent for the rest of the cold start even though it is blocked on the same worker. Concrete fix: persist the current progress state per `worker_key` and immediately replay the active `cold_start`/`waiting` snapshot to newly registered sinks before they wait on the worker lock.
-2. [MAJOR] tests/test_workloop_thread_scope.py:87 - This PR also changes an unrelated workloop test skip guard, and the new required-files list is wrong after ISSUE-180: it requires `types.py`, but the live workloop checkout now ships `runtime.py` instead. In this environment `~/.mindroom-chat/plugins/workloop` exists, `runtime.py` exists, and `types.py` does not, so the whole regression module is now skipped on a valid checkout. Concrete fix: drop this unrelated change from ISSUE-183, or port the helper to the same `runtime.py`/`types.py` fallback used after ISSUE-180 instead of guarding on stale `types.py`.
+# REVIEW-C.md (Round 3)
+## Verdict: APPROVE
+## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
+1. No findings.
 ## Final summary
-The round-1 blocker is fixed correctly: `send_streaming_response()` now shuts down the worker-progress drain before terminal finalization, so I no longer see the cancel/error warmup suffix reappearing after finalize.
-Remaining issues are the late-joining worker-progress gap above and the unrelated broken workloop test guard.
+APPROVE. The R2 fix closes the late-joiner gap and the finalize/cancel suffix-leak race without introducing a new blocker in the reviewed cancel-safety and ISSUE-178 finalize paths.
