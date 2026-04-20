@@ -2850,7 +2850,7 @@ def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cd
     assert message.text == thread_history[0].body
 
 
-def test_build_matrix_prompt_with_thread_history_renders_tool_trace_events_in_cdata() -> None:
+def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> None:
     thread_history = [
         make_visible_message(
             sender="@alice:localhost",
@@ -2885,15 +2885,7 @@ def test_build_matrix_prompt_with_thread_history_renders_tool_trace_events_in_cd
     assert (
         prompt == "Previous conversation in this thread:\n"
         "<conversation>\n"
-        '<msg from="@alice:localhost"><![CDATA['
-        "Investigating\n\n"
-        "[tool:run_shell_command completed]\n"
-        "  args: cmd=echo 1234\n"
-        "  result: 1234\n"
-        "[tool:run_shell_command started]\n"
-        "  args: cmd=tail --pid=1234 -f /dev/null\n"
-        "  result: <not yet returned>"
-        "]]></msg>\n"
+        '<msg from="@alice:localhost"><![CDATA[Investigating]]></msg>\n'
         "</conversation>\n\n"
         "Current message:\n"
         '<msg from="@bob:localhost"><![CDATA[Follow-up]]></msg>'

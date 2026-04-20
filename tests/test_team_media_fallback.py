@@ -12,6 +12,19 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.models.response import ToolExecution
+from agno.run.agent import (
+    RunContentEvent as AgentRunContentEvent,
+)
+from agno.run.agent import (
+    RunOutput,
+)
+from agno.run.agent import (
+    ToolCallCompletedEvent as AgentToolCallCompletedEvent,
+)
+from agno.run.agent import (
+    ToolCallStartedEvent as AgentToolCallStartedEvent,
+)
 from agno.run.base import RunStatus
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
@@ -705,6 +718,81 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
 
 
 @pytest.mark.asyncio
+async def test_team_response_persists_interrupted_replay_for_cancelled_runs() -> None:
+    """Cancelled team runs should be rewritten into canonical completed replay history."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(
+            run_id="run-123",
+            session_id="session-team",
+            content="Run run-123 was cancelled",
+            member_responses=[
+                RunOutput(
+                    agent_name="GeneralAgent",
+                    content="Half done",
+                    tools=[
+                        ToolExecution(
+                            tool_name="run_shell_command",
+                            tool_args={"cmd": "pwd"},
+                            result="/app",
+                        ),
+                    ],
+                    status=RunStatus.completed,
+                ),
+            ],
+            status=RunStatus.cancelled,
+        ),
+    )
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-team",
+            run_id="run-123",
+            reply_to_event_id="e1",
+        )
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-team",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert scope_context.session.runs is not None
+        persisted_run = scope_context.session.runs[0]
+
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
+    assert persisted_run.messages is not None
+    assert isinstance(persisted_run.messages[0].content, str)
+    assert "Half done" in persisted_run.messages[0].content
+    assert "was cancelled" not in persisted_run.messages[0].content
+    assert "[tool:run_shell_command completed]" in persisted_run.messages[0].content
+    assert "[interrupted by user]" in persisted_run.messages[0].content
+
+
+@pytest.mark.asyncio
 async def test_team_response_returns_friendly_error_for_error_status() -> None:
     """Errored TeamRunOutput values must not be formatted as successful team replies."""
     config = _build_test_config()
@@ -844,6 +932,91 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
         if isinstance(chunk, TeamRunContentEvent)
     ]
     assert any("partial consensus" in chunk for chunk in streamed_text)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_persists_hidden_interrupted_tool_state() -> None:
+    """Streaming team cancellation should persist hidden completed tools into replay history."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[fake_agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Half done")
+        yield AgentToolCallStartedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
+        )
+        yield AgentToolCallCompletedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "pwd"},
+                result="/app",
+            ),
+        )
+        yield TeamRunCancelledEvent(run_id="run-456", session_id="session-team-stream", reason="Run cancelled")
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            mode=TeamMode.COORDINATE,
+            session_id="session-team-stream",
+            run_id="run-456",
+            reply_to_event_id="e1",
+            show_tool_calls=False,
+        ):
+            pass
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-team-stream",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert scope_context.session.runs is not None
+        persisted_run = scope_context.session.runs[0]
+
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
+    assert persisted_run.messages is not None
+    assert isinstance(persisted_run.messages[0].content, str)
+    assert "Half done" in persisted_run.messages[0].content
+    assert "[tool:run_shell_command completed]" in persisted_run.messages[0].content
+    assert "[interrupted by user]" in persisted_run.messages[0].content
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,10 @@ from mindroom.history import (
     PreparedHistoryState,
 )
 from mindroom.history.compaction import compute_prompt_token_breakdown
+from mindroom.history.interrupted_replay import (
+    build_interrupted_replay_snapshot,
+    persist_interrupted_replay_snapshot,
+)
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
@@ -82,6 +86,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
+    format_tool_completed_event,
     format_tool_started_event,
 )
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
@@ -518,10 +523,13 @@ def _compute_compaction_token_breakdown(
 
 @dataclass
 class _StreamingAttemptState:
+    assistant_text: str = ""
     full_response: str = ""
     tool_count: int = 0
     observed_tool_calls: int = 0
-    pending_tools: list[tuple[str, int]] = field(default_factory=list)
+    pending_visible_tools: list[tuple[str, int]] = field(default_factory=list)
+    pending_tools: list[ToolTraceEntry] = field(default_factory=list)
+    completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
     latest_request_input_tokens: int | None = None
@@ -573,6 +581,66 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
         _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
         trace.append(trace_entry)
     return trace
+
+
+def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
+    """Return whether one streaming attempt already observed agent-visible work."""
+    return bool(state.assistant_text or state.observed_tool_calls)
+
+
+def _extract_interrupted_partial_text(
+    content: object,
+    *,
+    messages: list[Message] | None = None,
+) -> str:
+    """Extract assistant partial text while dropping bare cancellation boilerplate."""
+    assistant_parts = [
+        str(message.content).strip()
+        for message in messages or []
+        if isinstance(message, Message) and message.role == "assistant" and isinstance(message.content, str)
+    ]
+    assistant_text = "\n\n".join(part for part in assistant_parts if part)
+    if assistant_text:
+        return assistant_text
+    if not isinstance(content, str):
+        return ""
+    stripped = content.strip()
+    normalized = stripped.lower()
+    if normalized.startswith("run ") and "cancel" in normalized:
+        return ""
+    return stripped
+
+
+def _persist_interrupted_agent_replay(
+    *,
+    scope_context: ScopeSessionContext | None,
+    session_id: str,
+    run_id: str,
+    partial_text: str,
+    completed_tools: list[ToolTraceEntry],
+    interrupted_tools: list[ToolTraceEntry],
+    run_metadata: dict[str, Any] | None,
+    interruption_reason: str,
+) -> None:
+    """Persist one interrupted top-level agent turn into canonical replay history."""
+    if scope_context is None:
+        return
+    snapshot = build_interrupted_replay_snapshot(
+        partial_text=partial_text,
+        completed_tools=completed_tools,
+        interrupted_tools=interrupted_tools,
+        run_metadata=run_metadata,
+        interruption_reason=interruption_reason,
+    )
+    persist_interrupted_replay_snapshot(
+        storage=scope_context.storage,
+        session=scope_context.session,
+        session_id=session_id,
+        scope_id=scope_context.scope.scope_id,
+        run_id=run_id,
+        snapshot=snapshot,
+        is_team=False,
+    )
 
 
 def _get_model_config(
@@ -921,7 +989,7 @@ def _request_stream_retry(
     agent_name: str,
 ) -> bool:
     """Set retry flag when inline-media fallback should be attempted."""
-    if retried_without_inline_media or state.full_response:
+    if retried_without_inline_media or _stream_attempt_has_progress(state):
         # Once any stream content is emitted, retrying would duplicate partial output.
         return False
     if not should_retry_without_inline_media(error, media_inputs):
@@ -943,15 +1011,18 @@ def _track_stream_tool_started(
 ) -> None:
     """Track started tool-call metadata for streaming output."""
     state.observed_tool_calls += 1
-    if not show_tool_calls:
+    display_tool_index = state.tool_count + 1 if show_tool_calls else None
+    tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=display_tool_index)
+    if trace_entry is not None:
+        state.pending_tools.append(trace_entry)
+    if not show_tool_calls or display_tool_index is None:
         return
 
-    state.tool_count += 1
-    tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=state.tool_count)
+    state.tool_count = display_tool_index
     if tool_msg:
         state.full_response += tool_msg
     if trace_entry is not None:
-        state.pending_tools.append((trace_entry.tool_name, state.tool_count))
+        state.pending_visible_tools.append((trace_entry.tool_name, display_tool_index))
 
 
 def _track_stream_tool_completed(
@@ -962,15 +1033,28 @@ def _track_stream_tool_completed(
     agent_name: str,
 ) -> None:
     """Track completed tool-call metadata for streaming output."""
-    if not show_tool_calls:
-        return
-
     info = extract_tool_completed_info(event.tool)
     if info is None:
         return
     tool_name, result = info
+    pending_trace_pos = next(
+        (pos for pos in range(len(state.pending_tools) - 1, -1, -1) if state.pending_tools[pos].tool_name == tool_name),
+        None,
+    )
+    if pending_trace_pos is not None:
+        state.pending_tools.pop(pending_trace_pos)
+    _, completed_trace = format_tool_completed_event(event.tool)
+    if completed_trace is not None:
+        state.completed_tools.append(completed_trace)
+    if not show_tool_calls:
+        return
+
     match_pos = next(
-        (pos for pos in range(len(state.pending_tools) - 1, -1, -1) if state.pending_tools[pos][0] == tool_name),
+        (
+            pos
+            for pos in range(len(state.pending_visible_tools) - 1, -1, -1)
+            if state.pending_visible_tools[pos][0] == tool_name
+        ),
         None,
     )
     if match_pos is None:
@@ -980,7 +1064,7 @@ def _track_stream_tool_completed(
             agent=agent_name,
         )
         return
-    _, tool_index = state.pending_tools.pop(match_pos)
+    _, tool_index = state.pending_visible_tools.pop(match_pos)
     state.full_response, _ = complete_pending_tool_block(
         state.full_response,
         tool_name,
@@ -1513,6 +1597,19 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     run_metadata_collector.update(run_metadata)
 
             if response.status == RunStatus.cancelled:
+                _persist_interrupted_agent_replay(
+                    scope_context=scope_context,
+                    session_id=response.session_id or session_id,
+                    run_id=response.run_id or attempt_run_id or str(uuid4()),
+                    partial_text=_extract_interrupted_partial_text(
+                        response.content,
+                        messages=response.messages,
+                    ),
+                    completed_tools=_extract_tool_trace(response),
+                    interrupted_tools=[],
+                    run_metadata=metadata,
+                    interruption_reason=str(response.content or "Run cancelled"),
+                )
                 raise asyncio.CancelledError(response.content or "Run cancelled")
             if response.status == RunStatus.error:
                 return get_user_friendly_error_message(
@@ -1550,6 +1647,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     if pipeline_timing is not None:
                         pipeline_timing.mark("model_first_token")
                 chunk_text = str(event.content)
+                state.assistant_text += chunk_text
                 state.full_response += chunk_text
                 yield event
                 continue
@@ -1870,6 +1968,16 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
+                        _persist_interrupted_agent_replay(
+                            scope_context=scope_context,
+                            session_id=state.cancelled_run_event.session_id or session_id,
+                            run_id=state.cancelled_run_event.run_id or attempt_run_id or str(uuid4()),
+                            partial_text=state.assistant_text,
+                            completed_tools=state.completed_tools,
+                            interrupted_tools=state.pending_tools,
+                            run_metadata=metadata,
+                            interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
+                        )
                         raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
 
                     break

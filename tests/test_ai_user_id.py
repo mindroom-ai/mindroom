@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from contextvars import Context
 from copy import deepcopy
 from dataclasses import replace
@@ -17,6 +17,7 @@ from agno.db.base import SessionType
 from agno.media import File
 from agno.models.message import Message
 from agno.models.metrics import Metrics
+from agno.models.response import ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
@@ -24,6 +25,9 @@ from agno.run.agent import (
     RunCompletedEvent,
     RunContentEvent,
     RunErrorEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
@@ -56,6 +60,7 @@ from mindroom.constants import (
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.history import PreparedHistoryState
+from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -187,7 +192,24 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
         plugin_order=0,
     )
 
+@contextmanager
+def _open_agent_scope_context(
+    storage: _SessionStorage,
+    *,
+    scope_id: str = "general",
+) -> Generator[ScopeSessionContext, None, None]:
+    yield ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id=scope_id),
+        storage=storage.open(),
+        session=storage.session,
+    )
 
+
+@pytest.fixture(autouse=True)
+def _reset_execution_state() -> Generator[None, None, None]:
+    reset_hook_execution_state()
+    yield
+    reset_hook_execution_state()
 def _make_bot(
     tmp_path: Path,
     *,
@@ -2752,6 +2774,63 @@ class TestUserIdPassthrough:
                 )
 
     @pytest.mark.asyncio
+    async def test_ai_response_persists_interrupted_replay_for_cancelled_runs(self, tmp_path: Path) -> None:
+        """Cancelled runs should be rewritten into canonical completed replay history."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        cancelled_run = RunOutput(
+            run_id="run-123",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            ],
+            status=RunStatus.cancelled,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=cancelled_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                )
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.status is RunStatus.completed
+        assert persisted_run.metadata == {
+            "matrix_event_id": "e1",
+            "matrix_seen_event_ids": ["e1"],
+            "mindroom_original_status": "cancelled",
+            "mindroom_replay_state": "interrupted",
+        }
+        assert persisted_run.messages is not None
+        assert persisted_run.messages[0].content == (
+            "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted by user]"
+        )
+
+    @pytest.mark.asyncio
     async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
         """Errored Agno RunOutput values must not be surfaced as successful replies."""
         mock_agent = MagicMock()
@@ -3839,6 +3918,82 @@ class TestUserIdPassthrough:
         assert payload["usage"]["input_tokens"] == 100
         assert payload["usage"]["output_tokens"] == 25
         assert payload["usage"]["total_tokens"] == 125
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_persists_hidden_interrupted_tool_state(self, tmp_path: Path) -> None:
+        """Streaming cancellation should persist completed and interrupted tools even when hidden in output."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Half done")
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                ),
+            )
+            yield ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            )
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_name="save_file",
+                    tool_args={"file_name": "main.py"},
+                ),
+            )
+            yield RunCancelledEvent(
+                run_id="run-3",
+                session_id="session1",
+                reason="Run run-3 was cancelled",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(asyncio.CancelledError):
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                ):
+                    pass
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.status is RunStatus.completed
+        assert persisted_run.messages is not None
+        assert persisted_run.messages[0].content == (
+            "Half done\n\n"
+            "[tool:run_shell_command completed]\n"
+            "  args: cmd=pwd\n"
+            "  result: /app\n"
+            "[tool:save_file interrupted]\n"
+            "  args: file_name=main.py\n"
+            "  result: <interrupted before completion>\n\n"
+            "[interrupted by user]"
+        )
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_uses_request_metrics_fallback(self, tmp_path: Path) -> None:

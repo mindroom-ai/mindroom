@@ -25,6 +25,7 @@ path = "mindroom.ai"
 depends_on = [
     "mindroom.constants",
     "mindroom.execution_preparation",
+    "mindroom.history.interrupted_replay",
     "mindroom.memory", "mindroom.tool_system.events",
 ]
 
@@ -120,7 +121,6 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.streaming",
     "mindroom.constants",
-    "mindroom.tool_system.events",
 ]
 
 [[modules]]

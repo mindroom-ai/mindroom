@@ -32,7 +32,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.timing import timed
-from mindroom.tool_system.events import render_tool_trace_for_context, tool_trace_events_from_visible_content
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
@@ -134,12 +133,8 @@ def _collect_history_messages(
     collected: list[tuple[str, str]] = []
     for msg in messages:
         body = msg.body
-        tool_trace_events = tool_trace_events_from_visible_content(msg.content)
-        if not body and not tool_trace_events:
+        if not body:
             continue
-        if tool_trace_events:
-            tool_block = render_tool_trace_for_context(tool_trace_events)
-            body = f"{body}\n\n{tool_block}" if body else tool_block
         if max_message_length is not None:
             body = _truncate_message_body(body, max_message_length)
         sender = msg.sender
@@ -473,6 +468,8 @@ def _get_unseen_messages_for_sender(
                 msg,
                 active_event_ids=active_event_ids,
             )
+            if partial_kind is _PartialReplyKind.INTERRUPTED:
+                continue
             if partial_kind is None:
                 continue
             cleaned_body = _clean_partial_reply_body(msg.body)
