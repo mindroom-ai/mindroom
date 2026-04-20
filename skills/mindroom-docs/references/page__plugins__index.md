@@ -385,7 +385,7 @@ Plugins can ship typed event hooks for message enrichment, response transformati
 
 ## Live development (hot reload)
 
-Plugins hot-reload automatically. When you edit any file inside a configured plugin directory under `~/.mindroom/plugins/<name>/`, MindRoom detects the change within about one second, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code. No service restart and no agent session disruption.
+Plugins hot-reload automatically. When you edit any file inside a configured plugin directory, MindRoom detects the change within about one second, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code. No service restart and no agent session disruption.
 
 ### How it works
 
@@ -431,7 +431,7 @@ The hot-reload path is intentionally best-effort, not transactional.
 
 ### Production tip
 
-Hot reload is enabled by default in production. Edit `~/.mindroom/plugins/<name>/` directly while `mindroom.service` is running, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
+Hot reload is enabled by default in production. Edit any configured plugin directory directly while `mindroom.service` is running. `~/.mindroom/plugins/<name>/` is the common local layout, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
 
 ## Community plugins
 
