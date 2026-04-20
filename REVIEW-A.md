@@ -1,6 +1,6 @@
-# REVIEW-A.md (Round 3)
+# REVIEW-A.md (Round 4)
 ## Verdict: APPROVE
 ## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
 None.
 ## Final summary
-APPROVE because the round-2 worker-backend fixes close the previously flagged protocol issues without introducing new contract leaks or backend-state regressions.
+APPROVE because the `WorkerBackend.ensure_worker(..., progress_sink=...)` extension remains optional and backend-neutral, while the Kubernetes-specific progress fanout stays encapsulated without leaking new worker-state semantics to other backends or callers.
