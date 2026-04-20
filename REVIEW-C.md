@@ -1,0 +1,6 @@
+## Verdict: CHANGES REQUIRED
+## Findings
+1. [BLOCKER] src/mindroom/streaming.py:764 - `send_streaming_response()` only shuts down and cancels the worker-progress drain in `finally`, after `await streaming.finalize(...)`, so a queued or already-in-flight `_drain_worker_progress_events()` refresh can still call `send_message_result`/`edit_message_result` concurrently with the terminal cancel/error/completed update and leave a duplicate warmup message or reapply the warmup suffix after finalization. - Stop and await the progress drain before any terminal `finalize()` call, then clear any remaining warmup state/queued events before composing the terminal body, or gate worker-progress sends behind a terminalized flag.
+## Final summary
+`StreamingResponse.finalize()` does clear `_active_warmups` before composing its own body, and I did not find any path that writes warmup text into `accumulated_text`, run metadata, persisted Agno history, or `io.mindroom.tool_trace`.
+The blocker is the concurrent drain task: I was able to reproduce overlapping terminal and warmup sends during cancellation, which means the side-band notice can still leak back into the visible Matrix delivery even though the persisted stream state stays clean.
