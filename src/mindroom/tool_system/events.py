@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -479,3 +480,68 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         payload["content_truncated"] = True
 
     return {_TOOL_TRACE_KEY: payload}
+
+
+def _parse_tool_trace_payload(payload: Mapping) -> list[ToolTraceEntry] | None:
+    raw_events = payload.get("events")
+    if not isinstance(raw_events, list):
+        return None
+
+    parsed: list[ToolTraceEntry] = []
+    for raw in raw_events:
+        if not isinstance(raw, Mapping):
+            continue
+        ev_type = raw.get("type")
+        tool_name = raw.get("tool_name")
+        if ev_type not in {"tool_call_started", "tool_call_completed"}:
+            continue
+        if not isinstance(tool_name, str):
+            continue
+        parsed.append(
+            ToolTraceEntry(
+                type=ev_type,
+                tool_name=tool_name,
+                args_preview=raw["args_preview"] if isinstance(raw.get("args_preview"), str) else None,
+                result_preview=raw["result_preview"] if isinstance(raw.get("result_preview"), str) else None,
+                truncated=bool(raw.get("truncated", False)),
+            ),
+        )
+
+    return parsed or None
+
+
+def tool_trace_events_from_visible_content(content: Mapping | None) -> list[ToolTraceEntry] | None:
+    """Inverse of build_tool_trace_content; returns None if no parseable trace."""
+    if not isinstance(content, Mapping):
+        return None
+
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, Mapping):
+        visible_payload = new_content.get(_TOOL_TRACE_KEY)
+        if isinstance(visible_payload, Mapping):
+            parsed_visible_payload = _parse_tool_trace_payload(visible_payload)
+            if parsed_visible_payload is not None:
+                return parsed_visible_payload
+
+    payload = content.get(_TOOL_TRACE_KEY)
+    if not isinstance(payload, Mapping):
+        return None
+
+    return _parse_tool_trace_payload(payload)
+
+
+def render_tool_trace_for_context(events: list[ToolTraceEntry]) -> str:
+    """Render trace events as text for inclusion in conversation-history prompt."""
+    lines: list[str] = []
+    for event in events:
+        status = "completed" if event.type == "tool_call_completed" else "started"
+        lines.append(f"[tool:{event.tool_name} {status}]")
+        if event.args_preview:
+            lines.append(f"  args: {event.args_preview}")
+        if event.result_preview is not None:
+            lines.append(f"  result: {event.result_preview}")
+        elif status == "started":
+            lines.append("  result: <not yet returned>")
+        if event.truncated:
+            lines.append("  (truncated)")
+    return "\n".join(lines)

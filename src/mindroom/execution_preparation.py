@@ -32,6 +32,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.timing import timed
+from mindroom.tool_system.events import render_tool_trace_for_context, tool_trace_events_from_visible_content
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
@@ -113,6 +114,15 @@ def _wrap_msg_body(sender: str, body: str) -> str:
     return f"<msg from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
 
 
+def _truncate_message_body(body: str, limit: int) -> str:
+    """Cap one rendered history body to the requested character limit."""
+    if len(body) <= limit:
+        return body
+    if limit <= 1:
+        return "…"
+    return f"{body[: limit - 1]}…"
+
+
 def _collect_history_messages(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -124,10 +134,14 @@ def _collect_history_messages(
     collected: list[tuple[str, str]] = []
     for msg in messages:
         body = msg.body
-        if not body:
+        tool_trace_events = tool_trace_events_from_visible_content(msg.content)
+        if not body and not tool_trace_events:
             continue
-        if max_message_length is not None and len(body) >= max_message_length:
-            continue
+        if tool_trace_events:
+            tool_block = render_tool_trace_for_context(tool_trace_events)
+            body = f"{body}\n\n{tool_block}" if body else tool_block
+        if max_message_length is not None:
+            body = _truncate_message_body(body, max_message_length)
         sender = msg.sender
         if not sender:
             if missing_sender_label is None:

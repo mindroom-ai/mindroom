@@ -116,7 +116,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.execution_preparation"
-depends_on = ["mindroom.matrix.client_visible_messages", "mindroom.streaming", "mindroom.constants"]
+depends_on = [
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.streaming",
+    "mindroom.constants",
+    "mindroom.tool_system.events",
+]
 
 [[modules]]
 path = "mindroom.hooks.matrix_admin"
@@ -1233,6 +1238,8 @@ expose = [
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
+    "render_tool_trace_for_context",
+    "tool_trace_events_from_visible_content",
 ]
 from = ["mindroom.tool_system.events"]
 

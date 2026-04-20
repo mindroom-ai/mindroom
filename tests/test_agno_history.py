@@ -2850,6 +2850,77 @@ def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cd
     assert message.text == thread_history[0].body
 
 
+def test_build_matrix_prompt_with_thread_history_renders_tool_trace_events_in_cdata() -> None:
+    thread_history = [
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Investigating",
+            content={
+                "io.mindroom.tool_trace": {
+                    "version": 2,
+                    "events": [
+                        {
+                            "type": "tool_call_completed",
+                            "tool_name": "run_shell_command",
+                            "args_preview": "cmd=echo 1234",
+                            "result_preview": "1234",
+                        },
+                        {
+                            "type": "tool_call_started",
+                            "tool_name": "run_shell_command",
+                            "args_preview": "cmd=tail --pid=1234 -f /dev/null",
+                        },
+                    ],
+                }
+            },
+        ),
+    ]
+
+    prompt = build_matrix_prompt_with_thread_history(
+        "Follow-up",
+        thread_history,
+        current_sender="@bob:localhost",
+    )
+
+    assert (
+        prompt
+        == "Previous conversation in this thread:\n"
+        "<conversation>\n"
+        '<msg from="@alice:localhost"><![CDATA['
+        "Investigating\n\n"
+        "[tool:run_shell_command completed]\n"
+        "  args: cmd=echo 1234\n"
+        "  result: 1234\n"
+        "[tool:run_shell_command started]\n"
+        "  args: cmd=tail --pid=1234 -f /dev/null\n"
+        "  result: <not yet returned>"
+        "]]></msg>\n"
+        "</conversation>\n\n"
+        "Current message:\n"
+        '<msg from="@bob:localhost"><![CDATA[Follow-up]]></msg>'
+    )
+
+
+def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged() -> None:
+    thread_history = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
+
+    prompt = build_matrix_prompt_with_thread_history(
+        "Follow-up",
+        thread_history,
+        current_sender="@bob:localhost",
+    )
+
+    assert (
+        prompt
+        == "Previous conversation in this thread:\n"
+        "<conversation>\n"
+        '<msg from="@alice:localhost"><![CDATA[Earlier context]]></msg>\n'
+        "</conversation>\n\n"
+        "Current message:\n"
+        '<msg from="@bob:localhost"><![CDATA[Follow-up]]></msg>'
+    )
+
+
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
