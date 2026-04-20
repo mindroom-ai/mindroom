@@ -1016,3 +1016,46 @@ async def test_other_bot_can_process_requester_approval_when_local_reply_policy_
     decision = await asyncio.wait_for(task, timeout=1)
     assert decision.status == "approved"
     assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
+
+
+@pytest.mark.asyncio
+async def test_bot_custom_approval_response_event_resolves_pending_call(tmp_path: Path) -> None:
+    """Cinny's custom approval-response event should resolve the pending approval."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    event = nio.UnknownEvent.from_dict(
+        {
+            "type": "io.mindroom.tool_approval_response",
+            "event_id": "$response",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "approval_id": pending.id,
+                "status": "denied",
+                "denial_reason": "Use a safer command",
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._on_unknown_event(room, event)
+
+    decision = await task
+    assert decision.status == "denied"
+    assert decision.reason == "Use a safer command"
