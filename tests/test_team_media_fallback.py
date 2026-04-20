@@ -28,17 +28,17 @@ from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
-from mindroom.team_runtime_resolution import (
-    ResolvedExactTeamMembers,
-    materialize_exact_requested_team_members,
-    resolve_live_shared_agent_names,
-)
 from mindroom.teams import (
     TeamMode,
     _materialize_team_members,
     _team_response_stream_raw,
     team_response,
     team_response_stream,
+)
+from mindroom.teams.exact_members import (
+    ResolvedExactTeamMembers,
+    materialize_exact_requested_team_members,
+    resolve_live_shared_agent_names,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths

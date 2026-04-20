@@ -15,13 +15,15 @@ from agno.agent import Agent
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from pydantic import ValidationError
 
-from mindroom import agent_prompts
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
     create_agent,
     get_agent_runtime_sqlite_dbs,
     get_agent_toolkit_names,
+)
+from mindroom.agents import (
+    prompts as agent_prompts,
 )
 from mindroom.config.agent import (
     AgentConfig,

@@ -121,7 +121,6 @@ __all__ = [
     "scrub_queued_notice_session_context",
     "stream_agent_response",
 ]
-
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 type ModelRunInput = str | Sequence[Message]
 _AI_RUN_METADATA_VERSION = 1
@@ -1580,6 +1579,20 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             agent,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
+
+
+__all__ = [
+    "AIStreamChunk",
+    "ai_response",
+    "build_matrix_run_metadata",
+    "cached_agent_run",
+    "cleanup_queued_notice_state",
+    "get_model_instance",
+    "install_queued_message_notice_hook",
+    "queued_message_signal_context",
+    "scrub_queued_notice_session_context",
+    "stream_agent_response",
+]
 
 
 @timed("model_request_to_completion")

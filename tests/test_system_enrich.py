@@ -45,8 +45,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
-from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
+from mindroom.teams.exact_members import ResolvedExactTeamMembers
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,

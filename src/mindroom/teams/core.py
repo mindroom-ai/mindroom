@@ -26,7 +26,7 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom.agents import create_agent, enable_all_history_replay, get_team_session
+from mindroom.agents import create_agent, get_team_session
 from mindroom.ai import (
     _append_inline_media_fallback_to_run_input,
     _attach_media_to_run_input,
@@ -61,17 +61,18 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
-from mindroom.team_runtime_resolution import (
-    ResolvedExactTeamMembers,
-    materialize_exact_requested_team_members,
-    resolve_live_shared_agent_names,
-)
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_started_event,
+)
+
+from .exact_members import (
+    ResolvedExactTeamMembers,
+    materialize_exact_requested_team_members,
+    resolve_live_shared_agent_names,
 )
 
 if TYPE_CHECKING:
@@ -1227,7 +1228,7 @@ def _create_team_instance(
         # Agno will automatically list members with their names, roles, and tools
     )
     if history_settings.policy.mode == "all":
-        enable_all_history_replay(team)
+        team.num_history_runs = None
     return team
 
 
@@ -2056,3 +2057,23 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             team_db=cast("SqliteDb | None", team.db) if team is not None else None,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
+
+
+__all__ = [
+    "TeamIntent",
+    "TeamMemberStatus",
+    "TeamMode",
+    "TeamOutcome",
+    "TeamResolution",
+    "TeamResolutionMember",
+    "build_materialized_team_instance",
+    "decide_team_formation",
+    "format_team_response",
+    "materialize_exact_team_members",
+    "prepare_materialized_team_execution",
+    "resolve_configured_team",
+    "resolve_live_shared_agent_names",
+    "select_model_for_team",
+    "team_response",
+    "team_response_stream",
+]

@@ -154,3 +154,9 @@ async def suggest_agent_for_message(
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
     return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)
+
+
+__all__ = [
+    "suggest_agent",
+    "suggest_agent_for_message",
+]

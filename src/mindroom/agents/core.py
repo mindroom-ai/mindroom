@@ -20,7 +20,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 import mindroom.tools  # noqa: F401
-from mindroom import agent_prompts, constants
+from mindroom import constants
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
@@ -52,6 +52,8 @@ from mindroom.tool_system.worker_routing import (
     shared_storage_root,
 )
 from mindroom.workspaces import ensure_workspace_template
+
+from . import prompts as agent_prompts
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1376,3 +1378,22 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
         return config.agents[entity_name].rooms
 
     return []
+
+
+__all__ = [
+    "build_agent_tool_init_context",
+    "build_agent_toolkit",
+    "create_agent",
+    "create_session_storage",
+    "create_state_storage_db",
+    "describe_agent",
+    "ensure_default_agent_workspaces",
+    "get_agent_ids_for_room",
+    "get_agent_runtime_sqlite_dbs",
+    "get_agent_session",
+    "get_agent_toolkit_names",
+    "get_rooms_for_entity",
+    "get_team_session",
+    "remove_run_by_event_id",
+    "show_tool_calls_for_agent",
+]
