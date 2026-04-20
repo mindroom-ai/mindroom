@@ -1,4 +1,5 @@
 """Open a persistent Cinny browser profile for one-time manual login."""
+# ruff: noqa: N999
 
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Launch the headed persistent Chromium context for one manual login flow."""
     args = _parse_args()
     runtime_paths = resolve_runtime_paths(
         config_path=args.config_path,

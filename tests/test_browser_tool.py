@@ -13,8 +13,8 @@ import pytest
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
-    _BrowserProfileState,
     BrowserTools,
+    _BrowserProfileState,
     _BrowserTabState,
     _clean_str,
 )
