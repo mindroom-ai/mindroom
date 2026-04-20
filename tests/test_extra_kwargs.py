@@ -552,7 +552,7 @@ def test_get_model_instance_uses_explicit_named_connection_override(monkeypatch:
             captured.update(kwargs)
             self.id = str(kwargs["id"])
 
-    monkeypatch.setattr("mindroom.ai.OpenAIChat", _FakeOpenAIChat)
+    monkeypatch.setattr("mindroom.ai.core.OpenAIChat", _FakeOpenAIChat)
 
     config_data = {
         "connections": {

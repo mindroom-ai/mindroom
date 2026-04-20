@@ -1273,7 +1273,15 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         available_agents = list(sender_visible_room_agents)
     else:
         if thread_id:
-            thread_history = list(await conversation_cache.get_thread_history(room_id, thread_id))
+            thread_history = list(
+                await conversation_cache.get_thread_messages(
+                    room_id,
+                    thread_id,
+                    full_history=True,
+                    dispatch_safe=False,
+                    caller_label="schedule_existing_thread",
+                ),
+            )
             thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
             available_agents = [agent for agent in thread_agents if agent in sender_visible_room_agents]
 

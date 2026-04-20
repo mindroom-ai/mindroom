@@ -794,6 +794,7 @@ class ResponseRunner:
                 self._client(),
                 request.room_id,
                 request.thread_id,
+                caller_label="dispatch_post_lock_refresh",
             )
         except Exception as exc:
             if request.requires_full_thread_history:

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.logging_config import bound_log_context
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
@@ -93,6 +94,8 @@ class _EventCacheWriteCoordinator:
         room_id: str,
         operation: str,
         previous_task: asyncio.Task[Any] | None,
+        *,
+        logger: structlog.stdlib.BoundLogger,
     ) -> None:
         predecessor = previous_task
         while predecessor is not None:
@@ -104,7 +107,7 @@ class _EventCacheWriteCoordinator:
                     raise
                 predecessor = self._pending_predecessor(predecessor)
             except Exception as exc:
-                self.logger.debug(
+                logger.debug(
                     "Previous room cache update failed before follow-up update",
                     room_id=room_id,
                     operation=operation,
@@ -140,9 +143,17 @@ class _EventCacheWriteCoordinator:
             outcome = "ok"
             update_started: float | None = None
             try:
-                await self._await_predecessor(room_id, name, previous_task)
-                update_started = time.perf_counter()
-                return await update_coro_factory()
+                current_task = asyncio.current_task()
+                task_name = current_task.get_name() if current_task is not None else name
+                with bound_log_context(task_name=task_name):
+                    await self._await_predecessor(
+                        room_id,
+                        name,
+                        previous_task,
+                        logger=self.logger,
+                    )
+                    update_started = time.perf_counter()
+                    return await update_coro_factory()
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
