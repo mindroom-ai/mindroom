@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -10,18 +11,20 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.file_watcher import _tree_snapshot
-from mindroom.hooks import HookRegistry
+from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState, _watch_plugins_task
 from mindroom.tool_system.plugins import PluginReloadResult
+from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -246,6 +249,121 @@ def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
     assert hooks_path in snapshot
     assert git_head not in snapshot
     assert git_ref not in snapshot
+
+
+@pytest.mark.asyncio
+async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One broken save should trigger one failed reload attempt until another change arrives."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    reload_calls: list[tuple[str, tuple[Path, ...]]] = []
+    first_reload_seen = asyncio.Event()
+    second_reload_seen = asyncio.Event()
+    error_message = "broken plugin"
+
+    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+        reload_calls.append((source, changed_paths))
+        if len(reload_calls) == 1:
+            first_reload_seen.set()
+        if len(reload_calls) == 2:
+            second_reload_seen.set()
+        raise RuntimeError(error_message)
+
+    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.wait_for(first_reload_seen.wait(), timeout=1)
+        await asyncio.sleep(0.08)
+
+        assert len(reload_calls) == 1
+
+        hooks_path.write_text("VALUE = 3\n", encoding="utf-8")
+        await asyncio.wait_for(second_reload_seen.wait(), timeout=1)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    assert len(reload_calls) == 2
+    assert reload_calls[0][0] == "watcher"
+    assert reload_calls[1][0] == "watcher"
+
+
+@pytest.mark.asyncio
+async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_path: Path) -> None:
+    """A failed explicit reload should deactivate the broken plugin instead of leaving old hooks live."""
+    plugin_root = tmp_path / "plugins" / "broken-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "broken-reload", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = (plugin_root / "hooks.py").resolve()
+    hooks_path.write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    config = _runtime_bound_config(Config(plugins=["./plugins/broken-reload"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    shared_task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        initial = await orchestrator.reload_plugins_now(source="test")
+        assert initial.active_plugin_names == ("broken-reload",)
+        assert len(orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)) == 1
+
+        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+        hooks_module._AUTO_POKE_TASK = shared_task
+
+        hooks_path.unlink()
+
+        with pytest.raises(plugin_module.PluginValidationError, match="Plugin hooks module not found"):
+            await orchestrator.reload_plugins_now(source="test")
+        await asyncio.sleep(0)
+
+        assert shared_task.cancelled()
+        assert orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
+    finally:
+        await asyncio.gather(shared_task, return_exceptions=True)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
 
 
 @pytest.mark.asyncio

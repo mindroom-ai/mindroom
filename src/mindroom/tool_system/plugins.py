@@ -151,6 +151,8 @@ def get_configured_plugin_roots(
 def reload_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = False,
 ) -> PluginReloadResult:
     """Evict cached plugin imports and rebuild the live hook snapshot."""
     roots = get_configured_plugin_roots(config, runtime_paths)
@@ -162,7 +164,7 @@ def reload_plugins(
     cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
     _clear_plugin_reload_caches(roots)
     _evict_synthetic_plugin_subtrees(package_roots)
-    plugins = load_plugins(config, runtime_paths, skip_broken_plugins=False)
+    plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
     return PluginReloadResult(
         hook_registry=HookRegistry.from_plugins(plugins),
         active_plugin_names=tuple(plugin.name for plugin in plugins),
