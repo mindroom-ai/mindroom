@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.tools import Toolkit
-from playwright.async_api import Browser, BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -170,7 +171,6 @@ class _BrowserProfileState:
     """State for one browser profile."""
 
     playwright: Playwright
-    browser: Browser
     context: BrowserContext
     tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
@@ -182,6 +182,15 @@ def _clean_str(value: object) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned if cleaned else None
+
+
+def _profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:
+    """Return the persistent Playwright profile directory for one browser profile."""
+    normalized_profile = _clean_str(profile_name) or _DEFAULT_PROFILE
+    profile_slug = re.sub(r"[^a-zA-Z0-9._+-]+", "_", normalized_profile).strip("_") or _DEFAULT_PROFILE
+    profile_dir = (runtime_paths.storage_root / "browser-profiles" / profile_slug).resolve()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return profile_dir
 
 
 class BrowserTools(Toolkit):
@@ -938,12 +947,16 @@ class BrowserTools(Toolkit):
                 or shutil.which("chromium")
                 or shutil.which("google-chrome-stable")
             )
-            launch_kwargs: dict[str, Any] = {"headless": True}
+            launch_kwargs: dict[str, Any] = {
+                "headless": True,
+                "service_workers": "block",
+                "user_data_dir": str(_profile_dir(self._runtime_paths, profile_name)),
+                "viewport": {"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH},
+            }
             if executable:
                 launch_kwargs["executable_path"] = executable
-            browser = await playwright.chromium.launch(**launch_kwargs)
-            context = await browser.new_context(viewport={"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH})
-            state = _BrowserProfileState(playwright=playwright, browser=browser, context=context)
+            context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
+            state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
             page = await context.new_page()
@@ -957,7 +970,6 @@ class BrowserTools(Toolkit):
         if state is None:
             return
         await state.context.close()
-        await state.browser.close()
         await state.playwright.stop()
 
     async def _resolve_tab(
