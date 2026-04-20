@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,8 @@ def main() -> int:
     )
     user_data_dir = _profile_dir(runtime_paths, args.profile)
     executable = (
-        runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
+        os.environ.get("BROWSER_EXECUTABLE_PATH")
+        or runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
         or shutil.which("chromium")
         or shutil.which("google-chrome-stable")
     )

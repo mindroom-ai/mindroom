@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from uuid import uuid4
 from agno.tools import Toolkit
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -31,6 +33,8 @@ _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
 _VIEWPORT_WIDTH = 1280
 _VIEWPORT_HEIGHT = 720
+
+logger = get_logger(__name__)
 
 _BROWSER_ACTIONS = {
     "status",
@@ -190,7 +194,32 @@ def _profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:
     profile_slug = re.sub(r"[^a-zA-Z0-9._+-]+", "_", normalized_profile).strip("_") or _DEFAULT_PROFILE
     profile_dir = (runtime_paths.storage_root / "browser-profiles" / profile_slug).resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir.chmod(0o700)
     return profile_dir
+
+
+def _clear_stale_singleton_locks(profile_dir: Path) -> None:
+    """Best-effort cleanup for stale Chromium singleton lock symlinks."""
+    for entry_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        entry = profile_dir / entry_name
+        try:
+            if not entry.is_symlink():
+                continue
+            target = entry.readlink()
+            match = re.fullmatch(r".+-(\d+)", target.name)
+            if match is None:
+                continue
+            pid = int(match.group(1))
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                entry.unlink()
+        except OSError as exc:
+            logger.warning(
+                "Failed to clean Chromium singleton lock",
+                entry=str(entry),
+                error=str(exc),
+            )
 
 
 class BrowserTools(Toolkit):
@@ -942,6 +971,8 @@ class BrowserTools(Toolkit):
                 return state
 
             playwright = await async_playwright().start()
+            profile_dir = _profile_dir(self._runtime_paths, profile_name)
+            _clear_stale_singleton_locks(profile_dir)
             executable = (
                 self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
                 or shutil.which("chromium")
@@ -950,7 +981,7 @@ class BrowserTools(Toolkit):
             launch_kwargs: dict[str, Any] = {
                 "headless": True,
                 "service_workers": "block",
-                "user_data_dir": str(_profile_dir(self._runtime_paths, profile_name)),
+                "user_data_dir": str(profile_dir),
                 "viewport": {"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH},
             }
             if executable:
