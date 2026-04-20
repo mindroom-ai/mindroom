@@ -30,6 +30,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed
+from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import (
     DynamicToolkitSelection,
@@ -858,6 +859,46 @@ def _build_agent_tool_hook_bridge(
     )
 
 
+def _prune_openai_approval_gated_tools(
+    toolkit: Toolkit,
+    *,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Toolkit | None:
+    """Hide approval-gated tool functions from OpenAI-compatible agents."""
+    if execution_identity is None or execution_identity.channel != "openai_compat":
+        return toolkit
+
+    hidden_tool_names = {
+        tool_name
+        for tool_name in (*toolkit.functions, *toolkit.async_functions)
+        if tool_requires_approval_for_openai_compat(config, tool_name)
+    }
+    if not hidden_tool_names:
+        return toolkit
+
+    toolkit.functions = {
+        tool_name: function for tool_name, function in toolkit.functions.items() if tool_name not in hidden_tool_names
+    }
+    toolkit.async_functions = {
+        tool_name: function
+        for tool_name, function in toolkit.async_functions.items()
+        if tool_name not in hidden_tool_names
+    }
+    toolkit.tools = [
+        tool
+        for tool in toolkit.tools
+        if getattr(tool, "name", getattr(tool, "__name__", None)) not in hidden_tool_names
+    ]
+    toolkit._async_tools = [
+        (tool, tool_name) for tool, tool_name in toolkit._async_tools if tool_name not in hidden_tool_names
+    ]
+
+    if toolkit.functions or toolkit.async_functions:
+        return toolkit
+    return None
+
+
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
 def _resolve_agent_dynamic_tool_selection(
     *,
@@ -1018,6 +1059,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
             )
+            if toolkit:
+                toolkit = _prune_openai_approval_gated_tools(
+                    toolkit,
+                    config=config,
+                    execution_identity=execution_identity,
+                )
             if toolkit:
                 tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
         except (ValueError, ImportError) as exc:

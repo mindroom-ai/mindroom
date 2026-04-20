@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
+from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
@@ -32,6 +33,7 @@ from starlette.requests import ClientDisconnect
 
 from mindroom import constants
 from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.agents import create_agent
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
@@ -369,16 +371,9 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
     assert captured_runtime_paths == [runtime_a]
 
 
-def test_chat_completions_uses_the_same_tool_approval_gate(test_config: Config) -> None:
-    """OpenAI-compatible chat completions should hit the shared tool-approval bridge."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    app = FastAPI()
-    app.include_router(router)
-    runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-    initialize_api_app(app, runtime_paths)
+def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config, tmp_path: Path) -> None:
+    """OpenAI-compatible agent construction should hide tools that require approval."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     config = Config.validate_with_runtime(
         {
             **test_config.authored_model_dump(),
@@ -388,77 +383,78 @@ def test_chat_completions_uses_the_same_tool_approval_gate(test_config: Config) 
         },
         runtime_paths,
     )
-    seen_request_ids: list[str] = []
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
 
-    async def fake_ai_response(
-        *,
-        agent_name: str,
-        prompt: str,
-        session_id: str,
-        runtime_paths: RuntimePaths,
-        config: Config,
-        thread_history: object,
-        room_id: object,
-        knowledge: object,
-        user_id: object,
-        include_interactive_questions: bool,
-        include_openai_compat_guidance: bool,
-        active_event_ids: object,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> str:
-        del (
-            prompt,
-            session_id,
-            thread_history,
-            room_id,
-            knowledge,
-            user_id,
-            include_interactive_questions,
-            include_openai_compat_guidance,
-            active_event_ids,
-        )
-        assert execution_identity is not None
-        assert execution_identity.channel == "openai_compat"
-        bridge = build_tool_hook_bridge(
-            HookRegistry.empty(),
-            agent_name=agent_name,
-            dispatch_context=ToolDispatchContext(execution_identity=execution_identity),
+    with patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
             config=config,
             runtime_paths=runtime_paths,
-        )
-        assert bridge is not None
-
-        store = get_approval_store()
-        assert store is None
-        return await bridge(
-            "run_shell_command",
-            lambda **kwargs: kwargs["command"],
-            {"command": "echo from openai compat"},
+            execution_identity=execution_identity,
+            include_openai_compat_guidance=True,
         )
 
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
-        patch("mindroom.api.openai_compat._ensure_knowledge_initialized", new=AsyncMock()),
-        patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=None),
-        patch("mindroom.api.openai_compat.ai_response", side_effect=fake_ai_response),
-        TestClient(app) as client,
-    ):
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "general",
-                "messages": [{"role": "user", "content": "Run a shell command."}],
-            },
-        )
+    exposed_tool_names = {
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+    }
+    assert "run_shell_command" not in exposed_tool_names
+    assert "check_shell_command" in exposed_tool_names
+    assert "kill_shell_command" in exposed_tool_names
 
-    assert response.status_code == 200
-    assert response.json()["choices"][0]["message"]["content"] == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: run_shell_command\n"
-        "Reason: Tool approval is required but the approval store is not initialized.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
+
+def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
+    """Script-based approval rules should also hide matching /v1 tools."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    approval_script = tmp_path / "approval_scripts" / "shell_review.py"
+    approval_script.parent.mkdir(parents=True)
+    approval_script.write_text(
+        "def check(tool_name, arguments, agent_name):\n    return tool_name == 'run_shell_command'\n",
+        encoding="utf-8",
     )
-    assert seen_request_ids == []
+    config = Config.validate_with_runtime(
+        {
+            **test_config.authored_model_dump(),
+            "tool_approval": {
+                "rules": [{"match": "run_shell_command", "script": "approval_scripts/shell_review.py"}],
+            },
+        },
+        runtime_paths,
+    )
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            include_openai_compat_guidance=True,
+        )
+
+    exposed_tool_names = {
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+    }
+    assert "run_shell_command" not in exposed_tool_names
 
 
 def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path: Path) -> None:

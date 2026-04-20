@@ -95,6 +95,9 @@ authorization:
       - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 
 # Optional tool approval rules.
+# Rules are evaluated in order and the first match wins.
+# OpenAI-compatible `/v1` requests hide tool functions that match required-approval rules.
+# Script-based rules are also hidden on `/v1` because approval cards need Matrix context.
 # tool_approval:
 #   default: auto_approve
 #   timeout_days: 7

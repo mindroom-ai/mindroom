@@ -544,6 +544,30 @@ def _load_script_module(
     return module, resolved_path
 
 
+def tool_requires_approval_for_openai_compat(
+    config: Config,
+    tool_name: str,
+) -> bool:
+    """Return whether one `/v1` tool must be hidden because approval may be required.
+
+    This is a conservative static check used while constructing OpenAI-compatible
+    agent tool schemas. Script-based rules are treated as requiring approval
+    because `/v1` has no Matrix approval transport and cannot safely defer that
+    decision to request-time arguments.
+    """
+    approval_config = config.tool_approval
+    require_approval = approval_config.default == "require_approval"
+
+    for rule in approval_config.rules:
+        if not fnmatchcase(tool_name, rule.match):
+            continue
+        if rule.action is not None:
+            return rule.action == "require_approval"
+        return True
+
+    return require_approval
+
+
 async def evaluate_tool_approval(
     config: Config,
     runtime_paths: RuntimePaths,

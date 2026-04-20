@@ -22,6 +22,22 @@ mindroom config validate --path /path/to/config.yaml
 
 MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block. See [MCP](https://docs.mindroom.chat/mcp/index.md) for transport-specific config, tool naming, examples, and agent setup.
 
+## Tool Approval
+
+Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations. Rules are evaluated in order and the first matching rule wins. Each rule must set exactly one of `action` or `script`. Use `action: require_approval` to always pause the tool call and send a Matrix approval card. Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`. `timeout_days` sets the default approval expiry window and can be overridden per rule. OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
+
+```
+tool_approval:
+  default: auto_approve
+  timeout_days: 7
+  rules:
+    - match: slack_*
+      action: require_approval
+    - match: run_shell_command
+      script: ./approval_scripts/shell_review.py
+      timeout_days: 3
+```
+
 ## Environment Variables
 
 ### Core

@@ -765,6 +765,22 @@ mindroom config validate --path /path/to/config.yaml
 
 MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block. See [MCP](https://docs.mindroom.chat/mcp/index.md) for transport-specific config, tool naming, examples, and agent setup.
 
+## Tool Approval
+
+Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations. Rules are evaluated in order and the first matching rule wins. Each rule must set exactly one of `action` or `script`. Use `action: require_approval` to always pause the tool call and send a Matrix approval card. Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`. `timeout_days` sets the default approval expiry window and can be overridden per rule. OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
+
+```
+tool_approval:
+  default: auto_approve
+  timeout_days: 7
+  rules:
+    - match: slack_*
+      action: require_approval
+    - match: run_shell_command
+      script: ./approval_scripts/shell_review.py
+      timeout_days: 3
+```
+
 ## Environment Variables
 
 ### Core
@@ -10476,7 +10492,7 @@ MindRoom exposes an OpenAI-compatible chat completions API so any chat frontend 
 
 ## How It Works
 
-The frontend calls `GET /v1/models` and sees your agents in the model picker. The user picks an agent and chats. The frontend sends standard OpenAI requests; MindRoom routes them to the selected agent with all its tools, instructions, and memory. The frontend doesn't know it's talking to an agent — it's transparent.
+The frontend calls `GET /v1/models` and sees your agents in the model picker. The user picks an agent and chats. The frontend sends standard OpenAI requests. MindRoom routes them to the selected agent with its supported tools, instructions, and memory. The frontend doesn't know it's talking to an agent. It's transparent.
 
 ```
 Chat Frontend (LibreChat, Open WebUI, etc.)
@@ -10584,7 +10600,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 
 ### Model selection
 
-Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`. Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`. Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
+Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`. Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`. Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope. An OpenAI-compatible run can expose fewer tool functions than the same agent in Matrix when `tool_approval` hides approval-gated functions from `/v1`.
 
 ### Auto-routing
 
@@ -10658,6 +10674,7 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 - **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **No requester-private instances** — `/v1` currently supports only shared agents that are unscoped or configured with `worker_scope=shared`, so `agents.<name>.private` and other isolating execution scopes are not available there
+- **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a Matrix room and thread
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
 
 # Architecture
