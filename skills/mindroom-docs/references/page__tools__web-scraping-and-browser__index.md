@@ -21,7 +21,7 @@ This page documents the built-in tools in the `web-scraping-and-browser` group. 
 - \[`oxylabs`\] - Oxylabs Google search, Amazon data, and general web scraping.
 - \[`agentql`\] - AgentQL browser-assisted scraping with optional custom extraction queries.
 - \[`browserbase`\] - Browserbase-hosted browser sessions with remote navigation, screenshots, and page reads.
-- \[`browser`\] - MindRoom's local OpenClaw-style Playwright browser controller.
+- \[`browser`\] - MindRoom's local Playwright browser controller.
 - \[`web_browser_tools`\] - Host OS browser opener for launching a real browser tab or window.
 
 ## Common Setup Notes
@@ -580,15 +580,15 @@ get_page_content()
 
 - `browserbase` needs both `api_key` and `project_id`.
 - It still depends on local Playwright support because the client connects to the remote browser over CDP.
-- Use `browserbase` when you want a hosted browser session but do not need the broader OpenClaw-style action surface of `browser`.
+- Use `browserbase` when you want a hosted browser session but do not need the broader local action surface of `browser`.
 
 ### \[`browser`\]
 
-`browser` is MindRoom's local OpenClaw-style browser controller for multi-step browser sessions, snapshots, screenshots, PDFs, uploads, dialogs, and low-level actions.
+`browser` is MindRoom's local browser controller for multi-step browser sessions, snapshots, screenshots, PDFs, uploads, dialogs, and low-level actions.
 
 #### What It Does
 
-`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, and `act`. It manages named browser profiles, with `openclaw` as the default profile name. It creates tabs, tracks the active tab, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls. `snapshot()` can return either `ai` or `aria` format. `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`. Only `target="host"` is supported on this branch, so OpenClaw compatibility fields for sandbox or node targeting currently return an error. If `output_dir` is unset, screenshots and PDFs are written under `<storage>/browser`. The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
+`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, and `act`. It manages named browser profiles, with `mindroom` as the default profile name. It creates tabs, tracks the active tab, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls. `snapshot()` can return either `ai` or `aria` format. `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`. Only `target="host"` is supported on this branch, so sandbox or node targeting fields currently return an error. If `output_dir` is unset, screenshots and PDFs are written under `<storage>/browser`. The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
 #### Configuration
 
@@ -615,9 +615,7 @@ browser(action="screenshot", fullPage=True)
 
 #### Notes
 
-- `browser` is the closest match to OpenClaw's browser workflow inside MindRoom.
 - This tool is local Playwright automation rather than a hosted browser API.
-- Use the dedicated [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/index.md) guide for the broader OpenClaw compatibility story and preset behavior.
 
 ### \[`web_browser_tools`\]
 
@@ -657,5 +655,4 @@ open_page("https://matrix.org/blog/", new_window=True)
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/index.md)
-- [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/index.md)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)

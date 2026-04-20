@@ -6,7 +6,6 @@ This directory contains utility scripts for MindRoom self-hosting.
 
 ### 🧪 Testing
 - **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
-- **`browser-login-cinny.py`** - Open a persistent Chromium profile for one-time Cinny login
 
 ### 🔧 Utilities
 - **`utilities/cleanup_agent_edits.sh`** - Clean up agent-edited files in Matrix database
@@ -35,14 +34,6 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 ### Benchmark Matrix performance
 ```bash
 ./scripts/testing/benchmark_matrix_throughput.py
-```
-
-### Seed a persistent Cinny login
-Run the helper once per runtime and browser profile, log in until the Cinny room timeline is visible, then press Enter to close the headed browser.
-The persistent Chromium profile lives at `<storage_root>/browser-profiles/<profile>`, so later browser-tool runs reuse the same localStorage-backed session.
-
-```bash
-uv run python scripts/browser-login-cinny.py --config-path /path/to/config.yaml --url http://localhost:8090/
 ```
 
 ### Generate and sync managed avatars

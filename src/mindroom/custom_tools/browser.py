@@ -1,7 +1,6 @@
-"""OpenClaw-style browser tool for MindRoom.
+"""Browser tool for MindRoom.
 
-This exposes a single ``browser`` function with an ``action`` parameter,
-matching OpenClaw's tool surface at a high level.
+This exposes a single ``browser`` function with an ``action`` parameter.
 """
 # ruff: noqa: N803, A002
 
@@ -26,7 +25,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-DEFAULT_PROFILE = "openclaw"
+DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
@@ -250,7 +249,7 @@ def clear_stale_singleton_locks(profile_dir: Path) -> None:
 
 
 class BrowserTools(Toolkit):
-    """OpenClaw-style browser control for MindRoom agents."""
+    """Browser control for MindRoom agents."""
 
     def __init__(self, runtime_paths: RuntimePaths, *, output_dir: Path | str | None = None) -> None:
         super().__init__(name="browser", tools=[self.browser])
@@ -312,8 +311,8 @@ class BrowserTools(Toolkit):
         Args:
             action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act)
             target: Browser target location. Only ``host`` is currently supported.
-            node: Node id (OpenClaw compatibility field; unsupported in MindRoom runtime).
-            profile: Browser profile name (defaults to ``openclaw``).
+            node: Node id compatibility field; unsupported in MindRoom runtime.
+            profile: Browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
             targetId: Tab target id for actions that address a specific tab.
             limit: Snapshot item limit.

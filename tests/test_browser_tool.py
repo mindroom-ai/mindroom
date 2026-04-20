@@ -1,4 +1,4 @@
-"""Tests for OpenClaw-style BrowserTools."""
+"""Tests for BrowserTools."""
 
 from __future__ import annotations
 
@@ -54,12 +54,12 @@ def test_profile_dir_distinct_names_yield_distinct_paths(tmp_path: Path) -> None
         process_env={},
     )
 
-    openclaw_dir = profile_dir(runtime_paths, "openclaw")
+    mindroom_dir = profile_dir(runtime_paths, "mindroom")
     chrome_dir = profile_dir(runtime_paths, "chrome")
     profiles_root = (runtime_paths.storage_root / "browser-profiles").resolve()
 
-    assert openclaw_dir != chrome_dir
-    assert openclaw_dir.parent == profiles_root
+    assert mindroom_dir != chrome_dir
+    assert mindroom_dir.parent == profiles_root
     assert chrome_dir.parent == profiles_root
 
 
@@ -70,11 +70,11 @@ def test_profile_dir_clamps_existing_dir_to_0700(tmp_path: Path) -> None:
         storage_path=tmp_path,
         process_env={},
     )
-    target = tmp_path / "browser-profiles" / "openclaw"
+    target = tmp_path / "browser-profiles" / "mindroom"
     target.mkdir(parents=True)
     target.chmod(0o755)
 
-    result = profile_dir(runtime_paths, "openclaw")
+    result = profile_dir(runtime_paths, "mindroom")
 
     assert result == target.resolve()
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
@@ -127,7 +127,7 @@ def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
         process_env={"BROWSER_EXECUTABLE_PATH": "/right"},
     )
 
-    launch_kwargs = persistent_launch_kwargs(runtime_paths, "openclaw", headless=True)
+    launch_kwargs = persistent_launch_kwargs(runtime_paths, "mindroom", headless=True)
 
     assert launch_kwargs["executable_path"] == "/right"
 
@@ -240,7 +240,7 @@ async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPat
     open_tab = AsyncMock(
         return_value={
             "action": "open",
-            "profile": "openclaw",
+            "profile": "mindroom",
             "status": "ok",
             "targetId": "tab-1",
             "title": "Example",
@@ -252,7 +252,7 @@ async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPat
     raw = await tool.browser(action="open", targetUrl="https://example.com")
     payload = json.loads(raw)
 
-    open_tab.assert_awaited_once_with("openclaw", "https://example.com")
+    open_tab.assert_awaited_once_with("mindroom", "https://example.com")
     assert payload["action"] == "open"
     assert payload["status"] == "ok"
     assert payload["targetId"] == "tab-1"
@@ -285,7 +285,7 @@ async def test_act_unknown_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValueError, match="Unsupported act kind: unknown"):
         await tool._act(
-            profile_name="openclaw",
+            profile_name="mindroom",
             request={"kind": "unknown"},
             fallback_target_id=None,
         )
@@ -310,7 +310,7 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(tool, "_resolve_tab", resolve_tab)
 
     payload = await tool._act(
-        profile_name="openclaw",
+        profile_name="mindroom",
         request={
             "kind": "click",
             "ref": "e1",
@@ -321,7 +321,7 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
         fallback_target_id="fallback-tab",
     )
 
-    ensure_profile.assert_awaited_once_with("openclaw")
+    ensure_profile.assert_awaited_once_with("mindroom")
     resolve_tab.assert_awaited_once_with(mock_state, "fallback-tab")
     locator.assert_called_once_with("#submit")
     click.assert_awaited_once_with(button="right", click_count=2, modifiers=["Alt"])
@@ -344,7 +344,7 @@ async def test_act_fill_requires_at_least_one_valid_field(monkeypatch: pytest.Mo
 
     with pytest.raises(ValueError, match="valid ref or selector"):
         await tool._act(
-            profile_name="openclaw",
+            profile_name="mindroom",
             request={"kind": "fill", "fields": [{"value": "hello"}]},
             fallback_target_id=None,
         )
@@ -408,11 +408,11 @@ async def test_ensure_profile_uses_runtime_browser_executable(
     context = _FakeContext(pages=[])
     launch_kwargs, _playwright = _install_fake_persistent_playwright(monkeypatch, context=context)
 
-    state = await tool._ensure_profile("openclaw")
+    state = await tool._ensure_profile("mindroom")
 
     assert launch_kwargs["headless"] is True
     assert launch_kwargs["service_workers"] == "block"
-    assert launch_kwargs["user_data_dir"] == str(runtime_paths.storage_root / "browser-profiles" / "openclaw")
+    assert launch_kwargs["user_data_dir"] == str(runtime_paths.storage_root / "browser-profiles" / "mindroom")
     assert launch_kwargs["viewport"] == {"height": 720, "width": 1280}
     assert launch_kwargs["executable_path"] == "/opt/custom-browser"
     context.new_page.assert_awaited_once_with()
@@ -434,7 +434,7 @@ async def test_ensure_profile_creates_user_data_dir_on_disk(
     context = _FakeContext(pages=[])
     launch_kwargs, _playwright = _install_fake_persistent_playwright(monkeypatch, context=context)
 
-    await tool._ensure_profile("openclaw")
+    await tool._ensure_profile("mindroom")
 
     user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
     assert user_data_dir.is_dir()
@@ -480,7 +480,7 @@ async def test_ensure_profile_rehydrates_existing_pages(
     register_tab = MagicMock(side_effect=["tab-1", "tab-2"])
     monkeypatch.setattr(tool, "_register_tab", register_tab)
 
-    state = await tool._ensure_profile("openclaw")
+    state = await tool._ensure_profile("mindroom")
 
     assert register_tab.call_args_list == [
         ((state, page_one),),
@@ -496,9 +496,9 @@ async def test_stop_profile_closes_context_only() -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     context = SimpleNamespace(close=AsyncMock())
     playwright = SimpleNamespace(stop=AsyncMock())
-    tool._profiles["openclaw"] = _BrowserProfileState(playwright=playwright, context=context)
+    tool._profiles["mindroom"] = _BrowserProfileState(playwright=playwright, context=context)
 
-    await tool._stop_profile("openclaw")
+    await tool._stop_profile("mindroom")
 
     context.close.assert_awaited_once_with()
     playwright.stop.assert_awaited_once_with()
@@ -533,7 +533,7 @@ async def test_stop_profile_holds_lock_through_shutdown(
     old_context = _FakeContext(pages=[_FakePage()])
     old_context.close = AsyncMock(side_effect=close_context)
     old_playwright = SimpleNamespace(stop=AsyncMock(side_effect=stop_playwright))
-    tool._profiles["openclaw"] = _BrowserProfileState(playwright=old_playwright, context=old_context)
+    tool._profiles["mindroom"] = _BrowserProfileState(playwright=old_playwright, context=old_context)
 
     new_context = _FakeContext(pages=[_FakePage()])
 
@@ -554,10 +554,10 @@ async def test_stop_profile_holds_lock_through_shutdown(
 
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FakePlaywrightStarter())
 
-    stop_task = asyncio.create_task(tool._stop_profile("openclaw"))
+    stop_task = asyncio.create_task(tool._stop_profile("mindroom"))
     await shutdown_started.wait()
 
-    ensure_task = asyncio.create_task(tool._ensure_profile("openclaw"))
+    ensure_task = asyncio.create_task(tool._ensure_profile("mindroom"))
     await asyncio.sleep(0)
 
     assert not launch_started.is_set()
@@ -589,7 +589,7 @@ async def test_screenshot_selector_uses_locator_screenshot(
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
 
     payload = await tool._screenshot(
-        profile_name="openclaw",
+        profile_name="mindroom",
         target_id=None,
         full_page=True,
         ref="e1",
