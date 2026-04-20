@@ -28,7 +28,7 @@ from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_me
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.streaming import StreamDeliveryState, StreamingResponse, send_streaming_response
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -212,6 +212,7 @@ class StreamingDeliveryRequest:
     show_tool_calls: bool = False
     extra_content: dict[str, Any] | None = None
     tool_trace_collector: list[ToolTraceEntry] | None = None
+    stream_state: StreamDeliveryState | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
@@ -244,6 +245,7 @@ class FinalizeStreamedResponseRequest:
     correlation_id: str
     tool_trace: list[ToolTraceEntry] | None
     extra_content: dict[str, Any] | None
+    stream_state: StreamDeliveryState | None = None
     cleanup_suppressed_streamed_event: bool = False
 
 
@@ -633,6 +635,7 @@ class DeliveryGateway:
             room_mode=request.target.is_room_mode,
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
+            stream_state=request.stream_state,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             latest_thread_event_id=latest_thread_event_id,
@@ -660,6 +663,8 @@ class DeliveryGateway:
                 visible_response_event_id=request.streamed_event_id,
             )
             if request.cleanup_suppressed_streamed_event:
+                if request.stream_state is not None:
+                    request.stream_state.suppressed_and_cleaned = True
                 return await self.cleanup_suppressed_streamed_response(
                     room_id=request.target.room_id,
                     event_id=request.streamed_event_id,
@@ -686,6 +691,11 @@ class DeliveryGateway:
             or draft.extra_content != request.extra_content
         )
         if needs_final_edit:
+            terminal_extra_content = dict(draft.extra_content or {})
+            terminal_extra_content[constants.STREAM_STATUS_KEY] = (request.extra_content or {}).get(
+                constants.STREAM_STATUS_KEY,
+                constants.STREAM_STATUS_COMPLETED,
+            )
             return await self.deliver_final(
                 FinalDeliveryRequest(
                     target=request.target,
@@ -695,7 +705,7 @@ class DeliveryGateway:
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
                     tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
+                    extra_content=terminal_extra_content,
                     apply_before_hooks=False,
                 ),
             )

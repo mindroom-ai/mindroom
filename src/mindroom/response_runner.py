@@ -58,7 +58,9 @@ from mindroom.post_response_effects import (
     ResponseOutcome,
 )
 from mindroom.streaming import (
+    PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
+    StreamDeliveryState,
     StreamingDeliveryError,
     StreamingResponse,
     build_restart_interrupted_body,
@@ -87,10 +89,10 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
+from .response_lifecycle import DeliveryOutcome, ResponseLifecycle, StreamingRepair
 
 if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
-from .response_lifecycle import DeliveryOutcome, ResponseLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -440,6 +442,39 @@ class ResponseRunner:
         if restart:
             return build_restart_interrupted_body(""), {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
         return _CANCELLED_RESPONSE_TEXT, {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED}
+
+    def _latest_stream_event_id(
+        self,
+        *,
+        tracked_event_id: str | None,
+        stream_state: StreamDeliveryState | None,
+        fallback_event_id: str | None = None,
+    ) -> str | None:
+        """Prefer the latest visible stream id captured inside the streaming transport."""
+        if stream_state is not None and stream_state.event_id is not None:
+            return stream_state.event_id
+        return tracked_event_id or fallback_event_id
+
+    def _build_streaming_repair(
+        self,
+        *,
+        target: MessageTarget,
+        response_text: str,
+        tool_trace: list[Any] | None,
+        extra_content: dict[str, Any] | None,
+    ) -> StreamingRepair:
+        """Build one lifecycle repair payload for a missed terminal stream edit."""
+        visible_text = response_text if response_text.strip() else PROGRESS_PLACEHOLDER
+        visible_text = interactive.parse_and_format_interactive(
+            visible_text,
+            extract_mapping=False,
+        ).formatted_text
+        return StreamingRepair(
+            target=target,
+            response_text=visible_text,
+            tool_trace=tool_trace if tool_trace else None,
+            extra_content=extra_content,
+        )
 
     @property
     def in_flight_response_count(self) -> int:
@@ -1146,6 +1181,7 @@ class ResponseRunner:
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
+        stream_state = StreamDeliveryState()
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = self._active_response_event_ids(request.room_id)
         team_turn_recorder = self._build_turn_recorder(
@@ -1230,6 +1266,7 @@ class ResponseRunner:
                                 header=None,
                                 show_tool_calls=show_tool_calls,
                                 streaming_cls=ReplacementStreamingResponse,
+                                stream_state=stream_state,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
                             ),
@@ -1272,6 +1309,7 @@ class ResponseRunner:
                             correlation_id=resolved_correlation_id,
                             tool_trace=None,
                             extra_content=None,
+                            stream_state=stream_state,
                             cleanup_suppressed_streamed_event=(
                                 delivery_request.existing_event_is_placeholder
                                 or delivery_request.existing_event_id is None
@@ -1419,8 +1457,11 @@ class ResponseRunner:
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,
             )
-            if tracked_event_id is None:
-                tracked_event_id = run_message_id
+            tracked_event_id = self._latest_stream_event_id(
+                tracked_event_id=tracked_event_id,
+                stream_state=stream_state,
+                fallback_event_id=run_message_id,
+            )
         except StreamingDeliveryError as error:
             self.deps.logger.exception("Error in team streaming response", error=str(error.error))
             delivery_failure_reason = str(error.error)
@@ -1459,6 +1500,16 @@ class ResponseRunner:
                 delivery_result=delivery_result,
                 delivery_failure_reason=delivery_failure_reason,
                 tracked_event_id=tracked_event_id,
+                stream_finalization=stream_state.finalization_outcome,
+                stream_state=stream_state,
+                streaming_repair=self._build_streaming_repair(
+                    target=delivery_target,
+                    response_text=(
+                        delivery_result.response_text if delivery_result is not None else stream_state.accumulated_text
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
+                ),
             ),
             build_post_response_outcome=lambda resolved_event_id: ResponseOutcome(
                 resolved_event_id=resolved_event_id,
@@ -1764,6 +1815,7 @@ class ResponseRunner:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
+        stream_state: StreamDeliveryState | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> tuple[str | None, str]:
         """Run one streaming AI request and send the streamed Matrix response."""
@@ -1991,10 +2043,14 @@ class ResponseRunner:
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
+        stream_state: StreamDeliveryState | None = None,
+        tool_trace_collector: list[Any] | None = None,
+        run_metadata_content_collector: dict[str, Any] | None = None,
     ) -> DeliveryResult:
         """Process a message and send a streamed response."""
         if not request.prompt.strip():
             return DeliveryResult(event_id=request.existing_event_id, response_text="", delivery_kind=None)
+        local_stream_state = stream_state or StreamDeliveryState()
 
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
@@ -2026,9 +2082,9 @@ class ResponseRunner:
             create_storage=history_storage_factory,
         )
         compaction_outcomes: list[CompactionOutcome] = []
-        run_metadata_content: dict[str, Any] = {}
+        run_metadata_content = run_metadata_content_collector if run_metadata_content_collector is not None else {}
         active_event_ids = self._active_response_event_ids(request.room_id)
-        tool_trace: list[Any] = []
+        tool_trace = tool_trace_collector if tool_trace_collector is not None else []
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
@@ -2046,6 +2102,7 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
+                    stream_state=local_stream_state,
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -2142,6 +2199,7 @@ class ResponseRunner:
                     correlation_id=request.correlation_id,
                     tool_trace=tool_trace if self._show_tool_calls() else None,
                     extra_content=response_extra_content,
+                    stream_state=local_stream_state,
                     cleanup_suppressed_streamed_event=(
                         request.existing_event_is_placeholder or request.existing_event_id is None
                     ),
@@ -2258,6 +2316,9 @@ class ResponseRunner:
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
+        stream_state = StreamDeliveryState()
+        tool_trace: list[Any] = []
+        run_metadata_content: dict[str, Any] = {}
         resolved_correlation_id = self._correlation_id_for_request(request)
         resolved_response_envelope = self._response_envelope_for_request(
             request,
@@ -2318,6 +2379,9 @@ class ResponseRunner:
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
                     on_delivery_started=note_delivery_started,
+                    stream_state=stream_state,
+                    tool_trace_collector=tool_trace,
+                    run_metadata_content_collector=run_metadata_content,
                 )
             else:
                 delivery_result = await self.process_and_respond(
@@ -2344,8 +2408,11 @@ class ResponseRunner:
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,
             )
-            if tracked_event_id is None:
-                tracked_event_id = run_message_id
+            tracked_event_id = self._latest_stream_event_id(
+                tracked_event_id=tracked_event_id,
+                stream_state=stream_state,
+                fallback_event_id=run_message_id,
+            )
         except Exception as error:
             if not delivery_stage_started:
                 raise
@@ -2356,6 +2423,16 @@ class ResponseRunner:
                 delivery_result=delivery_result,
                 delivery_failure_reason=delivery_failure_reason,
                 tracked_event_id=tracked_event_id,
+                stream_finalization=stream_state.finalization_outcome,
+                stream_state=stream_state,
+                streaming_repair=self._build_streaming_repair(
+                    target=resolved_target,
+                    response_text=(
+                        delivery_result.response_text if delivery_result is not None else stream_state.accumulated_text
+                    ),
+                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    extra_content=_merge_response_extra_content(run_metadata_content, request.attachment_ids),
+                ),
             ),
             build_post_response_outcome=lambda resolved_event_id: ResponseOutcome(
                 resolved_event_id=resolved_event_id,

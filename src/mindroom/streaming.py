@@ -6,8 +6,9 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from html import escape
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, Literal
+
+from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -60,7 +61,28 @@ _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
-_StreamInputChunk = StreamInputChunk
+_StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+_TerminalStreamStatus = Literal["completed", "cancelled", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class StreamFinalizationOutcome:
+    """Report whether terminal stream state is already visible or needs outer repair."""
+
+    terminal_landed: bool
+    terminal_event_id: str | None
+    terminal_status: _TerminalStreamStatus
+    reason: str
+
+
+@dataclass(slots=True)
+class StreamDeliveryState:
+    """Capture one streaming delivery's latest visible event and terminal outcome."""
+
+    event_id: str | None = None
+    accumulated_text: str = ""
+    finalization_outcome: StreamFinalizationOutcome | None = None
+    suppressed_and_cleaned: bool = False
 
 
 class StreamingDeliveryError(Exception):
@@ -73,12 +95,14 @@ class StreamingDeliveryError(Exception):
         event_id: str | None,
         accumulated_text: str,
         tool_trace: list[ToolTraceEntry],
+        finalization_outcome: StreamFinalizationOutcome | None = None,
     ) -> None:
         super().__init__(str(error))
         self.error = error
         self.event_id = event_id
         self.accumulated_text = accumulated_text
         self.tool_trace = tool_trace.copy()
+        self.finalization_outcome = finalization_outcome
 
 
 def _build_streaming_delivery_error(
@@ -304,9 +328,8 @@ class StreamingResponse:
         cancelled: bool = False,
         restart_interrupted: bool = False,
         error: Exception | None = None,
-    ) -> None:
-        """Send final message update."""
-        self._warmup_state.clear_for_terminal_transition()
+    ) -> StreamFinalizationOutcome:
+        """Send the terminal update and report whether it became visible."""
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
             error_note = _format_stream_error_note(error)
@@ -324,17 +347,47 @@ class StreamingResponse:
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
-        final_stream_status = STREAM_STATUS_COMPLETED
+        final_stream_status: _TerminalStreamStatus = STREAM_STATUS_COMPLETED
         if error is not None or restart_interrupted:
             final_stream_status = STREAM_STATUS_ERROR
         elif cancelled:
             final_stream_status = STREAM_STATUS_CANCELLED
-        send_succeeded = await self._send_or_edit_message(
-            client,
-            is_final=True,
-            allow_empty_progress=has_placeholder,
-            stream_status=final_stream_status,
-        )
+        try:
+            send_succeeded = await self._send_or_edit_message(
+                client,
+                is_final=True,
+                allow_empty_progress=has_placeholder,
+                stream_status=final_stream_status,
+            )
+        except asyncio.CancelledError:
+            logger.warning(
+                "Terminal streaming update was cancelled before it landed",
+                event_id=self.event_id,
+                room_id=self.room_id,
+                stream_status=final_stream_status,
+                exc_info=True,
+            )
+            return StreamFinalizationOutcome(
+                terminal_landed=False,
+                terminal_event_id=self.event_id,
+                terminal_status=final_stream_status,
+                reason="terminal_update_cancelled",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Terminal streaming update raised after retries",
+                event_id=self.event_id,
+                room_id=self.room_id,
+                stream_status=final_stream_status,
+                reason=str(exc),
+                exc_info=True,
+            )
+            return StreamFinalizationOutcome(
+                terminal_landed=False,
+                terminal_event_id=self.event_id,
+                terminal_status=final_stream_status,
+                reason=f"terminal_update_exception:{exc.__class__.__name__}",
+            )
         if not send_succeeded:
             logger.warning(
                 "Failed to persist terminal stream status",
@@ -342,6 +395,18 @@ class StreamingResponse:
                 room_id=self.room_id,
                 stream_status=final_stream_status,
             )
+            return StreamFinalizationOutcome(
+                terminal_landed=False,
+                terminal_event_id=self.event_id,
+                terminal_status=final_stream_status,
+                reason="terminal_update_failed",
+            )
+        return StreamFinalizationOutcome(
+            terminal_landed=True,
+            terminal_event_id=self.event_id,
+            terminal_status=final_stream_status,
+            reason="terminal_update_applied",
+        )
 
     async def _send_or_edit_message(
         self,
@@ -530,8 +595,9 @@ class StreamingResponse:
         retry_on_failure: bool = False,
     ) -> bool:
         """Send a new event or edit the existing one."""
-        attempts = 2 if retry_on_failure else 1
-        for attempt in range(1, attempts + 1):
+        max_retries = 5 if retry_on_failure else 0
+        total_attempts = max_retries + 1
+        for attempt in range(1, total_attempts + 1):
             try:
                 if self.event_id is None:
                     logger.debug("Sending initial streaming message", attempt=attempt)
@@ -551,15 +617,18 @@ class StreamingResponse:
                     room_id=self.room_id,
                     exc_info=True,
                 )
-                if attempt == attempts:
+                if attempt == total_attempts:
                     raise
-            if attempt < attempts:
+            if attempt < total_attempts:
+                backoff_seconds = 2**attempt
                 logger.warning(
                     "Retrying failed terminal streaming update",
                     attempt=attempt,
                     event_id=self.event_id,
                     room_id=self.room_id,
+                    backoff_seconds=backoff_seconds,
                 )
+                await asyncio.sleep(backoff_seconds)
         return False
 
 
@@ -577,7 +646,86 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.chars_since_last_update += len(new_chunk)
 
 
-async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
+async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
+    client: nio.AsyncClient,
+    response_stream: AsyncIterator[_StreamInputChunk],
+    streaming: StreamingResponse,
+) -> None:
+    """Consume stream chunks and apply incremental message updates."""
+    pending_tools: list[tuple[str, int]] = []
+
+    async for chunk in response_stream:
+        # Handle different types of chunks from the stream
+        if isinstance(chunk, str):
+            text_chunk = chunk
+        elif isinstance(chunk, StructuredStreamChunk):
+            text_chunk = chunk.content
+            if chunk.tool_trace is not None:
+                streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
+        elif isinstance(chunk, RunContentEvent) and chunk.content:
+            text_chunk = str(chunk.content)
+        elif isinstance(chunk, ToolCallStartedEvent):
+            if not streaming.show_tool_calls:
+                if chunk.tool is not None:
+                    streaming._ensure_hidden_tool_gap()
+                await streaming._throttled_send(client, progress_hint=True)
+                continue
+
+            tool_index = len(streaming.tool_trace) + 1
+            text_chunk, trace_entry = format_tool_started_event(chunk.tool, tool_index=tool_index)
+            if trace_entry is not None:
+                streaming.tool_trace.append(trace_entry)
+                pending_tools.append((trace_entry.tool_name, tool_index))
+        elif isinstance(chunk, ToolCallCompletedEvent):
+            info = extract_tool_completed_info(chunk.tool)
+            if info:
+                tool_name, result = info
+                if streaming.show_tool_calls:
+                    match_pos = next(
+                        (pos for pos in range(len(pending_tools) - 1, -1, -1) if pending_tools[pos][0] == tool_name),
+                        None,
+                    )
+                    if match_pos is None:
+                        logger.warning(
+                            "Missing pending tool start in streaming response; skipping completion marker",
+                            tool_name=tool_name,
+                        )
+                        await streaming._throttled_send(client, progress_hint=True)
+                        continue
+                    _, tool_index = pending_tools.pop(match_pos)
+                    streaming.accumulated_text, trace_entry = complete_pending_tool_block(
+                        streaming.accumulated_text,
+                        tool_name,
+                        result,
+                        tool_index=tool_index,
+                    )
+                    if 0 < tool_index <= len(streaming.tool_trace):
+                        existing_entry = streaming.tool_trace[tool_index - 1]
+                        existing_entry.type = "tool_call_completed"
+                        existing_entry.result_preview = trace_entry.result_preview
+                        existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
+                    else:
+                        logger.warning(
+                            "Missing tool trace slot in streaming response for completion",
+                            tool_name=tool_name,
+                            tool_index=tool_index,
+                            trace_len=len(streaming.tool_trace),
+                        )
+                else:
+                    await streaming._throttled_send(client, progress_hint=True)
+                    continue
+                await streaming._throttled_send(client)
+                continue
+            text_chunk = ""
+        else:
+            logger.debug("unhandled_streaming_event_type", event_type=type(chunk).__name__)
+            continue
+
+        if text_chunk:
+            await streaming.update_content(text_chunk, client)
+
+
+async def send_streaming_response(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
@@ -596,6 +744,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     extra_content: dict[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
+    stream_state: StreamDeliveryState | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
     latest_thread_event_id: str | None = None,
@@ -640,129 +789,50 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         streaming.accumulated_text = ""
         streaming.placeholder_progress_sent = adopt_existing_placeholder
 
-    if header:
-        await streaming.update_content(header, client)
-
-    worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-    progress_task: asyncio.Task[None] | None = None
-    delivery_task: asyncio.Task[None] | None = None
-    loop = asyncio.get_running_loop()
-
-    with worker_progress_pump_scope(loop, worker_progress_queue) as pump:
-        delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
-        progress_task = asyncio.create_task(
-            _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
-        )
-        try:
-            await _consume_stream_with_progress_supervision(
-                response_stream,
-                streaming,
-                progress_task,
-                delivery_task,
-                delivery_queue,
-            )
-            progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if progress_error is None:
-                progress_task = None
-            delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_error is None:
-                delivery_task = None
-            if progress_error is not None:
-                _raise_progress_delivery_error(progress_error)
-            if delivery_error is not None:
-                _raise_nonterminal_delivery_error(delivery_error)
-        except asyncio.CancelledError as exc:
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if cleanup_error is None:
-                progress_task = None
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_cleanup_error is None:
-                delivery_task = None
-            if cleanup_error is not None:
-                logger.warning(
-                    "Worker progress drain raised during cancellation cleanup",
-                    error=str(cleanup_error),
-                )
-            if delivery_cleanup_error is not None:
-                logger.warning(
-                    "Stream delivery controller raised during cancellation cleanup",
-                    error=str(delivery_cleanup_error),
-                )
-                if isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
-                    streaming.restore_last_delivered_state()
-                    raise _build_streaming_delivery_error(
-                        streaming,
-                        delivery_cleanup_error,
-                        tool_trace_collector=tool_trace_collector,
-                    ) from delivery_cleanup_error
-            if is_sync_restart_cancel(exc):
-                logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
-                await streaming.finalize(client, restart_interrupted=True)
-            else:
-                logger.warning(
-                    "Streaming response cancelled — traceback for diagnosis",
-                    message_id=streaming.event_id,
-                    exc_info=True,
-                )
-                await streaming.finalize(client, cancelled=True)
-            raise
-        except Exception as e:
-            delivery_error = e.error if isinstance(e, _NonTerminalDeliveryError) else e
-            logger.exception("Streaming response failed", error=str(delivery_error))
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if cleanup_error is None:
-                progress_task = None
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_cleanup_error is None:
-                delivery_task = None
-            if cleanup_error is not None and cleanup_error is not delivery_error:
-                logger.warning(
-                    "Worker progress drain raised during error cleanup",
-                    error=str(cleanup_error),
-                )
-            if delivery_cleanup_error is not None and delivery_cleanup_error is not delivery_error:
-                logger.warning(
-                    "Stream delivery controller raised during error cleanup",
-                    error=str(delivery_cleanup_error),
-                )
-            shutdown_timeout = None
-            if isinstance(delivery_error, _StreamDeliveryShutdownTimeoutError):
-                shutdown_timeout = delivery_error
-            elif isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
-                shutdown_timeout = delivery_cleanup_error
-            if shutdown_timeout is not None:
-                streaming.restore_last_delivered_state()
-                raise _build_streaming_delivery_error(
-                    streaming,
-                    shutdown_timeout,
-                    tool_trace_collector=tool_trace_collector,
-                ) from shutdown_timeout
-            if isinstance(e, _NonTerminalDeliveryError):
-                streaming.restore_last_delivered_state()
-            await streaming.finalize(client, error=delivery_error)
-            raise _build_streaming_delivery_error(
-                streaming,
-                delivery_error,
-                tool_trace_collector=tool_trace_collector,
-            ) from delivery_error
+    stream_error: Exception | None = None
+    cancellation_error: asyncio.CancelledError | None = None
+    cancellation_traceback = None
+    finalization_outcome: StreamFinalizationOutcome | None = None
+    try:
+        if header:
+            await streaming.update_content(header, client)
+        await _consume_streaming_chunks(client, response_stream, streaming)
+    except asyncio.CancelledError as exc:
+        cancellation_error = exc
+        cancellation_traceback = exc.__traceback__
+        if is_sync_restart_cancel(exc):
+            logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
+            finalization_outcome = await streaming.finalize(client, restart_interrupted=True)
         else:
-            await streaming.finalize(client)
-        finally:
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if cleanup_error is not None:
-                logger.warning(
-                    "Worker progress drain raised during final cleanup",
-                    error=str(cleanup_error),
-                )
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_cleanup_error is not None:
-                logger.warning(
-                    "Stream delivery controller raised during final cleanup",
-                    error=str(delivery_cleanup_error),
-                )
+            logger.warning(
+                "Streaming response cancelled — traceback for diagnosis",
+                message_id=streaming.event_id,
+                exc_info=True,
+            )
+            finalization_outcome = await streaming.finalize(client, cancelled=True)
+    except Exception as e:
+        stream_error = e
+        logger.exception("Streaming response failed", error=str(e))
+        finalization_outcome = await streaming.finalize(client, error=e)
+    else:
+        finalization_outcome = await streaming.finalize(client)
+    finally:
+        if tool_trace_collector is not None:
+            tool_trace_collector[:] = streaming.tool_trace
+        if stream_state is not None:
+            stream_state.event_id = streaming.event_id
+            stream_state.accumulated_text = streaming.accumulated_text
+            stream_state.finalization_outcome = finalization_outcome
 
-    if tool_trace_collector is not None:
-        tool_trace_collector[:] = streaming.tool_trace
+    if cancellation_error is not None:
+        raise cancellation_error.with_traceback(cancellation_traceback)
+    if stream_error is not None:
+        raise StreamingDeliveryError(
+            stream_error,
+            event_id=streaming.event_id,
+            accumulated_text=streaming.accumulated_text,
+            tool_trace=streaming.tool_trace,
+            finalization_outcome=finalization_outcome,
+        ) from stream_error
 
     return streaming.event_id, streaming.accumulated_text
