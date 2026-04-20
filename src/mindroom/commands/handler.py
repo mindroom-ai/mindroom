@@ -524,7 +524,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = get_command_help(topic)
 
     elif command.type == CommandType.RELOAD_PLUGINS:
-        if requester_user_id not in context.config.authorization.global_users:
+        resolved_requester_user_id = context.config.authorization.resolve_alias(requester_user_id)
+        if resolved_requester_user_id not in context.config.authorization.global_users:
             response_text = "❌ Admin only."
         elif context.reload_plugins is None:
             response_text = "❌ Plugin reload unavailable."

@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
@@ -224,6 +225,27 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
     assert all(".ruff_cache" not in path.parts for path in changed_paths)
     assert all(".mypy_cache" not in path.parts for path in changed_paths)
     assert all(".pytest_cache" not in path.parts for path in changed_paths)
+
+
+def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
+    """Plugin tree snapshots should ignore Git metadata files inside watched repos."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+    git_dir = plugin_root / ".git"
+    git_dir.mkdir()
+    git_head = git_dir / "HEAD"
+    git_head.write_text("ref: refs/heads/main\n", encoding="utf-8")
+    git_ref = git_dir / "refs" / "heads" / "main"
+    git_ref.parent.mkdir(parents=True)
+    git_ref.write_text("deadbeef\n", encoding="utf-8")
+
+    snapshot = _tree_snapshot(plugin_root)
+
+    assert hooks_path in snapshot
+    assert git_head not in snapshot
+    assert git_ref not in snapshot
 
 
 @pytest.mark.asyncio

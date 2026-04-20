@@ -20,7 +20,7 @@ def _is_relevant_path(path: Path) -> bool:
     """Return whether one tree entry should participate in change snapshots."""
     if not path.is_file():
         return False
-    if any(part in {"__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache"} for part in path.parts):
+    if any(part in {"__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache", ".git"} for part in path.parts):
         return False
     name = path.name
     return not (name.endswith((".pyc", ".pyo", ".swp", ".swo", "~", ".tmp")) or name.startswith(".#"))
