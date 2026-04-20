@@ -31,6 +31,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed
+from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.dynamic_toolkits import DynamicToolkitSelection, resolve_dynamic_toolkit_selection
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -585,6 +586,54 @@ def _resolve_runtime_worker_tools(
     return default_worker_routed_tools(runtime_tool_names)
 
 
+def _hide_openai_compat_approval_gated_tools(
+    toolkit: Toolkit,
+    *,
+    agent_name: str,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> bool:
+    """Remove approval-gated tool functions from OpenAI-compatible toolkits."""
+    if execution_identity is None or execution_identity.channel != "openai_compat":
+        return True
+
+    hidden_tool_names = {
+        tool_name
+        for tool_name in {*toolkit.functions, *toolkit.async_functions}
+        if tool_may_require_approval(config, tool_name)
+    }
+    if not hidden_tool_names:
+        return True
+
+    toolkit.functions = toolkit.functions.__class__(
+        (tool_name, function) for tool_name, function in toolkit.functions.items() if tool_name not in hidden_tool_names
+    )
+    toolkit.async_functions = toolkit.async_functions.__class__(
+        (tool_name, function)
+        for tool_name, function in toolkit.async_functions.items()
+        if tool_name not in hidden_tool_names
+    )
+    toolkit.requires_confirmation_tools = [
+        tool_name for tool_name in toolkit.requires_confirmation_tools if tool_name not in hidden_tool_names
+    ]
+    toolkit.external_execution_required_tools = [
+        tool_name for tool_name in toolkit.external_execution_required_tools if tool_name not in hidden_tool_names
+    ]
+    toolkit.stop_after_tool_call_tools = [
+        tool_name for tool_name in toolkit.stop_after_tool_call_tools if tool_name not in hidden_tool_names
+    ]
+    toolkit.show_result_tools = [
+        tool_name for tool_name in toolkit.show_result_tools if tool_name not in hidden_tool_names
+    ]
+    logger.info(
+        "Hid approval-gated tools from OpenAI-compatible agent",
+        agent=agent_name,
+        toolkit=toolkit.name,
+        hidden_tools=sorted(hidden_tool_names),
+    )
+    return bool(toolkit.functions or toolkit.async_functions)
+
+
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
 _RICH_PROMPTS = {
     "code": agent_prompts.CODE_AGENT_PROMPT,
@@ -1069,7 +1118,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
             )
-            if toolkit:
+            if toolkit and _hide_openai_compat_approval_gated_tools(
+                toolkit,
+                agent_name=agent_name,
+                config=config,
+                execution_identity=execution_identity,
+            ):
                 tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))
         except (ValueError, ImportError) as exc:
             logger.warning(

@@ -593,6 +593,26 @@ async def evaluate_tool_approval(
     return require_approval, matched_rule, script_path, timeout_seconds
 
 
+def tool_may_require_approval(
+    config: Config,
+    tool_name: str,
+) -> bool:
+    """Return whether one tool name should be hidden on approval-free surfaces.
+
+    This is a conservative, name-only check used for surfaces such as `/v1`
+    where there is no approval transport. Script-backed rules are treated as
+    approval-gated because the static exposure check has no call arguments.
+    """
+    approval_config = config.tool_approval
+    for rule in approval_config.rules:
+        if not fnmatchcase(tool_name, rule.match):
+            continue
+        if rule.action is not None:
+            return rule.action == "require_approval"
+        return True
+    return approval_config.default == "require_approval"
+
+
 def get_approval_store() -> ApprovalStore | None:
     """Return the module-level approval store when initialized."""
     return _STORE

@@ -22,8 +22,6 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.api import config_lifecycle
 
 # Import routers
-from mindroom.api.approvals import router as approvals_router
-from mindroom.api.approvals import websocket_router as approvals_websocket_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult
 from mindroom.api.config_lifecycle import api_runtime_paths as api_request_runtime_paths
 from mindroom.api.config_lifecycle import load_config_into_app as load_api_config_into_app
@@ -54,7 +52,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
-from mindroom.tool_approval import initialize_approval_store
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
@@ -286,7 +283,6 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             ),
         )
         config_lifecycle.register_api_app(api_app)
-        initialize_approval_store(runtime_paths)
         return
 
     config_lock = previous_state.config_lock
@@ -314,7 +310,6 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         )
         api_app.state.api_state = current_state
     config_lifecycle.register_api_app(api_app)
-    initialize_approval_store(runtime_paths)
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
@@ -976,8 +971,6 @@ def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastA
 
 
 # Include routers
-app.include_router(approvals_router, dependencies=[Depends(verify_user)])
-app.include_router(approvals_websocket_router)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(google_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])

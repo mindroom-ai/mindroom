@@ -1,0 +1,32 @@
+name: tach
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/tach.yml"
+      - "pyproject.toml"
+      - "tach.toml"
+      - "uv.lock"
+      - "src/**"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dev dependencies
+        run: uv sync --group dev
+
+      - name: Run narrow Tach checks
+        run: uv run tach check --dependencies --interfaces
