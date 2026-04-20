@@ -102,13 +102,16 @@ class BotRoomLifecycle:
         save_invited_rooms(self.invited_rooms_file_path(), self.invited_rooms)
 
     async def join_configured_rooms(self) -> None:
-        """Join all rooms this bot is configured for."""
+        """Join all rooms this bot should preserve across restarts."""
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or [])
         current_rooms.update(client.rooms)
+        desired_rooms = set(self.deps.get_configured_rooms())
+        if self.should_persist_invited_rooms():
+            desired_rooms.update(self.invited_rooms)
 
-        for room_id in self.deps.get_configured_rooms():
+        for room_id in desired_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
                 await self.deps.on_configured_room_joined(room_id)
