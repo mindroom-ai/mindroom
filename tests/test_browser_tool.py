@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -471,6 +472,73 @@ async def test_stop_profile_closes_context_only() -> None:
 
     context.close.assert_awaited_once_with()
     playwright.stop.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_stop_profile_holds_lock_through_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Restarting a profile should wait for shutdown to finish before relaunching Chromium."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+    shutdown_started = asyncio.Event()
+    allow_shutdown = asyncio.Event()
+    launch_started = asyncio.Event()
+    events: list[str] = []
+
+    async def close_context() -> None:
+        events.append("close-start")
+        shutdown_started.set()
+        await allow_shutdown.wait()
+        events.append("close-end")
+
+    async def stop_playwright() -> None:
+        events.append("stop")
+
+    old_context = _FakeContext(pages=[_FakePage()])
+    old_context.close = AsyncMock(side_effect=close_context)
+    old_playwright = SimpleNamespace(stop=AsyncMock(side_effect=stop_playwright))
+    tool._profiles["openclaw"] = _BrowserProfileState(playwright=old_playwright, context=old_context)
+
+    new_context = _FakeContext(pages=[_FakePage()])
+
+    class _FakeChromium:
+        async def launch_persistent_context(self, **_kwargs: object) -> _FakeContext:
+            events.append("launch")
+            launch_started.set()
+            return new_context
+
+    class _FakePlaywright:
+        def __init__(self) -> None:
+            self.chromium = _FakeChromium()
+            self.stop = AsyncMock()
+
+    class _FakePlaywrightStarter:
+        async def start(self) -> _FakePlaywright:
+            return _FakePlaywright()
+
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FakePlaywrightStarter())
+
+    stop_task = asyncio.create_task(tool._stop_profile("openclaw"))
+    await shutdown_started.wait()
+
+    ensure_task = asyncio.create_task(tool._ensure_profile("openclaw"))
+    await asyncio.sleep(0)
+
+    assert not launch_started.is_set()
+    assert not ensure_task.done()
+    assert events == ["close-start"]
+
+    allow_shutdown.set()
+    await stop_task
+    await ensure_task
+
+    assert events == ["close-start", "close-end", "stop", "launch"]
 
 
 @pytest.mark.asyncio

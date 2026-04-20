@@ -1018,10 +1018,10 @@ class BrowserTools(Toolkit):
     async def _stop_profile(self, profile_name: str) -> None:
         async with self._lock:
             state = self._profiles.pop(profile_name, None)
-        if state is None:
-            return
-        await state.context.close()
-        await state.playwright.stop()
+            if state is None:
+                return
+            await state.context.close()
+            await state.playwright.stop()
 
     async def _resolve_tab(
         self,
