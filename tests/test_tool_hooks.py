@@ -1296,7 +1296,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
         runtime_paths,
     )
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator._capture_main_loop()
+    orchestrator._capture_runtime_loop()
 
     client = MagicMock()
     client.room_send = AsyncMock(
