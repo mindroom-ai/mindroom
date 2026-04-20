@@ -1,6 +1,6 @@
-# REVIEW-C.md (Round 3)
+# REVIEW-C.md (Round 4)
 ## Verdict: APPROVE
 ## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
-1. No findings.
+None.
 ## Final summary
-APPROVE. The R2 fix closes the late-joiner gap and the finalize/cancel suffix-leak race without introducing a new blocker in the reviewed cancel-safety and ISSUE-178 finalize paths.
+APPROVE because the round-3 regression test now exercises the real 1.0s poll cadence with a controllable monotonic clock, and I did not find any remaining cancel/finalize warmup-suffix leak in the ISSUE-178 interaction path.
