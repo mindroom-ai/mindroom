@@ -1,6 +1,6 @@
-# REVIEW-G.md
-## Verdict: CHANGES REQUIRED
+# REVIEW-G.md (Round 3)
+## Verdict: APPROVE
 ## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
-1. [MAJOR] tests/test_workloop_thread_scope.py:87 - The new `_plugin_checkout_available()` skip guard hard-codes `types.py`, so on the current workloop checkout where ISSUE-180 renamed that module to `runtime.py` this entire regression file is spuriously skipped and real thread-scope breakages stop being tested. Fix it by removing this scope-creep file-list guard or updating it to accept `runtime.py` (with a `types.py` fallback only if an older checkout genuinely still needs it).
+None.
 ## Final summary
-The worker-progress implementation itself is structurally clean for this lens, but the added workloop checkout guard is incorrect and weakens the test suite by hiding regressions behind a stale filename check.
+APPROVE. The round-2 fix removed the stale `test_workloop_thread_scope.py` guard I flagged, and the snapshot-replay path stays compact and non-duplicative while the focused ISSUE-183 worker/streaming tests pass cleanly.
