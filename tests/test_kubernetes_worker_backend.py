@@ -8,7 +8,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import pytest
 
@@ -27,6 +27,8 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import kubernetes as kubernetes_backend_module
+from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_resources import ANNOTATION_STARTUP_MANIFEST_HASH
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
@@ -50,6 +52,71 @@ _TEST_TOOL_VALIDATION_SNAPSHOT = {
         "runtime_loadable": True,
     },
 }
+
+
+class _ControlledMonotonicClock:
+    def __init__(self, initial_seconds: float = 0.0) -> None:
+        self._now = initial_seconds
+        self._condition = threading.Condition()
+        self._listeners: list[Callable[[], None]] = []
+
+    def monotonic(self) -> float:
+        with self._condition:
+            return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self.wait_until(self.monotonic() + seconds)
+
+    def wait_until(self, target_seconds: float) -> None:
+        with self._condition:
+            while self._now < target_seconds:
+                self._condition.wait(timeout=0.1)
+
+    def advance_to(self, target_seconds: float) -> None:
+        with self._condition:
+            assert target_seconds >= self._now
+            self._now = target_seconds
+            listeners = tuple(self._listeners)
+            self._condition.notify_all()
+        for listener in listeners:
+            listener()
+
+    def add_listener(self, listener: Callable[[], None]) -> None:
+        with self._condition:
+            self._listeners.append(listener)
+
+
+class _ControlledCondition:
+    def __init__(self, clock: _ControlledMonotonicClock) -> None:
+        self._clock = clock
+        self._condition = threading.Condition()
+        self._wakeups = 0
+        self._clock.add_listener(self._notify_from_clock)
+
+    def __enter__(self) -> Self:
+        self._condition.__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._condition.__exit__(exc_type, exc, tb)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else self._clock.monotonic() + timeout
+        while True:
+            if self._wakeups > 0:
+                self._wakeups -= 1
+                return True
+            if deadline is not None and self._clock.monotonic() >= deadline:
+                return True
+            self._condition.wait(timeout=0.1)
+
+    def notify_all(self) -> None:
+        self._wakeups += 1
+        self._condition.notify_all()
+
+    def _notify_from_clock(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
 
 
 def _load_startup_manifest(
@@ -275,6 +342,9 @@ def _install_real_elapsed_wait_for_ready(
     ready_after_seconds: float,
     ready_gate: threading.Event | None = None,
     poll_interval_seconds: float = 0.01,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    on_iteration: Callable[[float], None] | None = None,
 ) -> None:
     object.__setattr__(
         backend.config,
@@ -291,18 +361,20 @@ def _install_real_elapsed_wait_for_ready(
         on_poll_tick: Callable[[float], None] | None = None,
     ) -> object:
         del deployment_ready_fn
-        started_at = time.monotonic()
+        started_at = monotonic()
         deadline = started_at + timeout_seconds
         while True:
-            elapsed_seconds = time.monotonic() - started_at
+            elapsed_seconds = monotonic() - started_at
+            if on_iteration is not None:
+                on_iteration(elapsed_seconds)
             if elapsed_seconds >= ready_after_seconds and (ready_gate is None or ready_gate.is_set()):
                 deployment = self.read_deployment(deployment_name)
                 assert deployment is not None
                 return deployment
-            assert time.monotonic() < deadline
+            assert monotonic() < deadline
             if on_poll_tick is not None:
                 on_poll_tick(elapsed_seconds)
-            time.sleep(poll_interval_seconds)
+            sleep(poll_interval_seconds)
 
     backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
 
@@ -1194,35 +1266,89 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert worker_id not in _core_api.services
 
 
-@pytest.mark.parametrize(
-    ("ready_after_seconds", "expected_phases"),
-    [
-        (0.8, []),
-        (1.4, []),
-        (1.7, ["cold_start", "ready"]),
-        (6.0, ["cold_start", "waiting", "ready"]),
-        (12.0, ["cold_start", "waiting", "waiting", "ready"]),
-    ],
-)
 def test_kubernetes_backend_progress_respects_real_elapsed_time(
-    ready_after_seconds: float,
-    expected_phases: list[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Progress should follow reporter-owned elapsed deadlines instead of poll-tick cadence."""
+    """Cold-start progress should fire on the 1.5s grace deadline even with 1.0s polling."""
     backend, _apps_api, _core_api = _backend()
     events: list[WorkerReadyProgress] = []
+    cold_start_seen = threading.Event()
+    ensure_worker_returned = threading.Event()
+    first_poll_seen = threading.Event()
+    clock = _ControlledMonotonicClock()
+    handle: list[object] = []
+    errors: list[BaseException] = []
+
+    def sink(progress: WorkerReadyProgress) -> None:
+        events.append(progress)
+        if progress.phase == "cold_start":
+            cold_start_seen.set()
+
+    monkeypatch.setattr(
+        kubernetes_backend_module,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, time=time.time),
+    )
+    monkeypatch.setattr(
+        kubernetes_backend_module,
+        "threading",
+        SimpleNamespace(
+            Condition=lambda: _ControlledCondition(clock),
+            Thread=threading.Thread,
+            Lock=threading.Lock,
+        ),
+    )
     _install_real_elapsed_wait_for_ready(
         backend,
-        ready_after_seconds=ready_after_seconds,
+        ready_after_seconds=1.7,
+        poll_interval_seconds=kubernetes_resources_module._READY_POLL_INTERVAL_SECONDS,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        on_iteration=lambda _elapsed_seconds: first_poll_seen.set(),
     )
 
-    backend.ensure_worker(
-        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
-        now=10.0,
-        progress_sink=events.append,
-    )
+    def ensure_worker() -> None:
+        try:
+            handle.append(
+                backend.ensure_worker(
+                    WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+                    now=10.0,
+                    progress_sink=sink,
+                ),
+            )
+        except BaseException as exc:  # pragma: no cover - raised explicitly below
+            errors.append(exc)
+        finally:
+            ensure_worker_returned.set()
 
-    assert [event.phase for event in events] == expected_phases
+    worker_thread = threading.Thread(target=ensure_worker)
+    worker_thread.start()
+
+    assert first_poll_seen.wait(timeout=1.0)
+    clock.advance_to(1.0)
+    assert not cold_start_seen.wait(timeout=0.1)
+    assert not ensure_worker_returned.is_set()
+
+    clock.advance_to(1.5)
+    assert cold_start_seen.wait(timeout=1.0)
+    assert not ensure_worker_returned.is_set()
+
+    clock.advance_to(1.7)
+    assert not ensure_worker_returned.is_set()
+
+    clock.advance_to(2.0)
+    worker_thread.join(timeout=1.0)
+    assert ensure_worker_returned.is_set()
+
+    if errors:
+        raise errors[0]
+
+    assert len(handle) == 1
+    assert [event.phase for event in events] == ["cold_start", "ready"]
+    assert 1.5 <= events[0].elapsed_seconds <= 1.7
+    assert events[1].elapsed_seconds >= 2.0
+
+    assert handle[0].worker_key == _TEST_SCOPED_WORKER_KEY_A
 
 
 def test_kubernetes_backend_skips_progress_for_warm_worker() -> None:
