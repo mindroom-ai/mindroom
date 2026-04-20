@@ -316,6 +316,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
+        caller_label: str = "unknown",
     ) -> str | None:
         """Resolve canonical thread membership for one event."""
         return await resolve_event_thread_id(
@@ -325,6 +326,7 @@ class ConversationResolver:
             access=self.thread_membership_access(
                 full_history=full_history,
                 dispatch_safe=dispatch_safe,
+                caller_label=caller_label,
             ),
         )
 
@@ -347,6 +349,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
+        caller_label: str = "unknown",
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver."""
         return thread_messages_thread_membership_access(
@@ -357,6 +360,7 @@ class ConversationResolver:
                 thread_id,
                 full_history=full_history,
                 dispatch_safe=dispatch_safe,
+                caller_label=caller_label,
             ),
         )
 
@@ -367,6 +371,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
+        caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve one thread read through the shared cache entrypoint."""
         return await self.deps.conversation_cache.get_thread_messages(
@@ -374,6 +379,7 @@ class ConversationResolver:
             thread_id,
             full_history=full_history,
             dispatch_safe=dispatch_safe,
+            caller_label=caller_label,
         )
 
     async def _event_info_for_event_id(
@@ -400,6 +406,7 @@ class ConversationResolver:
         event_info: EventInfo,
         *,
         event_id: str | None = None,
+        caller_label: str = "unknown",
     ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]:
         """Derive conversation context from canonical Matrix thread membership."""
         is_thread, thread_id, thread_history, _requires_full_thread_history = await self._resolve_thread_context(
@@ -408,6 +415,7 @@ class ConversationResolver:
             event_info,
             full_history=True,
             dispatch_safe=False,
+            caller_label=caller_label,
         )
         return is_thread, thread_id, thread_history
 
@@ -419,6 +427,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
+        caller_label: str = "unknown",
     ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage], bool]:
         """Resolve one thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(
@@ -427,6 +436,7 @@ class ConversationResolver:
             event_info,
             full_history=full_history,
             dispatch_safe=dispatch_safe,
+            caller_label=caller_label,
         )
         if thread_id is None:
             return False, None, [], False
@@ -436,6 +446,7 @@ class ConversationResolver:
             thread_id,
             full_history=full_history,
             dispatch_safe=dispatch_safe,
+            caller_label=caller_label,
         )
         if full_history:
             return True, thread_id, thread_messages, False
@@ -524,6 +535,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
+        caller_label: str = "unknown",
     ) -> MessageContext:
         """Resolve event metadata, mentions, and thread history for one inbound turn."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
@@ -569,6 +581,7 @@ class ConversationResolver:
                 event_info,
                 full_history=full_history,
                 dispatch_safe=dispatch_safe,
+                caller_label=caller_label,
             )
 
         return MessageContext(
@@ -597,6 +610,7 @@ class ConversationResolver:
             event,
             full_history=True,
             dispatch_safe=True,
+            caller_label="dispatch_hydration",
         )
         context.thread_history = full_context.thread_history
         context.is_thread = full_context.is_thread
@@ -621,6 +635,8 @@ class ConversationResolver:
         _client: nio.AsyncClient,
         room_id: str,
         thread_id: str,
+        *,
+        caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Fetch strict post-lock thread history through the shared conversation-cache policy."""
         return await self._read_thread_messages(
@@ -628,4 +644,5 @@ class ConversationResolver:
             thread_id,
             full_history=True,
             dispatch_safe=True,
+            caller_label=caller_label,
         )

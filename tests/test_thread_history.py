@@ -692,6 +692,8 @@ class TestThreadHistory:
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
             trusted_sender_ids=(),
+            caller_label="unknown",
+            coordinator_queue_wait_ms=0.0,
         )
 
     @pytest.mark.asyncio
@@ -741,6 +743,8 @@ class TestThreadHistory:
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
             trusted_sender_ids=(),
+            caller_label="unknown",
+            coordinator_queue_wait_ms=0.0,
         )
 
     @pytest.mark.asyncio
@@ -2929,3 +2933,76 @@ class TestThreadHistoryCache:
         assert room_stale_revalidated is False
         assert [message.event_id for message in history] == ["$thread_root", "$reply1", "$reply2"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_logs_refresh_diagnostics_for_cache_miss(self) -> None:
+        """Homeserver refills should emit the phase-1 diagnostics line with miss metadata."""
+        logger = MagicMock()
+        refreshed_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="refreshed",
+                event_id="$thread_root",
+                content={"body": "refreshed"},
+            ),
+        ]
+
+        with (
+            patch.object(matrix_client_module, "logger", logger),
+            patch(
+                "mindroom.matrix.client_thread_history._load_cached_thread_history_if_usable",
+                new=AsyncMock(
+                    return_value=(
+                        None,
+                        {
+                            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
+                        },
+                    ),
+                ),
+            ),
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
+                new=AsyncMock(
+                    return_value=MagicMock(
+                        history=refreshed_history,
+                        event_sources=[{"event_id": "$thread_root"}],
+                        fetch_ms=91.2,
+                        room_scan_pages=7,
+                        scanned_event_count=42,
+                        resolution_ms=8.6,
+                        sidecar_hydration_ms=4.4,
+                    ),
+                ),
+            ),
+            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()),
+        ):
+            history = await matrix_client_module.fetch_thread_history(
+                AsyncMock(),
+                "!room:localhost",
+                "$thread_root",
+                event_cache=_event_cache(),
+                caller_label="cache_miss_test",
+                coordinator_queue_wait_ms=45.6,
+            )
+
+        assert [message.event_id for message in history] == ["$thread_root"]
+        refreshed_log = next(
+            call
+            for call in logger.info.call_args_list
+            if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
+        )
+        assert refreshed_log.kwargs == {
+            "room_id": "!room:localhost",
+            "thread_id": "$thread_root",
+            "caller_label": "cache_miss_test",
+            "mode": "full_scan",
+            "cache_read_ms": 0.0,
+            "homeserver_fetch_ms": 91.2,
+            "homeserver_scan_pages": 7,
+            "homeserver_scanned_event_count": 42,
+            "homeserver_thread_event_count": 1,
+            "resolution_ms": 8.6,
+            "sidecar_hydration_ms": 4.4,
+            "coordinator_queue_wait_ms": 45.6,
+            "cache_reject_reason": "no_cache_state",
+        }

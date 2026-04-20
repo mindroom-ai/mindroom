@@ -3169,8 +3169,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(event.event_id)
-            .with_response_event_id("$cancelled"),
+            HandledTurnState.from_source_event_id(event.event_id).with_response_event_id("$cancelled"),
         )
 
     @pytest.mark.asyncio
@@ -3992,7 +3991,17 @@ class TestAgentBot:
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
 
-        async def cached_history_refresh(_room_id: str, _thread_id: str) -> list[ResolvedVisibleMessage]:
+        async def cached_history_refresh(
+            _room_id: str,
+            _thread_id: str,
+            *,
+            full_history: bool,
+            dispatch_safe: bool,
+            caller_label: str,
+        ) -> list[ResolvedVisibleMessage]:
+            assert full_history is True
+            assert dispatch_safe is True
+            assert caller_label == "dispatch_post_lock_refresh"
             return fresh_history
 
         with (
@@ -4015,7 +4024,7 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_dispatch_thread_history",
+                "get_thread_messages",
                 new=AsyncMock(side_effect=cached_history_refresh),
             ) as mock_get_thread_history,
             patch_response_runner_module(
@@ -4036,7 +4045,13 @@ class TestAgentBot:
                 )
 
         assert _handled_response_event_id(resolution) == "$response"
-        mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
+        mock_get_thread_history.assert_awaited_once_with(
+            "!test:localhost",
+            "$thread",
+            full_history=True,
+            dispatch_safe=True,
+            caller_label="dispatch_post_lock_refresh",
+        )
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history
         assert request.thread_history[0].stream_status == STREAM_STATUS_COMPLETED
@@ -7793,6 +7808,8 @@ class TestAgentBot:
             runtime_started_at=bot._runtime_view.runtime_started_at,
             cache_write_guard_started_at=ANY,
             trusted_sender_ids=trusted_sender_ids,
+            caller_label="unknown",
+            coordinator_queue_wait_ms=0.0,
         )
 
     @pytest.mark.asyncio
