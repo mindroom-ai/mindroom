@@ -4,152 +4,277 @@
 
 Proposed and approved for planning.
 
+This version replaces the earlier design that tried to retrofit interrupted replay across several existing layers.
+
 ## Problem
 
-MindRoom currently treats completed turns as canonical Agno replay history and treats interrupted self-turns as a special Matrix-side prompt overlay.
+MindRoom currently spreads one product requirement across four different places.
 
-That split makes the read path harder to understand and causes interrupted tool state to depend on visible Matrix message reconstruction.
+`stop.py` decides when a turn is interrupted.
 
-It also creates a mismatch between what the agent most needs to see next and what the trusted persisted history model actually contains.
+`ai.py` and `teams.py` hold the live partial execution state.
 
-## Goals
+`history` code decides what gets persisted and replayed.
 
-Interrupted self-turns should be visible to the next top-level turn in the same session.
+`execution_preparation.py` decides what the next prompt sees.
 
-The next turn should see partial assistant text and trusted tool-call state without depending on Matrix `io.mindroom.tool_trace` replay.
+That split has no single owner for the invariant that matters.
 
-The canonical history model should be easier to explain as one trusted persisted lane.
+The invariant is: every top-level self turn must become exactly one canonical history record, whether it completed or was interrupted.
 
-The prompt prefix should change once when an interruption happens and then become stable again.
+Because no layer owns that invariant end to end, every fix keeps missing a combination such as agent versus team, streaming versus non-streaming, or graceful cancellation versus hard task cancellation.
 
-## Non-Goals
+## Product Requirement
 
-This design does not change how completed turns are replayed.
+After an interrupted self turn, the next top-level turn should see the same core facts it would see after a completed turn.
 
-This design does not include `error` or `paused` runs in replay.
+The next turn should see the triggering user message.
 
-This design does not replay member child-runs inside teams.
+The next turn should see any assistant text that was actually produced.
 
-This design does not trust room event payloads as the source of truth for interrupted self-history.
+The next turn should see completed tool calls and any known in-flight tool calls.
+
+The next turn should see that the previous turn was interrupted rather than completed.
+
+This should come from one trusted canonical history record, not from ad hoc prompt overlays or untrusted Matrix payload reconstruction.
 
 ## Recommendation
 
-Persist canonical interrupted replay snapshots into the same Agno session history used for normal completed replay.
+Create one response-lifecycle-owned interruption recorder and make it the only writer of canonical interrupted turn history.
 
-Keep `unseen` thread context only for newer external messages that have not yet been persisted into trusted history.
+Execution code should emit trusted runtime facts into that recorder.
 
-Represent interrupted self-turns as replayable top-level runs with explicit interrupted markers instead of raw `RunStatus.cancelled` replay.
+Stop handling should signal interruption through that recorder before cancellation completes.
 
-Keep the original cancellation fact in metadata for analytics and delivery behavior.
+History replay should consume the recorder's finalized canonical turn records and nothing else for self-turn reconstruction.
 
-## Why This Approach
+The unseen Matrix overlay should go back to its narrower job of carrying only newer external messages that happened after the last persisted canonical turn.
 
-Agno already owns the main persisted history lane, so the cleanest mental model is that session history is the agent-visible truth.
+## Why This Design Is Better
 
-Cancelled turns should be part of that truth for coding-style continuation workflows.
+This design is better because it moves the guarantee to the only place that can actually enforce it.
 
-Agno's native `get_messages()` skips cancelled runs by default, so replaying raw cancelled runs would require patching vendor semantics and would still not solve hard-cancel-before-persist cleanly.
+The response lifecycle already sits at the boundary where a turn starts, streams or runs, completes or is interrupted, and hands control back to delivery and history code.
 
-A canonical interrupted replay snapshot avoids that problem while keeping replay deterministic.
+If that lifecycle owns the canonical turn record, then cancellation, state capture, persistence, and replay all line up behind one invariant.
 
-## Scope
+That removes the current cross-product of edge cases where each layer partially understands interruption and no layer fully owns it.
 
-The design applies only to top-level self-authored interrupted turns in the same agent or team scope and the same session.
+It also gives the simplest mental model for future work.
 
-For individual agents, that means one top-level interrupted turn for the same `room_id` or `room_id:thread_id` session.
+Canonical history becomes the full self-authored past.
 
-For teams, that means the top-level team response only and not member child-runs.
+The unseen overlay becomes newer external Matrix messages only.
 
-## Data Model
+## Rejected Approaches
 
-Add one internal `InterruptedReplaySnapshot` runtime collector.
+### Patch the current design in place
 
-The collector stores partial assistant text, completed tool calls, interrupted tool calls, Matrix linkage, seen event IDs, and interruption reason.
+Reject this approach because it keeps the same ownership problem.
 
-Persist the snapshot into the session DB as one replayable top-level run in the same scope as a normal completed turn.
+It can fix individual holes, but every new hole appears at a boundary between stop handling, execution, persistence, and prompt assembly.
 
-Set replay metadata such as `mindroom_replay_state=interrupted`.
+### Replay raw cancelled Agno runs directly
 
-Set lifecycle metadata such as `mindroom_original_status=cancelled`.
+Reject this approach because raw cancelled runs are not a good canonical replay shape.
 
-If Agno already persisted a raw cancelled run for the same top-level run, rewrite that run in place into the canonical interrupted replay form instead of keeping both versions.
+They are also skipped by Agno replay today, and relying on vendor run status alone still does not solve hard task cancellation cleanly.
 
-## Canonical Interrupted Content
+### Reconstruct interrupted self turns from Matrix message payloads
 
-Interrupted replay content must be deterministic and minimal.
+Reject this approach because Matrix room payloads are not the trusted source of truth for internal self-turn replay.
 
-The canonical content order is partial assistant text first, tool replay blocks second, and one short terminal marker last.
+It also keeps replay correctness entangled with visible message formatting.
 
-The terminal marker should be a fixed string such as `[interrupted by user]`.
+## Core Invariant
 
-Completed tools should be rendered in the same trusted history form that the next prompt expects.
+Every top-level self turn finalizes as exactly one canonical turn record.
 
-Started-but-not-completed tools should be rendered as interrupted and must never look completed.
+The canonical turn record has an explicit terminal state of either `completed` or `interrupted`.
 
-If there is no partial text and no tool state, no interrupted replay snapshot should be persisted.
+The next turn reads canonical turn records as the agent-visible self history.
 
-## Write Path
+No other subsystem should reconstruct interrupted self turns independently.
 
-The response lifecycle should collect interrupted replay state from trusted runtime events rather than from Matrix message payloads.
+## Architecture
 
-Tool collection must happen even when `show_tool_calls` is false because user-facing visibility and replay correctness are different concerns.
+### Turn Recorder
 
-On normal completion, the current completed-turn persistence path stays unchanged.
+Add one internal `TurnRecorder` for every top-level response run.
 
-On interruption, the lifecycle persists one canonical interrupted replay snapshot into the same session and scope.
+The recorder is created by the response runner before execution begins.
 
-The snapshot becomes part of normal persisted replay for the next turn.
+The recorder is owned by the response lifecycle rather than by `ai.py` or `teams.py`.
+
+The recorder accumulates trusted runtime facts only.
+
+Those facts are:
+
+- the triggering user message
+- the canonical session and scope identifiers
+- assistant text deltas
+- completed tool calls
+- in-flight tool calls
+- seen external event ids for the turn
+- the final outcome of the turn
+
+### Execution Adapters
+
+`ai.py` and `teams.py` should stop deciding how interrupted replay is persisted.
+
+Their job becomes emitting execution facts into the `TurnRecorder`.
+
+For streaming runs, that means forwarding content deltas, tool-start events, tool-complete events, and completion or cancellation events.
+
+For non-streaming runs, that means forwarding the final `RunOutput` or `TeamRunOutput` when one exists.
+
+If a non-streaming run is hard-cancelled before any trusted runtime facts arrive, the recorder may still finalize an interrupted turn with only the user message and an interrupted marker.
+
+That is acceptable because it is truthful.
+
+The system must not invent partial assistant text that it never observed.
+
+### Stop Boundary
+
+`stop.py` should not be responsible for history persistence.
+
+Its job is to signal interruption through the active response lifecycle and then cancel execution.
+
+The response lifecycle should record that interruption was requested before the underlying task is cancelled.
+
+That gives one consistent exit path for graceful cancellation and hard task cancellation.
+
+### Finalization
+
+The response lifecycle must finalize the recorder exactly once.
+
+Finalization happens in one place regardless of whether the run:
+
+- completed normally
+- emitted an explicit cancelled event
+- returned a cancelled run output
+- was hard-cancelled at the task level
+
+Finalization writes one canonical turn record into session history.
+
+If the turn completed, the canonical record is a normal completed turn.
+
+If the turn was interrupted, the canonical record is an interrupted turn with explicit interrupted content.
+
+## Canonical Turn Record
+
+The canonical turn record should be stored in the same trusted session history lane used for normal replay.
+
+The shape should be stable and minimal.
+
+For interrupted turns, the canonical record contains:
+
+- the triggering user message as the user half of the turn
+- assistant content assembled from observed assistant text and tool state
+- one short deterministic terminal marker such as `[interrupted]`
+- metadata marking the turn as interrupted
+
+Completed tools should render using the same trusted replay format the next prompt already expects.
+
+In-flight tools should render as interrupted and must never appear completed.
+
+If no assistant text or tool state was observed before interruption, the assistant content should still include the interrupted marker so the turn remains explicit and stable.
+
+## Persistence Model
+
+Canonical interrupted turn records should be stored in the same session and scope as the completed turns they belong beside.
+
+The persisted metadata should distinguish replay semantics from lifecycle facts.
+
+The replay semantics should say that the record is replayable self history.
+
+The lifecycle metadata should preserve that the original outcome was interrupted.
+
+The exact metadata names can be finalized in implementation, but the distinction matters.
+
+The persisted record must be the only source of truth for self interrupted replay.
 
 ## Read Path
 
-Normal Agno session replay becomes the source of truth for interrupted self-turns.
+Prompt preparation should read canonical persisted self history first.
 
-`execution_preparation.py` should stop reconstructing self partial replies from Matrix thread history.
+Prompt preparation should not reconstruct interrupted self turns from Matrix visible message content.
 
-`unseen` prompt context should be limited to newer external thread messages that happened after the last persisted trusted turn.
+The unseen Matrix overlay should only include newer external messages that happened after the last persisted canonical turn.
 
-This removes the need to rehydrate the agent's own interrupted tool calls from Matrix `io.mindroom.tool_trace`.
+That means:
 
-## Compaction
+- no self interrupted replay from `io.mindroom.tool_trace`
+- no self interrupted replay from visible streaming marker text
+- no second self-history lane competing with canonical replay
 
-Interrupted replay snapshots should be eligible for normal replay and normal compaction because they are canonical persisted history.
+## Scope For V1
 
-The interrupted marker must stay inside the assistant-visible content so compaction does not silently convert incomplete work into completed work.
+This design should stay narrow in the first implementation.
 
-Compaction summaries should preserve that the turn was interrupted rather than fully concluded.
+V1 includes:
+
+- top-level agent turns
+- top-level team turns
+- completed turns
+- interrupted turns
+- completed tools
+- known in-flight tools
+
+V1 excludes:
+
+- child member runs as independent replay units
+- `paused` and `error` as replay outcomes
+- any attempt to reconstruct self interrupted state from room payloads
+- any attempt to invent non-observed assistant content for hard-cancelled non-streaming runs
 
 ## Security
 
-Trusted interrupted self-history must come from internal runtime state and persisted session storage only.
+Trusted interrupted self history must come from internal runtime state and internal persisted session storage only.
 
-Matrix room events should not be treated as authoritative for replaying self interrupted tool state.
+Visible Matrix content is user-visible output, not authoritative replay state.
 
-This keeps the canonical replay lane separate from untrusted participant-authored event content.
+This keeps replay correctness independent from participant-authored room content.
+
+## Migration Plan
+
+The old Matrix self-interruption reconstruction path should be removed rather than kept as a fallback.
+
+Keeping both systems would preserve the current ambiguity about which history lane is authoritative.
+
+Migration should therefore happen as one behavior change:
+
+1. add the lifecycle-owned `TurnRecorder`
+2. route agent and team execution facts into it
+3. finalize canonical interrupted records through one path
+4. remove self interrupted reconstruction from prompt preparation
 
 ## Testing
 
-Add coverage for cancellation after one completed tool call and verify the next turn sees that tool call without rerunning it.
+Add coverage for completed agent turns and completed team turns to prove the normal path is unchanged.
 
-Add coverage for cancellation with `show_tool_calls=false` and verify hidden user-facing tool calls still become trusted replay state.
+Add coverage for streaming interruption after assistant text only.
 
-Add coverage for cancellation during an in-flight tool call and verify the next turn sees an interrupted tool marker rather than a completed result.
+Add coverage for streaming interruption after one completed tool call.
 
-Add coverage that newer user follow-up messages still arrive through `unseen` context while the interrupted self-turn arrives through normal replay.
+Add coverage for streaming interruption with one in-flight tool call.
 
-Add coverage that completed-turn behavior and non-cancelled replay stay unchanged.
+Add coverage for hard task cancellation through the stop path for agent and team runs.
+
+Add coverage for non-streaming interruption where no partial assistant state was observed and verify that the canonical record stays truthful and minimal.
+
+Add coverage that the next prompt reads interrupted self turns from canonical history and that the unseen overlay contains only newer external messages.
 
 ## Simplification Outcome
 
-This design adds a small amount of complexity at the write boundary where interruptions are persisted.
+This design adds one focused subsystem at the response lifecycle boundary.
 
-It removes larger distributed complexity from the read boundary where prompt assembly currently has to merge canonical replay with self partial reconstruction from Matrix state.
+In return, it removes distributed interruption logic from stop handling, execution code, replay helpers, and prompt assembly.
 
-The resulting mental model is simpler because session history becomes the single source of truth for both completed and interrupted self-turns.
+That is a good trade because write-boundary complexity is easier to isolate and test than read-boundary complexity spread across the system.
 
-## Rejected Alternatives
+The resulting mental model is simpler.
 
-Reject replaying raw cancelled Agno runs unchanged because Agno skips them by default and because raw cancelled status is not a good canonical replay shape.
+A turn produces one canonical history record.
 
-Reject keeping the current split and only improving Matrix self-reconstruction because that preserves two competing history systems.
-
-Reject one-off next-prompt notices like "your previous response was cancelled" because they create transient prompt branches instead of stable canonical history.
+The next turn reads canonical history plus newer external messages.
