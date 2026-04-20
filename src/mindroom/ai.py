@@ -101,6 +101,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
+    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1378,6 +1379,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
@@ -1422,6 +1424,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
         model_prompt: Optional model-facing current-turn prompt additions.
+        turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
     Returns:
@@ -1502,6 +1505,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
+            if turn_recorder is not None:
+                turn_recorder.set_run_metadata(metadata)
 
             response: RunOutput | None = None
             attempt_prompt = _copy_run_input(run_input)
@@ -1606,21 +1611,31 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     run_metadata_collector.update(run_metadata)
 
             if response.status == RunStatus.cancelled:
+                partial_text = _extract_interrupted_partial_text(
+                    response.content,
+                    messages=response.messages,
+                )
+                completed_tools = _extract_tool_trace(response)
+                if turn_recorder is not None:
+                    turn_recorder.set_run_metadata(metadata)
+                    turn_recorder.set_assistant_text(partial_text)
+                    turn_recorder.set_completed_tools(completed_tools)
+                    turn_recorder.set_interrupted_tools([])
+                    turn_recorder.mark_interrupted(str(response.content or "Run cancelled"))
                 _persist_interrupted_agent_replay(
                     scope_context=scope_context,
                     session_id=response.session_id or session_id,
                     run_id=response.run_id or attempt_run_id or str(uuid4()),
                     user_message=prompt,
-                    partial_text=_extract_interrupted_partial_text(
-                        response.content,
-                        messages=response.messages,
-                    ),
-                    completed_tools=_extract_tool_trace(response),
+                    partial_text=partial_text,
+                    completed_tools=completed_tools,
                     interrupted_tools=[],
                     run_metadata=metadata,
                     interruption_reason=str(response.content or "Run cancelled"),
                 )
                 interrupted_replay_persisted = True
+                if turn_recorder is not None:
+                    turn_recorder.claim_interrupted_persistence()
                 _raise_agent_run_cancelled(response.content)
             if response.status == RunStatus.error:
                 return get_user_friendly_error_message(
@@ -1628,9 +1643,25 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     agent_name,
                 )
 
-            return _extract_response_content(response, show_tool_calls=show_tool_calls)
+            response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
+            if turn_recorder is not None:
+                turn_recorder.set_run_metadata(metadata)
+                turn_recorder.set_assistant_text(response_text)
+                turn_recorder.set_completed_tools(_extract_tool_trace(response))
+                turn_recorder.set_interrupted_tools([])
+                turn_recorder.mark_completed()
+            return response_text
     except asyncio.CancelledError:
-        if not interrupted_replay_persisted:
+        if turn_recorder is not None:
+            turn_recorder.set_run_metadata(
+                build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+            )
+            turn_recorder.mark_interrupted("Run interrupted")
+        elif not interrupted_replay_persisted:
             _persist_interrupted_agent_replay(
                 scope_context=scope_context,
                 session_id=session_id,
@@ -1768,6 +1799,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
@@ -1810,6 +1842,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
         model_prompt: Optional model-facing current-turn prompt additions.
+        turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
     Yields:
@@ -1894,6 +1927,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
+            if turn_recorder is not None:
+                turn_recorder.set_run_metadata(metadata)
 
             attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
@@ -1979,6 +2014,14 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         return
 
                     if state.cancelled_run_event is not None:
+                        if turn_recorder is not None:
+                            turn_recorder.set_run_metadata(metadata)
+                            turn_recorder.set_assistant_text(state.assistant_text)
+                            turn_recorder.set_completed_tools(state.completed_tools)
+                            turn_recorder.set_interrupted_tools(state.pending_tools)
+                            turn_recorder.mark_interrupted(
+                                state.cancelled_run_event.reason or "Run cancelled",
+                            )
                         if run_metadata_collector is not None:
                             fallback_metrics = _build_model_request_metrics_fallback(
                                 state.request_metric_totals,
@@ -2012,6 +2055,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
                         )
                         interrupted_replay_persisted = True
+                        if turn_recorder is not None:
+                            turn_recorder.claim_interrupted_persistence()
                         _raise_agent_run_cancelled(state.cancelled_run_event.reason)
 
                     break
@@ -2047,6 +2092,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     )
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)
+                if turn_recorder is not None:
+                    turn_recorder.set_run_metadata(metadata)
+                    turn_recorder.set_assistant_text(state.assistant_text)
+                    turn_recorder.set_completed_tools(state.completed_tools)
+                    turn_recorder.set_interrupted_tools([])
+                    turn_recorder.mark_completed()
             finally:
                 cleanup_queued_notice_state(
                     run_output=None,
@@ -2056,7 +2107,19 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     entity_name=agent_name,
                 )
     except asyncio.CancelledError:
-        if not interrupted_replay_persisted:
+        if turn_recorder is not None:
+            turn_recorder.set_run_metadata(
+                build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+            )
+            turn_recorder.set_assistant_text(state.assistant_text)
+            turn_recorder.set_completed_tools(state.completed_tools)
+            turn_recorder.set_interrupted_tools(state.pending_tools)
+            turn_recorder.mark_interrupted("Run interrupted")
+        elif not interrupted_replay_persisted:
             _persist_interrupted_agent_replay(
                 scope_context=scope_context,
                 session_id=session_id,

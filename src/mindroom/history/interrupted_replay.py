@@ -163,8 +163,6 @@ def persist_interrupted_replay_snapshot(
     is_team: bool,
 ) -> None:
     """Persist one canonical interrupted replay snapshot into session history."""
-    if not snapshot.partial_text and not snapshot.completed_tools and not snapshot.interrupted_tools:
-        return
     persisted_session = _load_persisted_session(
         storage=storage,
         session_id=session_id,

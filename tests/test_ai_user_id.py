@@ -108,6 +108,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
+    from agno.run.team import TeamRunOutput
+
 
 def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
     return resolve_runtime_paths(
@@ -1345,6 +1347,71 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
 
 @pytest.mark.asyncio
+async def test_generate_response_locked_persists_minimal_interrupted_history_after_task_cancel(
+    tmp_path: Path,
+) -> None:
+    """Lifecycle-owned agent cancellation should persist one minimal interrupted turn."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    started = asyncio.Event()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        task = asyncio.create_task(response_function("$thinking"))
+        await started.wait()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            started.set()
+            await asyncio.sleep(60)
+            return "unreachable"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].role == "user"
+    assert "Hello" in cast("str", persisted_run.messages[0].content)
+    assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
+        ("assistant", "[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_context(
     tmp_path: Path,
 ) -> None:
@@ -1634,6 +1701,84 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         "stream",
         "deliver:Team hello",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_minimal_interrupted_history_after_task_cancel(
+    tmp_path: Path,
+) -> None:
+    """Lifecycle-owned team cancellation should persist one minimal interrupted turn."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+
+    storage = _SessionStorage()
+    started = asyncio.Event()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        task = asyncio.create_task(response_function("$thinking"))
+        await started.wait()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new_callable=AsyncMock) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+            started.set()
+            await asyncio.sleep(60)
+            return "unreachable"
+
+        mock_team_response.side_effect = fake_team_response
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].role == "user"
+    assert "Hello" in cast("str", persisted_run.messages[0].content)
+    assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
+        ("assistant", "[interrupted]"),
     ]
 
 

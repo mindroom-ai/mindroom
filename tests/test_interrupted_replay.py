@@ -16,6 +16,7 @@ from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
     persist_interrupted_replay_snapshot,
 )
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.tool_system.events import ToolTraceEntry
 
 if TYPE_CHECKING:
@@ -178,5 +179,83 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
         assert persisted is not None
         assert persisted.runs is not None
         assert [run.run_id for run in persisted.runs] == ["old1", "old2", "cancelled-run"]
+    finally:
+        storage.close()
+
+
+def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
+    """TurnRecorder should accumulate trusted interrupted-turn runtime facts."""
+    recorder = TurnRecorder(
+        user_message="Please continue",
+        run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
+    )
+
+    recorder.append_assistant_text("Half")
+    recorder.append_assistant_text(" done")
+    recorder.set_completed_tools(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="run_shell_command",
+                args_preview="cmd=pwd",
+                result_preview="/app",
+            ),
+        ],
+    )
+    recorder.set_interrupted_tools(
+        [
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="save_file",
+                args_preview="file_name=main.py",
+            ),
+        ],
+    )
+    recorder.mark_interrupted("user_cancelled")
+
+    snapshot = recorder.interrupted_snapshot()
+
+    assert snapshot.user_message == "Please continue"
+    assert snapshot.partial_text == "Half done"
+    assert snapshot.seen_event_ids == ("e1",)
+    assert snapshot.source_event_id == "e1"
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+    assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
+    assert snapshot.interruption_reason == "user_cancelled"
+
+
+def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_path: Path) -> None:
+    """Even hard-cancelled turns with no observed assistant state should persist one interrupted record."""
+    storage = create_state_storage_db(
+        "test_agent",
+        tmp_path,
+        subdir="sessions",
+        session_table="test_agent_sessions",
+    )
+    try:
+        snapshot = build_interrupted_replay_snapshot(
+            user_message="Please continue",
+            partial_text="",
+            completed_tools=(),
+            interrupted_tools=(),
+            run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
+            interruption_reason="user_cancelled",
+        )
+
+        persist_interrupted_replay_snapshot(
+            storage=storage,
+            session=None,
+            session_id="session-1",
+            scope_id="test_agent",
+            run_id="cancelled-run",
+            snapshot=snapshot,
+            is_team=False,
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        assert persisted.runs is not None
+        assert len(persisted.runs) == 1
+        assert _assistant_text(persisted.runs[0]) == "[interrupted]"
     finally:
         storage.close()

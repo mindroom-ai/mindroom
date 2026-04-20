@@ -13,7 +13,12 @@ from agno.db.base import SessionType
 
 from mindroom import interactive
 from mindroom.agents import get_agent_session, get_team_session, show_tool_calls_for_agent
-from mindroom.ai import ai_response, queued_message_signal_context, stream_agent_response
+from mindroom.ai import (
+    ai_response,
+    build_matrix_run_metadata,
+    queued_message_signal_context,
+    stream_agent_response,
+)
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -24,6 +29,8 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
+from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -429,6 +436,49 @@ class ResponseRunner:
         return show_tool_calls_for_agent(
             self.deps.runtime.config,
             agent_name or self.deps.agent_name,
+        )
+
+    def _build_turn_recorder(
+        self,
+        *,
+        user_message: str,
+        reply_to_event_id: str,
+        active_event_ids: set[str],
+        matrix_run_metadata: dict[str, Any] | None,
+    ) -> TurnRecorder:
+        """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
+        recorder = TurnRecorder(user_message=user_message)
+        recorder.set_run_metadata(
+            build_matrix_run_metadata(
+                reply_to_event_id,
+                sorted(active_event_ids),
+                extra_metadata=matrix_run_metadata,
+            ),
+        )
+        return recorder
+
+    def _persist_interrupted_turn(
+        self,
+        *,
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+    ) -> None:
+        """Persist one interrupted recorder snapshot exactly once."""
+        if not recorder.claim_interrupted_persistence():
+            return
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
+        persist_interrupted_replay_snapshot(
+            storage=storage,
+            session=None,
+            session_id=session_id,
+            scope_id=session_scope.scope_id,
+            run_id=run_id or str(uuid4()),
+            snapshot=recorder.interrupted_snapshot(),
+            is_team=is_team,
         )
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
@@ -1018,6 +1068,13 @@ class ResponseRunner:
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
+        active_event_ids = self._active_response_event_ids(request.room_id)
+        team_turn_recorder = self._build_turn_recorder(
+            user_message=request.prompt,
+            reply_to_event_id=request.reply_to_event_id,
+            active_event_ids=active_event_ids,
+            matrix_run_metadata=matrix_run_metadata,
+        )
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
@@ -1059,7 +1116,7 @@ class ResponseRunner:
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
                             reply_to_event_id=request.reply_to_event_id,
-                            active_event_ids=self._active_response_event_ids(request.room_id),
+                            active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
                             compaction_outcomes_collector=compaction_outcomes,
                             configured_team_name=self.deps.agent_name
@@ -1068,6 +1125,7 @@ class ResponseRunner:
                             system_enrichment_items=request.system_enrichment_items,
                             reason_prefix=team_request.reason_prefix,
                             matrix_run_metadata=matrix_run_metadata,
+                            turn_recorder=team_turn_recorder,
                         )
 
                     response_stream = self._stream_in_tool_context(
@@ -1092,6 +1150,17 @@ class ResponseRunner:
                         )
                         if event_id is not None:
                             tracked_event_id = event_id
+                    except asyncio.CancelledError:
+                        team_turn_recorder.mark_interrupted("Run interrupted")
+                        self._persist_interrupted_turn(
+                            recorder=team_turn_recorder,
+                            session_scope=session_scope,
+                            session_id=session_id,
+                            execution_identity=tool_dispatch.execution_identity,
+                            run_id=response_run_id,
+                            is_team=True,
+                        )
+                        raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                 if request.pipeline_timing is not None:
@@ -1144,7 +1213,7 @@ class ResponseRunner:
                                     run_id_callback=_note_attempt_run_id,
                                     user_id=requester_user_id,
                                     reply_to_event_id=request.reply_to_event_id,
-                                    active_event_ids=self._active_response_event_ids(request.room_id),
+                                    active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,
                                     compaction_outcomes_collector=compaction_outcomes,
                                     configured_team_name=self.deps.agent_name
@@ -1153,12 +1222,25 @@ class ResponseRunner:
                                     system_enrichment_items=request.system_enrichment_items,
                                     reason_prefix=team_request.reason_prefix,
                                     matrix_run_metadata=matrix_run_metadata,
+                                    turn_recorder=team_turn_recorder,
                                 )
 
-                            response_text = await self._run_in_tool_context(
-                                tool_dispatch=tool_dispatch,
-                                operation=build_response_text,
-                            )
+                            try:
+                                response_text = await self._run_in_tool_context(
+                                    tool_dispatch=tool_dispatch,
+                                    operation=build_response_text,
+                                )
+                            except asyncio.CancelledError:
+                                team_turn_recorder.mark_interrupted("Run interrupted")
+                                self._persist_interrupted_turn(
+                                    recorder=team_turn_recorder,
+                                    session_scope=session_scope,
+                                    session_id=session_id,
+                                    execution_identity=tool_dispatch.execution_identity,
+                                    run_id=response_run_id,
+                                    is_team=True,
+                                )
+                                raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                 except asyncio.CancelledError as exc:
@@ -1476,6 +1558,7 @@ class ResponseRunner:
         run_id: str | None,
         runtime: _PreparedResponseRuntime,
         active_event_ids: set[str],
+        turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
@@ -1516,14 +1599,27 @@ class ResponseRunner:
                 compaction_outcomes_collector=compaction_outcomes,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=request.system_enrichment_items,
+                turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
 
-        async with typing_indicator(self._client(), request.room_id):
-            return await self._run_in_tool_context(
-                tool_dispatch=runtime.tool_dispatch,
-                operation=build_response_text,
+        try:
+            async with typing_indicator(self._client(), request.room_id):
+                return await self._run_in_tool_context(
+                    tool_dispatch=runtime.tool_dispatch,
+                    operation=build_response_text,
+                )
+        except asyncio.CancelledError:
+            turn_recorder.mark_interrupted("Run interrupted")
+            self._persist_interrupted_turn(
+                recorder=turn_recorder,
+                session_scope=self.deps.state_writer.history_scope(),
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
             )
+            raise
 
     @timed("streaming_response_generation")
     async def generate_streaming_ai_response(
@@ -1533,6 +1629,7 @@ class ResponseRunner:
         run_id: str | None,
         runtime: _PreparedResponseRuntime,
         active_event_ids: set[str],
+        turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
@@ -1571,35 +1668,48 @@ class ResponseRunner:
             compaction_outcomes_collector=compaction_outcomes,
             matrix_run_metadata=matrix_run_metadata,
             system_enrichment_items=request.system_enrichment_items,
+            turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
         )
 
-        async with typing_indicator(self._client(), request.room_id):
-            wrapped_response_stream = self._stream_in_tool_context(
-                tool_dispatch=runtime.tool_dispatch,
-                stream_factory=lambda: response_stream,
+        try:
+            async with typing_indicator(self._client(), request.room_id):
+                wrapped_response_stream = self._stream_in_tool_context(
+                    tool_dispatch=runtime.tool_dispatch,
+                    stream_factory=lambda: response_stream,
+                )
+                response_extra_content = _merge_response_extra_content(
+                    run_metadata_content,
+                    request.attachment_ids,
+                )
+                event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
+                    StreamingDeliveryRequest(
+                        target=runtime.resolved_target,
+                        response_stream=wrapped_response_stream,
+                        existing_event_id=request.existing_event_id,
+                        adopt_existing_placeholder=request.existing_event_id is not None
+                        and request.existing_event_is_placeholder,
+                        show_tool_calls=self._show_tool_calls(),
+                        extra_content=response_extra_content,
+                        tool_trace_collector=tool_trace,
+                        streaming_cls=StreamingResponse,
+                        pipeline_timing=request.pipeline_timing,
+                    ),
+                )
+                if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark("streaming_complete")
+                return event_id, accumulated
+        except asyncio.CancelledError:
+            turn_recorder.mark_interrupted("Run interrupted")
+            self._persist_interrupted_turn(
+                recorder=turn_recorder,
+                session_scope=self.deps.state_writer.history_scope(),
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
             )
-            response_extra_content = _merge_response_extra_content(
-                run_metadata_content,
-                request.attachment_ids,
-            )
-            event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
-                StreamingDeliveryRequest(
-                    target=runtime.resolved_target,
-                    response_stream=wrapped_response_stream,
-                    existing_event_id=request.existing_event_id,
-                    adopt_existing_placeholder=request.existing_event_id is not None
-                    and request.existing_event_is_placeholder,
-                    show_tool_calls=self._show_tool_calls(),
-                    extra_content=response_extra_content,
-                    tool_trace_collector=tool_trace,
-                    streaming_cls=StreamingResponse,
-                    pipeline_timing=request.pipeline_timing,
-                ),
-            )
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("streaming_complete")
-            return event_id, accumulated
+            raise
 
     async def process_and_respond(  # noqa: C901
         self,
@@ -1647,6 +1757,12 @@ class ResponseRunner:
         compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(request.room_id)
+        turn_recorder = self._build_turn_recorder(
+            user_message=request.prompt,
+            reply_to_event_id=request.reply_to_event_id,
+            active_event_ids=active_event_ids,
+            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+        )
 
         try:
             try:
@@ -1655,6 +1771,7 @@ class ResponseRunner:
                     run_id=run_id,
                     runtime=runtime,
                     active_event_ids=active_event_ids,
+                    turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
@@ -1765,6 +1882,12 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(request.room_id)
         tool_trace: list[Any] = []
+        turn_recorder = self._build_turn_recorder(
+            user_message=request.prompt,
+            reply_to_event_id=request.reply_to_event_id,
+            active_event_ids=active_event_ids,
+            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+        )
 
         try:
             try:
@@ -1773,6 +1896,7 @@ class ResponseRunner:
                     run_id=run_id,
                     runtime=runtime,
                     active_event_ids=active_event_ids,
+                    turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
