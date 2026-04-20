@@ -5,7 +5,7 @@ icon: lucide/webhook
 # Hooks
 
 Hooks let plugins observe, enrich, and transform messages as they flow through MindRoom.
-A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, circuit-breaker fault isolation, and zero risk of crashing the bot.
+A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, per-event fault isolation, and zero risk of crashing the bot.
 Hooks integrate with the existing [plugin system](plugins.md) and are configured through `config.yaml`.
 
 ## Quick start

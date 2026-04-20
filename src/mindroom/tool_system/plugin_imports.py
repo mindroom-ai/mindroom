@@ -168,7 +168,10 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         return None
 
     module_name, subpath, _explicit = parsed
-    spec = util.find_spec(module_name)
+    try:
+        spec = util.find_spec(module_name)
+    except ModuleNotFoundError:
+        return None
     if spec is None:
         return None
 
