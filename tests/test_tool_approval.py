@@ -54,6 +54,11 @@ def _base_config_kwargs() -> dict[str, object]:
                 role="Help with coding",
                 rooms=["!room:localhost"],
             ),
+            "general": AgentConfig(
+                display_name="General",
+                role="Help generally",
+                rooms=["!room:localhost"],
+            ),
         },
         "models": {
             "default": ModelConfig(provider="openai", id="gpt-5.4"),
@@ -73,12 +78,12 @@ def _runtime_bound_config(
     return bind_runtime_paths(config, runtime_paths)
 
 
-def _agent_bot(tmp_path: Path, *, config: Config) -> AgentBot:
+def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
     bot = AgentBot(
         agent_user=AgentMatrixUser(
-            agent_name="code",
-            user_id="@mindroom_code:localhost",
-            display_name="Code",
+            agent_name=agent_name,
+            user_id=f"@mindroom_{agent_name}:localhost",
+            display_name=agent_name.capitalize(),
             password="test-password",  # noqa: S106
         ),
         storage_path=tmp_path,
@@ -86,7 +91,7 @@ def _agent_bot(tmp_path: Path, *, config: Config) -> AgentBot:
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
-    bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+    bot.client = make_matrix_client_mock(user_id=f"@mindroom_{agent_name}:localhost")
     return bot
 
 
@@ -96,6 +101,7 @@ async def _request_tool_approval(
     sender: AsyncMock | None = None,
     editor: AsyncMock | None = None,
     timeout_seconds: float = 60,
+    requester_id: str = "@user:localhost",
 ) -> tuple[ApprovalManager, asyncio.Task[ApprovalDecision], PendingApproval | None]:
     store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
     task = asyncio.create_task(
@@ -105,7 +111,8 @@ async def _request_tool_approval(
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$thread",
-            requester_id="@user:localhost",
+            requester_id=requester_id,
+            approver_user_id=requester_id,
             matched_rule="run_shell_*",
             script_path=None,
             timeout_seconds=timeout_seconds,
@@ -409,6 +416,7 @@ async def test_request_approval_resolves_from_different_event_loop(tmp_path: Pat
                     room_id="!room:localhost",
                     thread_id="$thread",
                     requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
                     matched_rule="run_shell_*",
                     script_path=None,
                     timeout_seconds=60,
@@ -431,7 +439,7 @@ async def test_request_approval_resolves_from_different_event_loop(tmp_path: Pat
         approval_id=pending[0].id,
         status="approved",
         reason=None,
-        resolved_by="@bas:localhost",
+        resolved_by="@user:localhost",
     )
     thread.join(timeout=1)
 
@@ -440,7 +448,7 @@ async def test_request_approval_resolves_from_different_event_loop(tmp_path: Pat
     assert not thread.is_alive()
     assert result is not None
     assert result.status == "approved"
-    assert result.resolved_by == "@bas:localhost"
+    assert result.resolved_by == "@user:localhost"
     assert editor.await_args.args[3]["status"] == "approved"
     assert store.list_pending() == []
 
@@ -497,6 +505,7 @@ async def test_request_approval_requires_matrix_context(tmp_path: Path) -> None:
         room_id=None,
         thread_id=None,
         requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
         matched_rule="run_shell_*",
         script_path=None,
         timeout_seconds=60,
@@ -504,6 +513,33 @@ async def test_request_approval_requires_matrix_context(tmp_path: Path) -> None:
 
     assert decision.status == "denied"
     assert decision.reason == "Tool approval requires a Matrix room and thread."
+
+
+@pytest.mark.asyncio
+async def test_request_approval_requires_human_requester(tmp_path: Path) -> None:
+    """Agent-authored approval requests should fail closed without sending a card."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+
+    decision = await store.request_approval(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@mindroom_code:localhost",
+        approver_user_id=None,
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=0,
+    )
+
+    assert decision.status == "denied"
+    assert decision.reason == "Tool approval requires a human requester."
+    sender.assert_not_awaited()
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -519,6 +555,7 @@ async def test_request_approval_expires_when_matrix_send_fails(tmp_path: Path) -
         room_id="!room:localhost",
         thread_id="$thread",
         requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
         matched_rule="run_shell_*",
         script_path=None,
         timeout_seconds=60,
@@ -542,7 +579,7 @@ async def test_handle_approval_resolution_updates_future_and_card(tmp_path: Path
         approval_id=pending.id,
         status="approved",
         reason=None,
-        resolved_by="@bas:localhost",
+        resolved_by="@user:localhost",
     )
     decision = await task
 
@@ -553,7 +590,7 @@ async def test_handle_approval_resolution_updates_future_and_card(tmp_path: Path
         approval_id=pending.id,
         status="approved",
         reason=None,
-        resolved_by="@bas:localhost",
+        resolved_by="@user:localhost",
     )
     assert handled_again is False
 
@@ -569,7 +606,37 @@ async def test_handle_reaction_approves_by_event_id(tmp_path: Path) -> None:
     handled = await store.handle_reaction(
         approval_event_id="$approval",
         reaction_key="✅",
-        resolved_by="@bas:localhost",
+        resolved_by="@user:localhost",
+    )
+    decision = await task
+
+    assert handled is True
+    assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_handle_reaction_requires_original_requester(tmp_path: Path) -> None:
+    """Only the original requester should be able to resolve a pending approval."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+
+    handled = await store.handle_reaction(
+        approval_event_id="$approval",
+        reaction_key="✅",
+        resolved_by="@other:localhost",
+    )
+
+    assert handled is False
+    assert task.done() is False
+
+    handled = await store.handle_reaction(
+        approval_event_id="$approval",
+        reaction_key="✅",
+        resolved_by="@user:localhost",
     )
     decision = await task
 
@@ -588,7 +655,7 @@ async def test_handle_reply_denies_by_event_id(tmp_path: Path) -> None:
     handled = await store.handle_reply(
         approval_event_id="$approval",
         reason="No destructive commands",
-        resolved_by="@bas:localhost",
+        resolved_by="@user:localhost",
     )
     decision = await task
 
@@ -835,6 +902,51 @@ async def test_bot_reply_denies_pending_tool_call(tmp_path: Path) -> None:
     assert decision.status == "denied"
     assert decision.reason == "Do not run this"
     assert bot._turn_controller.handle_text_event.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_other_bot_can_process_requester_approval_when_local_reply_policy_denies(tmp_path: Path) -> None:
+    """Approval ownership should be tied to the requester, not the observing bot's local reply policy."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=False),
+    ):
+        await bot._handle_reaction_inner(room, reaction)
+
+    decision = await asyncio.wait_for(task, timeout=1)
+    assert decision.status == "approved"
+    assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
 
 
 @pytest.mark.asyncio

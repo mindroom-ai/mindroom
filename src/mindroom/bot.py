@@ -1390,11 +1390,9 @@ class AgentBot:
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 
-    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+    async def _on_unknown_event(self, _room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""
         if event.type != "io.mindroom.tool_approval_response":
-            return
-        if not self._approval_sender_is_allowed(room, event.sender):
             return
 
         approval_id, status, reason = self._approval_response_payload(event)
@@ -1411,22 +1409,6 @@ class AgentBot:
             reason=reason,
             resolved_by=event.sender,
         )
-
-    def _approval_sender_is_allowed(self, room: nio.MatrixRoom, sender: str) -> bool:
-        """Return whether one sender may resolve a pending tool approval."""
-        if not is_authorized_sender(
-            sender,
-            self.config,
-            room.room_id,
-            self.runtime_paths,
-            room_alias=room.canonical_alias,
-        ):
-            self.logger.debug("Ignoring tool approval action from unauthorized sender", user_id=sender)
-            return False
-        if not self._turn_policy.can_reply_to_sender(sender):
-            self.logger.debug("Ignoring tool approval action due to reply permissions", sender=sender)
-            return False
-        return True
 
     @staticmethod
     def _approval_response_payload(
@@ -1457,7 +1439,7 @@ class AgentBot:
 
     async def _maybe_handle_tool_approval_reply(
         self,
-        room: nio.MatrixRoom,
+        _room: nio.MatrixRoom,
         event: nio.RoomMessageText,
     ) -> bool:
         """Consume reply-to-approval messages as denial actions."""
@@ -1468,8 +1450,6 @@ class AgentBot:
         reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
         if reply_to_event_id is None or approval_manager.approval_id_for_event(reply_to_event_id) is None:
             return False
-        if not self._approval_sender_is_allowed(room, event.sender):
-            return True
 
         await approval_manager.handle_reply(
             approval_event_id=reply_to_event_id,
@@ -1482,15 +1462,26 @@ class AgentBot:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
-        if not self._approval_sender_is_allowed(room, event.sender):
-            return
-
         approval_manager = get_approval_store()
         if approval_manager is not None and await approval_manager.handle_reaction(
             approval_event_id=event.reacts_to,
             reaction_key=event.key,
             resolved_by=event.sender,
         ):
+            return
+
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            self.runtime_paths,
+            room_alias=room.canonical_alias,
+        ):
+            self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
+            return
+
+        if not self._turn_policy.can_reply_to_sender(event.sender):
+            self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
             return
 
         if event.key == "🛑":

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,6 +30,7 @@ MatrixEventEditor = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
 
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room and thread."
+_DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
 _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
@@ -68,6 +70,7 @@ class PendingApproval:
     room_id: str | None
     thread_id: str | None
     requester_id: str | None
+    approver_user_id: str
     matched_rule: str
     script_path: str | None
     requested_at: datetime
@@ -126,6 +129,21 @@ class ApprovalManager:
         """Return the approval ID for one Matrix approval event."""
         return self._approval_id_by_event_id.get(event_id)
 
+    def _preflight_request_decision(
+        self,
+        *,
+        room_id: str | None,
+        thread_id: str | None,
+        approver_user_id: str | None,
+    ) -> ApprovalDecision | None:
+        if room_id is None or thread_id is None:
+            return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
+        if approver_user_id is None:
+            return self._new_decision(status="denied", reason=_DEFAULT_MISSING_REQUESTER_REASON, resolved_by=None)
+        if self._send_event is None:
+            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+        return None
+
     async def request_approval(
         self,
         *,
@@ -135,15 +153,23 @@ class ApprovalManager:
         room_id: str | None,
         thread_id: str | None,
         requester_id: str | None,
+        approver_user_id: str | None,
         matched_rule: str,
         script_path: str | None,
         timeout_seconds: float,
     ) -> ApprovalDecision:
         """Send one Matrix approval card and wait for a decision."""
-        if room_id is None or thread_id is None:
-            return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
-        if self._send_event is None:
-            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+        preflight_decision = self._preflight_request_decision(
+            room_id=room_id,
+            thread_id=thread_id,
+            approver_user_id=approver_user_id,
+        )
+        if preflight_decision is not None:
+            return preflight_decision
+        assert approver_user_id is not None
+        assert room_id is not None
+        assert thread_id is not None
+        assert self._send_event is not None
 
         requested_at = _utcnow()
         pending = PendingApproval(
@@ -154,6 +180,7 @@ class ApprovalManager:
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
+            approver_user_id=approver_user_id,
             matched_rule=matched_rule,
             script_path=script_path,
             requested_at=requested_at,
@@ -161,6 +188,7 @@ class ApprovalManager:
             future=Future(),
         )
 
+        event_id: str | None = None
         try:
             event_id = await self._send_event(
                 room_id,
@@ -177,8 +205,6 @@ class ApprovalManager:
                 agent_name=agent_name,
                 exc_info=True,
             )
-            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
-
         if not event_id:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
 
@@ -217,6 +243,9 @@ class ApprovalManager:
         resolved_by: str,
     ) -> bool:
         """Resolve one approval from a Matrix reaction, reply, or custom event."""
+        pending = self._pending_by_id.get(approval_id)
+        if pending is None or pending.approver_user_id != resolved_by:
+            return False
         return (
             await self._resolve_pending(
                 approval_id,
@@ -571,6 +600,19 @@ def tool_requires_approval_for_openai_compat(
         return True
 
     return require_approval
+
+
+def resolve_tool_approval_approver(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str | None,
+) -> str | None:
+    """Return the human requester allowed to resolve one approval request."""
+    if requester_id is None or not requester_id.startswith("@") or ":" not in requester_id:
+        return None
+    if is_agent_id(requester_id, config, runtime_paths):
+        return None
+    return requester_id
 
 
 async def evaluate_tool_approval(

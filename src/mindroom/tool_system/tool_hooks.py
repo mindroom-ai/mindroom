@@ -31,6 +31,7 @@ from mindroom.tool_approval import (
     ToolApprovalScriptError,
     evaluate_tool_approval,
     get_approval_store,
+    resolve_tool_approval_approver,
 )
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -445,6 +446,11 @@ async def _maybe_block_for_tool_approval(
         room_id=resolved_context.room_id,
         thread_id=resolved_context.thread_id,
         requester_id=resolved_context.requester_id,
+        approver_user_id=resolve_tool_approval_approver(
+            resolved_context.config,
+            resolved_context.runtime_paths,
+            resolved_context.requester_id,
+        ),
         matched_rule=matched_rule,
         script_path=script_path,
         timeout_seconds=timeout_seconds,

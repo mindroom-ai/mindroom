@@ -1357,7 +1357,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
         approval_id=pending[0].id,
         status="approved",
         reason=None,
-        resolved_by="@bas:localhost",
+        resolved_by="@user:localhost",
     )
     thread.join(timeout=1)
 

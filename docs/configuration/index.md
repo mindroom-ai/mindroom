@@ -35,6 +35,10 @@ Each rule must set exactly one of `action` or `script`.
 Use `action: require_approval` to always pause the tool call and send a Matrix approval card.
 Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`.
 `timeout_days` sets the default approval expiry window and can be overridden per rule.
+React to the approval card with `✅` to approve the tool call.
+Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
+Only the original human requester can approve or deny their pending tool call.
+Agent-authored or system-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
 ```yaml
