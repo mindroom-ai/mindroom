@@ -151,6 +151,55 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_agent_rejoins_persisted_invited_rooms_on_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Persisted ad-hoc invited rooms should be reconciled during startup joins."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    accept_invites=True,
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    invited_path = _invited_rooms_path(config, "agent1")
+    invited_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_path.write_text('[\n  "!invited-room:localhost"\n]\n', encoding="utf-8")
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    mock_client = AsyncMock()
+    bot.client = mock_client
+
+    join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
+    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
+
+    await bot.join_configured_rooms()
+
+    join_room.assert_awaited_once_with(mock_client, "!invited-room:localhost")
+
+
+@pytest.mark.asyncio
 async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # noqa: ARG001
     """Test that agents leave rooms they're no longer configured for."""
     # Create a mock agent user
