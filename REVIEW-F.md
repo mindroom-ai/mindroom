@@ -1,0 +1,5 @@
+## Verdict: CHANGES REQUIRED
+## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
+1. [BLOCKER] src/mindroom/streaming.py:367 - The warmup suffix is appended to `display_text` before `format_message_with_mentions()` re-runs markdown-to-HTML, so if the streamed reply is currently inside an incomplete markdown construct (for example an open fenced code block) the notice is rendered inside that block in `formatted_body` instead of as a separate status line, which means plain Element/Cinny can visually bury the cold-start notice instead of surfacing it. Compose the warmup notice after the main message content is formatted by appending a separate plain-text suffix to `body` and a separate standalone HTML paragraph to `formatted_body`, so the status block stays isolated from partial markdown while preserving mentions and the existing `m.replace` edit payload shape.
+## Final summary
+I reproduced a real client-rendering bug in the new side-band composition path: mentions and the edit envelope look fine, but the notice is not safely isolated from partial markdown, so the targeted UX regresses exactly when a stream is mid-fence.
