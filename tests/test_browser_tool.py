@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -60,6 +61,23 @@ def test_profile_dir_distinct_names_yield_distinct_paths(tmp_path: Path) -> None
     assert openclaw_dir != chrome_dir
     assert openclaw_dir.parent == profiles_root
     assert chrome_dir.parent == profiles_root
+
+
+def test_profile_dir_clamps_existing_dir_to_0700(tmp_path: Path) -> None:
+    """profile_dir() must clamp permissions even when the dir already exists with looser mode."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    target = tmp_path / "browser-profiles" / "openclaw"
+    target.mkdir(parents=True)
+    target.chmod(0o755)
+
+    result = profile_dir(runtime_paths, "openclaw")
+
+    assert result == target.resolve()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
 
 
 def test_clear_stale_singleton_locks_unlinks_stale_symlink(tmp_path: Path) -> None:
@@ -420,6 +438,7 @@ async def test_ensure_profile_creates_user_data_dir_on_disk(
 
     user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
     assert user_data_dir.is_dir()
+    assert stat.S_IMODE(user_data_dir.stat().st_mode) == 0o700
 
 
 @pytest.mark.asyncio
