@@ -82,6 +82,7 @@ def load_plugins(
     runtime_paths: RuntimePaths,
     *,
     set_skill_roots: bool = True,
+    skip_broken_plugins: bool = True,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     import mindroom.tools  # noqa: F401, PLC0415
@@ -98,7 +99,7 @@ def load_plugins(
         plugin_bases = plugin_imports._collect_plugin_bases(
             plugin_entries,
             runtime_paths,
-            skip_broken_plugins=True,
+            skip_broken_plugins=skip_broken_plugins,
         )
         snapshot = _capture_tool_registry_snapshot()
         try:
@@ -110,6 +111,8 @@ def load_plugins(
                     plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
                 except Exception as exc:
                     _restore_tool_registry_snapshot(plugin_snapshot)
+                    if not skip_broken_plugins:
+                        raise
                     plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
                     continue
                 plugins.append(plugin)
@@ -159,7 +162,7 @@ def reload_plugins(
     cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
     _clear_plugin_reload_caches(roots)
     _evict_synthetic_plugin_subtrees(package_roots)
-    plugins = load_plugins(config, runtime_paths)
+    plugins = load_plugins(config, runtime_paths, skip_broken_plugins=False)
     return PluginReloadResult(
         hook_registry=HookRegistry.from_plugins(plugins),
         active_plugin_names=tuple(plugin.name for plugin in plugins),

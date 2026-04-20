@@ -1906,3 +1906,48 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+def test_reload_plugins_raises_when_configured_plugin_becomes_invalid(tmp_path: Path) -> None:
+    """Explicit reloads should fail closed when a configured plugin breaks."""
+    plugin_root = tmp_path / "plugins" / "broken-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken-reload", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/broken-reload"]), config_path)
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        initial = reload_plugins(config, runtime_paths_for(config))
+        assert initial.active_plugin_names == ("broken-reload",)
+
+        hooks_path.unlink()
+
+        with pytest.raises(plugin_module.PluginValidationError, match="Plugin hooks module not found"):
+            reload_plugins(config, runtime_paths_for(config))
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
