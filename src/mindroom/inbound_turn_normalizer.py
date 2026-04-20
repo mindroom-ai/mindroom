@@ -161,6 +161,7 @@ class InboundTurnNormalizer:
             request.room.room_id,
             event_info,
             event_id=request.event.event_id,
+            caller_label="voice_normalization",
         )
         effective_thread_id = self.deps.conversation_resolver.build_message_target(
             room_id=request.room.room_id,

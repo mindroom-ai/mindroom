@@ -85,6 +85,7 @@ class DeriveConversationContext(Protocol):
         event_info: EventInfo,
         *,
         event_id: str | None = None,
+        caller_label: str = "unknown",
     ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]:
         """Return whether one event is threaded plus its thread id and history."""
 
@@ -495,6 +496,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         room.room_id,
         event_info,
         event_id=event.event_id,
+        caller_label="command_context",
     )
 
     # Commands/tools that persist conversation context should use the same

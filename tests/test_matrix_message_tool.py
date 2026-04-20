@@ -1250,7 +1250,13 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     assert payload["limit"] == MatrixMessageTools._MAX_READ_LIMIT
     assert len(payload["messages"]) == MatrixMessageTools._MAX_READ_LIMIT
     assert "edit_options" in payload
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, ctx.thread_id)
+    ctx.conversation_cache.get_thread_messages.assert_awaited_once_with(
+        ctx.room_id,
+        ctx.thread_id,
+        full_history=True,
+        dispatch_safe=False,
+        caller_label="matrix_message_tool",
+    )
 
 
 @pytest.mark.asyncio
@@ -1324,7 +1330,13 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
     assert payload["edit_options"][0]["event_id"] == "$two"
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_messages.assert_awaited_once_with(
+        ctx.room_id,
+        "$thread-other:localhost",
+        full_history=True,
+        dispatch_safe=False,
+        caller_label="matrix_message_tool",
+    )
 
 
 @pytest.mark.asyncio
@@ -1356,7 +1368,13 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
     assert payload["status"] == "ok"
     assert payload["messages"] == [message.to_dict() for message in thread_messages]
     assert payload["messages"][1]["msgtype"] == "m.notice"
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_messages.assert_awaited_once_with(
+        ctx.room_id,
+        "$thread-other:localhost",
+        full_history=True,
+        dispatch_safe=False,
+        caller_label="matrix_message_tool",
+    )
 
 
 @pytest.mark.asyncio
@@ -2051,7 +2069,13 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
     assert payload["action"] == "read"
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(ctx.room_id, "$thread-other:localhost")
+    ctx.conversation_cache.get_thread_messages.assert_awaited_once_with(
+        ctx.room_id,
+        "$thread-other:localhost",
+        full_history=True,
+        dispatch_safe=False,
+        caller_label="matrix_message_tool",
+    )
     ctx.client.room_messages.assert_not_awaited()
 
 

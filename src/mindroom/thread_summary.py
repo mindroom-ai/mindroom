@@ -175,7 +175,15 @@ async def _load_thread_history(
     thread_id: str,
 ) -> list[ResolvedVisibleMessage]:
     """Load thread history through the explicit conversation-cache seam."""
-    return list(await conversation_cache.get_thread_history(room_id, thread_id))
+    return list(
+        await conversation_cache.get_thread_messages(
+            room_id,
+            thread_id,
+            full_history=True,
+            dispatch_safe=False,
+            caller_label="thread_summary_background",
+        ),
+    )
 
 
 async def _recover_last_summary_count(

@@ -705,7 +705,12 @@ class TurnController:
     ) -> None:
         """Execute one validated interactive selection through the normal response path."""
         thread_history = (
-            await self.deps.resolver.fetch_thread_history(self._client(), room.room_id, selection.thread_id)
+            await self.deps.resolver.fetch_thread_history(
+                self._client(),
+                room.room_id,
+                selection.thread_id,
+                caller_label="interactive_selection",
+            )
             if selection.thread_id
             else []
         )
@@ -1359,7 +1364,7 @@ class TurnController:
         )
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        timing_scope_token = timing_scope_context.set(event.event_id[:20] if event.event_id else "unknown")
+        timing_scope_token = timing_scope_context.set(event.event_id[:20] if event.event_id else "<missing-event-id>")
         try:
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_start")

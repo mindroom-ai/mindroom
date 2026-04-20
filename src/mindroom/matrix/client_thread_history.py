@@ -84,6 +84,34 @@ def _thread_history_result(
     return thread_history_result(history, is_full_history=is_full_history, diagnostics=diagnostics)
 
 
+def _log_thread_history_refresh(
+    *,
+    room_id: str,
+    thread_id: str,
+    caller_label: str,
+    mode: str,
+    diagnostics: Mapping[str, str | int | float | bool],
+    coordinator_queue_wait_ms: float,
+) -> None:
+    """Emit one structured INFO line for a completed thread read."""
+    logger.info(
+        "matrix_cache_thread_history_refreshed",
+        room_id=room_id,
+        thread_id=thread_id,
+        caller_label=caller_label,
+        mode=mode,
+        cache_read_ms=diagnostics.get("cache_read_ms", 0.0),
+        homeserver_fetch_ms=diagnostics.get("homeserver_fetch_ms", 0.0),
+        homeserver_scan_pages=diagnostics.get("homeserver_scan_pages", 0),
+        homeserver_scanned_event_count=diagnostics.get("homeserver_scanned_event_count", 0),
+        homeserver_thread_event_count=diagnostics.get("homeserver_thread_event_count", 0),
+        resolution_ms=diagnostics.get("resolution_ms", 0.0),
+        sidecar_hydration_ms=diagnostics.get("sidecar_hydration_ms", 0.0),
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        cache_reject_reason=diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
+    )
+
+
 class RoomThreadsPageError(ValueError):
     """Raised when a single /threads page request fails."""
 
@@ -517,6 +545,8 @@ async def refresh_thread_history_from_source(
     allow_stale_fallback: bool = True,
     cache_write_guard_started_at: float | None = None,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
+    caller_label: str = "unknown",
+    coordinator_queue_wait_ms: float = 0.0,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
     try:
@@ -539,6 +569,14 @@ async def refresh_thread_history_from_source(
                 cache_reject_diagnostics=cache_reject_diagnostics,
             )
             if stale_history is not None:
+                _log_thread_history_refresh(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    caller_label=caller_label,
+                    mode="full_scan",
+                    diagnostics=stale_history.diagnostics,
+                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                )
                 return stale_history
         raise
     if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
@@ -561,11 +599,20 @@ async def refresh_thread_history_from_source(
     }
     if cache_reject_diagnostics is not None:
         diagnostics.update(cache_reject_diagnostics)
-    return _thread_history_result(
+    result = _thread_history_result(
         fetch_result.history,
         is_full_history=hydrate_sidecars,
         diagnostics=diagnostics,
     )
+    _log_thread_history_refresh(
+        room_id=room_id,
+        thread_id=thread_id,
+        caller_label=caller_label,
+        mode="full_scan",
+        diagnostics=result.diagnostics,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+    )
+    return result
 
 
 async def _store_thread_history_cache(
@@ -659,6 +706,8 @@ async def fetch_thread_history(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    caller_label: str = "unknown",
+    coordinator_queue_wait_ms: float = 0.0,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -688,6 +737,8 @@ async def fetch_thread_history(
         event_cache,
         allow_stale_fallback=True,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        caller_label=caller_label,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
 
 
@@ -698,6 +749,8 @@ async def fetch_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    caller_label: str = "unknown",
+    coordinator_queue_wait_ms: float = 0.0,
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context without hydrating sidecars when a fresh cache hit is unavailable."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -728,6 +781,8 @@ async def fetch_thread_snapshot(
         hydrate_sidecars=False,
         allow_stale_fallback=True,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        caller_label=caller_label,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
 
 
@@ -738,6 +793,8 @@ async def fetch_dispatch_thread_history(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    caller_label: str = "unknown",
+    coordinator_queue_wait_ms: float = 0.0,
 ) -> ThreadHistoryResult:
     """Fetch strict full thread history for dispatch using only fresh cache data or a homeserver refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -768,6 +825,8 @@ async def fetch_dispatch_thread_history(
         hydrate_sidecars=True,
         allow_stale_fallback=False,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        caller_label=caller_label,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
 
 
@@ -779,6 +838,8 @@ async def fetch_dispatch_thread_snapshot(
     *,
     runtime_started_at: float | None = None,
     cache_write_guard_started_at: float | None = None,
+    caller_label: str = "unknown",
+    coordinator_queue_wait_ms: float = 0.0,
 ) -> ThreadHistoryResult:
     """Fetch strict lightweight dispatch context using only fresh cache data or a homeserver refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -810,6 +871,8 @@ async def fetch_dispatch_thread_snapshot(
         allow_stale_fallback=False,
         cache_write_guard_started_at=cache_write_guard_started_at,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        caller_label=caller_label,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
 
 

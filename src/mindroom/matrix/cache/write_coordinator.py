@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.logging_config import bound_log_context
 
 if TYPE_CHECKING:
     import structlog
@@ -68,6 +69,8 @@ class _EventCacheWriteCoordinator:
         room_id: str,
         operation: str,
         previous_task: asyncio.Task[Any] | None,
+        *,
+        logger: structlog.stdlib.BoundLogger,
     ) -> None:
         predecessor = previous_task
         while predecessor is not None:
@@ -79,7 +82,7 @@ class _EventCacheWriteCoordinator:
                     raise
                 predecessor = self._pending_predecessor(predecessor)
             except Exception as exc:
-                self.logger.debug(
+                logger.debug(
                     "Previous room cache update failed before follow-up update",
                     room_id=room_id,
                     operation=operation,
@@ -110,8 +113,16 @@ class _EventCacheWriteCoordinator:
         previous_task = self._room_update_tasks.get(room_id)
 
         async def run_after_previous() -> object:
-            await self._await_predecessor(room_id, name, previous_task)
-            return await update_coro_factory()
+            current_task = asyncio.current_task()
+            task_name = current_task.get_name() if current_task is not None else name
+            with bound_log_context(task_name=task_name):
+                await self._await_predecessor(
+                    room_id,
+                    name,
+                    previous_task,
+                    logger=self.logger,
+                )
+                return await update_coro_factory()
 
         task = create_background_task(
             run_after_previous(),

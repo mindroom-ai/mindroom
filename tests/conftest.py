@@ -238,7 +238,9 @@ def make_conversation_cache_mock() -> AsyncMock:
         *,
         full_history: bool,
         dispatch_safe: bool,
+        caller_label: str = "unknown",
     ) -> object:
+        _ = caller_label
         if dispatch_safe:
             if full_history:
                 return await conversation_cache.get_dispatch_thread_history(room_id, thread_id)
