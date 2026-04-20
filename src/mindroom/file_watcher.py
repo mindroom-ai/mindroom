@@ -14,16 +14,18 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _WATCH_SCAN_INTERVAL_SECONDS = 1.0
 _WATCH_TREE_DEBOUNCE_SECONDS = 1.0
+_IGNORED_TREE_PARTS = {"__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache", ".git"}
+_IGNORED_TREE_SUFFIXES = (".pyc", ".pyo", ".swp", ".swo", "~", ".tmp")
 
 
 def _is_relevant_path(path: Path) -> bool:
     """Return whether one tree entry should participate in change snapshots."""
     if not path.is_file():
         return False
-    if any(part in {"__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache", ".git"} for part in path.parts):
+    if any(part in _IGNORED_TREE_PARTS for part in path.parts):
         return False
     name = path.name
-    return not (name.endswith((".pyc", ".pyo", ".swp", ".swo", "~", ".tmp")) or name.startswith(".#"))
+    return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
 async def watch_file(

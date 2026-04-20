@@ -745,23 +745,12 @@ class MultiAgentOrchestrator:
         try:
             result = reload_plugins(config, self.runtime_paths)
         except Exception:
-            try:
-                degraded_result = reload_plugins(config, self.runtime_paths, skip_broken_plugins=True)
-            except Exception as degraded_error:
-                deactivated_result = deactivate_plugins()
-                self._activate_hook_registry(deactivated_result.hook_registry)
-                logger.warning(
-                    "Plugin reload failed; all plugins deactivated",
-                    source=source,
-                    degraded_error=str(degraded_error),
-                )
-            else:
-                self._activate_hook_registry(degraded_result.hook_registry)
-                logger.warning(
-                    "Plugin reload failed; active plugin set degraded",
-                    source=source,
-                    active_plugins=list(degraded_result.active_plugin_names),
-                )
+            recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
+                config,
+                self.runtime_paths,
+            )
+            self._activate_hook_registry(recovery_result.hook_registry)
+            logger.warning(warning_message, source=source, **warning_kwargs)
             raise
         self._activate_hook_registry(result.hook_registry)
         logger.info(
@@ -1555,6 +1544,26 @@ class MultiAgentOrchestrator:
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
         logger.info("All agent bots stopped")
+
+
+def _recover_failed_plugin_reload(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[PluginReloadResult, str, dict[str, object]]:
+    """Return the fail-broken recovery result after one strict reload failure."""
+    try:
+        recovery_result = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
+    except Exception as degraded_error:
+        return (
+            deactivate_plugins(),
+            "Plugin reload failed; all plugins deactivated",
+            {"degraded_error": str(degraded_error)},
+        )
+    return (
+        recovery_result,
+        "Plugin reload failed; active plugin set degraded",
+        {"active_plugins": list(recovery_result.active_plugin_names)},
+    )
 
 
 async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
