@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import inspect
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
@@ -71,7 +72,7 @@ class PendingApproval:
     script_path: str | None
     requested_at: datetime
     expires_at: datetime
-    future: asyncio.Future[ApprovalDecision] = field(repr=False)
+    future: Future[ApprovalDecision] = field(repr=False)
     status: PendingApprovalStatus = "pending"
     resolution_reason: str | None = None
     resolved_at: datetime | None = None
@@ -157,7 +158,7 @@ class ApprovalManager:
             script_path=script_path,
             requested_at=requested_at,
             expires_at=requested_at + timedelta(seconds=max(timeout_seconds, 0.0)),
-            future=asyncio.get_running_loop().create_future(),
+            future=Future(),
         )
 
         try:
@@ -186,7 +187,8 @@ class ApprovalManager:
         self._approval_id_by_event_id[event_id] = pending.id
 
         try:
-            return await asyncio.wait_for(asyncio.shield(pending.future), timeout=max(timeout_seconds, 0.0))
+            wrapped_future = asyncio.wrap_future(pending.future)
+            return await asyncio.wait_for(asyncio.shield(wrapped_future), timeout=max(timeout_seconds, 0.0))
         except TimeoutError:
             decision = await self._resolve_pending(
                 pending.id,
@@ -389,11 +391,14 @@ class ApprovalManager:
             return None
 
         decision = self._new_decision(status=status, reason=reason, resolved_by=resolved_by)
+        try:
+            pending.future.set_result(decision)
+        except InvalidStateError:
+            return None
         pending.status = status
         pending.resolution_reason = reason
         pending.resolved_at = decision.resolved_at
         pending.resolved_by = resolved_by
-        pending.future.set_result(decision)
         return decision
 
     async def _edit_resolved_event(

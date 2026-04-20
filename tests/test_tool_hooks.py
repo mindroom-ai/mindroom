@@ -1276,6 +1276,101 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: Path) -> None:
+    """Approval-gated sync tools should resume after approval resolves on another loop."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "rules": [{"match": "echo", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_main_loop()
+
+    client = MagicMock()
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
+    )
+    bot = MagicMock()
+    bot.client = client
+    orchestrator.agent_bots = {"code": bot}
+    editor = AsyncMock()
+    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=editor)
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+    result: object | None = None
+    error: BaseException | None = None
+
+    def worker() -> None:
+        nonlocal result, error
+
+        async def run_execute() -> object:
+            return FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
+
+        try:
+            result = asyncio.run(run_execute())
+        except BaseException as exc:  # pragma: no cover - asserted below
+            error = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+
+    store = get_approval_store()
+    assert store is not None
+    async with asyncio.timeout(1):
+        while True:
+            pending = store.list_pending()
+            if pending:
+                break
+            await asyncio.sleep(0)
+
+    await store.handle_approval_resolution(
+        approval_id=pending[0].id,
+        status="approved",
+        reason=None,
+        resolved_by="@bas:localhost",
+    )
+    thread.join(timeout=1)
+
+    assert error is None
+    assert not thread.is_alive()
+    assert result is not None
+    assert result.status == "success"
+    assert result.result == "HI"
+    client.room_send.assert_awaited_once()
+    assert editor.await_args.args[3]["status"] == "approved"
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_context(tmp_path: Path) -> None:
     """Nested tool execution should stay attributed to the bridge agent, not the parent runtime context."""
     before_seen: list[str] = []

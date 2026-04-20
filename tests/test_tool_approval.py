@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -385,6 +386,63 @@ async def test_request_approval_denies_with_reason(tmp_path: Path) -> None:
     assert decision.status == "denied"
     assert decision.reason == "Too dangerous"
     assert editor.await_args.args[3]["denial_reason"] == "Too dangerous"
+
+
+@pytest.mark.asyncio
+async def test_request_approval_resolves_from_different_event_loop(tmp_path: Path) -> None:
+    """Approval resolution from another thread and loop should wake the waiter."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    result: ApprovalDecision | None = None
+    error: BaseException | None = None
+
+    def worker() -> None:
+        nonlocal result, error
+        try:
+            result = asyncio.run(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id="$thread",
+                    requester_id="@user:localhost",
+                    matched_rule="run_shell_*",
+                    script_path=None,
+                    timeout_seconds=60,
+                ),
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            error = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+
+    async with asyncio.timeout(1):
+        while True:
+            pending = store.list_pending()
+            if pending:
+                break
+            await asyncio.sleep(0)
+
+    handled = await store.handle_approval_resolution(
+        approval_id=pending[0].id,
+        status="approved",
+        reason=None,
+        resolved_by="@bas:localhost",
+    )
+    thread.join(timeout=1)
+
+    assert handled is True
+    assert error is None
+    assert not thread.is_alive()
+    assert result is not None
+    assert result.status == "approved"
+    assert result.resolved_by == "@bas:localhost"
+    assert editor.await_args.args[3]["status"] == "approved"
+    assert store.list_pending() == []
 
 
 @pytest.mark.asyncio
