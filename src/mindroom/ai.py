@@ -520,6 +520,7 @@ class _StreamingAttemptState:
     full_response: str = ""
     tool_count: int = 0
     observed_tool_calls: int = 0
+    observed_request_metric_fields: set[str] = field(default_factory=set)
     pending_tools: list[tuple[str, int]] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
@@ -617,8 +618,9 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
 def _build_model_request_metrics_fallback(
     totals: dict[str, int],
     first_token_latency: float | None,
+    observed_fields: set[str],
 ) -> dict[str, Any] | None:
-    payload = {key: value for key, value in totals.items() if value > 0}
+    payload = {key: totals[key] for key in observed_fields if key in totals}
     if payload.get("total_tokens") is None:
         input_tokens = payload.get("input_tokens")
         output_tokens = payload.get("output_tokens")
@@ -671,8 +673,13 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     provider = model_provider or (model_config.provider if model_config is not None else None)
 
     usage_payload = _serialize_metrics(metrics)
-    if usage_payload is None and metrics_fallback:
-        usage_payload = dict(metrics_fallback)
+    if metrics_fallback:
+        fallback_usage_payload = dict(metrics_fallback)
+        if usage_payload is None:
+            usage_payload = fallback_usage_payload
+        else:
+            for key, value in fallback_usage_payload.items():
+                usage_payload.setdefault(key, value)
 
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):
@@ -1037,20 +1044,30 @@ def _track_model_request_metrics(
     if event.model_provider:
         state.latest_model_provider = event.model_provider
     if isinstance(event.input_tokens, int):
+        state.observed_request_metric_fields.add("input_tokens")
         state.latest_request_input_tokens = event.input_tokens
         state.request_metric_totals["input_tokens"] += event.input_tokens
     if isinstance(event.output_tokens, int):
+        state.observed_request_metric_fields.add("output_tokens")
         state.request_metric_totals["output_tokens"] += event.output_tokens
     if isinstance(event.total_tokens, int):
+        state.observed_request_metric_fields.add("total_tokens")
         state.request_metric_totals["total_tokens"] += event.total_tokens
     if isinstance(event.reasoning_tokens, int):
+        state.observed_request_metric_fields.add("reasoning_tokens")
         state.request_metric_totals["reasoning_tokens"] += event.reasoning_tokens
     if isinstance(event.cache_read_tokens, int):
+        state.observed_request_metric_fields.add("cache_read_tokens")
         state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
     if isinstance(event.cache_write_tokens, int):
+        state.observed_request_metric_fields.add("cache_write_tokens")
         state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
+
+
+def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> bool:
+    return state.completed_run_event is not None and not state.full_response.strip() and state.observed_tool_calls == 0
 
 
 def _attempt_request_log_context(
@@ -1896,6 +1913,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             fallback_metrics = _build_model_request_metrics_fallback(
                                 state.request_metric_totals,
                                 state.first_token_latency,
+                                state.observed_request_metric_fields,
                             )
                             cancelled_metadata = _build_ai_run_metadata_content(
                                 agent_name=agent_name,
@@ -1921,6 +1939,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     fallback_metrics = _build_model_request_metrics_fallback(
                         state.request_metric_totals,
                         state.first_token_latency,
+                        state.observed_request_metric_fields,
+                    )
+                    final_status = (
+                        RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
                     )
                     run_metadata = _build_ai_run_metadata_content(
                         agent_name=agent_name,
@@ -1933,7 +1955,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             and state.completed_run_event.session_id is not None
                             else session_id
                         ),
-                        status=RunStatus.completed,
+                        status=final_status,
                         model=state.latest_model_id,
                         model_provider=state.latest_model_provider,
                         room_id=room_id,

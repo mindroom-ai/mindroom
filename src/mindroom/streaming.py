@@ -11,6 +11,7 @@ from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStar
 
 from mindroom import interactive
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -48,6 +49,7 @@ PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
+_NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = "**[Model emitted no visible text content after thinking. Please retry.]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
@@ -304,7 +306,18 @@ class StreamingResponse:
         error: Exception | None = None,
     ) -> StreamFinalizationOutcome:
         """Send the terminal update and report whether it became visible."""
-        if error is not None:
+        ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
+        no_visible_text_error = (
+            error is None
+            and not restart_interrupted
+            and not cancelled
+            and isinstance(ai_run_payload, dict)
+            and ai_run_payload.get("status") == STREAM_STATUS_ERROR
+            and not self.accumulated_text.strip()
+        )
+        if no_visible_text_error:
+            self.accumulated_text = _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+        elif error is not None:
             stripped_text = self.accumulated_text.rstrip()
             error_note = _format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
@@ -322,7 +335,7 @@ class StreamingResponse:
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
         final_stream_status: _TerminalStreamStatus = STREAM_STATUS_COMPLETED
-        if error is not None or restart_interrupted:
+        if no_visible_text_error or error is not None or restart_interrupted:
             final_stream_status = STREAM_STATUS_ERROR
         elif cancelled:
             final_stream_status = STREAM_STATUS_CANCELLED

@@ -16,6 +16,7 @@ from mindroom.agents import get_agent_session, get_team_session, show_tool_calls
 from mindroom.ai import ai_response, queued_message_signal_context, stream_agent_response
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -1923,6 +1924,13 @@ class ResponseRunner:
             run_metadata_content,
             request.attachment_ids,
         )
+        ai_run_payload = response_extra_content.get(AI_RUN_METADATA_KEY) if response_extra_content else None
+        if (
+            response_extra_content is not None
+            and isinstance(ai_run_payload, dict)
+            and ai_run_payload.get("status") == STREAM_STATUS_ERROR
+        ):
+            response_extra_content[STREAM_STATUS_KEY] = STREAM_STATUS_ERROR
         delivery_kind: Literal["sent", "edited"] = "edited" if request.existing_event_id else "sent"
         if request.response_envelope is None or request.correlation_id is None:
             interactive_response = interactive.parse_and_format_interactive(
