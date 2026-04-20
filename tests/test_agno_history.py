@@ -2871,7 +2871,7 @@ def test_build_matrix_prompt_with_thread_history_renders_tool_trace_events_in_cd
                             "args_preview": "cmd=tail --pid=1234 -f /dev/null",
                         },
                     ],
-                }
+                },
             },
         ),
     ]
@@ -2883,8 +2883,7 @@ def test_build_matrix_prompt_with_thread_history_renders_tool_trace_events_in_cd
     )
 
     assert (
-        prompt
-        == "Previous conversation in this thread:\n"
+        prompt == "Previous conversation in this thread:\n"
         "<conversation>\n"
         '<msg from="@alice:localhost"><![CDATA['
         "Investigating\n\n"
@@ -2911,8 +2910,7 @@ def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged
     )
 
     assert (
-        prompt
-        == "Previous conversation in this thread:\n"
+        prompt == "Previous conversation in this thread:\n"
         "<conversation>\n"
         '<msg from="@alice:localhost"><![CDATA[Earlier context]]></msg>\n'
         "</conversation>\n\n"

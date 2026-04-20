@@ -31,9 +31,9 @@ def test_collect_history_messages_appends_tool_trace_to_body() -> None:
                             "args_preview": "file_name=a.py",
                         },
                     ],
-                }
+                },
             },
-        )
+        ),
     ]
 
     collected = _collect_history_messages(
@@ -53,7 +53,7 @@ def test_collect_history_messages_appends_tool_trace_to_body() -> None:
             "[tool:save_file started]\n"
             "  args: file_name=a.py\n"
             "  result: <not yet returned>",
-        )
+        ),
     ]
 
 
@@ -84,11 +84,11 @@ def test_collect_history_messages_surfaces_tool_only_message() -> None:
                             "type": "tool_call_started",
                             "tool_name": "run_shell_command",
                             "args_preview": "cmd=sleep 600",
-                        }
+                        },
                     ],
-                }
+                },
             },
-        )
+        ),
     ]
 
     collected = _collect_history_messages(
@@ -101,10 +101,8 @@ def test_collect_history_messages_surfaces_tool_only_message() -> None:
     assert collected == [
         (
             "@alice:localhost",
-            "[tool:run_shell_command started]\n"
-            "  args: cmd=sleep 600\n"
-            "  result: <not yet returned>",
-        )
+            "[tool:run_shell_command started]\n  args: cmd=sleep 600\n  result: <not yet returned>",
+        ),
     ]
 
 
@@ -122,11 +120,11 @@ def test_collect_history_messages_truncates_final_rendered_body() -> None:
                             "type": "tool_call_completed",
                             "tool_name": "run_shell_command",
                             "result_preview": "/app",
-                        }
+                        },
                     ],
-                }
+                },
             },
-        )
+        ),
     ]
 
     collected = _collect_history_messages(
@@ -157,9 +155,9 @@ def test_build_matrix_prompt_with_thread_history_truncates_tool_enriched_body_to
                             "tool_name": "run_shell_command",
                             "args_preview": "cmd=echo 1234",
                             "result_preview": "x" * 5000,
-                        }
+                        },
                     ],
-                }
+                },
             },
         ),
     ]
