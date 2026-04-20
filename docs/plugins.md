@@ -413,7 +413,7 @@ See the [Hooks](hooks.md) page for full documentation including:
 ## Live development (hot reload)
 
 Plugins hot-reload automatically.
-When you edit any file inside a configured plugin directory under `~/.mindroom-chat/plugins/<name>/`, MindRoom detects the change within about one second, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code.
+When you edit any file inside a configured plugin directory under `~/.mindroom/plugins/<name>/`, MindRoom detects the change within about one second, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code.
 No service restart and no agent session disruption.
 
 ### How it works
@@ -427,10 +427,10 @@ No service restart and no agent session disruption.
 
 ```bash
 # 1. Edit any file under your plugin
-$EDITOR ~/.mindroom-chat/plugins/my-plugin/hooks.py
+$EDITOR ~/.mindroom/plugins/my-plugin/hooks.py
 
 # 2. Save. Watch the journal:
-journalctl -u mindroom-chat.service -f | grep -E 'Reloading plugins|Plugin reload complete'
+journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload complete'
 
 # 3. Trigger your hook (send a message, fire the matching event, etc.)
 #    The new code path is live.
@@ -465,7 +465,7 @@ The hot-reload path is intentionally best-effort, not transactional.
 ### Production tip
 
 Hot reload is enabled by default in production.
-Edit `~/.mindroom-chat/plugins/<name>/` directly while `mindroom-chat.service` is running, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
+Edit `~/.mindroom/plugins/<name>/` directly while `mindroom.service` is running, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
 
 ## Community plugins
 
@@ -473,12 +473,12 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains a colle
 Clone any of them into your plugins directory and add the path to `config.yaml`:
 
 ```bash
-git clone https://github.com/mindroom-ai/ping-hook-plugin.git ~/.mindroom-chat/plugins/ping-hook
+git clone https://github.com/mindroom-ai/ping-hook-plugin.git ~/.mindroom/plugins/ping-hook
 ```
 
 ```yaml
 plugins:
-  - ~/.mindroom-chat/plugins/ping-hook
+  - ~/.mindroom/plugins/ping-hook
 ```
 
 ### Hooks-only plugins
@@ -486,7 +486,7 @@ plugins:
 | Plugin | Description |
 | --- | --- |
 | [ping-hook-plugin](https://github.com/mindroom-ai/ping-hook-plugin) | Minimal example — responds to `!ping-hook` with a pong message. Good starting point for learning the hook system. |
-| [shell-guard-plugin](https://github.com/mindroom-ai/shell-guard-plugin) | Blocks dangerous shell commands (e.g., `systemctl restart mindroom-chat`) via `tool:before_call` gating. |
+| [shell-guard-plugin](https://github.com/mindroom-ai/shell-guard-plugin) | Blocks dangerous shell commands (e.g., `systemctl restart mindroom`) via `tool:before_call` gating. |
 | [voice-enrich-plugin](https://github.com/mindroom-ai/voice-enrich-plugin) | Injects AI-only metadata when a voice-transcribed message arrives, warning the model about possible transcription errors. |
 | [location-enrich-plugin](https://github.com/mindroom-ai/location-enrich-plugin) | Enriches prompts with real-time GPS location from [Dawarich](https://dawarich.app/), including place matching and movement classification. |
 | [restart-resume-plugin](https://github.com/mindroom-ai/restart-resume-plugin) | Re-activates threads tagged `pending-restart` after a bot restart. |
