@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
-_INTERRUPTED_RESPONSE_MARKER = "[interrupted by user]"
+_INTERRUPTED_RESPONSE_MARKER = "[interrupted]"
 _MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 
 
@@ -34,6 +34,7 @@ _MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 class InterruptedReplaySnapshot:
     """Trusted interrupted self-turn facts needed for canonical replay."""
 
+    user_message: str
     partial_text: str
     completed_tools: tuple[ToolTraceEntry, ...]
     interrupted_tools: tuple[ToolTraceEntry, ...]
@@ -94,7 +95,10 @@ def build_interrupted_replay_run(
 ) -> RunOutput | TeamRunOutput:
     """Build one canonical replayable run for an interrupted top-level turn."""
     content = render_interrupted_replay_content(snapshot)
-    assistant_message = Message(role="assistant", content=content)
+    messages = []
+    if snapshot.user_message:
+        messages.append(Message(role="user", content=snapshot.user_message))
+    messages.append(Message(role="assistant", content=content))
     metadata = _interrupted_replay_metadata(snapshot)
     if is_team:
         return TeamRunOutput(
@@ -102,7 +106,7 @@ def build_interrupted_replay_run(
             team_id=scope_id,
             session_id=session_id,
             content=content,
-            messages=[assistant_message],
+            messages=messages,
             metadata=metadata,
             status=RunStatus.completed,
         )
@@ -111,7 +115,7 @@ def build_interrupted_replay_run(
         agent_id=scope_id,
         session_id=session_id,
         content=content,
-        messages=[assistant_message],
+        messages=messages,
         metadata=metadata,
         status=RunStatus.completed,
     )
@@ -119,6 +123,7 @@ def build_interrupted_replay_run(
 
 def build_interrupted_replay_snapshot(
     *,
+    user_message: str | None,
     partial_text: str | None,
     completed_tools: Sequence[ToolTraceEntry],
     interrupted_tools: Sequence[ToolTraceEntry],
@@ -136,6 +141,7 @@ def build_interrupted_replay_snapshot(
     source_event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
     response_event_id = metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     return InterruptedReplaySnapshot(
+        user_message=(user_message or "").strip(),
         partial_text=(partial_text or "").strip(),
         completed_tools=tuple(completed_tools),
         interrupted_tools=tuple(interrupted_tools),

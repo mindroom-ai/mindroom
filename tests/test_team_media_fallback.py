@@ -785,11 +785,18 @@ async def test_team_response_persists_interrupted_replay_for_cancelled_runs() ->
     assert isinstance(persisted_run, TeamRunOutput)
     assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
     assert persisted_run.messages is not None
-    assert isinstance(persisted_run.messages[0].content, str)
-    assert "Half done" in persisted_run.messages[0].content
-    assert "was cancelled" not in persisted_run.messages[0].content
-    assert "[tool:run_shell_command completed]" in persisted_run.messages[0].content
-    assert "[interrupted by user]" in persisted_run.messages[0].content
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Analyze this."),
+        (
+            "assistant",
+            "**GeneralAgent**: Half done\n\n\n"
+            "*No team consensus - showing individual responses only*\n\n"
+            "[tool:run_shell_command completed]\n"
+            "  args: cmd=pwd\n"
+            "  result: /app\n\n"
+            "[interrupted]",
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1013,10 +1020,100 @@ async def test_team_response_stream_persists_hidden_interrupted_tool_state() -> 
     assert isinstance(persisted_run, TeamRunOutput)
     assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
     assert persisted_run.messages is not None
-    assert isinstance(persisted_run.messages[0].content, str)
-    assert "Half done" in persisted_run.messages[0].content
-    assert "[tool:run_shell_command completed]" in persisted_run.messages[0].content
-    assert "[interrupted by user]" in persisted_run.messages[0].content
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Analyze this."),
+        (
+            "assistant",
+            "**GeneralAgent**: Half done\n\n\n"
+            "*No team consensus - showing individual responses only*\n\n"
+            "[tool:run_shell_command completed]\n"
+            "  args: cmd=pwd\n"
+            "  result: /app\n\n"
+            "[interrupted]",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_persists_interrupted_replay_after_external_task_cancel() -> None:
+    """External task cancellation should still persist interrupted team replay state."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[fake_agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+    first_chunk_seen = asyncio.Event()
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Half done")
+        await asyncio.sleep(60)
+
+    async def consume_stream() -> None:
+        team_agent_ids = [
+            MatrixID.from_agent(
+                "general",
+                config.get_domain(runtime_paths),
+                runtime_paths,
+            ),
+        ]
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            mode=TeamMode.COORDINATE,
+            session_id="session-team-stream",
+            run_id="run-999",
+            reply_to_event_id="e1",
+            show_tool_calls=False,
+        ):
+            first_chunk_seen.set()
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+    ):
+        task = asyncio.create_task(consume_stream())
+        await first_chunk_seen.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-team-stream",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert scope_context.session.runs is not None
+        persisted_run = scope_context.session.runs[0]
+
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Analyze this."),
+        (
+            "assistant",
+            "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n[interrupted]",
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1119,8 +1216,11 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
 
     assert isinstance(persisted_run, TeamRunOutput)
     assert persisted_run.messages is not None
-    assert isinstance(persisted_run.messages[0].content, str)
-    content = persisted_run.messages[0].content
+    assert len(persisted_run.messages) == 2
+    assert persisted_run.messages[0].role == "user"
+    assert persisted_run.messages[0].content == "Analyze this."
+    assert isinstance(persisted_run.messages[1].content, str)
+    content = persisted_run.messages[1].content
     assert "[tool:run_shell_command completed]" in content
     assert "args: cmd=pwd" in content
     assert "[tool:run_shell_command interrupted]" in content

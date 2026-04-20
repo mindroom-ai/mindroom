@@ -2826,9 +2826,13 @@ class TestUserIdPassthrough:
             "mindroom_replay_state": "interrupted",
         }
         assert persisted_run.messages is not None
-        assert persisted_run.messages[0].content == (
-            "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted by user]"
-        )
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]",
+            ),
+        ]
 
     @pytest.mark.asyncio
     async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
@@ -3984,16 +3988,78 @@ class TestUserIdPassthrough:
         persisted_run = cast("RunOutput", persisted_session.runs[0])
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.messages is not None
-        assert persisted_run.messages[0].content == (
-            "Half done\n\n"
-            "[tool:run_shell_command completed]\n"
-            "  args: cmd=pwd\n"
-            "  result: /app\n"
-            "[tool:save_file interrupted]\n"
-            "  args: file_name=main.py\n"
-            "  result: <interrupted before completion>\n\n"
-            "[interrupted by user]"
-        )
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n"
+                "[tool:run_shell_command completed]\n"
+                "  args: cmd=pwd\n"
+                "  result: /app\n"
+                "[tool:save_file interrupted]\n"
+                "  args: file_name=main.py\n"
+                "  result: <interrupted before completion>\n\n"
+                "[interrupted]",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_persists_interrupted_replay_after_external_task_cancel(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """External task cancellation should still persist interrupted replay state."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        first_chunk_seen = asyncio.Event()
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Half done")
+            await asyncio.sleep(60)
+
+        async def consume_stream() -> None:
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                reply_to_event_id="e1",
+                show_tool_calls=False,
+            ):
+                first_chunk_seen.set()
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            task = asyncio.create_task(consume_stream())
+            await first_chunk_seen.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.status is RunStatus.completed
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            ("assistant", "Half done\n\n[interrupted]"),
+        ]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_uses_request_metrics_fallback(self, tmp_path: Path) -> None:

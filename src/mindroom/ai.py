@@ -7,7 +7,7 @@ import importlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 from uuid import uuid4
 
 from agno.db.base import SessionType
@@ -616,6 +616,7 @@ def _persist_interrupted_agent_replay(
     scope_context: ScopeSessionContext | None,
     session_id: str,
     run_id: str,
+    user_message: str,
     partial_text: str,
     completed_tools: list[ToolTraceEntry],
     interrupted_tools: list[ToolTraceEntry],
@@ -626,6 +627,7 @@ def _persist_interrupted_agent_replay(
     if scope_context is None:
         return
     snapshot = build_interrupted_replay_snapshot(
+        user_message=user_message,
         partial_text=partial_text,
         completed_tools=completed_tools,
         interrupted_tools=interrupted_tools,
@@ -641,6 +643,11 @@ def _persist_interrupted_agent_replay(
         snapshot=snapshot,
         is_team=False,
     )
+
+
+def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
+    """Raise the canonical agent cancellation error."""
+    raise asyncio.CancelledError(reason or "Run cancelled")
 
 
 def _get_model_config(
@@ -1431,6 +1438,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
+    interrupted_replay_persisted = False
+    unseen_event_ids: list[str] = []
     try:
         try:
             _assert_agent_target(agent_name, config)
@@ -1601,6 +1610,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     scope_context=scope_context,
                     session_id=response.session_id or session_id,
                     run_id=response.run_id or attempt_run_id or str(uuid4()),
+                    user_message=prompt,
                     partial_text=_extract_interrupted_partial_text(
                         response.content,
                         messages=response.messages,
@@ -1610,7 +1620,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     run_metadata=metadata,
                     interruption_reason=str(response.content or "Run cancelled"),
                 )
-                raise asyncio.CancelledError(response.content or "Run cancelled")
+                interrupted_replay_persisted = True
+                _raise_agent_run_cancelled(response.content)
             if response.status == RunStatus.error:
                 return get_user_friendly_error_message(
                     Exception(str(response.content or "Unknown agent error")),
@@ -1618,6 +1629,24 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 )
 
             return _extract_response_content(response, show_tool_calls=show_tool_calls)
+    except asyncio.CancelledError:
+        if not interrupted_replay_persisted:
+            _persist_interrupted_agent_replay(
+                scope_context=scope_context,
+                session_id=session_id,
+                run_id=run_id or str(uuid4()),
+                user_message=prompt,
+                partial_text="",
+                completed_tools=[],
+                interrupted_tools=[],
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                interruption_reason="Run interrupted",
+            )
+        raise
     finally:
         close_agent_runtime_sqlite_dbs(
             agent,
@@ -1797,6 +1826,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
+    interrupted_replay_persisted = False
+    unseen_event_ids: list[str] = []
+    state = _StreamingAttemptState()
 
     try:
         try:
@@ -1972,13 +2004,15 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             scope_context=scope_context,
                             session_id=state.cancelled_run_event.session_id or session_id,
                             run_id=state.cancelled_run_event.run_id or attempt_run_id or str(uuid4()),
+                            user_message=prompt,
                             partial_text=state.assistant_text,
                             completed_tools=state.completed_tools,
                             interrupted_tools=state.pending_tools,
                             run_metadata=metadata,
                             interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
                         )
-                        raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
+                        interrupted_replay_persisted = True
+                        _raise_agent_run_cancelled(state.cancelled_run_event.reason)
 
                     break
 
@@ -2021,6 +2055,24 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     session_type=SessionType.AGENT,
                     entity_name=agent_name,
                 )
+    except asyncio.CancelledError:
+        if not interrupted_replay_persisted:
+            _persist_interrupted_agent_replay(
+                scope_context=scope_context,
+                session_id=session_id,
+                run_id=run_id or str(uuid4()),
+                user_message=prompt,
+                partial_text=state.assistant_text,
+                completed_tools=state.completed_tools,
+                interrupted_tools=state.pending_tools,
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                interruption_reason="Run interrupted",
+            )
+        raise
     finally:
         close_agent_runtime_sqlite_dbs(
             agent,

@@ -46,6 +46,7 @@ def _completed_run(run_id: str, content: str) -> RunOutput:
 def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_and_tools() -> None:
     """Interrupted snapshots should replay through the normal completed history lane."""
     snapshot = InterruptedReplaySnapshot(
+        user_message="Please continue",
         partial_text="Half done",
         completed_tools=(
             ToolTraceEntry(
@@ -77,21 +78,27 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_an
     )
 
     assert run.status is RunStatus.completed
-    assert _assistant_text(run) == (
-        "Half done\n\n"
-        "[tool:run_shell_command completed]\n"
-        "  args: cmd=pwd\n"
-        "  result: /app\n"
-        "[tool:save_file interrupted]\n"
-        "  args: file_name=main.py\n"
-        "  result: <interrupted before completion>\n\n"
-        "[interrupted by user]"
-    )
+    assert run.messages is not None
+    assert [(message.role, message.content) for message in run.messages] == [
+        ("user", "Please continue"),
+        (
+            "assistant",
+            "Half done\n\n"
+            "[tool:run_shell_command completed]\n"
+            "  args: cmd=pwd\n"
+            "  result: /app\n"
+            "[tool:save_file interrupted]\n"
+            "  args: file_name=main.py\n"
+            "  result: <interrupted before completion>\n\n"
+            "[interrupted]",
+        ),
+    ]
 
 
 def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() -> None:
     """Interrupted replay runs should preserve the event-consumption metadata used by prompt prep."""
     snapshot = InterruptedReplaySnapshot(
+        user_message="Please continue",
         partial_text="Half done",
         completed_tools=(),
         interrupted_tools=(),
@@ -150,6 +157,7 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
         )
 
         snapshot = build_interrupted_replay_snapshot(
+            user_message="Please continue",
             partial_text="Half done",
             completed_tools=(),
             interrupted_tools=(),

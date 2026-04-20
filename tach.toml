@@ -1239,7 +1239,6 @@ expose = [
     "format_tool_completed_event",
     "format_tool_started_event",
     "render_tool_trace_for_context",
-    "tool_trace_events_from_visible_content",
 ]
 from = ["mindroom.tool_system.events"]
 

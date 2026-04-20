@@ -1069,6 +1069,7 @@ def _persist_interrupted_team_replay(
     scope_context: ScopeSessionContext | None,
     session_id: str,
     run_id: str,
+    user_message: str,
     partial_text: str,
     completed_tools: list[ToolTraceEntry],
     interrupted_tools: list[ToolTraceEntry],
@@ -1079,6 +1080,7 @@ def _persist_interrupted_team_replay(
     if scope_context is None:
         return
     snapshot = build_interrupted_replay_snapshot(
+        user_message=user_message,
         partial_text=partial_text,
         completed_tools=completed_tools,
         interrupted_tools=interrupted_tools,
@@ -1482,6 +1484,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
+    interrupted_replay_persisted = False
+    unseen_event_ids: list[str] = []
 
     try:
         with open_bound_scope_session_context(
@@ -1605,12 +1609,14 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             scope_context=scope_context,
                             session_id=persisted_session_id,
                             run_id=response.run_id or attempt_run_id or str(uuid4()),
+                            user_message=message,
                             partial_text=_extract_interrupted_team_partial_text(response),
                             completed_tools=_extract_completed_team_tool_trace(response),
                             interrupted_tools=[],
                             run_metadata=run_metadata,
                             interruption_reason=str(response.content or "Run cancelled"),
                         )
+                        interrupted_replay_persisted = True
                     _raise_team_run_cancelled(response.content)
                 if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                     return get_user_friendly_error_message(
@@ -1665,6 +1671,24 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                     session_type=SessionType.TEAM,
                     entity_name=configured_team_name or team_name,
                 )
+    except asyncio.CancelledError:
+        if not interrupted_replay_persisted and session_id is not None:
+            _persist_interrupted_team_replay(
+                scope_context=scope_context,
+                session_id=session_id,
+                run_id=run_id or str(uuid4()),
+                user_message=message,
+                partial_text="",
+                completed_tools=[],
+                interrupted_tools=[],
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                interruption_reason="Run interrupted",
+            )
+        raise
     except Exception as e:
         logger.exception("Error preparing team members", agents=agent_list)
         return get_user_friendly_error_message(e, team_name)
@@ -1794,6 +1818,17 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     team_label = f"Team ({', '.join(agent_names)})"
+    interrupted_replay_persisted = False
+    unseen_event_ids: list[str] = []
+    canonical_per_member: dict[str, str] = {}
+    canonical_consensus = ""
+    completed_tools: list[ToolTraceEntry] = []
+    pending_tools: list[tuple[str, ToolTraceEntry]] = []
+
+    def _empty_canonical_partial_text() -> str:
+        return ""
+
+    render_canonical_partial_text: Callable[[], str] = _empty_canonical_partial_text
 
     try:
         with open_bound_scope_session_context(
@@ -1847,14 +1882,10 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
 
-            canonical_per_member: dict[str, str] = {}
             visible_per_member: dict[str, str] = {}
-            canonical_consensus: str = ""
             visible_consensus: str = ""
             tool_trace: list[ToolTraceEntry] = []
-            completed_tools: list[ToolTraceEntry] = []
             next_tool_index = 1
-            pending_tools: list[tuple[str, ToolTraceEntry]] = []
             pending_visible_tools: list[tuple[str, int, str]] = []
 
             def _scope_key_for_agent(agent_name: str) -> str:
@@ -1890,6 +1921,16 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 elif parts:
                     parts.append(_format_no_consensus_note())
                 return parts
+
+            def _current_canonical_partial_text() -> str:
+                return "\n\n".join(
+                    _render_team_parts(
+                        per_member=canonical_per_member,
+                        consensus=canonical_consensus,
+                    ),
+                )
+
+            render_canonical_partial_text = _current_canonical_partial_text
 
             def _start_tool(
                 *,
@@ -2042,12 +2083,14 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     scope_context=scope_context,
                                     session_id=persisted_session_id,
                                     run_id=event.run_id or attempt_run_id or str(uuid4()),
+                                    user_message=message,
                                     partial_text=_extract_interrupted_team_partial_text(event),
                                     completed_tools=_extract_completed_team_tool_trace(event),
                                     interrupted_tools=[],
                                     run_metadata=run_metadata,
                                     interruption_reason=str(event.content or "Run cancelled"),
                                 )
+                                interrupted_replay_persisted = True
                             _raise_team_run_cancelled(event.content)
                         if isinstance(event, (TeamRunOutput, RunOutput)) and is_errored_run_output(event):
                             error_text = str(event.content or "Unknown team error")
@@ -2120,17 +2163,14 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     scope_context=scope_context,
                                     session_id=persisted_session_id,
                                     run_id=event.run_id or attempt_run_id or str(uuid4()),
-                                    partial_text="\n\n".join(
-                                        _render_team_parts(
-                                            per_member=canonical_per_member,
-                                            consensus=canonical_consensus,
-                                        ),
-                                    ),
+                                    user_message=message,
+                                    partial_text=render_canonical_partial_text(),
                                     completed_tools=completed_tools,
                                     interrupted_tools=[trace_entry for _, trace_entry in pending_tools],
                                     run_metadata=run_metadata,
                                     interruption_reason=event.reason or "Run cancelled",
                                 )
+                                interrupted_replay_persisted = True
                             _raise_team_run_cancelled(event.reason)
 
                         if isinstance(event, AgentRunContentEvent):
@@ -2202,6 +2242,24 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     session_type=SessionType.TEAM,
                     entity_name=configured_team_name or team_label,
                 )
+    except asyncio.CancelledError:
+        if not interrupted_replay_persisted and session_id is not None:
+            _persist_interrupted_team_replay(
+                scope_context=scope_context,
+                session_id=session_id,
+                run_id=run_id or str(uuid4()),
+                user_message=message,
+                partial_text=render_canonical_partial_text(),
+                completed_tools=completed_tools,
+                interrupted_tools=[trace_entry for _, trace_entry in pending_tools],
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                interruption_reason="Run interrupted",
+            )
+        raise
     except Exception as e:
         logger.exception("Error preparing team members for streaming", agents=agent_names)
         yield get_user_friendly_error_message(e, team_label)
