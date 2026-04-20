@@ -15,6 +15,7 @@ from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_event,
     install_runtime_cache_support,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -299,15 +300,31 @@ class TestBotIntegration:
         bot.client.room_put_state = AsyncMock()
         install_runtime_cache_support(bot)
 
+        async def mock_send_message_result(_client: object, _room_id: str, content: dict) -> object:
+            return delivered_matrix_event("$stream", content)
+
+        async def mock_edit_message_result(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            content: dict,
+            _display_text: str,
+        ) -> object:
+            return delivered_matrix_event("$edit", content)
+
         # Simulate a message from a user
-        await bot._generate_response(
-            room_id="!test:localhost",
-            prompt="Hello bot",
-            reply_to_event_id="$msg123",
-            thread_id="$thread123",
-            thread_history=[],
-            user_id="@user:localhost",
-        )
+        with (
+            patch("mindroom.streaming.send_message_result", side_effect=mock_send_message_result),
+            patch("mindroom.streaming.edit_message_result", side_effect=mock_edit_message_result),
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Hello bot",
+                reply_to_event_id="$msg123",
+                thread_id="$thread123",
+                thread_history=[],
+                user_id="@user:localhost",
+            )
 
         # Should have used streaming since user is online
         mock_stream_agent_response.assert_called_once()
