@@ -1,5 +1,6 @@
-# REVIEW-D
-## Verdict: CHANGES REQUIRED
+# REVIEW-D.md (Round 3)
+## Verdict: APPROVE
 ## Findings
-1. [MAJOR] src/mindroom/workers/backends/kubernetes.py:152 - The round-1 fix removed the stale finalize backfill, but the reporter still only learns elapsed time from `wait_for_ready()` poll ticks. In the real path `wait_for_ready()` calls `on_poll_tick()` only while the deployment is still not ready, so any cold start that finishes after the 1.5 s grace window but before the next 1.0 s poll stays completely silent. That is still wrong for the D5 grace requirement: a 1.7 s startup should emit the cold-start notice, but this implementation records only the previous 1.0 s tick and returns `ready` with no progress event at all. Make the reporter own its timing from `started_at` and timed waits, so it can emit at 1.5 s and every 5 s independently of Kubernetes poll cadence, while still cancelling cleanly on `ready`/`failed`.
-2. [MAJOR] tests/test_workloop_thread_scope.py:87 - This new `_plugin_checkout_available()` skip guard is unrelated scope creep for ISSUE-183, and it is incorrect in the current repo state: the live workloop checkout now has `runtime.py`, not `types.py`, so this guard makes the entire regression module skip even when the plugin is present. That silently drops thread-scope coverage instead of testing it. Remove this ISSUE-183 test change, or at minimum update the guard to the renamed file and fix the copied-file rewrites in a separate workloop-focused change.
+None.
+## Final summary
+APPROVE — the round-2 fix correctly decouples the 1.5s grace timer from poll cadence, keeps warm-worker waits silent, replays in-flight warmup state to late joiners, and I found no new bugs under this review lens.
