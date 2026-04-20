@@ -65,6 +65,7 @@ from mindroom.runtime_state import (
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
+    deactivate_plugins,
     get_configured_plugin_roots,
     load_plugins,
     reload_plugins,
@@ -744,13 +745,23 @@ class MultiAgentOrchestrator:
         try:
             result = reload_plugins(config, self.runtime_paths)
         except Exception:
-            degraded_result = reload_plugins(config, self.runtime_paths, skip_broken_plugins=True)
-            self._activate_hook_registry(degraded_result.hook_registry)
-            logger.warning(
-                "Plugin reload failed; active plugin set degraded",
-                source=source,
-                active_plugins=list(degraded_result.active_plugin_names),
-            )
+            try:
+                degraded_result = reload_plugins(config, self.runtime_paths, skip_broken_plugins=True)
+            except Exception as degraded_error:
+                deactivated_result = deactivate_plugins()
+                self._activate_hook_registry(deactivated_result.hook_registry)
+                logger.warning(
+                    "Plugin reload failed; all plugins deactivated",
+                    source=source,
+                    degraded_error=str(degraded_error),
+                )
+            else:
+                self._activate_hook_registry(degraded_result.hook_registry)
+                logger.warning(
+                    "Plugin reload failed; active plugin set degraded",
+                    source=source,
+                    active_plugins=list(degraded_result.active_plugin_names),
+                )
             raise
         self._activate_hook_registry(result.hook_registry)
         logger.info(
