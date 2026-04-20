@@ -1,0 +1,6 @@
+# REVIEW-B.md
+## Verdict: CHANGES REQUIRED
+## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
+1. [BLOCKER] [src/mindroom/streaming.py](/srv/mindroom-worktrees/issue-183/src/mindroom/streaming.py:735), [src/mindroom/tool_system/sandbox_proxy.py](/srv/mindroom-worktrees/issue-183/src/mindroom/tool_system/sandbox_proxy.py:439) - `send_streaming_response()` keeps the worker-progress drain task alive until after `streaming.finalize()`, and `_make_progress_sink()` schedules `queue.put_nowait` directly, so a late `waiting` event can still land after the final body and issue one more edit that puts `⏳ Preparing isolated worker...` back onto a completed or cancelled reply. I reproduced this with a delayed sink call during teardown and the captured delivery sequence ended with a post-final warmup edit. - Set `pump.shutdown` and stop or gate the progress-drain path before finalizing the Matrix message, and enqueue through a loop-thread callback that re-checks shutdown before touching the queue.
+## Final summary
+The side-band rendering approach is correct, but the current loop/queue shutdown ordering is not safe: late worker progress can overwrite the final user-visible message, so this is not merge-ready yet.
