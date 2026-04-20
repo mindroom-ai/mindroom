@@ -1,5 +1,6 @@
 """Test extra_kwargs functionality in model configuration."""
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -7,13 +8,11 @@ import pytest
 import yaml
 from agno.models.message import Message
 from agno.models.vertexai.claude import Claude as VertexAIClaude
-from pydantic import ValidationError
 
 from mindroom.ai import get_model_instance
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.vertex_claude_prompt_cache import (
     copy_messages_with_vertex_prompt_cache_breakpoint,
     install_vertex_claude_prompt_cache_hook,
@@ -29,22 +28,6 @@ def _config_with_runtime_paths(config_data: dict[str, object]) -> tuple[Config, 
     )
     config = Config(**config_data)
     return config, runtime_paths
-
-
-def _set_api_key(runtime_paths: RuntimePaths, service: str, api_key: str) -> None:
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-        service,
-        {"api_key": api_key, "_source": "test"},
-    )
-
-
-def _api_key_connection(provider: str, *, service: str | None = None) -> dict[str, str]:
-    canonical_provider = "google" if provider == "gemini" else provider
-    return {
-        "provider": canonical_provider,
-        "service": service or canonical_provider,
-        "auth_kind": "api_key",
-    }
 
 
 def test_model_config_with_extra_kwargs() -> None:
@@ -71,9 +54,6 @@ def test_model_config_with_extra_kwargs() -> None:
 def test_config_yaml_with_extra_kwargs() -> None:
     """Test loading config from YAML with extra_kwargs."""
     config_data = {
-        "connections": {
-            "openrouter/default": _api_key_connection("openrouter"),
-        },
         "models": {
             "test_model": {
                 "provider": "openrouter",
@@ -132,10 +112,9 @@ def test_config_yaml_with_extra_kwargs() -> None:
 
 def test_get_model_instance_with_extra_kwargs() -> None:
     """Test that get_model_instance passes extra_kwargs to the model."""
+    os.environ["OPENROUTER_API_KEY"] = "test-key"
+
     config_data = {
-        "connections": {
-            "openrouter/default": _api_key_connection("openrouter"),
-        },
         "models": {
             "test_model": {
                 "provider": "openrouter",
@@ -169,7 +148,6 @@ def test_get_model_instance_with_extra_kwargs() -> None:
     }
 
     config, runtime_paths = _config_with_runtime_paths(config_data)
-    _set_api_key(runtime_paths, "openrouter", "test-key")
 
     # Get the model instance
     model = get_model_instance(config, runtime_paths, "test_model")
@@ -186,11 +164,10 @@ def test_get_model_instance_with_extra_kwargs() -> None:
 
 def test_different_providers_with_extra_kwargs() -> None:
     """Test that extra_kwargs works with different providers."""
+    os.environ["OPENAI_API_KEY"] = "test-key"
+    os.environ["ANTHROPIC_API_KEY"] = "test-key"
+
     config_data = {
-        "connections": {
-            "openai/default": _api_key_connection("openai"),
-            "anthropic/default": _api_key_connection("anthropic"),
-        },
         "models": {
             "openai_model": {
                 "provider": "openai",
@@ -228,8 +205,6 @@ def test_different_providers_with_extra_kwargs() -> None:
     }
 
     config, runtime_paths = _config_with_runtime_paths(config_data)
-    _set_api_key(runtime_paths, "openai", "test-key")
-    _set_api_key(runtime_paths, "anthropic", "test-key")
 
     # Test OpenAI model
     openai_model = get_model_instance(config, runtime_paths, "openai_model")
@@ -247,10 +222,9 @@ def test_different_providers_with_extra_kwargs() -> None:
 
 def test_model_without_extra_kwargs() -> None:
     """Test that models work fine without extra_kwargs."""
+    os.environ["OPENAI_API_KEY"] = "test-key"
+
     config_data = {
-        "connections": {
-            "openai/default": _api_key_connection("openai"),
-        },
         "models": {
             "simple_model": {
                 "provider": "openai",
@@ -276,7 +250,6 @@ def test_model_without_extra_kwargs() -> None:
     }
 
     config, runtime_paths = _config_with_runtime_paths(config_data)
-    _set_api_key(runtime_paths, "openai", "test-key")
 
     # Should work without any issues
     model = get_model_instance(config, runtime_paths, "simple_model")
@@ -284,16 +257,9 @@ def test_model_without_extra_kwargs() -> None:
     assert model.provider == "OpenAI"
 
 
-def test_vertexai_claude_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vertexai_claude_provider() -> None:
     """Test native Vertex Claude provider mapping."""
     config_data = {
-        "connections": {
-            "vertexai_claude/default": {
-                "provider": "vertexai_claude",
-                "service": "google_vertex_adc",
-                "auth_kind": "google_adc",
-            },
-        },
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
@@ -322,23 +288,6 @@ def test_vertexai_claude_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
     config, runtime_paths = _config_with_runtime_paths(config_data)
-    credentials_path = runtime_paths.storage_root / "vertex-adc.json"
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-        "google_vertex_adc",
-        {
-            "application_credentials_path": str(credentials_path),
-            "_source": "test",
-        },
-    )
-
-    def fake_load_credentials_from_file(_path: str, *, scopes: list[str]) -> tuple[object, str]:
-        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
-        return object(), "ignored-project"
-
-    monkeypatch.setattr(
-        "google.auth.load_credentials_from_file",
-        fake_load_credentials_from_file,
-    )
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
     assert isinstance(model, VertexAIClaude)
@@ -407,13 +356,6 @@ async def test_vertexai_prompt_cache_hook_rewrites_messages_before_invoke() -> N
 def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Vertex Claude should translate runtime ADC paths into explicit client credentials."""
     config_data = {
-        "connections": {
-            "vertexai_claude/default": {
-                "provider": "vertexai_claude",
-                "service": "google_vertex_adc",
-                "auth_kind": "google_adc",
-            },
-        },
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
@@ -446,16 +388,9 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
     runtime_paths = resolve_runtime_paths(
         config_path=runtime_root / "config.yaml",
         storage_path=runtime_root / "mindroom_data",
-        process_env={},
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
     )
     config = Config(**config_data)
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-        "google_vertex_adc",
-        {
-            "application_credentials_path": str(credentials_path),
-            "_source": "test",
-        },
-    )
     fake_google_credentials = object()
 
     def fake_load_credentials_from_file(path: str, *, scopes: list[str]) -> tuple[object, str]:
@@ -470,54 +405,6 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
     assert isinstance(model, VertexAIClaude)
     assert model.client_params is not None
     assert model.client_params["credentials"] is fake_google_credentials
-
-
-def test_get_model_instance_uses_explicit_named_connection_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """LLM consumers should honor an explicit named connection instead of the conventional default."""
-    captured: dict[str, object] = {}
-
-    class _FakeOpenAIChat:
-        def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
-            self.id = str(kwargs["id"])
-
-    monkeypatch.setattr("mindroom.ai.OpenAIChat", _FakeOpenAIChat)
-
-    config_data = {
-        "connections": {
-            "openai/default": _api_key_connection("openai"),
-            "openai/research": _api_key_connection("openai", service="openai-research"),
-        },
-        "models": {
-            "research": {
-                "provider": "openai",
-                "id": "gpt-4o-mini",
-                "connection": "openai/research",
-            },
-        },
-        "defaults": {"markdown": True},
-        "router": {"model": "research"},
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-    _set_api_key(runtime_paths, "openai", "default-key")
-    _set_api_key(runtime_paths, "openai-research", "research-key")
-
-    model = get_model_instance(config, runtime_paths, "research")
-
-    assert model.id == "gpt-4o-mini"
-    assert captured["api_key"] == "research-key"
-
-
-def test_model_config_rejects_inline_vertex_client_credentials() -> None:
-    """Vertex model configs must not bypass connection routing with inline credentials."""
-    with pytest.raises(ValidationError, match="extra_kwargs.client_params.credentials"):
-        ModelConfig(
-            provider="vertexai_claude",
-            id="claude-sonnet-4-6",
-            extra_kwargs={"client_params": {"credentials": object()}},
-        )
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from agno.agent import Agent
+from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
@@ -32,6 +33,7 @@ from mindroom.ai import (
     _attach_media_to_run_input,
     _copy_run_input,
     build_matrix_run_metadata,
+    cleanup_queued_notice_state,
     get_model_instance,
     install_queued_message_notice_hook,
     scrub_queued_notice_session_context,
@@ -1306,6 +1308,10 @@ async def prepare_materialized_team_execution(
     current_sender_id: str | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
+    scrub_queued_notice_session_context(
+        scope_context=scope_context,
+        entity_name=configured_team_name or team.name or team.id or "team",
+    )
     if system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(system_enrichment_items)
         team.additional_context = rendered_system_context
@@ -1464,89 +1470,100 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
+            try:
+                for retried_without_inline_media in (False, True):
+                    response = None
+                    try:
+                        response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
+                    except Exception as e:
+                        if not retried_without_inline_media and should_retry_without_inline_media(
+                            e,
+                            attempt_media_inputs,
+                        ):
+                            logger.warning(
+                                "Retrying team response without inline media after validation error",
+                                agents=agent_list,
+                                error=str(e),
+                            )
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_media_inputs = MediaInputs()
+                            attempt_run_id = _next_retry_run_id(run_id)
+                            continue
 
-            for retried_without_inline_media in (False, True):
-                response = None
-                try:
-                    response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
-                except Exception as e:
-                    if not retried_without_inline_media and should_retry_without_inline_media(e, attempt_media_inputs):
-                        logger.warning(
-                            "Retrying team response without inline media after validation error",
-                            agents=agent_list,
-                            error=str(e),
-                        )
-                        attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
-                        attempt_media_inputs = MediaInputs()
-                        attempt_run_id = _next_retry_run_id(run_id)
-                        continue
+                        logger.exception("team_response_failed", agents=agent_list)
+                        return get_user_friendly_error_message(e, team_name)
 
-                    logger.exception("team_response_failed", agents=agent_list)
-                    return get_user_friendly_error_message(e, team_name)
+                    if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
+                        error_text = str(response.content or "Unknown team error")
+                        if not retried_without_inline_media and should_retry_without_inline_media(
+                            error_text,
+                            attempt_media_inputs,
+                        ):
+                            logger.warning(
+                                "Retrying team response without inline media after errored run output",
+                                agents=agent_list,
+                                error=error_text,
+                            )
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_media_inputs = MediaInputs()
+                            attempt_run_id = _next_retry_run_id(run_id)
+                            continue
+                        logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
 
+                    break
+
+                assert response is not None
+                if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
+                    _raise_team_run_cancelled(response.content)
                 if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
-                    error_text = str(response.content or "Unknown team error")
-                    if not retried_without_inline_media and should_retry_without_inline_media(
-                        error_text,
-                        attempt_media_inputs,
-                    ):
-                        logger.warning(
-                            "Retrying team response without inline media after errored run output",
-                            agents=agent_list,
-                            error=error_text,
-                        )
-                        attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
-                        attempt_media_inputs = MediaInputs()
-                        attempt_run_id = _next_retry_run_id(run_id)
-                        continue
-                    logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
+                    return get_user_friendly_error_message(
+                        Exception(str(response.content or "Unknown team error")),
+                        team_name,
+                    )
+                if reply_to_event_id:
+                    _persist_bound_seen_event_ids(
+                        scope_context=scope_context,
+                        session_id=session_id,
+                        event_ids=_run_metadata_seen_event_ids(run_metadata),
+                    )
 
-                break
+                if isinstance(response, TeamRunOutput):
+                    if response.member_responses:
+                        logger.debug("team_member_response_count", response_count=len(response.member_responses))
 
-            assert response is not None
-            if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
-                _raise_team_run_cancelled(response.content)
-            if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
-                return get_user_friendly_error_message(
-                    Exception(str(response.content or "Unknown team error")),
-                    team_name,
-                )
-            if reply_to_event_id:
-                _persist_bound_seen_event_ids(
-                    scope_context=scope_context,
-                    session_id=session_id,
-                    event_ids=_run_metadata_seen_event_ids(run_metadata),
-                )
+                    logger.info(
+                        "team_consensus_preview",
+                        content_preview=response.content[:200] if response.content else None,
+                    )
 
-            if isinstance(response, TeamRunOutput):
-                if response.member_responses:
-                    logger.debug("team_member_response_count", response_count=len(response.member_responses))
+                    parts = format_team_response(response)
+                    team_response_text = "\n\n".join(parts) if parts else "No team response generated."
+                else:
+                    logger.warning(
+                        "team_response_unexpected_type",
+                        response_type=type(response).__name__,
+                        response=response,
+                    )
+                    team_response_text = str(response)
 
                 logger.info(
-                    "team_consensus_preview",
-                    content_preview=response.content[:200] if response.content else None,
+                    "team_response_preview",
+                    agents=agent_list,
+                    response_preview=team_response_text[:_MAX_LOG_MESSAGE_LENGTH],
                 )
+                if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
+                    logger.debug("team_response_full", agents=agent_list, response=team_response_text)
 
-                parts = format_team_response(response)
-                team_response_text = "\n\n".join(parts) if parts else "No team response generated."
-            else:
-                logger.warning(
-                    "team_response_unexpected_type",
-                    response_type=type(response).__name__,
-                    response=response,
+                team_header = _format_team_header(team_members.display_names)
+                return team_header + team_response_text
+            finally:
+                cleanup_queued_notice_state(
+                    run_output=response if isinstance(response, TeamRunOutput) else None,
+                    storage=scope_context.storage if scope_context is not None else None,
+                    session_id=session_id,
+                    session_type=SessionType.TEAM,
+                    entity_name=configured_team_name or team_name,
                 )
-                team_response_text = str(response)
-
-            logger.info(
-                "team_response_preview",
-                agents=agent_list,
-                response_preview=team_response_text[:_MAX_LOG_MESSAGE_LENGTH],
-            )
-            if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
-                logger.debug("team_response_full", agents=agent_list, response=team_response_text)
-
-            team_header = _format_team_header(team_members.display_names)
-            return team_header + team_response_text
     except Exception as e:
         logger.exception("Error preparing team members", agents=agent_list)
         return get_user_friendly_error_message(e, team_name)
@@ -1852,51 +1869,84 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     tool=tool,
                 )
 
-            for retried_without_inline_media in (False, True):
-                per_member = dict.fromkeys(display_names, "")
-                consensus = ""
-                tool_trace = []
-                next_tool_index = 1
-                pending_tools = []
-                emitted_output = False
-                retry_requested = False
+            try:
+                for retried_without_inline_media in (False, True):
+                    per_member = dict.fromkeys(display_names, "")
+                    consensus = ""
+                    tool_trace = []
+                    next_tool_index = 1
+                    pending_tools = []
+                    emitted_output = False
+                    retry_requested = False
 
-                if run_id_callback is not None and attempt_run_id is not None:
-                    run_id_callback(attempt_run_id)
+                    if run_id_callback is not None and attempt_run_id is not None:
+                        run_id_callback(attempt_run_id)
 
-                raw_stream = await _team_response_stream_raw(
-                    team=team,
-                    team_members=team_members,
-                    prompt=attempt_prompt,
-                    metadata=run_metadata,
-                    media=attempt_media_inputs,
-                    session_id=session_id,
-                    run_id=attempt_run_id,
-                    user_id=user_id,
-                )
-                async for event in raw_stream:
-                    if isinstance(event, RunOutput):
-                        if reply_to_event_id:
-                            _persist_bound_seen_event_ids(
-                                scope_context=scope_context,
-                                session_id=session_id,
-                                event_ids=[reply_to_event_id, *unseen_event_ids],
+                    raw_stream = await _team_response_stream_raw(
+                        team=team,
+                        team_members=team_members,
+                        prompt=attempt_prompt,
+                        metadata=run_metadata,
+                        media=attempt_media_inputs,
+                        session_id=session_id,
+                        run_id=attempt_run_id,
+                        user_id=user_id,
+                    )
+                    async for event in raw_stream:
+                        if isinstance(event, RunOutput):
+                            if reply_to_event_id:
+                                _persist_bound_seen_event_ids(
+                                    scope_context=scope_context,
+                                    session_id=session_id,
+                                    event_ids=[reply_to_event_id, *unseen_event_ids],
+                                )
+                            yield _get_response_content(event)
+                            return
+
+                        if isinstance(event, TeamRunOutput):
+                            if event.status == RunStatus.cancelled:
+                                _raise_team_run_cancelled(event.content)
+                            if event.status == RunStatus.error:
+                                error_text = str(event.content or "Unknown team error")
+                                if (
+                                    not retried_without_inline_media
+                                    and not emitted_output
+                                    and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                                ):
+                                    logger.warning(
+                                        "Retrying team streaming without inline media after errored run output",
+                                        agents=", ".join(agent_names),
+                                        error=error_text,
+                                    )
+                                    attempt_prompt = _append_inline_media_fallback_to_run_input(prepared_run_input)
+                                    attempt_media_inputs = MediaInputs()
+                                    attempt_run_id = _next_retry_run_id(run_id)
+                                    retry_requested = True
+                                    break
+                                yield get_user_friendly_error_message(Exception(error_text), team_label)
+                                return
+                            if reply_to_event_id:
+                                _persist_bound_seen_event_ids(
+                                    scope_context=scope_context,
+                                    session_id=session_id,
+                                    event_ids=[reply_to_event_id, *unseen_event_ids],
+                                )
+                            parts = format_team_response(event)
+                            team_response_text = (
+                                "\n\n".join(parts) if parts else str(event.content or "No team response generated.")
                             )
-                        yield _get_response_content(event)
-                        return
+                            yield _format_team_header(team_members.display_names) + team_response_text
+                            return
 
-                    if isinstance(event, TeamRunOutput):
-                        if event.status == RunStatus.cancelled:
-                            _raise_team_run_cancelled(event.content)
-                        if event.status == RunStatus.error:
-                            error_text = str(event.content or "Unknown team error")
+                        if isinstance(event, TeamRunErrorEvent):
+                            error_text = event.content or "Unknown team error"
                             if (
                                 not retried_without_inline_media
                                 and not emitted_output
                                 and should_retry_without_inline_media(error_text, attempt_media_inputs)
                             ):
                                 logger.warning(
-                                    "Retrying team streaming without inline media after errored run output",
+                                    "Retrying team streaming without inline media after team error",
                                     agents=", ".join(agent_names),
                                     error=error_text,
                                 )
@@ -1907,109 +1957,85 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 break
                             yield get_user_friendly_error_message(Exception(error_text), team_label)
                             return
-                        if reply_to_event_id:
-                            _persist_bound_seen_event_ids(
-                                scope_context=scope_context,
-                                session_id=session_id,
-                                event_ids=[reply_to_event_id, *unseen_event_ids],
+
+                        if isinstance(event, TeamRunCancelledEvent):
+                            _raise_team_run_cancelled(event.reason)
+
+                        if isinstance(event, AgentRunContentEvent):
+                            member_name = event.agent_name
+                            if member_name:
+                                if member_name not in per_member:
+                                    per_member[member_name] = ""
+                                per_member[member_name] += str(event.content or "")
+                        elif isinstance(event, AgentToolCallStartedEvent):
+                            member_name = event.agent_name
+                            if member_name:
+                                _start_tool_for_member(member_name, event.tool)
+                        elif isinstance(event, AgentToolCallCompletedEvent):
+                            member_name = event.agent_name
+                            if member_name:
+                                _complete_tool_for_member(member_name, event.tool)
+                        elif isinstance(event, TeamRunContentEvent):
+                            if event.content:
+                                consensus += str(event.content)
+                            else:
+                                logger.debug("Empty team consensus event received")
+                        elif isinstance(event, TeamToolCallStartedEvent):
+                            _start_tool(
+                                scope_key="team",
+                                get_text=_get_consensus,
+                                apply_text=_append_to_consensus,
+                                tool=event.tool,
                             )
-                        parts = format_team_response(event)
-                        team_response_text = (
-                            "\n\n".join(parts) if parts else str(event.content or "No team response generated.")
-                        )
-                        yield _format_team_header(team_members.display_names) + team_response_text
-                        return
-
-                    if isinstance(event, TeamRunErrorEvent):
-                        error_text = event.content or "Unknown team error"
-                        if (
-                            not retried_without_inline_media
-                            and not emitted_output
-                            and should_retry_without_inline_media(error_text, attempt_media_inputs)
-                        ):
-                            logger.warning(
-                                "Retrying team streaming without inline media after team error",
-                                agents=", ".join(agent_names),
-                                error=error_text,
+                        elif isinstance(event, TeamToolCallCompletedEvent):
+                            _complete_tool(
+                                scope_key="team",
+                                get_text=_get_consensus,
+                                set_text=_set_consensus,
+                                tool=event.tool,
                             )
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(prepared_run_input)
-                            attempt_media_inputs = MediaInputs()
-                            attempt_run_id = _next_retry_run_id(run_id)
-                            retry_requested = True
-                            break
-                        yield get_user_friendly_error_message(Exception(error_text), team_label)
-                        return
-
-                    if isinstance(event, TeamRunCancelledEvent):
-                        _raise_team_run_cancelled(event.reason)
-
-                    if isinstance(event, AgentRunContentEvent):
-                        member_name = event.agent_name
-                        if member_name:
-                            if member_name not in per_member:
-                                per_member[member_name] = ""
-                            per_member[member_name] += str(event.content or "")
-                    elif isinstance(event, AgentToolCallStartedEvent):
-                        member_name = event.agent_name
-                        if member_name:
-                            _start_tool_for_member(member_name, event.tool)
-                    elif isinstance(event, AgentToolCallCompletedEvent):
-                        member_name = event.agent_name
-                        if member_name:
-                            _complete_tool_for_member(member_name, event.tool)
-                    elif isinstance(event, TeamRunContentEvent):
-                        if event.content:
-                            consensus += str(event.content)
                         else:
-                            logger.debug("Empty team consensus event received")
-                    elif isinstance(event, TeamToolCallStartedEvent):
-                        _start_tool(
-                            scope_key="team",
-                            get_text=_get_consensus,
-                            apply_text=_append_to_consensus,
-                            tool=event.tool,
-                        )
-                    elif isinstance(event, TeamToolCallCompletedEvent):
-                        _complete_tool(
-                            scope_key="team",
-                            get_text=_get_consensus,
-                            set_text=_set_consensus,
-                            tool=event.tool,
-                        )
-                    else:
-                        logger.debug("ignoring_team_stream_event_type", event_type=type(event).__name__)
+                            logger.debug("ignoring_team_stream_event_type", event_type=type(event).__name__)
+                            continue
+
+                        parts: list[str] = []
+                        for display in display_names:
+                            body = per_member.get(display, "").strip()
+                            if body:
+                                parts.append(_format_member_contribution(display, body))
+                        for display, body in per_member.items():
+                            if display not in display_names and body.strip():
+                                parts.append(_format_member_contribution(display, body.strip()))
+
+                        if consensus.strip():
+                            parts.extend(_format_team_consensus(consensus.strip()))
+                        elif parts:
+                            parts.append(_format_no_consensus_note())
+
+                        if parts:
+                            emitted_output = True
+                            header = _format_team_header(team_members.display_names)
+                            full_text = "\n\n".join(parts)
+                            chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
+                            yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
+
+                    if retry_requested:
                         continue
-
-                    parts: list[str] = []
-                    for display in display_names:
-                        body = per_member.get(display, "").strip()
-                        if body:
-                            parts.append(_format_member_contribution(display, body))
-                    for display, body in per_member.items():
-                        if display not in display_names and body.strip():
-                            parts.append(_format_member_contribution(display, body.strip()))
-
-                    if consensus.strip():
-                        parts.extend(_format_team_consensus(consensus.strip()))
-                    elif parts:
-                        parts.append(_format_no_consensus_note())
-
-                    if parts:
-                        emitted_output = True
-                        header = _format_team_header(team_members.display_names)
-                        full_text = "\n\n".join(parts)
-                        chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
-                        yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
-
-                if retry_requested:
-                    continue
-                if emitted_output and reply_to_event_id:
-                    _persist_bound_seen_event_ids(
-                        scope_context=scope_context,
-                        session_id=session_id,
-                        event_ids=[reply_to_event_id, *unseen_event_ids],
-                    )
-                return
+                    if emitted_output and reply_to_event_id:
+                        _persist_bound_seen_event_ids(
+                            scope_context=scope_context,
+                            session_id=session_id,
+                            event_ids=[reply_to_event_id, *unseen_event_ids],
+                        )
+                    return
+            finally:
+                cleanup_queued_notice_state(
+                    run_output=None,
+                    storage=scope_context.storage if scope_context is not None else None,
+                    session_id=session_id,
+                    session_type=SessionType.TEAM,
+                    entity_name=configured_team_name or team_label,
+                )
     except Exception as e:
         logger.exception("Error preparing team members for streaming", agents=agent_names)
         yield get_user_friendly_error_message(e, team_label)

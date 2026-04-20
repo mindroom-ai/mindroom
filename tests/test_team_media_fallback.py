@@ -17,8 +17,10 @@ from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 from agno.team import Team as AgnoTeam
+from agno.team._run import _cleanup_and_store
 
 from mindroom.agents import create_agent
+from mindroom.ai import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -88,6 +90,25 @@ def _prepared_team_execution_context(
         unseen_event_ids=unseen_event_ids or [],
         replays_persisted_history=replays_persisted_history,
         compaction_outcomes=[],
+    )
+
+
+def _queued_notice_message() -> Message:
+    return Message(
+        role="user",
+        content=QUEUED_MESSAGE_NOTICE_TEXT,
+        provider_data={"mindroom_queued_message_notice": True},
+    )
+
+
+def _has_queued_notice(messages: list[Message] | None) -> bool:
+    return any(
+        (
+            isinstance(message.provider_data, dict)
+            and message.provider_data.get("mindroom_queued_message_notice") is True
+        )
+        or message.content == QUEUED_MESSAGE_NOTICE_TEXT
+        for message in messages or []
     )
 
 
@@ -341,6 +362,119 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     assert [message.role for message in prompt] == ["user", "user"]
     assert prompt[0].content == "user: Fresh follow-up"
     assert prompt[1].content == "Analyze this."
+
+
+@pytest.mark.asyncio
+async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run() -> None:
+    """Team runs should not replay or persist hidden queued-message notices."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-queued",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        persisted_team = _make_test_team(
+            name="General Team",
+            team_id=scope_context.session.team_id,
+        )
+        persisted_team.db = scope_context.storage
+        _cleanup_and_store(
+            persisted_team,
+            TeamRunOutput(
+                run_id="run-1",
+                team_id=scope_context.session.team_id,
+                team_name="General Team",
+                session_id="session-queued",
+                messages=[_queued_notice_message()],
+                status=RunStatus.completed,
+            ),
+            scope_context.session,
+        )
+
+    prepared_scope_context = None
+    team_id = "team_general"
+    mock_team = _make_test_team(name="General Team", team_id=team_id)
+
+    async def fake_arun(*_args: object, **_kwargs: object) -> TeamRunOutput:
+        assert prepared_scope_context is not None
+        mock_team.db = prepared_scope_context.storage
+        assert prepared_scope_context.session is not None
+        _cleanup_and_store(
+            mock_team,
+            TeamRunOutput(
+                run_id="run-2",
+                team_id=team_id,
+                team_name="General Team",
+                session_id="session-queued",
+                content="Recovered team response",
+                messages=[_queued_notice_message()],
+                status=RunStatus.completed,
+            ),
+            prepared_scope_context.session,
+        )
+        return TeamRunOutput(
+            run_id="run-2",
+            team_id=team_id,
+            team_name="General Team",
+            session_id="session-queued",
+            content="Recovered team response",
+            messages=[_queued_notice_message()],
+            status=RunStatus.completed,
+        )
+
+    mock_team.arun = AsyncMock(side_effect=fake_arun)
+
+    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> PreparedExecutionContext:
+        nonlocal prepared_scope_context
+        scope_context = kwargs["scope_context"]
+        assert scope_context is not None
+        assert scope_context.session is not None
+        prepared_scope_context = scope_context
+        assert not any(_has_queued_notice(run.messages) for run in scope_context.session.runs or [])
+        return _prepared_team_execution_context(final_prompt="Analyze this.")
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch(
+            "mindroom.teams.prepare_bound_team_execution_context",
+            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+        ),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-queued",
+        )
+
+    assert "Recovered team response" in response
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-queued",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert not any(_has_queued_notice(run.messages) for run in scope_context.session.runs or [])
 
 
 @pytest.mark.asyncio

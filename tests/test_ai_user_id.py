@@ -75,7 +75,12 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
-from mindroom.response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
+from mindroom.response_runner import (
+    ResponseRequest,
+    ResponseRunner,
+    ResponseRunnerDeps,
+    prepare_memory_and_model_context,
+)
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -2008,6 +2013,29 @@ async def test_send_skill_command_response_locked_emits_session_started_after_pe
 
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
+
+    def test_prepare_memory_and_model_context_keeps_raw_prompt_when_model_prompt_only_contains_substring(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Short prompts must not disappear when they happen to occur inside attachment IDs."""
+        config = _config()
+        runtime_paths = _runtime_paths(tmp_path)
+
+        memory_prompt, memory_thread_history, model_prompt, model_thread_history = prepare_memory_and_model_context(
+            "report",
+            [],
+            config=config,
+            runtime_paths=runtime_paths,
+            model_prompt="Available attachment IDs: att_report. Use tool calls to inspect or process them.",
+        )
+
+        assert memory_prompt == "report"
+        assert memory_thread_history == []
+        assert model_thread_history == []
+        assert model_prompt.endswith(
+            "report\n\nAvailable attachment IDs: att_report. Use tool calls to inspect or process them.",
+        )
 
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:

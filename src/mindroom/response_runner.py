@@ -221,8 +221,11 @@ def prepare_memory_and_model_context(
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
     """Return raw memory inputs alongside timestamped model-facing context."""
     model_prompt_content = model_prompt or prompt
-    if model_prompt is not None and prompt and prompt not in model_prompt:
-        model_prompt_content = f"{prompt}\n\n{model_prompt}"
+    if model_prompt is not None and prompt:
+        if model_prompt == prompt or model_prompt.startswith(f"{prompt}\n\n"):
+            model_prompt_content = model_prompt
+        else:
+            model_prompt_content = f"{prompt}\n\n{model_prompt}"
     model_prompt_text = _prefix_user_turn_time(
         model_prompt_content,
         timezone=config.timezone,
