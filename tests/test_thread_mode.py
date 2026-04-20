@@ -1071,8 +1071,19 @@ class TestSendStreamingResponseRoomMode:
             captured.update(content)
             return delivered_matrix_event("$sent", content)
 
+        async def mock_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            content: dict,
+            _display_text: str,
+        ) -> object:
+            captured.update(content)
+            return delivered_matrix_event("$edit", content)
+
         with (
             patch("mindroom.streaming.send_message_result", side_effect=mock_send),
+            patch("mindroom.streaming.edit_message_result", side_effect=mock_edit),
         ):
             await send_streaming_response(
                 client,
