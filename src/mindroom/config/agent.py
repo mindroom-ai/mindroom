@@ -248,7 +248,10 @@ class AgentConfig(BaseModel):
     )
     compress_tool_results: bool | None = Field(
         default=None,
-        description="Compress tool results in history to save context (per-agent override)",
+        description=(
+            "Compress tool results in history to save context (per-agent override). ISSUE-184: On Anthropic, "
+            "setting this to true can mutate replayed tool messages and invalidate prompt-cache prefixes."
+        ),
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
