@@ -89,9 +89,10 @@ async def watch_tree(
                 and last_change_at is not None
                 and loop.time() - last_change_at >= _WATCH_TREE_DEBOUNCE_SECONDS
             ):
-                await callback(tuple(sorted(pending_changes)))
+                changed_paths = tuple(sorted(pending_changes))
                 pending_changes.clear()
                 last_change_at = None
+                await callback(changed_paths)
         except Exception:
             logger.exception("Exception during file watcher callback - continuing to watch")
 

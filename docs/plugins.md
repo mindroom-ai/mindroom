@@ -407,7 +407,7 @@ See the [Hooks](hooks.md) page for full documentation including:
 - The built-in events and their execution modes
 - The enrichment pipeline (`message:enrich`)
 - Custom events
-- Error handling and circuit breaker behavior
+- Error handling without cooldowns or circuit breakers
 - Testing patterns
 
 ## Live development (hot reload)
@@ -437,7 +437,7 @@ journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload com
 ```
 
 You can break and fix a plugin freely.
-A broken save can raise an import or runtime error, and the next valid save reloads the plugin successfully.
+A broken save can raise an import or runtime error, deactivate that plugin, and the next valid save reloads it successfully.
 There is no quarantine, failure threshold, or cooldown.
 Each save just reloads.
 

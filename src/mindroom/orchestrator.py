@@ -741,7 +741,17 @@ class MultiAgentOrchestrator:
             source=source,
             changed_paths=[str(path) for path in changed_paths],
         )
-        result = reload_plugins(config, self.runtime_paths)
+        try:
+            result = reload_plugins(config, self.runtime_paths)
+        except Exception:
+            degraded_result = reload_plugins(config, self.runtime_paths, skip_broken_plugins=True)
+            self._activate_hook_registry(degraded_result.hook_registry)
+            logger.warning(
+                "Plugin reload failed; active plugin set degraded",
+                source=source,
+                active_plugins=list(degraded_result.active_plugin_names),
+            )
+            raise
         self._activate_hook_registry(result.hook_registry)
         logger.info(
             "Plugin reload complete",
