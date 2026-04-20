@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
-    from mindroom.workers.models import WorkerHandle, WorkerSpec
+    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec
 
 
 @dataclass(slots=True)
@@ -26,9 +26,15 @@ class WorkerManager:
         """Return the configured backend idle timeout."""
         return self.backend.idle_timeout_seconds
 
-    def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+    def ensure_worker(
+        self,
+        spec: WorkerSpec,
+        *,
+        now: float | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> WorkerHandle:
         """Resolve or create a worker."""
-        return self.backend.ensure_worker(spec, now=now)
+        return self.backend.ensure_worker(spec, now=now, progress_sink=progress_sink)
 
     def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Return a known worker handle, if present."""

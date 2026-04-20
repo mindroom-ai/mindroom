@@ -84,8 +84,22 @@ def _plugin_root() -> Path:
     return Path.home() / ".mindroom" / "plugins" / "workloop"
 
 
+def _plugin_checkout_available() -> bool:
+    root = _plugin_root()
+    required_files = (
+        "commands.py",
+        "formatting.py",
+        "hooks.py",
+        "poke.py",
+        "state.py",
+        "todos.py",
+        "types.py",
+    )
+    return root.is_dir() and all((root / path).is_file() for path in required_files)
+
+
 pytestmark = pytest.mark.skipif(
-    not _plugin_root().is_dir(),
+    not _plugin_checkout_available(),
     reason="workloop plugin checkout is not available in this environment",
 )
 

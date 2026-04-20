@@ -1081,7 +1081,7 @@ path = "mindroom.streaming"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
-    "mindroom.orchestration.runtime", "mindroom.tool_system.events",
+    "mindroom.orchestration.runtime", "mindroom.tool_system.events", "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -1685,6 +1685,8 @@ from = ["mindroom.tool_system.dependencies"]
 expose = [
     "LiveToolDispatchContext",
     "ToolDispatchContext",
+    "WorkerProgressEvent",
+    "WorkerProgressPump",
     "ToolRuntimeContext",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
@@ -1693,6 +1695,7 @@ expose = [
     "build_scheduling_runtime_from_tool_runtime_context",
     "emit_custom_event",
     "execution_identity_matches_tool_runtime_context",
+    "get_worker_progress_pump",
     "get_plugin_state_root",
     "get_tool_runtime_context",
     "list_tool_runtime_attachment_ids",
@@ -1700,6 +1703,7 @@ expose = [
     "resolve_tool_runtime_hook_bindings",
     "runtime_context_from_dispatch_context",
     "tool_runtime_context",
+    "worker_progress_pump_scope",
 ]
 from = ["mindroom.tool_system.runtime_context"]
 

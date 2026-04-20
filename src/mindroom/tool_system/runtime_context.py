@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -25,6 +26,7 @@ from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.workers.models import WorkerReadyProgress
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
@@ -151,6 +154,24 @@ class ToolRuntimeHookBindings:
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProgressEvent:
+    """One worker warmup progress event routed back into streaming delivery."""
+
+    tool_name: str
+    function_name: str
+    progress: WorkerReadyProgress
+
+
+@dataclass
+class WorkerProgressPump:
+    """Bridge worker warmup progress from sync worker threads back to the stream loop."""
+
+    loop: asyncio.AbstractEventLoop
+    queue: asyncio.Queue[WorkerProgressEvent]
+    shutdown: threading.Event
 
 
 @dataclass
@@ -363,11 +384,20 @@ _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
     "tool_runtime_context",
     default=None,
 )
+_WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
+    "worker_progress_pump",
+    default=None,
+)
 
 
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
     """Get the current shared tool runtime context."""
     return _TOOL_RUNTIME_CONTEXT.get()
+
+
+def get_worker_progress_pump() -> WorkerProgressPump | None:
+    """Get the current worker progress pump bound to the stream task."""
+    return _WORKER_PROGRESS_PUMP.get()
 
 
 def resolve_tool_runtime_hook_bindings(context: ToolRuntimeContext) -> ToolRuntimeHookBindings:
@@ -560,3 +590,18 @@ def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
         yield
     finally:
         _TOOL_RUNTIME_CONTEXT.reset(token)
+
+
+@contextmanager
+def worker_progress_pump_scope(
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue[WorkerProgressEvent],
+) -> Iterator[WorkerProgressPump]:
+    """Bind one worker progress pump for the lifetime of one streaming response."""
+    pump = WorkerProgressPump(loop=loop, queue=queue, shutdown=threading.Event())
+    token = _WORKER_PROGRESS_PUMP.set(pump)
+    try:
+        yield pump
+    finally:
+        pump.shutdown.set()
+        _WORKER_PROGRESS_PUMP.reset(token)

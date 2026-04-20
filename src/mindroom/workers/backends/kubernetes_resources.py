@@ -408,8 +408,10 @@ class KubernetesResourceManager:
         *,
         timeout_seconds: float,
         deployment_ready_fn: Callable[[KubernetesDeployment], bool],
+        on_poll_tick: Callable[[float], None] | None = None,
     ) -> KubernetesDeployment:
         """Poll a worker Deployment until it becomes ready or times out."""
+        started_at = time.monotonic()
         deadline = time.time() + timeout_seconds
         while True:
             deployment = self.read_deployment(deployment_name)
@@ -421,6 +423,8 @@ class KubernetesResourceManager:
             if time.time() >= deadline:
                 msg = f"Kubernetes worker '{deployment_name}' did not become ready within {timeout_seconds:.0f}s."
                 raise WorkerBackendError(msg)
+            if on_poll_tick is not None:
+                on_poll_tick(time.monotonic() - started_at)
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
     def _apply_object(

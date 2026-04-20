@@ -1598,7 +1598,8 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             captured_snapshots.append(tool_validation_snapshot)
             return cls()
 
-        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+            del spec, now, progress_sink
             raise NotImplementedError
 
         def get_worker(self, worker_key: str, *, now: float | None = None) -> object:
@@ -1718,7 +1719,8 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
             del runtime_paths, auth_token, storage_root, tool_validation_snapshot, worker_grantable_credentials
             return cls()
 
-        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+            del spec, now, progress_sink
             raise NotImplementedError
 
         def get_worker(self, worker_key: str, *, now: float | None = None) -> object:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
+WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,20 @@ class WorkerHandle:
     failure_count: int = 0
     failure_reason: str | None = None
     debug_metadata: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerReadyProgress:
+    """Progress event emitted while a worker is warming up."""
+
+    phase: WorkerReadyPhase
+    worker_key: str
+    backend_name: str
+    elapsed_seconds: float
+    error: str | None = None
+
+
+ProgressSink = Callable[[WorkerReadyProgress], None]
 
 
 def worker_api_endpoint(handle: WorkerHandle, operation: Literal["execute", "leases", "workers", "cleanup"]) -> str:

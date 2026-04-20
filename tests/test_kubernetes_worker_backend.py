@@ -27,10 +27,12 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_resources import ANNOTATION_STARTUP_MANIFEST_HASH
-from mindroom.workers.models import WorkerSpec
+from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
 
 _TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
@@ -1128,8 +1130,9 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
         *,
         timeout_seconds: float,
         deployment_ready_fn: object,
+        on_poll_tick: object | None = None,
     ) -> object:
-        del timeout_seconds, deployment_ready_fn
+        del timeout_seconds, deployment_ready_fn, on_poll_tick
         raise WorkerBackendError(error_message)
 
     backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
@@ -1149,6 +1152,144 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert handle.status == "failed"
     assert handle.failure_reason == error_message
     assert worker_id not in _core_api.services
+
+
+def test_kubernetes_backend_reports_cold_start_progress() -> None:
+    """Cold worker startups should emit one cold-start notice and one ready notice."""
+    backend, _apps_api, _core_api = _backend()
+    events: list[WorkerReadyProgress] = []
+
+    def _ready(
+        self: object,
+        deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: Callable[[float], None] | None = None,
+    ) -> object:
+        del timeout_seconds, deployment_ready_fn
+        assert on_poll_tick is not None
+        on_poll_tick(2.0)
+        return self.read_deployment(deployment_name)
+
+    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+
+    backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=10.0,
+        progress_sink=events.append,
+    )
+
+    assert [event.phase for event in events] == ["cold_start", "ready"]
+    assert all(event.worker_key == _TEST_SCOPED_WORKER_KEY_A for event in events)
+    assert all(event.backend_name == "kubernetes" for event in events)
+
+
+def test_kubernetes_backend_skips_progress_for_warm_worker() -> None:
+    """Warm ready workers should stay silent even when a sink is provided."""
+    backend, _apps_api, _core_api = _backend()
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    events: list[WorkerReadyProgress] = []
+
+    backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=11.0,
+        progress_sink=events.append,
+    )
+
+    assert events == []
+
+
+def test_kubernetes_backend_reports_waiting_progress_every_five_seconds() -> None:
+    """Long cold starts should keep emitting waiting progress on the five-second cadence."""
+    backend, _apps_api, _core_api = _backend()
+    events: list[WorkerReadyProgress] = []
+
+    def _ready(
+        self: object,
+        deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: Callable[[float], None] | None = None,
+    ) -> object:
+        del timeout_seconds, deployment_ready_fn
+        assert on_poll_tick is not None
+        for elapsed_seconds in (2.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0):
+            on_poll_tick(elapsed_seconds)
+        return self.read_deployment(deployment_name)
+
+    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+
+    backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=10.0,
+        progress_sink=events.append,
+    )
+
+    assert [event.phase for event in events] == [
+        "cold_start",
+        "waiting",
+        "waiting",
+        "waiting",
+        "waiting",
+        "waiting",
+        "waiting",
+        "ready",
+    ]
+
+
+def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
+    """Failed cold starts should surface a terminal failed progress event with the error."""
+    backend, _apps_api, _core_api = _backend()
+    events: list[WorkerReadyProgress] = []
+    error_message = "worker never became ready"
+
+    def _boom(
+        _self: object,
+        _deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: Callable[[float], None] | None = None,
+    ) -> object:
+        del timeout_seconds, deployment_ready_fn
+        assert on_poll_tick is not None
+        on_poll_tick(2.0)
+        raise WorkerBackendError(error_message)
+
+    backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
+
+    with pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=10.0,
+            progress_sink=events.append,
+        )
+
+    assert [event.phase for event in events] == ["cold_start", "failed"]
+    assert events[-1].error == error_message
+
+
+def test_kubernetes_backend_ignores_progress_when_sink_is_absent() -> None:
+    """Backends should not build progress callbacks when no sink was provided."""
+    backend, _apps_api, _core_api = _backend()
+
+    def _ready(
+        self: object,
+        deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: object | None = None,
+    ) -> object:
+        del timeout_seconds, deployment_ready_fn
+        assert on_poll_tick is None
+        return self.read_deployment(deployment_name)
+
+    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0, progress_sink=None)
 
 
 def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> None:

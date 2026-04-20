@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from mindroom.workers.models import WorkerHandle, WorkerSpec
+    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec
 
 
 class WorkerBackendError(RuntimeError):
@@ -18,7 +18,13 @@ class WorkerBackend(Protocol):
     backend_name: str
     idle_timeout_seconds: float
 
-    def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+    def ensure_worker(
+        self,
+        spec: WorkerSpec,
+        *,
+        now: float | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> WorkerHandle:
         """Resolve or create the worker described by *spec*."""
 
     def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
