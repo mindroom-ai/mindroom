@@ -27,6 +27,7 @@ def main() -> int:
     runtime_paths = resolve_runtime_paths(
         config_path=args.config_path,
         storage_path=args.storage_path,
+        # Isolate from shell MINDROOM_* env so the script only follows --config-path/--storage-path.
         process_env={},
     )
     launch_kwargs = persistent_launch_kwargs(runtime_paths, args.profile, headless=False)

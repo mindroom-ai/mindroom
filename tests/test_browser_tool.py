@@ -17,8 +17,9 @@ from mindroom.custom_tools.browser import (
     BrowserTools,
     _BrowserProfileState,
     _BrowserTabState,
-    _clear_stale_singleton_locks,
     _clean_str,
+    _clear_stale_singleton_locks,
+    profile_dir,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
@@ -40,6 +41,23 @@ TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml
 def test_clean_str_normalizes_values(value: object, expected: str | None) -> None:
     """_clean_str strips strings and rejects non-strings."""
     assert _clean_str(value) == expected
+
+
+def test_profile_dir_distinct_names_yield_distinct_paths(tmp_path: Path) -> None:
+    """Different profile names should map to different directories under browser-profiles."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    openclaw_dir = profile_dir(runtime_paths, "openclaw")
+    chrome_dir = profile_dir(runtime_paths, "chrome")
+    profiles_root = (runtime_paths.storage_root / "browser-profiles").resolve()
+
+    assert openclaw_dir != chrome_dir
+    assert openclaw_dir.parent == profiles_root
+    assert chrome_dir.parent == profiles_root
 
 
 def test_clear_stale_singleton_locks_unlinks_stale_symlink(tmp_path: Path) -> None:

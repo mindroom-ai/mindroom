@@ -213,6 +213,8 @@ def persistent_launch_kwargs(
     )
     launch_kwargs: dict[str, Any] = {
         "headless": headless,
+        # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
+        # Revisit if PWA targets matter.
         "service_workers": "block",
         "user_data_dir": str(profile_dir(runtime_paths, profile_name)),
         "viewport": {"height": VIEWPORT_HEIGHT, "width": VIEWPORT_WIDTH},
