@@ -105,14 +105,16 @@ logger = get_logger(__name__)
 __all__ = [
     "AIStreamChunk",
     "ai_response",
+    "append_inline_media_fallback_to_run_input",
+    "attach_media_to_run_input",
     "cleanup_queued_notice_state",
+    "copy_run_input",
     "get_model_instance",
     "install_queued_message_notice_hook",
     "queued_message_signal_context",
     "scrub_queued_notice_session_context",
     "stream_agent_response",
 ]
-
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 type ModelRunInput = str | Sequence[Message]
 _AI_RUN_METADATA_VERSION = 1
@@ -184,7 +186,7 @@ class PreparedAgentRun:
     @property
     def run_input(self) -> list[Message]:
         """Return a deep-copied mutable message list for one provider call."""
-        return _copy_run_input(self.messages)
+        return copy_run_input(self.messages)
 
 
 def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
@@ -194,17 +196,17 @@ def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
     return [message.model_copy(deep=True) for message in run_input]
 
 
-def _copy_run_input(run_input: ModelRunInput) -> list[Message]:
+def copy_run_input(run_input: ModelRunInput) -> list[Message]:
     """Deep-copy canonical run input so retries can mutate safely."""
     return _normalize_run_input(run_input)
 
 
-def _attach_media_to_run_input(
+def attach_media_to_run_input(
     run_input: ModelRunInput,
     media_inputs: MediaInputs,
 ) -> list[Message]:
     """Attach media to the current user message."""
-    run_messages = _copy_run_input(run_input)
+    run_messages = copy_run_input(run_input)
     current_message = run_messages[-1]
     current_message.audio = media_inputs.audio
     current_message.images = media_inputs.images
@@ -213,9 +215,9 @@ def _attach_media_to_run_input(
     return run_messages
 
 
-def _append_inline_media_fallback_to_run_input(run_input: ModelRunInput) -> list[Message]:
+def append_inline_media_fallback_to_run_input(run_input: ModelRunInput) -> list[Message]:
     """Append the inline-media fallback note to the current user turn."""
-    run_messages = _copy_run_input(run_input)
+    run_messages = copy_run_input(run_input)
     current_message = run_messages[-1]
     current_text = current_message.content if isinstance(current_message.content, str) else ""
     current_message.content = append_inline_media_fallback_prompt(current_text)
@@ -1034,7 +1036,7 @@ def _attempt_request_log_context(
         reply_to_event_id=reply_to_event_id,
         prompt=prompt,
         model_prompt=model_prompt,
-        full_prompt=render_prepared_messages_text(_normalize_run_input(attempt_prompt)),
+        full_prompt=render_prepared_messages_text(copy_run_input(attempt_prompt)),
         metadata=metadata,
     )
 
@@ -1070,7 +1072,7 @@ async def cached_agent_run(
     """Shared wrapper for one `agent.arun()` call."""
     media_inputs = media or MediaInputs()
     _note_attempt_run_id(run_id_callback, run_id)
-    prepared_input = _attach_media_to_run_input(run_input, media_inputs)
+    prepared_input = attach_media_to_run_input(run_input, media_inputs)
     return await agent.arun(
         prepared_input,
         session_id=session_id,
@@ -1411,7 +1413,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             )
 
             response: RunOutput | None = None
-            attempt_prompt = _copy_run_input(run_input)
+            attempt_prompt = copy_run_input(run_input)
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
 
@@ -1454,7 +1456,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=str(e),
                             )
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1473,7 +1475,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=error_text,
                             )
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1526,6 +1528,23 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             agent,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
+
+
+__all__ = [
+    "AIStreamChunk",
+    "ai_response",
+    "append_inline_media_fallback_to_run_input",
+    "attach_media_to_run_input",
+    "build_matrix_run_metadata",
+    "cached_agent_run",
+    "cleanup_queued_notice_state",
+    "copy_run_input",
+    "get_model_instance",
+    "install_queued_message_notice_hook",
+    "queued_message_signal_context",
+    "scrub_queued_notice_session_context",
+    "stream_agent_response",
+]
 
 
 @timed("model_request_to_completion")
@@ -1765,7 +1784,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 extra_metadata=matrix_run_metadata,
             )
 
-            attempt_prompt = _copy_run_input(run_input)
+            attempt_prompt = copy_run_input(run_input)
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
             state = _StreamingAttemptState()
@@ -1789,7 +1808,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             metadata=metadata,
                         )
                         with bind_llm_request_log_context(**request_context):
-                            prepared_input = _attach_media_to_run_input(
+                            prepared_input = attach_media_to_run_input(
                                 attempt_prompt,
                                 attempt_media_inputs,
                             )
@@ -1826,7 +1845,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             log_message="Retrying streaming AI response without inline media after validation error",
                             agent_name=agent_name,
                         ):
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1835,7 +1854,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         return
 
                     if state.retry_requested:
-                        attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                        attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
                         attempt_media_inputs = MediaInputs()
                         attempt_run_id = _next_retry_run_id(run_id)
                         continue

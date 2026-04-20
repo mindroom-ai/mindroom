@@ -147,7 +147,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.get_model_instance"):
+        with patch("mindroom.routing.core.get_model_instance"):
             # Mock the Agent and response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -157,7 +157,7 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
+            with patch("mindroom.routing.core.Agent", return_value=mock_agent):
                 # Create MatrixID objects for agents
                 agents = [
                     MatrixID(username="mindroom_calculator", domain="localhost"),
@@ -188,13 +188,13 @@ class TestAIRouting:
             _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
-        with patch("mindroom.routing.get_model_instance"):
+        with patch("mindroom.routing.core.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = _AgentSuggestion(agent_name="finance", reasoning="Continuing financial discussion")
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
+            with patch("mindroom.routing.core.Agent", return_value=mock_agent):
                 # Create MatrixID objects for agents
                 agents = [
                     MatrixID(username="mindroom_calculator", domain="localhost"),
@@ -228,7 +228,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.get_model_instance"):
+        with patch("mindroom.routing.core.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             # AI suggests an agent not in available list
@@ -238,7 +238,7 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
+            with patch("mindroom.routing.core.Agent", return_value=mock_agent):
                 # Create MatrixID objects for agents
                 agents = [
                     MatrixID(username="mindroom_calculator", domain="localhost"),
@@ -265,7 +265,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.get_model_instance") as mock_model:
+        with patch("mindroom.routing.core.get_model_instance") as mock_model:
             mock_model.side_effect = ValueError("Model error")
 
             agents = [MatrixID(username="mindroom_general", domain="localhost")]

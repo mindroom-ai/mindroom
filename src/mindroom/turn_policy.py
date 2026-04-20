@@ -28,7 +28,6 @@ from mindroom.hooks.ingress import HookIngressPolicy, is_automation_source_kind
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID, is_agent_id
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
-from mindroom.team_runtime_resolution import resolve_live_shared_agent_names
 from mindroom.teams import (
     TeamIntent,
     TeamMode,
@@ -36,6 +35,7 @@ from mindroom.teams import (
     TeamResolution,
     decide_team_formation,
     resolve_configured_team,
+    resolve_live_shared_agent_names,
 )
 from mindroom.thread_utils import (
     get_agents_in_thread,

@@ -21,13 +21,13 @@ from agno.session.team import TeamSession
 
 from mindroom.ai import (
     QUEUED_MESSAGE_NOTICE_TEXT,
-    PreparedAgentRun,
     ai_response,
     cleanup_queued_notice_state,
     install_queued_message_notice_hook,
     queued_message_signal_context,
     stream_agent_response,
 )
+from mindroom.ai.core import PreparedAgentRun
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import PreparedTextEvent
@@ -1025,9 +1025,12 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
         return _prepared_run(agent)
 
     with (
-        patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(side_effect=fake_prepare)),
-        patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
+        patch(
+            "mindroom.ai.core.open_resolved_scope_session_context",
+            side_effect=lambda **_kwargs: _open_scope(storage),
+        ),
+        patch("mindroom.ai.core._prepare_agent_and_prompt", new=AsyncMock(side_effect=fake_prepare)),
+        patch("mindroom.ai.core.close_agent_runtime_sqlite_dbs"),
     ):
         response = await ai_response(
             agent_name="general",
@@ -1086,9 +1089,12 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
     agent.arun = AsyncMock(side_effect=fake_arun)
 
     with (
-        patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
-        patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
+        patch(
+            "mindroom.ai.core.open_resolved_scope_session_context",
+            side_effect=lambda **_kwargs: _open_scope(storage),
+        ),
+        patch("mindroom.ai.core._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
+        patch("mindroom.ai.core.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
         response = await ai_response(
@@ -1136,9 +1142,12 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
     agent.arun = AsyncMock(side_effect=fake_arun)
 
     with (
-        patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
-        patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
+        patch(
+            "mindroom.ai.core.open_resolved_scope_session_context",
+            side_effect=lambda **_kwargs: _open_scope(storage),
+        ),
+        patch("mindroom.ai.core._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
+        patch("mindroom.ai.core.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
         response = await ai_response(
@@ -1186,9 +1195,12 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
     agent.arun = fake_stream
 
     with (
-        patch("mindroom.ai.open_resolved_scope_session_context", side_effect=lambda **_kwargs: _open_scope(storage)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
-        patch("mindroom.ai.close_agent_runtime_sqlite_dbs"),
+        patch(
+            "mindroom.ai.core.open_resolved_scope_session_context",
+            side_effect=lambda **_kwargs: _open_scope(storage),
+        ),
+        patch("mindroom.ai.core._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
+        patch("mindroom.ai.core.close_agent_runtime_sqlite_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
         chunks = [
@@ -1215,8 +1227,8 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
     model = _FakeModel()
 
     with (
-        patch("mindroom.teams.get_model_instance", return_value=model),
-        patch("mindroom.teams.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
+        patch("mindroom.teams.core.get_model_instance", return_value=model),
+        patch("mindroom.teams.core.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
         team = _create_team_instance(

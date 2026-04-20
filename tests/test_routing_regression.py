@@ -622,11 +622,11 @@ class TestRoutingRegression:
         assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["facts", "research"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.teams.get_agent_knowledge")
-    @patch("mindroom.teams.create_agent")
-    @patch("mindroom.teams.Team.arun")
+    @patch("mindroom.teams.core.get_agent_knowledge")
+    @patch("mindroom.teams.core.create_agent")
+    @patch("mindroom.teams.core.Team.arun")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.teams.get_model_instance")
+    @patch("mindroom.teams.core.get_model_instance")
     @patch("mindroom.config.main.Config.from_yaml")
     async def test_multiple_mentions_each_responds_once(
         self,

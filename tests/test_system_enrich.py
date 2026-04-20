@@ -18,7 +18,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from agno.team import Team
 
-from mindroom.ai import _prepare_agent_and_prompt
+from mindroom.ai.core import _prepare_agent_and_prompt
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -43,8 +43,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
-from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
+from mindroom.teams.exact_members import ResolvedExactTeamMembers
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -345,10 +345,10 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
         )
 
     with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=prepared_agent),
+        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.core.create_agent", return_value=prepared_agent),
         patch(
-            "mindroom.ai.prepare_agent_execution_context",
+            "mindroom.ai.core.prepare_agent_execution_context",
             new=AsyncMock(side_effect=fake_prepare_agent_execution_context),
         ),
     ):
@@ -412,9 +412,9 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
         )
 
     with (
-        patch("mindroom.teams._create_team_instance", return_value=prepared_team),
+        patch("mindroom.teams.core._create_team_instance", return_value=prepared_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.core.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):

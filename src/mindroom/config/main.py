@@ -1406,7 +1406,6 @@ class Config(BaseModel):
         agent_name: str,
         *,
         closures: dict[str, frozenset[str]] | None = None,
-        visiting: frozenset[str] = frozenset(),
     ) -> frozenset[str]:
         """Return one agent plus all agents reachable through transitive delegation."""
         return get_agent_delegation_closure(
@@ -1416,7 +1415,6 @@ class Config(BaseModel):
                 default_worker_scope=self.defaults.worker_scope,
             ),
             closures=closures,
-            visiting=visiting,
         )
 
     def get_private_team_targets(

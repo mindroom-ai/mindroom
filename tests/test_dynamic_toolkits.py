@@ -759,8 +759,8 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
     model.id = "gpt-4o-mini"
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
-        patch("mindroom.agents.Agent") as mock_agent_class,
+        patch("mindroom.ai.core.get_model_instance", return_value=model),
+        patch("mindroom.agents.core.Agent") as mock_agent_class,
     ):
         create_agent(
             "code",
@@ -816,8 +816,8 @@ def test_create_agent_without_session_id_skips_dynamic_tools_and_prompt_block(tm
     model.id = "gpt-4o-mini"
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
-        patch("mindroom.agents.Agent") as mock_agent_class,
+        patch("mindroom.ai.core.get_model_instance", return_value=model),
+        patch("mindroom.agents.core.Agent") as mock_agent_class,
     ):
         create_agent(
             "code",
@@ -852,8 +852,8 @@ def test_create_agent_reuses_saved_in_memory_toolkits_across_calls(tmp_path: Pat
     save_loaded_toolkits_for_session(session_id="session-1", loaded_toolkits=["research"])
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
-        patch("mindroom.agents.Agent") as mock_agent_class,
+        patch("mindroom.ai.core.get_model_instance", return_value=model),
+        patch("mindroom.agents.core.Agent") as mock_agent_class,
     ):
         create_agent(
             "code",
@@ -888,10 +888,10 @@ def test_create_agent_uses_dynamic_runtime_worker_routing(tmp_path: Path) -> Non
         return toolkit
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
-        patch("mindroom.agents.build_agent_toolkit", side_effect=_fake_toolkit) as mock_build_agent_toolkit,
-        patch("mindroom.agents.prepend_tool_hook_bridge", side_effect=lambda toolkit, _bridge: toolkit),
-        patch("mindroom.agents.Agent"),
+        patch("mindroom.ai.core.get_model_instance", return_value=model),
+        patch("mindroom.agents.core.build_agent_toolkit", side_effect=_fake_toolkit) as mock_build_agent_toolkit,
+        patch("mindroom.agents.core.prepend_tool_hook_bridge", side_effect=lambda toolkit, _bridge: toolkit),
+        patch("mindroom.agents.core.Agent"),
     ):
         create_agent(
             "code",
@@ -981,13 +981,17 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
 
     with (
         patch(
-            "mindroom.ai.build_memory_prompt_parts",
+            "mindroom.ai.core.build_memory_prompt_parts",
             new_callable=AsyncMock,
             return_value=MemoryPromptParts(),
         ),
-        patch("mindroom.ai.prepare_agent_execution_context", new_callable=AsyncMock, return_value=prepared_execution),
-        patch("mindroom.ai.get_model_instance", return_value=model),
-        patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
+        patch(
+            "mindroom.ai.core.prepare_agent_execution_context",
+            new_callable=AsyncMock,
+            return_value=prepared_execution,
+        ),
+        patch("mindroom.ai.core.get_model_instance", return_value=model),
+        patch("mindroom.ai.core.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
     ):
         response = await ai_response(
             agent_name="code",
@@ -1041,8 +1045,8 @@ def test_team_builder_passes_team_session_id_to_create_agent(tmp_path: Path) -> 
     )
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create_agent,
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create_agent,
     ):
         result = materialize_exact_team_members(
             ["code"],
@@ -1080,8 +1084,8 @@ def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) 
     runtime_paths = _runtime_paths(tmp_path)
 
     with (
-        patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create,
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create,
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
         patch(
             "mindroom.api.openai_compat.resolve_bound_team_scope_context",
             create=True,

@@ -119,7 +119,7 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             return None
 
         logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)
-    except Exception as e:
+    except (RuntimeError, ValueError) as e:
         # Log error and return None - the router will fall back to not routing
         logger.exception("Routing failed", error=str(e))
         return None
@@ -154,3 +154,9 @@ async def suggest_agent_for_message(
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
     return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)
+
+
+__all__ = [
+    "suggest_agent",
+    "suggest_agent_for_message",
+]

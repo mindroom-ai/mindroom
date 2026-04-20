@@ -12,7 +12,7 @@ from agno.models.message import Message
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.ai import _prepare_agent_and_prompt
+from mindroom.ai.core import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -227,10 +227,10 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     )
 
     with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.core.create_agent", return_value=live_agent),
         patch(
-            "mindroom.ai.prepare_agent_execution_context",
+            "mindroom.ai.core.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):

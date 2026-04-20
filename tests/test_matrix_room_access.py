@@ -942,7 +942,7 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
     mock_client = AsyncMock()
 
     monkeypatch.setattr(Config, "get_all_configured_rooms", lambda _self: ["lobby", "ops"])
-    monkeypatch.setattr("mindroom.agents.get_agent_ids_for_room", lambda _room_key, _config, _runtime_paths: [])
+    monkeypatch.setattr("mindroom.agents.core.get_agent_ids_for_room", lambda _room_key, _config, _runtime_paths: [])
 
     async def _ensure_room_exists(*, room_key: str, **_kwargs: object) -> str:
         if room_key == "lobby":

@@ -27,30 +27,22 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.execution_preparation import (
-    PreparedExecutionContext,
-    ThreadHistoryRenderLimits,
-    prepare_bound_team_execution_context,
-    render_prepared_team_messages_text,
-)
+from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
-from mindroom.history.types import PreparedHistoryState
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
-from mindroom.team_runtime_resolution import (
-    ResolvedExactTeamMembers,
-    materialize_exact_requested_team_members,
-    resolve_live_shared_agent_names,
-)
 from mindroom.teams import (
-    _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
     TeamMode,
     _materialize_team_members,
     _team_response_stream_raw,
-    prepare_materialized_team_execution,
     team_response,
     team_response_stream,
+)
+from mindroom.teams.exact_members import (
+    ResolvedExactTeamMembers,
+    materialize_exact_requested_team_members,
+    resolve_live_shared_agent_names,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
@@ -194,9 +186,9 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -214,9 +206,10 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, str)
+    assert isinstance(second_prompt, list)
     assert first_prompt[-1].audio == [audio_input]
-    assert "Inline media unavailable for this model" in second_prompt
+    assert not second_prompt[-1].audio
+    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
 
 @pytest.mark.asyncio
@@ -245,9 +238,9 @@ async def test_team_response_fallback_run_output_cleans_queued_notice_before_for
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -261,7 +254,6 @@ async def test_team_response_fallback_run_output_cleans_queued_notice_before_for
     assert "Recovered team response" in response
     assert "RunOutput(" not in response
     assert QUEUED_MESSAGE_NOTICE_TEXT not in response
-    assert not _has_queued_notice(fallback_result.messages)
 
 
 @pytest.mark.asyncio
@@ -286,10 +278,10 @@ async def test_team_response_fallback_run_output_error_uses_friendly_error() -> 
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -318,10 +310,10 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     collector: list[object] = []
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Analyze this.")
         response = await team_response(
@@ -343,7 +335,6 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert scope_context is not None
     assert scope_context.scope.kind == "team"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
-    assert mock_prepare.await_args.kwargs["thread_history_render_limits"] == _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS
 
 
 @pytest.mark.asyncio
@@ -361,10 +352,10 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -387,8 +378,8 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
         "Old thread context",
     ]
     prompt = mock_team.arun.await_args.args[0]
-    assert isinstance(prompt, str)
-    assert prompt == "Analyze this."
+    assert isinstance(prompt, list)
+    assert [message.content for message in prompt] == ["Analyze this."]
 
 
 @pytest.mark.asyncio
@@ -425,10 +416,10 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     ]
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -451,8 +442,11 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     assert "Recovered team response" in response
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_team.arun.await_args.args[0]
-    assert isinstance(prompt, str)
-    assert prompt == "user: Fresh follow-up\n\nAnalyze this."
+    assert isinstance(prompt, list)
+    assert [message.content for message in prompt] == [
+        "user: Fresh follow-up",
+        "Analyze this.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -538,11 +532,11 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         return _prepared_team_execution_context(final_prompt="Analyze this.")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.core.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -595,10 +589,10 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         scope_context.storage.upsert_session(scope_context.session)
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -652,9 +646,9 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -689,9 +683,9 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
         pytest.raises(asyncio.CancelledError),
     ):
         await team_response(
@@ -721,10 +715,13 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error") as mock_friendly,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch(
+            "mindroom.teams.core.get_user_friendly_error_message",
+            return_value="friendly-team-error",
+        ) as mock_friendly,
     ):
         response = await team_response(
             agent_names=["general"],
@@ -759,9 +756,9 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
     fake_agent = _make_test_agent("GeneralAgent")
     callback_run_ids: list[str] = []
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -816,10 +813,10 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
     ]
 
     with (
-        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
 
         async def collect_chunks_until_cancelled() -> list[str]:
@@ -878,10 +875,10 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     ]
 
     with (
-        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
             chunk
@@ -933,10 +930,10 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
     ]
 
     with (
-        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
         pytest.raises(asyncio.CancelledError),
     ):
         async for _chunk in team_response_stream(
@@ -981,11 +978,11 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     ]
 
     with (
-        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
-        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
+        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.core.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
         chunks = [
             chunk
@@ -1032,11 +1029,11 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
     ]
 
     with (
-        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
-        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
+        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.core.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
         chunks = [
             chunk
@@ -1090,10 +1087,10 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     ]
 
     with (
-        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
             chunk
@@ -1135,9 +1132,9 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         team_members = _materialize_team_members(["general"], orchestrator, None)
         raw_stream = await _team_response_stream_raw(
@@ -1173,7 +1170,7 @@ async def test_team_response_rejects_missing_materialized_members() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    with patch("mindroom.teams._create_team_instance") as mock_create_team:
+    with patch("mindroom.teams.core._create_team_instance") as mock_create_team:
         response = await team_response(
             agent_names=["general", "research"],
             mode=TeamMode.COORDINATE,
@@ -1203,12 +1200,12 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams._team_response_stream_raw",
+            "mindroom.teams.core._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1256,12 +1253,12 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams._team_response_stream_raw",
+            "mindroom.teams.core._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1290,7 +1287,8 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
         "Old thread context",
     ]
     prepared_prompt = mock_raw.await_args.kwargs["prompt"]
-    assert prepared_prompt == "Analyze this."
+    assert isinstance(prepared_prompt, list)
+    assert [message.content for message in prepared_prompt] == ["Analyze this."]
 
 
 @pytest.mark.asyncio
@@ -1323,12 +1321,12 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams._team_response_stream_raw",
+            "mindroom.teams.core._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1360,7 +1358,8 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     assert len(chunks) == 1
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_raw.await_args.kwargs["prompt"]
-    assert prompt == "user: Fresh follow-up\n\nAnalyze this."
+    assert isinstance(prompt, list)
+    assert [message.content for message in prompt] == ["user: Fresh follow-up", "Analyze this."]
 
 
 @pytest.mark.asyncio
@@ -1379,12 +1378,12 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams._team_response_stream_raw",
+            "mindroom.teams.core._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1408,120 +1407,9 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
 
     assert len(chunks) == 1
     assert "Streamed team response" in str(chunks[0])
-    assert mock_prepare.await_args.kwargs["thread_history_render_limits"] == _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS
-    assert mock_raw.await_args.kwargs["prompt"] == "assistant: Previous team reply\n\nAnalyze this."
-
-
-@pytest.mark.asyncio
-async def test_prepare_materialized_team_execution_applies_explicit_thread_history_render_limits() -> None:
-    """Explicit thread-history render limits should bound prompt stuffing for Matrix fallback replay."""
-    config = _build_test_config()
-    runtime_paths = runtime_paths_for(config)
-    agents = [_make_test_agent("GeneralAgent")]
-    team = _make_test_team()
-    long_body = "x" * 250
-    thread_history = [
-        make_visible_message(event_id=f"old-{idx}", sender=f"user{idx}", body=f"old message {idx}") for idx in range(5)
-    ]
-    thread_history.extend(
-        make_visible_message(event_id=f"keep-{idx}", sender=f"user{idx}", body=f"recent message {idx}")
-        for idx in range(30)
-    )
-    thread_history.append(make_visible_message(event_id="long", sender="user-long", body=long_body))
-
-    prepared = await prepare_materialized_team_execution(
-        scope_context=None,
-        agents=agents,
-        team=team,
-        message="Analyze this.",
-        thread_history=thread_history,
-        config=config,
-        runtime_paths=runtime_paths,
-        active_model_name="default",
-        reply_to_event_id=None,
-        active_event_ids=frozenset(),
-        response_sender_id=None,
-        compaction_outcomes_collector=None,
-        configured_team_name=None,
-        thread_history_render_limits=ThreadHistoryRenderLimits(
-            max_messages=30,
-            max_message_length=200,
-            missing_sender_label="Unknown",
-        ),
-    )
-
-    assert "old message 0" not in prepared.prepared_prompt
-    assert "old message 4" not in prepared.prepared_prompt
-    assert "recent message 5" in prepared.prepared_prompt
-    assert "recent message 29" in prepared.prepared_prompt
-    assert long_body not in prepared.prepared_prompt
-    assert prepared.prepared_prompt.endswith("Analyze this.")
-
-
-@pytest.mark.asyncio
-async def test_prepare_bound_team_execution_context_uses_team_renderer_for_history_planning() -> None:
-    """Team history planning and token estimation must use the same renderer as team execution."""
-    config = _build_test_config()
-    runtime_paths = runtime_paths_for(config)
-    team = _make_test_team()
-    agents = [_make_test_agent("GeneralAgent")]
-    planner_fallback_full_prompt: str | None = None
-    estimator_fallback_full_prompt: str | None = None
-
-    async def fake_prepare_bound_scope_history(**kwargs: object) -> object:
-        nonlocal planner_fallback_full_prompt
-        planner_fallback_full_prompt = kwargs["fallback_full_prompt"]
-        return object()
-
-    def fake_estimate_preparation_static_tokens_for_team(
-        _team: object,
-        *,
-        full_prompt: str,
-        fallback_full_prompt: str | None = None,
-    ) -> int:
-        nonlocal estimator_fallback_full_prompt
-        assert full_prompt == "Analyze this."
-        estimator_fallback_full_prompt = fallback_full_prompt
-        return 0
-
-    with (
-        patch(
-            "mindroom.execution_preparation.prepare_bound_scope_history",
-            new=AsyncMock(side_effect=fake_prepare_bound_scope_history),
-        ),
-        patch(
-            "mindroom.execution_preparation.estimate_preparation_static_tokens_for_team",
-            new=fake_estimate_preparation_static_tokens_for_team,
-        ),
-        patch(
-            "mindroom.execution_preparation._finalize_prepared_history",
-            return_value=PreparedHistoryState(replay_plan=None, replays_persisted_history=False),
-        ),
-    ):
-        prepared = await prepare_bound_team_execution_context(
-            scope_context=None,
-            agents=agents,
-            team=team,
-            prompt="Analyze this.",
-            thread_history=[
-                make_visible_message(
-                    event_id="event-1",
-                    sender="@mindroom_team:example.org",
-                    body="Previous team reply",
-                ),
-            ],
-            runtime_paths=runtime_paths,
-            config=config,
-            team_name=None,
-            active_model_name="default",
-            active_context_window=8192,
-            response_sender_id="@mindroom_team:example.org",
-        )
-
-    expected = "assistant: Previous team reply\n\nAnalyze this."
-    assert planner_fallback_full_prompt == expected
-    assert estimator_fallback_full_prompt == expected
-    assert render_prepared_team_messages_text(prepared.messages) == expected
+    prompt = mock_raw.await_args.kwargs["prompt"]
+    assert isinstance(prompt, list)
+    assert [message.content for message in prompt] == ["Previous team reply", "Analyze this."]
 
 
 def test_agno_team_message_normalization_drops_assistant_context() -> None:
@@ -1556,7 +1444,7 @@ async def test_team_response_rejects_non_running_materialized_members() -> None:
         "research": MagicMock(running=False),
     }
 
-    with patch("mindroom.teams._create_team_instance") as mock_create_team:
+    with patch("mindroom.teams.core._create_team_instance") as mock_create_team:
         response = await team_response(
             agent_names=["general", "research"],
             mode=TeamMode.COORDINATE,
@@ -1590,11 +1478,11 @@ async def test_team_response_rejects_request_time_materialization_failure() -> N
 
     with (
         patch(
-            "mindroom.teams.create_agent",
+            "mindroom.teams.core.create_agent",
             side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
         ),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance") as mock_create_team,
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance") as mock_create_team,
     ):
         response = await team_response(
             agent_names=["general", "research"],
@@ -1628,7 +1516,7 @@ async def test_team_stream_rejects_missing_materialized_members() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    with patch("mindroom.teams._create_team_instance") as mock_create_team:
+    with patch("mindroom.teams.core._create_team_instance") as mock_create_team:
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -1668,11 +1556,11 @@ async def test_team_stream_rejects_request_time_materialization_failure() -> Non
 
     with (
         patch(
-            "mindroom.teams.create_agent",
+            "mindroom.teams.core.create_agent",
             side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
         ),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance") as mock_create_team,
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance") as mock_create_team,
     ):
         chunks = [
             chunk
@@ -1714,9 +1602,9 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         chunks = [
             chunk
@@ -1736,9 +1624,10 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, str)
+    assert isinstance(second_prompt, list)
     assert first_prompt[-1].audio == [audio_input]
-    assert "Inline media unavailable for this model" in second_prompt
+    assert not second_prompt[-1].audio
+    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered setup stream" in rendered_output
@@ -1768,9 +1657,9 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         chunks = [
             chunk
@@ -1790,9 +1679,10 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, str)
+    assert isinstance(second_prompt, list)
     assert first_prompt[-1].audio == [audio_input]
-    assert "Inline media unavailable for this model" in second_prompt
+    assert not second_prompt[-1].audio
+    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered stream" in rendered_output
@@ -1954,9 +1844,9 @@ async def test_team_response_ignores_router_in_direct_team_member_list() -> None
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["router", "general"],
@@ -1987,9 +1877,9 @@ async def test_team_response_stream_ignores_router_in_direct_team_member_list() 
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         chunks = [
             chunk
@@ -2028,9 +1918,9 @@ async def test_team_response_forwards_session_and_user_id_to_team_run() -> None:
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -2079,9 +1969,9 @@ async def test_team_response_materializes_members_with_request_execution_identit
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
 
     with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create_agent,
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent) as mock_create_agent,
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],

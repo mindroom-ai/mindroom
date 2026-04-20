@@ -203,16 +203,12 @@ def get_agent_delegation_closure(
     seeds: Mapping[str, AgentPolicySeed],
     *,
     closures: dict[str, frozenset[str]] | None = None,
-    visiting: frozenset[str] = frozenset(),
 ) -> frozenset[str]:
     """Return one agent plus all agents reachable through transitive delegation."""
     if closures is None:
         closures = {}
     if agent_name in closures:
         return closures[agent_name]
-    # Keep the argument for compatibility with existing callers. The closure walk is now
-    # iterative so we never cache or observe partial results from an active cycle.
-    _ = visiting
 
     reachable: set[str] = set()
     pending = [agent_name]
@@ -370,3 +366,17 @@ def resolve_private_knowledge_base_agent(
     if policy.private_knowledge_base_id != base_id:
         return None
     return agent_name
+
+
+__all__ = [
+    "ResolvedAgentPolicy",
+    "build_agent_policy_seeds",
+    "dashboard_credentials_supported_for_scope",
+    "get_agent_delegation_closure",
+    "get_private_team_targets",
+    "get_unsupported_team_agents",
+    "resolve_agent_policy_from_data",
+    "resolve_agent_policy_index",
+    "resolve_private_knowledge_base_agent",
+    "unsupported_team_agent_message",
+]

@@ -8731,9 +8731,9 @@ class TestAgentBot:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.Config.from_yaml")
-    @patch("mindroom.teams.get_agent_knowledge")
-    @patch("mindroom.teams.create_agent")
-    @patch("mindroom.teams.get_model_instance")
+    @patch("mindroom.teams.core.get_agent_knowledge")
+    @patch("mindroom.teams.core.create_agent")
+    @patch("mindroom.teams.core.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")

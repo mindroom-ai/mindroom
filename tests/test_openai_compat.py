@@ -3061,10 +3061,10 @@ class TestTeamCompletion:
     def test_team_member_materialization_failure_returns_friendly_500(self, team_app_client: TestClient) -> None:
         """Configured team failures should surface the user-facing materialization error."""
         with (
-            patch("mindroom.teams.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.teams.get_agent_knowledge", return_value=None),
+            patch("mindroom.teams.core.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
             patch(
-                "mindroom.teams.create_agent",
+                "mindroom.teams.core.create_agent",
                 side_effect=[_make_test_agent("GeneralAgent"), RuntimeError("boom")],
             ),
         ):
@@ -3482,8 +3482,8 @@ class TestTeamCompletion:
             },
         )
         with (
-            patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.teams.get_model_instance"),
+            patch("mindroom.teams.core.create_agent") as mock_create,
+            patch("mindroom.teams.core.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             mock_create.return_value = MagicMock(name="GeneralAgent")
@@ -3498,8 +3498,8 @@ class TestTeamCompletion:
     def test_coordinate_mode_no_delegate_all(self) -> None:
         """Coordinate mode sets delegate_to_all_members=False on Team."""
         with (
-            patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.teams.get_model_instance"),
+            patch("mindroom.teams.core.create_agent") as mock_create,
+            patch("mindroom.teams.core.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             mock_create.return_value = MagicMock(name="GeneralAgent")
@@ -3545,8 +3545,8 @@ class TestTeamCompletion:
         member.id = "general"
 
         with (
-            patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.teams.get_model_instance"),
+            patch("mindroom.teams.core.create_agent", return_value=member),
+            patch("mindroom.teams.core.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
@@ -3589,8 +3589,8 @@ class TestTeamCompletion:
         member.id = "general"
 
         with (
-            patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.teams.get_model_instance", return_value="openai:test-model"),
+            patch("mindroom.teams.core.create_agent", return_value=member),
+            patch("mindroom.teams.core.get_model_instance", return_value="openai:test-model"),
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
@@ -3626,9 +3626,9 @@ class TestTeamCompletion:
         )
         mock_knowledge = MagicMock()
         with (
-            patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.teams.get_model_instance"),
-            patch("mindroom.teams.get_agent_knowledge", return_value=mock_knowledge),
+            patch("mindroom.teams.core.create_agent") as mock_create,
+            patch("mindroom.teams.core.get_model_instance"),
+            patch("mindroom.teams.core.get_agent_knowledge", return_value=mock_knowledge),
             patch("agno.team.Team.__init__", return_value=None),
         ):
             mock_create.return_value = MagicMock(name="Research")

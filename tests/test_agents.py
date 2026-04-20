@@ -15,13 +15,15 @@ from agno.agent import Agent
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from pydantic import ValidationError
 
-from mindroom import agent_prompts
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
     create_agent,
     get_agent_runtime_sqlite_dbs,
     get_agent_toolkit_names,
+)
+from mindroom.agents import (
+    prompts as agent_prompts,
 )
 from mindroom.config.agent import (
     AgentConfig,
@@ -202,7 +204,7 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
     }
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
     config = _test_config()
@@ -211,7 +213,7 @@ def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "CalculatorAgent"
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the general agent is created correctly."""
     config = _test_config()
@@ -245,7 +247,7 @@ def test_get_agent_runtime_sqlite_dbs_includes_learning_storage(tmp_path: Path) 
         history_db.close()
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Agents with hidden tool calls get a prompt hint to avoid narrating tool usage."""
     config = _test_config()
@@ -289,7 +291,7 @@ def test_history_limits_require_positive_values(factory: Callable[[], object], f
         factory()
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """All agents should get the scheduler tool even when not explicitly configured."""
     config = _test_config()
@@ -301,7 +303,7 @@ def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # 
     assert "scheduler" in tool_names
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """defaults.tools should be merged into every agent's configured tools."""
     config = _test_config()
@@ -315,7 +317,7 @@ def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None
     assert "calculator" in tool_names
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """An agent tool already present should not be duplicated by defaults.tools."""
     config = _test_config()
@@ -328,7 +330,7 @@ def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> 
     assert tool_names.count("scheduler") == 1
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Agent include_default_tools=False should skip defaults.tools entirely."""
     config = _test_config()
@@ -391,8 +393,8 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -409,8 +411,8 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     assert looked_up_tools == config.get_agent_tools("summary")
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -432,8 +434,8 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
     }
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -458,8 +460,8 @@ def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(workspace)}
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_continues_when_implied_tool_import_fails(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -512,8 +514,8 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     assert "matrix_message" in tool_names
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -562,8 +564,8 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     assert [tool.name for tool in agent.tools] == ["shell"]
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -583,8 +585,8 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     assert all(override == expected_worker_tools for override in worker_overrides)
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -998,8 +1000,8 @@ def test_private_workspace_template_initializes_missing_files_in_partially_popul
     assert (workspace.root / "USER.md").read_text(encoding="utf-8") == "user\n"
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1021,8 +1023,8 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
     assert runtime_overrides_by_tool["visualization"] is None
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_passes_authored_shell_runtime_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1052,8 +1054,8 @@ def test_create_agent_passes_authored_shell_runtime_overrides(
     }
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1075,7 +1077,7 @@ def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     assert overrides_by_tool["duckduckgo"] is None
 
 
-@patch("mindroom.agents.load_plugins")
+@patch("mindroom.agents.core.load_plugins")
 def test_create_agent_threads_config_path_to_plugin_loading(
     mock_load_plugins: MagicMock,
     tmp_path: Path,
@@ -1086,7 +1088,7 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     config = _test_config()
     runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
 
-    with patch("mindroom.agents.SqliteDb"):
+    with patch("mindroom.agents.core.SqliteDb"):
         _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     mock_load_plugins.assert_called_once()
@@ -1132,8 +1134,8 @@ def test_create_agent_rejects_bare_env_var_context_files() -> None:
         config.agents["general"].context_files = ["$MINDROOM_STORAGE_PATH/SOUL.md"]
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1159,8 +1161,8 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_uses_default_worker_tool_policy_when_unset(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1179,7 +1181,7 @@ def test_create_agent_uses_default_worker_tool_policy_when_unset(
     assert all(override == ["shell", "coding"] for override in worker_overrides)
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """openclaw_compat should stay in the runtime toolkit list and imply matrix_message."""
     config = _test_config()
@@ -1225,7 +1227,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     assert effective_tools.count("attachments") == 1
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
     config = _test_config()
@@ -1234,7 +1236,7 @@ def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "CodeAgent"
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the shell agent is created correctly."""
     config = _test_config()
@@ -1243,7 +1245,7 @@ def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "ShellAgent"
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the summary agent is created correctly."""
     config = _test_config()
@@ -1259,7 +1261,7 @@ def test_get_agent_unknown() -> None:
         _create_agent_for_test("unknown", config=config)
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     """Tests that learning can be disabled per agent."""
     config = _test_config()
@@ -1270,7 +1272,7 @@ def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     assert mock_storage.call_count == 1
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_storage: MagicMock) -> None:
     """Tests that defaults.learning is used when per-agent learning is omitted."""
     config = _test_config()
@@ -1285,7 +1287,7 @@ def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_st
     assert mock_storage.call_count == 1
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that learning mode can be configured as agentic."""
     config = _test_config()
@@ -1299,7 +1301,7 @@ def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # no
     assert agent.learning.user_memory.mode is LearningMode.AGENTIC
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     """Tests that learning mode falls back to defaults when agent config is None."""
     config = _test_config()
@@ -1320,7 +1322,7 @@ def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     assert mock_storage.call_count == 2
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Session and learning databases should live under the canonical agent state root."""
     config = _test_config()
@@ -1332,7 +1334,7 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Worker scope should not change the canonical session and learning paths."""
     config = _test_config()
@@ -1358,7 +1360,7 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     mock_storage: MagicMock,
     tmp_path: Path,
@@ -1391,7 +1393,7 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_shared_identity(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -1462,7 +1464,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool.name = tool_name
         return tool
 
-    monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.core.get_tool_by_name", _get_tool_by_name)
 
     agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
 
@@ -1613,8 +1615,8 @@ def test_resolve_agent_owned_path_rejects_path_traversal(tmp_path: Path) -> None
         )
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1670,7 +1672,7 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert "Updated canonical soul context." not in deleted_agent.role
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
@@ -1721,8 +1723,8 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
     assert "## Personality Context" in agent.role
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_tools(
     mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
@@ -1754,8 +1756,8 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.get_tool_by_name")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_state(
     mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
@@ -1792,7 +1794,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Context files should load directly from the canonical workspace."""
     config = _test_config()
@@ -1819,7 +1821,7 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
     assert "Canonical soul directive." in updated_agent.role
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_agent_preload_cap_truncates_context_files_in_order(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -1847,7 +1849,7 @@ def test_agent_preload_cap_truncates_context_files_in_order(
     assert "SECOND_START" in agent.role
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Missing context files should not prevent agent creation."""
     config = _test_config()
@@ -1874,7 +1876,7 @@ def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: P
     other_cwd.mkdir(parents=True, exist_ok=True)
     os.chdir(other_cwd)
     try:
-        with patch("mindroom.agents.SqliteDb"):
+        with patch("mindroom.agents.core.SqliteDb"):
             agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
     finally:
         os.chdir(original_cwd)
@@ -1952,7 +1954,7 @@ def test_copy_workspace_template_rejects_destination_symlink_escape(tmp_path: Pa
         _copy_workspace_template(workspace_root, template_dir=template_dir)
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -2051,7 +2053,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     assert alice_workspace.parent == private_instance_scope_root_path(tmp_path, alice_worker_key) / "general"
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_private_template_dir_does_not_imply_context_files(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -2098,7 +2100,7 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
     assert "Template user." not in agent.role
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.core.SqliteDb")
 def test_create_agent_private_root_requires_execution_identity(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -2844,9 +2846,9 @@ def test_config_rejects_git_backed_private_knowledge_overlapping_template_conten
         )
 
 
-@patch("mindroom.agents.SqliteDb")
-@patch("mindroom.agents.CultureManager")
-@patch("mindroom.agents.Agent")
+@patch("mindroom.agents.core.SqliteDb")
+@patch("mindroom.agents.core.CultureManager")
+@patch("mindroom.agents.core.Agent")
 def test_create_agent_shares_culture_manager_for_same_culture(
     mock_agent_class: MagicMock,
     mock_culture_manager_class: MagicMock,
@@ -2916,9 +2918,9 @@ def test_create_agent_shares_culture_manager_for_same_culture(
     assert len(culture_db_calls) == 1
 
 
-@patch("mindroom.agents.SqliteDb")
-@patch("mindroom.agents.CultureManager")
-@patch("mindroom.agents.Agent")
+@patch("mindroom.agents.core.SqliteDb")
+@patch("mindroom.agents.core.CultureManager")
+@patch("mindroom.agents.core.Agent")
 def test_create_agent_culture_uses_agent_model_when_default_missing(
     mock_agent_class: MagicMock,
     mock_culture_manager_class: MagicMock,
@@ -2968,9 +2970,9 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     assert mock_culture_manager_class.call_args.kwargs["model"] is model
 
 
-@patch("mindroom.agents.SqliteDb")
-@patch("mindroom.agents.CultureManager")
-@patch("mindroom.agents.Agent")
+@patch("mindroom.agents.core.SqliteDb")
+@patch("mindroom.agents.core.CultureManager")
+@patch("mindroom.agents.core.Agent")
 def test_create_private_agent_scopes_culture_storage_per_requester(
     mock_agent_class: MagicMock,
     mock_culture_manager_class: MagicMock,
@@ -3059,9 +3061,9 @@ def test_create_private_agent_scopes_culture_storage_per_requester(
     assert second_kwargs["culture_manager"] is created_culture_managers[1]
 
 
-@patch("mindroom.agents.SqliteDb")
-@patch("mindroom.agents.CultureManager")
-@patch("mindroom.agents.Agent")
+@patch("mindroom.agents.core.SqliteDb")
+@patch("mindroom.agents.core.CultureManager")
+@patch("mindroom.agents.core.Agent")
 def test_private_agents_share_culture_manager_within_same_requester_scope(
     mock_agent_class: MagicMock,
     mock_culture_manager_class: MagicMock,
@@ -3154,9 +3156,9 @@ def test_private_agents_share_culture_manager_within_same_requester_scope(
     assert second_kwargs["culture_manager"] is created_culture_manager
 
 
-@patch("mindroom.agents.SqliteDb")
-@patch("mindroom.agents.CultureManager")
-@patch("mindroom.agents.Agent")
+@patch("mindroom.agents.core.SqliteDb")
+@patch("mindroom.agents.core.CultureManager")
+@patch("mindroom.agents.core.Agent")
 def test_private_user_agent_agents_share_culture_manager_within_same_requester_scope(
     mock_agent_class: MagicMock,
     mock_culture_manager_class: MagicMock,

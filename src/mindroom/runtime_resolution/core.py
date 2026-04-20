@@ -291,3 +291,13 @@ def resolve_knowledge_binding(
             refresh_enabled and (agent_runtime.policy.request_scoped_knowledge_enabled or not start_watchers)
         ),
     )
+
+
+__all__ = [
+    "ResolvedAgentRuntime",
+    "ResolvedKnowledgeBinding",
+    "resolve_agent_execution",
+    "resolve_agent_runtime",
+    "resolve_knowledge_binding",
+    "resolve_private_requester_scope_root",
+]

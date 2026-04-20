@@ -400,7 +400,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
         captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return object()
 
-    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.core.get_tool_by_name", fake_get_tool_by_name)
 
     runtime_storage_path = tmp_path / "runtime_storage"
     config = _base_config(["dispatch"])
@@ -462,7 +462,7 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
         captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return DemoTools()
 
-    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.core.get_tool_by_name", fake_get_tool_by_name)
 
     runtime_storage_path = tmp_path / "runtime_storage"
     config = _base_config(["dispatch"])
@@ -548,7 +548,7 @@ async def test_skill_command_tool_dispatch_preserves_runtime_env_when_storage_ro
         env_file_values={"OPENAI_API_KEY": "sk-test"},
     )
 
-    with patch("mindroom.agents.get_tool_by_name", side_effect=fake_get_tool_by_name):
+    with patch("mindroom.agents.core.get_tool_by_name", side_effect=fake_get_tool_by_name):
         result = await _run_skill_command_tool(
             config=config,
             runtime_paths=original_runtime_paths,
@@ -585,7 +585,7 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
         captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return object()
 
-    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.core.get_tool_by_name", fake_get_tool_by_name)
 
     config = _base_config(["dispatch"])
     config.agents["code"].memory_backend = "file"
@@ -1279,7 +1279,10 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
         def _get_runtime_credentials_manager(_runtime_paths: object) -> FakeCredentialsManager:
             return fake_credentials
 
-        monkeypatch.setattr("mindroom.agents.get_runtime_credentials_manager", _get_runtime_credentials_manager)
+        monkeypatch.setattr(
+            "mindroom.agents.core.get_runtime_credentials_manager",
+            _get_runtime_credentials_manager,
+        )
         monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
         monkeypatch.setenv("ACCOUNT_ID", "account-456")
 
