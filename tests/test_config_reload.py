@@ -367,6 +367,89 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_still_fails(
+    tmp_path: Path,
+) -> None:
+    """Unrecoverable reload failures should clear the live plugin registry."""
+    first_root = tmp_path / "plugins" / "first"
+    first_root.mkdir(parents=True)
+    (first_root / "mindroom.plugin.json").write_text(
+        '{"name": "first", "hooks_module": "hooks.py", "skills": ["skills"]}',
+        encoding="utf-8",
+    )
+    (first_root / "hooks.py").write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'first'\n",
+        encoding="utf-8",
+    )
+    first_skills = first_root / "skills" / "first-skill"
+    first_skills.mkdir(parents=True)
+    (first_skills / "SKILL.md").write_text(
+        "---\nname: first-skill\ndescription: test\n---\n",
+        encoding="utf-8",
+    )
+
+    second_root = tmp_path / "plugins" / "second"
+    second_root.mkdir(parents=True)
+    second_manifest_path = second_root / "mindroom.plugin.json"
+    second_manifest_path.write_text(
+        '{"name": "second", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    (second_root / "hooks.py").write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'second'\n",
+        encoding="utf-8",
+    )
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/first", "./plugins/second"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        initial = await orchestrator.reload_plugins_now(source="test")
+        assert initial.active_plugin_names == ("first", "second")
+        assert [hook.plugin_name for hook in orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == [
+            "first",
+            "second",
+        ]
+        assert _get_plugin_skill_roots() == [first_root / "skills"]
+
+        second_manifest_path.write_text(
+            '{"name": "first", "hooks_module": "hooks.py", "skills": []}',
+            encoding="utf-8",
+        )
+
+        with pytest.raises(plugin_module.PluginValidationError, match="Duplicate plugin manifest names configured"):
+            await orchestrator.reload_plugins_now(source="test")
+
+        assert orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
+        assert _get_plugin_skill_roots() == []
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
 async def test_queued_config_reload_waits_for_in_flight_response_without_event_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

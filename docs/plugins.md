@@ -437,7 +437,7 @@ journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload com
 ```
 
 You can break and fix a plugin freely.
-A broken save can raise an import or runtime error, deactivate that plugin, and the next valid save reloads it successfully.
+A broken save can raise an import or runtime error, deactivate the affected plugin set, and the next valid save reloads it successfully.
 There is no quarantine, failure threshold, or cooldown.
 Each save just reloads.
 

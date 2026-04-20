@@ -77,6 +77,18 @@ def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     _synchronize_plugin_tools(active_tool_modules)
 
 
+def deactivate_plugins() -> PluginReloadResult:
+    """Clear live plugin-derived tools, skills, and hooks."""
+    with _locked_tool_registry_state():
+        _sync_loaded_plugin_tools([])
+        set_plugin_skill_roots([])
+    return PluginReloadResult(
+        hook_registry=HookRegistry.empty(),
+        active_plugin_names=(),
+        cancelled_task_count=0,
+    )
+
+
 def load_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
