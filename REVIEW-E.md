@@ -1,6 +1,3 @@
-# REVIEW-E.md (Round 3)
-## Verdict: CHANGES REQUIRED
-## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
-1. [MAJOR] [tests/test_kubernetes_worker_backend.py](/srv/mindroom-worktrees/issue-183/tests/test_kubernetes_worker_backend.py:272), [tests/test_kubernetes_worker_backend.py](/srv/mindroom-worktrees/issue-183/tests/test_kubernetes_worker_backend.py:1197) - The new `test_kubernetes_backend_progress_respects_real_elapsed_time()` still does not lock in the round-2 bug fix, because its fake `wait_for_ready()` polls every `0.01s` and the assertion only checks the final phase list, so the old poll-tick/finalize-driven reporter would also pass this test instead of proving that a live `cold_start` notice appears once the real clock crosses the 1.5s grace window. Fix: keep the helper on the production `1.0s` poll cadence for the `1.5-2.0s` boundary case and assert timing/ordering that fails the old implementation, such as observing `cold_start` before `ensure_worker()` returns and with `elapsed_seconds` near the grace threshold rather than only matching the post-hoc phase sequence.
-## Final summary
-The production change looks plausible, but the new regression that is supposed to prove the round-2 timing fix would have passed on the old behavior too, so this still needs one stronger test before approval.
+APPROVE
+
+The revised test now pins the real bug by driving both the reporter and `wait_for_ready()` off a controlled monotonic clock at the production 1.0s poll cadence and asserting that `cold_start` is emitted around the 1.5s grace threshold before `ensure_worker()` can return.
