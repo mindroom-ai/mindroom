@@ -37,11 +37,12 @@ __all__ = [
 
 _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
+_PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass
 class _ProgressReporterState:
-    latest_elapsed: float = 0.0
+    started_at: float
     cold_start_emitted: bool = False
     next_waiting_elapsed: float = _WAITING_PROGRESS_INTERVAL_SECONDS
     reporter_done: bool = False
@@ -51,51 +52,131 @@ def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> Non
     del _phase, _error
 
 
-def _report_progress(
+def _progress_event(
     *,
-    progress_sink: ProgressSink,
     phase: WorkerReadyPhase,
     worker_key: str,
     backend_name: str,
     elapsed_seconds: float,
     error: str | None = None,
-) -> None:
-    progress_sink(
-        WorkerReadyProgress(
-            phase=phase,
-            worker_key=worker_key,
-            backend_name=backend_name,
-            elapsed_seconds=elapsed_seconds,
-            error=error,
-        ),
+) -> WorkerReadyProgress:
+    return WorkerReadyProgress(
+        phase=phase,
+        worker_key=worker_key,
+        backend_name=backend_name,
+        elapsed_seconds=elapsed_seconds,
+        error=error,
     )
 
 
-def _emit_pending_progress_events(
+def _pending_progress_events(
     *,
     state: _ProgressReporterState,
-    progress_sink: ProgressSink,
     worker_key: str,
     backend_name: str,
-) -> None:
-    if not state.cold_start_emitted and state.latest_elapsed >= _COLD_START_GRACE_SECONDS:
-        _report_progress(
-            progress_sink=progress_sink,
-            phase="cold_start",
-            worker_key=worker_key,
-            backend_name=backend_name,
-            elapsed_seconds=state.latest_elapsed,
+) -> list[WorkerReadyProgress]:
+    elapsed_seconds = max(0.0, time.monotonic() - state.started_at)
+    events: list[WorkerReadyProgress] = []
+    if not state.cold_start_emitted and elapsed_seconds >= _COLD_START_GRACE_SECONDS:
+        events.append(
+            _progress_event(
+                phase="cold_start",
+                worker_key=worker_key,
+                backend_name=backend_name,
+                elapsed_seconds=elapsed_seconds,
+            ),
         )
         state.cold_start_emitted = True
-    while state.cold_start_emitted and state.latest_elapsed >= state.next_waiting_elapsed:
-        _report_progress(
-            progress_sink=progress_sink,
-            phase="waiting",
-            worker_key=worker_key,
-            backend_name=backend_name,
-            elapsed_seconds=state.latest_elapsed,
+    while state.cold_start_emitted and elapsed_seconds >= state.next_waiting_elapsed:
+        events.append(
+            _progress_event(
+                phase="waiting",
+                worker_key=worker_key,
+                backend_name=backend_name,
+                elapsed_seconds=elapsed_seconds,
+            ),
         )
         state.next_waiting_elapsed += _WAITING_PROGRESS_INTERVAL_SECONDS
+    return events
+
+
+def _next_progress_deadline_elapsed(state: _ProgressReporterState) -> float:
+    if not state.cold_start_emitted:
+        return _COLD_START_GRACE_SECONDS
+    return state.next_waiting_elapsed
+
+
+def _report_progress(progress_sink: ProgressSink, events: list[WorkerReadyProgress]) -> None:
+    for event in events:
+        progress_sink(event)
+
+
+def _progress_terminal_event(
+    *,
+    state: _ProgressReporterState,
+    phase: WorkerReadyPhase,
+    worker_key: str,
+    backend_name: str,
+    error: str | None,
+) -> WorkerReadyProgress | None:
+    if phase == "ready" and not state.cold_start_emitted:
+        return None
+    return _progress_event(
+        phase=phase,
+        worker_key=worker_key,
+        backend_name=backend_name,
+        elapsed_seconds=max(0.0, time.monotonic() - state.started_at),
+        error=error,
+    )
+
+
+def _progress_reporter_events(
+    *,
+    condition: threading.Condition,
+    state: _ProgressReporterState,
+    worker_key: str,
+    backend_name: str,
+) -> list[WorkerReadyProgress] | None:
+    with condition:
+        while True:
+            if state.reporter_done:
+                return None
+            wait_timeout = state.started_at + _next_progress_deadline_elapsed(state) - time.monotonic()
+            if wait_timeout > 0:
+                condition.wait(timeout=wait_timeout)
+                continue
+            return _pending_progress_events(
+                state=state,
+                worker_key=worker_key,
+                backend_name=backend_name,
+            )
+
+
+def _finalize_progress_events(
+    *,
+    condition: threading.Condition,
+    state: _ProgressReporterState,
+    phase: WorkerReadyPhase,
+    worker_key: str,
+    backend_name: str,
+    error: str | None,
+) -> tuple[list[WorkerReadyProgress], WorkerReadyProgress | None]:
+    with condition:
+        pending_events = _pending_progress_events(
+            state=state,
+            worker_key=worker_key,
+            backend_name=backend_name,
+        )
+        terminal_event = _progress_terminal_event(
+            state=state,
+            phase=phase,
+            worker_key=worker_key,
+            backend_name=backend_name,
+            error=error,
+        )
+        state.reporter_done = True
+        condition.notify_all()
+        return pending_events, terminal_event
 
 
 def _progress_reporter_loop(
@@ -107,23 +188,15 @@ def _progress_reporter_loop(
     backend_name: str,
 ) -> None:
     while True:
-        with condition:
-            while not state.reporter_done:
-                should_emit_cold_start = (
-                    not state.cold_start_emitted and state.latest_elapsed >= _COLD_START_GRACE_SECONDS
-                )
-                should_emit_waiting = state.cold_start_emitted and state.latest_elapsed >= state.next_waiting_elapsed
-                if should_emit_cold_start or should_emit_waiting:
-                    break
-                condition.wait()
-            if state.reporter_done:
-                return
-        _emit_pending_progress_events(
+        pending_events = _progress_reporter_events(
+            condition=condition,
             state=state,
-            progress_sink=progress_sink,
             worker_key=worker_key,
             backend_name=backend_name,
         )
+        if pending_events is None:
+            return
+        _report_progress(progress_sink, pending_events)
 
 
 def _build_progress_reporter(
@@ -133,7 +206,7 @@ def _build_progress_reporter(
     progress_sink: ProgressSink,
 ) -> tuple[Callable[[float], None] | None, Callable[[WorkerReadyPhase, str | None], None]]:
     condition = threading.Condition()
-    state = _ProgressReporterState()
+    state = _ProgressReporterState(started_at=time.monotonic())
 
     thread = threading.Thread(
         target=_progress_reporter_loop,
@@ -149,32 +222,23 @@ def _build_progress_reporter(
     )
     thread.start()
 
-    def on_poll_tick(elapsed_seconds: float) -> None:
+    def on_poll_tick(_elapsed_seconds: float) -> None:
         with condition:
-            state.latest_elapsed = max(state.latest_elapsed, elapsed_seconds)
             condition.notify_all()
 
     def finalize(phase: WorkerReadyPhase, error: str | None) -> None:
-        with condition:
-            state.reporter_done = True
-            condition.notify_all()
-        thread.join()
-        _emit_pending_progress_events(
+        pending_events, terminal_event = _finalize_progress_events(
+            condition=condition,
             state=state,
-            progress_sink=progress_sink,
-            worker_key=worker_key,
-            backend_name=backend_name,
-        )
-        if phase == "ready" and not state.cold_start_emitted:
-            return
-        _report_progress(
-            progress_sink=progress_sink,
             phase=phase,
             worker_key=worker_key,
             backend_name=backend_name,
-            elapsed_seconds=state.latest_elapsed,
             error=error,
         )
+        thread.join(timeout=_PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS)
+        _report_progress(progress_sink, pending_events)
+        if terminal_event is not None:
+            progress_sink(terminal_event)
 
     return on_poll_tick, finalize
 
@@ -218,6 +282,7 @@ class KubernetesWorkerBackend:
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
         self._progress_sinks: dict[str, list[ProgressSink]] = {}
+        self._progress_snapshots: dict[str, WorkerReadyProgress | None] = {}
         self._progress_sinks_lock = threading.Lock()
 
     @classmethod
@@ -243,6 +308,9 @@ class KubernetesWorkerBackend:
     def _register_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
         with self._progress_sinks_lock:
             self._progress_sinks.setdefault(worker_key, []).append(progress_sink)
+            snapshot = self._progress_snapshots.setdefault(worker_key, None)
+            if snapshot is not None:
+                progress_sink(snapshot)
 
     def _unregister_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
         with self._progress_sinks_lock:
@@ -255,15 +323,16 @@ class KubernetesWorkerBackend:
                     break
             if not sinks:
                 self._progress_sinks.pop(worker_key, None)
+                self._progress_snapshots.pop(worker_key, None)
 
-    def _fanout_progress_sink(self, worker_key: str) -> ProgressSink:
-        def sink(progress: WorkerReadyProgress) -> None:
-            with self._progress_sinks_lock:
-                sinks = list(self._progress_sinks.get(worker_key, ()))
-            for current_sink in sinks:
+    def _emit_progress(self, progress: WorkerReadyProgress) -> None:
+        with self._progress_sinks_lock:
+            if progress.phase in {"ready", "failed"}:
+                self._progress_snapshots.pop(progress.worker_key, None)
+            else:
+                self._progress_snapshots[progress.worker_key] = progress
+            for current_sink in self._progress_sinks.get(progress.worker_key, ()):
                 current_sink(progress)
-
-        return sink
 
     def ensure_worker(
         self,
@@ -326,7 +395,7 @@ class KubernetesWorkerBackend:
                     poll_reporter, finalize_progress = _build_progress_reporter(
                         worker_key=worker_key,
                         backend_name=self.backend_name,
-                        progress_sink=self._fanout_progress_sink(worker_key),
+                        progress_sink=self._emit_progress,
                     )
                 try:
                     deployment = self._resources.wait_for_ready(

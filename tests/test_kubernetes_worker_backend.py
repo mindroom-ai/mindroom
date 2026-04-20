@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -266,6 +267,44 @@ def _backend(
             status=SimpleNamespace(ready_replicas=1, observed_generation=1),
         )
     return backend, apps_api, core_api
+
+
+def _install_real_elapsed_wait_for_ready(
+    backend: KubernetesWorkerBackend,
+    *,
+    ready_after_seconds: float,
+    ready_gate: threading.Event | None = None,
+    poll_interval_seconds: float = 0.01,
+) -> None:
+    object.__setattr__(
+        backend.config,
+        "ready_timeout_seconds",
+        max(backend.config.ready_timeout_seconds, ready_after_seconds + 1.0),
+    )
+
+    def _ready(
+        self: object,
+        deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: Callable[[float], None] | None = None,
+    ) -> object:
+        del deployment_ready_fn
+        started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
+        while True:
+            elapsed_seconds = time.monotonic() - started_at
+            if elapsed_seconds >= ready_after_seconds and (ready_gate is None or ready_gate.is_set()):
+                deployment = self.read_deployment(deployment_name)
+                assert deployment is not None
+                return deployment
+            assert time.monotonic() < deadline
+            if on_poll_tick is not None:
+                on_poll_tick(elapsed_seconds)
+            time.sleep(poll_interval_seconds)
+
+    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
 
 
 def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # noqa: PLR0915
@@ -1155,68 +1194,27 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert worker_id not in _core_api.services
 
 
-def test_kubernetes_backend_reports_cold_start_progress() -> None:
-    """Cold worker startups should emit one cold-start notice and one ready notice."""
-    backend, _apps_api, _core_api = _backend()
-    events: list[WorkerReadyProgress] = []
-
-    def _ready(
-        self: object,
-        deployment_name: str,
-        *,
-        timeout_seconds: float,
-        deployment_ready_fn: object,
-        on_poll_tick: Callable[[float], None] | None = None,
-    ) -> object:
-        del timeout_seconds, deployment_ready_fn
-        assert on_poll_tick is not None
-        on_poll_tick(2.0)
-        return self.read_deployment(deployment_name)
-
-    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
-
-    backend.ensure_worker(
-        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
-        now=10.0,
-        progress_sink=events.append,
-    )
-
-    assert [event.phase for event in events] == ["cold_start", "ready"]
-    assert all(event.worker_key == _TEST_SCOPED_WORKER_KEY_A for event in events)
-    assert all(event.backend_name == "kubernetes" for event in events)
-
-
 @pytest.mark.parametrize(
-    ("elapsed_seconds", "expected_phases"),
+    ("ready_after_seconds", "expected_phases"),
     [
         (0.8, []),
         (1.4, []),
-        (1.6, ["cold_start", "ready"]),
-        (8.0, ["cold_start", "waiting", "ready"]),
+        (1.7, ["cold_start", "ready"]),
+        (6.0, ["cold_start", "waiting", "ready"]),
+        (12.0, ["cold_start", "waiting", "waiting", "ready"]),
     ],
 )
-def test_kubernetes_backend_progress_respects_grace_window(
-    elapsed_seconds: float,
+def test_kubernetes_backend_progress_respects_real_elapsed_time(
+    ready_after_seconds: float,
     expected_phases: list[str],
 ) -> None:
-    """Progress should stay silent inside grace and emit only after deadline observations."""
+    """Progress should follow reporter-owned elapsed deadlines instead of poll-tick cadence."""
     backend, _apps_api, _core_api = _backend()
     events: list[WorkerReadyProgress] = []
-
-    def _ready(
-        self: object,
-        deployment_name: str,
-        *,
-        timeout_seconds: float,
-        deployment_ready_fn: object,
-        on_poll_tick: Callable[[float], None] | None = None,
-    ) -> object:
-        del timeout_seconds, deployment_ready_fn
-        assert on_poll_tick is not None
-        on_poll_tick(elapsed_seconds)
-        return self.read_deployment(deployment_name)
-
-    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+    _install_real_elapsed_wait_for_ready(
+        backend,
+        ready_after_seconds=ready_after_seconds,
+    )
 
     backend.ensure_worker(
         WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
@@ -1242,45 +1240,6 @@ def test_kubernetes_backend_skips_progress_for_warm_worker() -> None:
     assert events == []
 
 
-def test_kubernetes_backend_reports_waiting_progress_every_five_seconds() -> None:
-    """Long cold starts should keep emitting waiting progress on the five-second cadence."""
-    backend, _apps_api, _core_api = _backend()
-    events: list[WorkerReadyProgress] = []
-
-    def _ready(
-        self: object,
-        deployment_name: str,
-        *,
-        timeout_seconds: float,
-        deployment_ready_fn: object,
-        on_poll_tick: Callable[[float], None] | None = None,
-    ) -> object:
-        del timeout_seconds, deployment_ready_fn
-        assert on_poll_tick is not None
-        for elapsed_seconds in (2.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0):
-            on_poll_tick(elapsed_seconds)
-        return self.read_deployment(deployment_name)
-
-    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
-
-    backend.ensure_worker(
-        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
-        now=10.0,
-        progress_sink=events.append,
-    )
-
-    assert [event.phase for event in events] == [
-        "cold_start",
-        "waiting",
-        "waiting",
-        "waiting",
-        "waiting",
-        "waiting",
-        "waiting",
-        "ready",
-    ]
-
-
 def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
     """Failed cold starts should surface a terminal failed progress event with the error."""
     backend, _apps_api, _core_api = _backend()
@@ -1295,10 +1254,17 @@ def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
         deployment_ready_fn: object,
         on_poll_tick: Callable[[float], None] | None = None,
     ) -> object:
-        del timeout_seconds, deployment_ready_fn
+        del deployment_ready_fn
         assert on_poll_tick is not None
-        on_poll_tick(2.0)
-        raise WorkerBackendError(error_message)
+        started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
+        while True:
+            elapsed_seconds = time.monotonic() - started_at
+            if elapsed_seconds >= 2.0:
+                raise WorkerBackendError(error_message)
+            assert time.monotonic() < deadline
+            on_poll_tick(elapsed_seconds)
+            time.sleep(0.01)
 
     backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
 
@@ -1334,19 +1300,22 @@ def test_kubernetes_backend_ignores_progress_when_sink_is_absent() -> None:
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0, progress_sink=None)
 
 
-def test_kubernetes_backend_fans_out_progress_to_concurrent_waiters() -> None:
-    """Concurrent ensure_worker calls for one cold worker should all receive the same progress."""
+def test_kubernetes_backend_replays_progress_snapshot_to_late_joining_waiter() -> None:
+    """A waiter that joins after cold_start should replay that state before terminal ready."""
     backend, _apps_api, _core_api = _backend()
     worker_key = _TEST_SCOPED_WORKER_KEY_A
     first_events: list[WorkerReadyProgress] = []
     second_events: list[WorkerReadyProgress] = []
-    wait_started = threading.Event()
+    cold_start_seen = threading.Event()
+    ready_gate = threading.Event()
     second_registered = threading.Event()
     errors: list[BaseException] = []
     handles: dict[str, object] = {}
 
     def first_sink(progress: WorkerReadyProgress) -> None:
         first_events.append(progress)
+        if progress.phase == "cold_start":
+            cold_start_seen.set()
 
     def second_sink(progress: WorkerReadyProgress) -> None:
         second_events.append(progress)
@@ -1360,23 +1329,11 @@ def test_kubernetes_backend_fans_out_progress_to_concurrent_waiters() -> None:
 
     backend._register_progress_sink = register_with_signal
 
-    def _ready(
-        self: object,
-        deployment_name: str,
-        *,
-        timeout_seconds: float,
-        deployment_ready_fn: object,
-        on_poll_tick: Callable[[float], None] | None = None,
-    ) -> object:
-        del timeout_seconds, deployment_ready_fn
-        if on_poll_tick is None:
-            return self.read_deployment(deployment_name)
-        wait_started.set()
-        assert second_registered.wait(timeout=1.0)
-        on_poll_tick(5.0)
-        return self.read_deployment(deployment_name)
-
-    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+    _install_real_elapsed_wait_for_ready(
+        backend,
+        ready_after_seconds=1.6,
+        ready_gate=ready_gate,
+    )
 
     def ensure_worker(name: str, *, progress_sink: Callable[[WorkerReadyProgress], None], now: float) -> None:
         try:
@@ -1400,16 +1357,18 @@ def test_kubernetes_backend_fans_out_progress_to_concurrent_waiters() -> None:
     )
 
     first_thread.start()
-    assert wait_started.wait(timeout=1.0)
+    assert cold_start_seen.wait(timeout=3.0)
     second_thread.start()
+    assert second_registered.wait(timeout=1.0)
+    ready_gate.set()
     first_thread.join()
     second_thread.join()
 
     if errors:
         raise errors[0]
 
-    assert [event.phase for event in first_events] == ["cold_start", "waiting", "ready"]
-    assert [event.phase for event in second_events] == ["cold_start", "waiting", "ready"]
+    assert [event.phase for event in first_events] == ["cold_start", "ready"]
+    assert [event.phase for event in second_events] == ["cold_start", "ready"]
     assert handles["first"].worker_id == handles["second"].worker_id
 
 
