@@ -38,7 +38,7 @@ Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, a
 React to the approval card with `✅` to approve the tool call.
 Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
 Only the original human requester can approve or deny their pending tool call.
-Agent-authored or system-authored tool calls are denied instead of entering the approval flow.
+Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
 ```yaml

@@ -1451,12 +1451,11 @@ class AgentBot:
         if reply_to_event_id is None or approval_manager.approval_id_for_event(reply_to_event_id) is None:
             return False
 
-        await approval_manager.handle_reply(
+        return await approval_manager.handle_reply(
             approval_event_id=reply_to_event_id,
             reason=event.body,
             resolved_by=event.sender,
         )
-        return True
 
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""

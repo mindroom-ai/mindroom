@@ -27,6 +27,7 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     get_approval_store,
     initialize_approval_store,
+    resolve_tool_approval_approver,
     shutdown_approval_store,
 )
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
@@ -123,10 +124,10 @@ async def _request_tool_approval(
     return store, task, pending[0] if pending else None
 
 
-def _reply_event(*, event_id: str, body: str) -> MagicMock:
+def _reply_event(*, event_id: str, body: str, sender: str = "@user:localhost") -> MagicMock:
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = event_id
-    event.sender = "@user:localhost"
+    event.sender = sender
     event.body = body
     event.source = {
         "type": "m.room.message",
@@ -543,6 +544,40 @@ async def test_request_approval_requires_human_requester(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_request_approval_rejects_configured_bot_account_requester(tmp_path: Path) -> None:
+    """Configured bridge bots should not own human approval requests."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            **_base_config_kwargs(),
+            bot_accounts=["@bridgebot:localhost"],
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+
+    decision = await store.request_approval(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@bridgebot:localhost",
+        approver_user_id=resolve_tool_approval_approver(config, runtime_paths, "@bridgebot:localhost"),
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=0,
+    )
+
+    assert decision.status == "denied"
+    assert decision.reason == "Tool approval requires a human requester."
+    sender.assert_not_awaited()
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_request_approval_expires_when_matrix_send_fails(tmp_path: Path) -> None:
     """Requests should fail closed when the Matrix approval card cannot be delivered."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -902,6 +937,40 @@ async def test_bot_reply_denies_pending_tool_call(tmp_path: Path) -> None:
     assert decision.status == "denied"
     assert decision.reason == "Do not run this"
     assert bot._turn_controller.handle_text_event.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_path: Path) -> None:
+    """Replies from other users should not be swallowed when they cannot resolve the approval."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    bot._turn_controller.handle_text_event = AsyncMock()
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    event = _reply_event(event_id="$reply", body="I cannot approve this either", sender="@other:localhost")
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._on_message(room, event)
+
+    assert task.done() is False
+    assert bot._turn_controller.handle_text_event.await_count == 1
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
 
 
 @pytest.mark.asyncio

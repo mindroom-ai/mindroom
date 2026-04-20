@@ -612,6 +612,8 @@ def resolve_tool_approval_approver(
         return None
     if is_agent_id(requester_id, config, runtime_paths):
         return None
+    if requester_id in config.bot_accounts:
+        return None
     return requester_id
 
 
