@@ -1,6 +1,5 @@
-# REVIEW-B.md
 ## Verdict: CHANGES REQUIRED
-## Findings (numbered, with severity BLOCKER / MAJOR / MINOR / NIT)
-1. [BLOCKER] [src/mindroom/streaming.py](/srv/mindroom-worktrees/issue-183/src/mindroom/streaming.py:735), [src/mindroom/tool_system/sandbox_proxy.py](/srv/mindroom-worktrees/issue-183/src/mindroom/tool_system/sandbox_proxy.py:439) - `send_streaming_response()` keeps the worker-progress drain task alive until after `streaming.finalize()`, and `_make_progress_sink()` schedules `queue.put_nowait` directly, so a late `waiting` event can still land after the final body and issue one more edit that puts `⏳ Preparing isolated worker...` back onto a completed or cancelled reply. I reproduced this with a delayed sink call during teardown and the captured delivery sequence ended with a post-final warmup edit. - Set `pump.shutdown` and stop or gate the progress-drain path before finalizing the Matrix message, and enqueue through a loop-thread callback that re-checks shutdown before touching the queue.
-## Final summary
-The side-band rendering approach is correct, but the current loop/queue shutdown ordering is not safe: late worker progress can overwrite the final user-visible message, so this is not merge-ready yet.
+## Findings
+1. [MAJOR] tests/test_workloop_thread_scope.py:87 - This new `_plugin_checkout_available()` guard is unrelated scope creep for ISSUE-183, and it is wrong against the current workloop checkout: it requires `types.py` at line 96, but the live plugin now has `runtime.py` instead, so `pytestmark = skipif(...)` at lines 101-103 skips the entire regression file and drops this thread-scope coverage in the standard environment. Concrete fix: remove this new guard entirely, or at minimum update it to validate the current plugin surface (`runtime.py`, not `types.py`) instead of the pre-ISSUE-180 filename.
+## Final Summary
+The round-1 streaming/thread-shutdown blocker is fixed correctly in `ccf7ff4bd`; the only concrete issue I found in this pass is the unrelated workloop test guard above.
