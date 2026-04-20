@@ -24,17 +24,20 @@ def _vertex_claude_cache_control(model: VertexAIClaude) -> dict[str, str]:
     return cache_control
 
 
-def copy_messages_with_vertex_prompt_cache_breakpoint(
+def copy_messages_with_vertex_prompt_cache_breakpoint(  # noqa: C901
     messages: list[Message],
     model: VertexAIClaude,
 ) -> list[Message]:
     """Copy request messages and mark the last cacheable block for Vertex Claude."""
     prepared_messages = [message.model_copy(deep=True) for message in messages]
     cache_control = _vertex_claude_cache_control(model)
-    cacheable_block_types = {"document", "image", "text", "tool_result"}
+    cacheable_block_types = {"document", "image", "text"}
 
     for message_index in range(len(prepared_messages) - 1, -1, -1):
-        content = prepared_messages[message_index].content
+        message = prepared_messages[message_index]
+        if message.role != "user":
+            continue
+        content = message.content
         if isinstance(content, str):
             if not content:
                 continue
