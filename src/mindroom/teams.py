@@ -1854,7 +1854,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             tool_trace: list[ToolTraceEntry] = []
             completed_tools: list[ToolTraceEntry] = []
             next_tool_index = 1
-            pending_tools: list[ToolTraceEntry] = []
+            pending_tools: list[tuple[str, ToolTraceEntry]] = []
             pending_visible_tools: list[tuple[str, int, str]] = []
 
             def _scope_key_for_agent(agent_name: str) -> str:
@@ -1901,7 +1901,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 tool_index = next_tool_index if show_tool_calls else None
                 tool_msg, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
                 if trace_entry is not None:
-                    pending_tools.append(trace_entry)
+                    pending_tools.append((scope_key, trace_entry))
                 if not show_tool_calls or tool_index is None:
                     return
                 if tool_msg:
@@ -1924,7 +1924,11 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
                 tool_name, result = info
                 pending_trace_pos = next(
-                    (pos for pos in range(len(pending_tools) - 1, -1, -1) if pending_tools[pos].tool_name == tool_name),
+                    (
+                        pos
+                        for pos in range(len(pending_tools) - 1, -1, -1)
+                        if pending_tools[pos][0] == scope_key and pending_tools[pos][1].tool_name == tool_name
+                    ),
                     None,
                 )
                 if pending_trace_pos is not None:
@@ -2123,7 +2127,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                         ),
                                     ),
                                     completed_tools=completed_tools,
-                                    interrupted_tools=pending_tools,
+                                    interrupted_tools=[trace_entry for _, trace_entry in pending_tools],
                                     run_metadata=run_metadata,
                                     interruption_reason=event.reason or "Run cancelled",
                                 )

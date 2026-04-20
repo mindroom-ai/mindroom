@@ -1020,6 +1020,115 @@ async def test_team_response_stream_persists_hidden_interrupted_tool_state() -> 
 
 
 @pytest.mark.asyncio
+async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_tools() -> None:
+    """Cancelled team replay must not confuse two members using the same tool name concurrently."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
+                "research": AgentConfig(display_name="ResearchAgent", rooms=["#test:example.org"]),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {
+        "general": MagicMock(running=True),
+        "research": MagicMock(running=True),
+    }
+
+    general_agent = _make_test_agent("GeneralAgent")
+    research_agent = _make_test_agent("ResearchAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general", "research"],
+        agents=[general_agent, research_agent],
+        display_names=["GeneralAgent", "ResearchAgent"],
+        materialized_agent_names={"general", "research"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="General started")
+        yield AgentRunContentEvent(agent_name="ResearchAgent", content="Research started")
+        yield AgentToolCallStartedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
+        )
+        yield AgentToolCallStartedEvent(
+            agent_name="ResearchAgent",
+            tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "ls"}),
+        )
+        yield AgentToolCallCompletedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "pwd"},
+                result="/app",
+            ),
+        )
+        yield TeamRunCancelledEvent(run_id="run-789", session_id="session-team-stream", reason="Run cancelled")
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+        MatrixID.from_agent(
+            "research",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            mode=TeamMode.COORDINATE,
+            session_id="session-team-stream",
+            run_id="run-789",
+            reply_to_event_id="e1",
+            show_tool_calls=False,
+        ):
+            pass
+
+    with open_bound_scope_session_context(
+        agents=[general_agent, research_agent],
+        session_id="session-team-stream",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert scope_context.session.runs is not None
+        persisted_run = scope_context.session.runs[0]
+
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert persisted_run.messages is not None
+    assert isinstance(persisted_run.messages[0].content, str)
+    content = persisted_run.messages[0].content
+    assert "[tool:run_shell_command completed]" in content
+    assert "args: cmd=pwd" in content
+    assert "[tool:run_shell_command interrupted]" in content
+    assert "args: cmd=ls" in content
+    assert "args: cmd=pwd\n  result: <interrupted before completion>" not in content
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     """A non-streaming provider fallback should still emit one final team response chunk."""
     config = _build_test_config()
