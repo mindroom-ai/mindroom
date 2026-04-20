@@ -1,0 +1,6 @@
+## Verdict: CHANGES REQUIRED
+## Findings
+1. [BLOCKER] src/mindroom/streaming.py:658 - A `ready` event only refreshes the message when there is accumulated text or another active warmup, so once the warmup is popped the stale `Preparing isolated worker` suffix stays visible until the next content chunk, and the new `tests/test_streaming_e2e.py:126-169` never catches it because it yields content immediately after `ready`. Refresh immediately when a visible warmup is cleared, and update the e2e test to pause after `ready` and assert a separate suffix-removal edit before any content arrives.
+2. [BLOCKER] src/mindroom/streaming.py:739 - On cancellation or other terminal paths, the stream finalizes before `pump.shutdown` is set and before the progress task is stopped, so a late worker progress event can overwrite the clean terminal body with a fresh warmup suffix; the direct `finalize()` tests in `tests/test_streaming_behavior.py:1355-1443` do not exercise this race. Shut down progress delivery before composing the terminal body, and replace the isolated `finalize()` assertions with a full `send_streaming_response()` cancellation/error test that injects a late progress event.
+## Final summary
+Not merge-ready: the new tests miss two real streaming regressions, and both show up in user-visible terminal or post-ready message state.
