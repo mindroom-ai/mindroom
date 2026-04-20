@@ -1512,8 +1512,10 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
             path=str((tmp_path / "plugins" / "missing").resolve()),
         )
         assert any(
-            call.args == ("Failed to load plugin, skipping",) and call.kwargs["path"] == str(bad_root.resolve())
-            for call in mock_logger.exception.call_args_list
+            call.args == ("Failed to load plugin, skipping",)
+            and call.kwargs["path"] == str(bad_root.resolve())
+            and "definitely_missing_plugin_dependency" in call.kwargs["error"]
+            for call in mock_logger.warning.call_args_list
         )
     finally:
         _TOOL_REGISTRY.clear()
@@ -1591,8 +1593,10 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
         assert "good_plugin_tool" in _TOOL_REGISTRY
         assert "good_plugin_tool" in TOOL_METADATA
         assert any(
-            call.args == ("Failed to load plugin, skipping",) and call.kwargs["path"] == str(bad_root.resolve())
-            for call in mock_logger.exception.call_args_list
+            call.args == ("Failed to load plugin, skipping",)
+            and call.kwargs["path"] == str(bad_root.resolve())
+            and "definitely_missing_plugin_dependency" in call.kwargs["error"]
+            for call in mock_logger.warning.call_args_list
         )
     finally:
         _TOOL_REGISTRY.clear()
