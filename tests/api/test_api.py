@@ -315,6 +315,19 @@ def test_exported_api_app_has_initialized_runtime_paths() -> None:
     assert isinstance(main._app_runtime_paths(main.app), constants.RuntimePaths)
 
 
+def test_exported_api_app_does_not_mount_removed_approvals_routes() -> None:
+    """The exported API app should not carry the removed approvals API surface."""
+    route_paths = {getattr(route, "path", None) for route in main.app.routes}
+
+    assert "/api/approvals" not in route_paths
+    assert "/api/approvals/ws" not in route_paths
+
+    with TestClient(main.app) as client:
+        response = client.get("/api/approvals")
+
+    assert response.status_code == 404
+
+
 def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     """A freshly constructed FastAPI app should get the full MindRoom API state."""
     fresh_app = FastAPI()

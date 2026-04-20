@@ -15,7 +15,6 @@ from agno.db.base import SessionType
 from agno.session.agent import AgentSession
 
 from mindroom.agents import create_session_storage
-from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
@@ -536,6 +535,8 @@ async def _extract_memory_summary(
     )
 
     model_name = config.get_entity_model_name(agent_name)
+    from mindroom.ai import get_model_instance  # noqa: PLC0415 - Avoid circular import through mindroom.memory facade.
+
     model = get_model_instance(config, runtime_paths, model_name)
     extractor_agent = Agent(
         name="MemoryAutoFlushExtractor",

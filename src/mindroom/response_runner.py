@@ -40,9 +40,12 @@ from mindroom.matrix.client import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.typing import typing_indicator
-from mindroom.memory import store_conversation_memory
-from mindroom.memory._prompting import strip_user_turn_time_prefix
-from mindroom.memory.auto_flush import mark_auto_flush_dirty_session, reprioritize_auto_flush_sessions
+from mindroom.memory import (
+    mark_auto_flush_dirty_session,
+    reprioritize_auto_flush_sessions,
+    store_conversation_memory,
+    strip_user_turn_time_prefix,
+)
 from mindroom.orchestration.runtime import is_sync_restart_cancel
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,

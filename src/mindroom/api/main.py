@@ -925,7 +925,7 @@ async def verify_user(
 
 
 async def authenticate_websocket_user(websocket: WebSocket) -> dict[str, Any]:
-    """Authenticate one approvals WebSocket using the same bearer/cookie rules as REST."""
+    """Authenticate one protected WebSocket using the same bearer/cookie rules as REST."""
     auth_state = _app_auth_state(cast("FastAPI", websocket.app))
     authorization = websocket.headers.get("authorization")
     mindroom_api_key = auth_state.settings.mindroom_api_key
