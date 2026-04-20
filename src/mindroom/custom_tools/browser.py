@@ -959,9 +959,14 @@ class BrowserTools(Toolkit):
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
-            page = await context.new_page()
-            target_id = self._register_tab(state, page)
-            state.active_target_id = target_id
+            for page in context.pages:
+                target_id = self._register_tab(state, page)
+                if state.active_target_id is None:
+                    state.active_target_id = target_id
+            if state.active_target_id is None:
+                page = await context.new_page()
+                target_id = self._register_tab(state, page)
+                state.active_target_id = target_id
             return state
 
     async def _stop_profile(self, profile_name: str) -> None:
