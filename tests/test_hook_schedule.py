@@ -304,7 +304,10 @@ async def test_schedule_hook_send_message_inherits_context_thread_id(tmp_path: P
             conversation_cache,
         )
 
-    conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with("!room:localhost", "$thread")
+    conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread",
+    )
     mock_schedule_send.assert_not_called()
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "resume"
@@ -344,7 +347,10 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
             conversation_cache,
         )
 
-    conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with("!room:localhost", None)
+    conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!room:localhost",
+        None,
+    )
     mock_schedule_send.assert_not_called()
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "room-level"

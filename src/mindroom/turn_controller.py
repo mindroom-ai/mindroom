@@ -930,7 +930,12 @@ class TurnController:
     ) -> None:
         """Execute one validated interactive selection through the normal response path."""
         thread_history = (
-            await self.deps.resolver.fetch_thread_history(self._client(), room.room_id, selection.thread_id)
+            await self.deps.resolver.fetch_thread_history(
+                self._client(),
+                room.room_id,
+                selection.thread_id,
+                caller_label="interactive_selection",
+            )
             if selection.thread_id
             else []
         )

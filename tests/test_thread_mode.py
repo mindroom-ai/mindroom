@@ -1365,7 +1365,11 @@ class TestExtractedModuleLoggerRebinding:
             ),
         )
 
-        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with("!room:localhost", "$threadroot")
+        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once()
+        assert bot._conversation_cache.get_dispatch_thread_history.await_args.args == (
+            "!room:localhost",
+            "$threadroot",
+        )
 
     @pytest.mark.asyncio
     async def test_conversation_cache_fetch_path_passes_explicit_event_cache(

@@ -48,6 +48,7 @@ def _conversation_cache(
 ) -> AsyncMock:
     access = AsyncMock()
     access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
+    access.get_thread_messages = AsyncMock(return_value=list(thread_history or []))
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     access.notify_outbound_message = Mock()
     return access

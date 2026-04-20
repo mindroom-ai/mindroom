@@ -732,7 +732,12 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             requester_user_id="@user:example.com",
         )
 
-    mock_fetch_history.assert_awaited_once_with(bot.client, room.room_id, stored_target.resolved_thread_id)
+    mock_fetch_history.assert_awaited_once_with(
+        bot.client,
+        room.room_id,
+        stored_target.resolved_thread_id,
+        caller_label="edit_regeneration_context",
+    )
     mock_remove_stale_runs.assert_called_once()
     call_kwargs = mock_generate_response.call_args.kwargs
     assert call_kwargs["reply_to_event_id"] == "$original:example.com"

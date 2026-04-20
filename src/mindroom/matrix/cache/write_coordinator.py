@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.logging_config import bound_log_context
 from mindroom.timing import emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
@@ -495,29 +496,18 @@ class _EventCacheWriteCoordinator:
         predecessor_count = self._pending_chain_length(self._pending_entry_tasks(room_state.entries))
         loop = asyncio.get_running_loop()
         start_signal: asyncio.Future[None] = loop.create_future()
+        queued_at = time.perf_counter() if instrument_timing else 0.0
 
-        if not instrument_timing:
-
-            async def run_when_scheduled() -> object:
-                await start_signal
-                self._log_coalesced_update_if_needed(
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    kind=kind,
-                    name=name,
-                    update_state=update_state,
-                )
-                return await update_state.update_coro_factory()
-
-        else:
-            queued_at = time.perf_counter()
-
-            async def run_when_scheduled() -> object:
-                outcome = "ok"
-                update_started: float | None = None
-                try:
+        async def run_when_scheduled() -> object:
+            outcome = "ok"
+            update_started: float | None = None
+            try:
+                current_task = asyncio.current_task()
+                task_name = current_task.get_name() if current_task is not None else name
+                with bound_log_context(task_name=task_name):
                     await start_signal
-                    update_started = time.perf_counter()
+                    if instrument_timing:
+                        update_started = time.perf_counter()
                     self._log_coalesced_update_if_needed(
                         room_id=room_id,
                         thread_id=thread_id,
@@ -526,13 +516,14 @@ class _EventCacheWriteCoordinator:
                         update_state=update_state,
                     )
                     return await update_state.update_coro_factory()
-                except asyncio.CancelledError:
-                    outcome = "cancelled"
-                    raise
-                except Exception:
-                    outcome = "error"
-                    raise
-                finally:
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except Exception:
+                outcome = "error"
+                raise
+            finally:
+                if instrument_timing:
                     finished = time.perf_counter()
                     total_ms = round((finished - queued_at) * 1000, 1)
                     if update_started is None:

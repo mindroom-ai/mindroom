@@ -567,7 +567,13 @@ class MatrixMessageOperations:
         thread_id: str,
         read_limit: int,
     ) -> MatrixMessageOperationResult:
-        thread_messages = await context.conversation_cache.get_thread_history(room_id, thread_id)
+        thread_messages = await context.conversation_cache.get_thread_messages(
+            room_id,
+            thread_id,
+            full_history=True,
+            dispatch_safe=False,
+            caller_label="matrix_message_tool",
+        )
         recent_messages = thread_messages[-read_limit:]
         return self._result(
             "ok",
