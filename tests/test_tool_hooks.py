@@ -1199,8 +1199,8 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_sync_tool_approval_send_uses_main_loop(tmp_path: Path) -> None:
-    """Sync-tool approval sends should hop back to the main runtime loop."""
+async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None:
+    """Sync-tool approval sends should hop back to the runtime loop."""
     request_thread = threading.get_ident()
     request_loop = asyncio.get_running_loop()
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1222,7 +1222,7 @@ async def test_sync_tool_approval_send_uses_main_loop(tmp_path: Path) -> None:
         runtime_paths,
     )
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator._capture_main_loop()
+    orchestrator._capture_runtime_loop()
 
     async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> nio.RoomSendResponse:
         current_loop = asyncio.get_running_loop()

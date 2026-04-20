@@ -558,10 +558,41 @@ async def test_shutdown_expires_pending_requests(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_send_approval_event_requires_runtime_loop(tmp_path: Path) -> None:
+    """Approval transport should fail fast without a captured runtime loop."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    client = MagicMock()
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval-event", room_id="!room:localhost"),
+    )
+    bot = MagicMock()
+    bot.client = client
+    orchestrator.agent_bots = {"code": bot}
+
+    with pytest.raises(RuntimeError, match="Approval runtime loop is not available"):
+        await orchestrator._send_approval_event(
+            "!room:localhost",
+            "$thread",
+            "code",
+            {
+                "approval_id": "approval-1",
+                "tool_name": "run_shell_command",
+                "arguments": {"command": "echo hi"},
+                "agent_name": "code",
+                "status": "pending",
+                "msgtype": "io.mindroom.tool_approval",
+                "body": "🔒 Approval required: run_shell_command",
+            },
+        )
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_send_approval_event_uses_expected_room_send_payload(tmp_path: Path) -> None:
     """The orchestrator helper should emit the Matrix approval card payload."""
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
     client = MagicMock()
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval-event", room_id="!room:localhost"),
@@ -612,6 +643,7 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
     """The orchestrator helper should edit approval cards via m.replace."""
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
     client = MagicMock()
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$edit-event", room_id="!room:localhost"),
