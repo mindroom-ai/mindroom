@@ -6,6 +6,7 @@ import asyncio
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from html import escape
 from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.tool_system.runtime_context import WorkerProgressEvent
+    from mindroom.tool_system.runtime_context import WorkerProgressEvent, WorkerProgressPump
     from mindroom.workers.models import WorkerReadyProgress
 
 logger = get_logger(__name__)
@@ -212,6 +213,8 @@ class StreamingResponse:
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
     _active_warmups: dict[str, _ActiveWarmup] = field(default_factory=dict, init=False, repr=False)
+    _last_send_had_warmup_suffix: bool = field(default=False, init=False, repr=False)
+    _needs_warmup_clear_edit: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -307,6 +310,7 @@ class StreamingResponse:
     ) -> None:
         """Send final message update."""
         self._active_warmups.clear()
+        self._needs_warmup_clear_edit = False
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
             error_note = _format_stream_error_note(error)
@@ -352,8 +356,8 @@ class StreamingResponse:
         stream_status: str | None = None,
     ) -> bool:
         """Send new message or edit existing one."""
-        warmup_suffix = self._render_warmup_suffix()
-        if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix:
+        warmup_suffix_lines = self._render_warmup_suffix_lines()
+        if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
             return True
 
         assert self.target is not None
@@ -364,8 +368,6 @@ class StreamingResponse:
         # Format the text (handles interactive questions if present)
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
         display_text = response.formatted_text
-        if warmup_suffix:
-            display_text = f"{display_text}\n\n{warmup_suffix}" if display_text else warmup_suffix
 
         # Only use latest_thread_event_id for the initial message (not edits)
         latest_for_message = self.latest_thread_event_id if self.event_id is None and not self.room_mode else None
@@ -384,6 +386,12 @@ class StreamingResponse:
             tool_trace=self.tool_trace if self.show_tool_calls else None,
             extra_content=extra_content,
         )
+        if warmup_suffix_lines:
+            warmup_suffix = "\n".join(warmup_suffix_lines)
+            display_text = f"{display_text}\n\n{warmup_suffix}" if display_text else warmup_suffix
+            content["body"] = f"{content['body']}\n\n{warmup_suffix}"
+            suffix_html = "".join(f"<p>{escape(line)}</p>" for line in warmup_suffix_lines)
+            content["formatted_body"] = f"{content['formatted_body']}{suffix_html}"
 
         send_succeeded = await self._send_content(
             client,
@@ -391,10 +399,13 @@ class StreamingResponse:
             display_text=display_text,
             retry_on_failure=is_final,
         )
-        if send_succeeded and not is_final:
-            self.placeholder_progress_sent = not self.accumulated_text.strip()
-        elif send_succeeded and is_final:
-            self.placeholder_progress_sent = False
+        if send_succeeded:
+            self._last_send_had_warmup_suffix = bool(warmup_suffix_lines)
+            self._needs_warmup_clear_edit = False
+            if not is_final:
+                self.placeholder_progress_sent = not self.accumulated_text.strip()
+            else:
+                self.placeholder_progress_sent = False
         return send_succeeded
 
     def _clear_terminal_warmups(self) -> None:
@@ -405,14 +416,14 @@ class StreamingResponse:
         for worker_key in failed_worker_keys:
             self._active_warmups.pop(worker_key, None)
 
-    def _render_warmup_suffix(self) -> str:
-        """Render all active worker warmup notices as a side-band suffix."""
+    def _render_warmup_suffix_lines(self) -> list[str]:
+        """Render all active worker warmup notices as side-band suffix lines."""
         if not self._active_warmups:
-            return ""
+            return []
 
         lines: list[str] = []
         for warmup in self._active_warmups.values():
-            labels = ", ".join(f"`{tool_label}`" for tool_label in warmup.tool_labels)
+            labels = ", ".join(warmup.tool_labels)
             phase = warmup.last_event.phase
             if phase == "failed":
                 error = _shorten_warmup_error(warmup.last_event.error)
@@ -426,16 +437,22 @@ class StreamingResponse:
                 continue
             elapsed_seconds = max(1, int(warmup.last_event.elapsed_seconds))
             lines.append(f"⏳ Preparing isolated worker for {labels}… {elapsed_seconds}s elapsed.")
-        return "\n".join(lines)
+        return lines
 
     def apply_worker_progress_event(self, event: WorkerProgressEvent) -> bool:
         """Update side-band warmup state from one routed worker progress event."""
         progress = event.progress
         worker_key = progress.worker_key
         if progress.phase == "ready":
-            return self._active_warmups.pop(worker_key, None) is not None
+            removed = self._active_warmups.pop(worker_key, None)
+            if removed is None:
+                return False
+            if not self._active_warmups and self._last_send_had_warmup_suffix:
+                self._needs_warmup_clear_edit = True
+            return True
 
         tool_label = f"{event.tool_name}.{event.function_name}"
+        self._needs_warmup_clear_edit = False
         warmup = self._active_warmups.get(worker_key)
         if warmup is None:
             self._active_warmups[worker_key] = _ActiveWarmup(
@@ -653,11 +670,27 @@ async def _drain_worker_progress_events(
     client: nio.AsyncClient,
     streaming: StreamingResponse,
     queue: asyncio.Queue[WorkerProgressEvent],
+    pump: WorkerProgressPump,
 ) -> None:
     """Apply worker progress events to side-band state and refresh the current stream body."""
     while True:
         event = await queue.get()
+        if pump.shutdown.is_set():
+            return
         if streaming.apply_worker_progress_event(event):
+            if pump.shutdown.is_set():
+                return
+            if streaming._needs_warmup_clear_edit:
+                sent = await streaming._send_or_edit_message(
+                    client,
+                    allow_empty_progress=not streaming.accumulated_text.strip(),
+                )
+                if pump.shutdown.is_set():
+                    return
+                if sent:
+                    streaming.last_update = time.time()
+                    streaming.chars_since_last_update = 0
+                continue
             should_refresh = (
                 bool(streaming.accumulated_text.strip())
                 or bool(streaming._active_warmups)
@@ -665,7 +698,22 @@ async def _drain_worker_progress_events(
             )
             if not should_refresh:
                 continue
+            if pump.shutdown.is_set():
+                return
             await streaming._throttled_send(client, progress_hint=True)
+
+
+async def _shutdown_worker_progress_drain(
+    pump: WorkerProgressPump,
+    progress_task: asyncio.Task[None] | None,
+) -> None:
+    """Stop the worker-progress drain before terminal stream finalization."""
+    pump.shutdown.set()
+    if progress_task is None:
+        return
+    progress_task.cancel()
+    with suppress(asyncio.CancelledError, TimeoutError):
+        await asyncio.wait_for(progress_task, timeout=0.5)
 
 
 async def send_streaming_response(
@@ -739,10 +787,14 @@ async def send_streaming_response(
     loop = asyncio.get_running_loop()
 
     with worker_progress_pump_scope(loop, worker_progress_queue) as pump:
-        progress_task = asyncio.create_task(_drain_worker_progress_events(client, streaming, worker_progress_queue))
+        progress_task = asyncio.create_task(
+            _drain_worker_progress_events(client, streaming, worker_progress_queue, pump),
+        )
         try:
             await _consume_streaming_chunks(client, response_stream, streaming)
         except asyncio.CancelledError as exc:
+            await _shutdown_worker_progress_drain(pump, progress_task)
+            progress_task = None
             if is_sync_restart_cancel(exc):
                 logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
                 await streaming.finalize(client, restart_interrupted=True)
@@ -756,6 +808,8 @@ async def send_streaming_response(
             raise
         except Exception as e:
             logger.exception("Streaming response failed", error=str(e))
+            await _shutdown_worker_progress_drain(pump, progress_task)
+            progress_task = None
             await streaming.finalize(client, error=e)
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
@@ -766,13 +820,11 @@ async def send_streaming_response(
                 tool_trace=streaming.tool_trace,
             ) from e
         else:
+            await _shutdown_worker_progress_drain(pump, progress_task)
+            progress_task = None
             await streaming.finalize(client)
         finally:
-            pump.shutdown.set()
-            if progress_task is not None:
-                progress_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await progress_task
+            await _shutdown_worker_progress_drain(pump, progress_task)
 
     if tool_trace_collector is not None:
         tool_trace_collector[:] = streaming.tool_trace

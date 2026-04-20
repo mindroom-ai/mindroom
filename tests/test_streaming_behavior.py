@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1340,7 +1341,7 @@ class TestStreamingBehavior:
 
         first_body = mock_client.room_send.call_args.kwargs["content"]["body"]
         assert "Preparing isolated worker" in first_body
-        assert "`shell.run`" in first_body
+        assert "shell.run" in first_body
         assert streaming.accumulated_text == ""
 
         streaming.accumulated_text = "hello"
@@ -1421,20 +1422,13 @@ class TestStreamingBehavior:
         assert "Preparing isolated worker" not in accumulated
 
     @pytest.mark.asyncio
-    async def test_finalize_clears_warmup_suffix_on_cancel(self) -> None:
-        """Cancelled final bodies should not leak any active warmup suffix text."""
+    async def test_worker_warmup_suffix_renders_outside_partial_markdown(self) -> None:
+        """Warmup notices should append outside partially open markdown blocks."""
         mock_client = _make_matrix_client_mock()
-        captured_texts: list[str] = []
-
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            _new_content: dict[str, object],
-            new_text: str,
-        ) -> DeliveredMatrixEvent:
-            captured_texts.append(new_text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$warmup_markdown"
+        mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -1444,32 +1438,44 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.event_id = "$existing"
-        streaming.placeholder_progress_sent = True
+        streaming.accumulated_text = "```python\nprint('hello')"
         streaming.apply_worker_progress_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
                 progress=WorkerReadyProgress(
-                    phase="waiting",
+                    phase="cold_start",
                     worker_key="worker-a",
                     backend_name="kubernetes",
-                    elapsed_seconds=10.0,
+                    elapsed_seconds=2.0,
                 ),
             ),
         )
 
-        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
-            await streaming.finalize(mock_client, cancelled=True)
+        await streaming._send_or_edit_message(mock_client)
 
-        assert captured_texts == [CANCELLED_RESPONSE_NOTE]
-        assert "Preparing isolated worker" not in captured_texts[0]
+        content = mock_client.room_send.call_args.kwargs["content"]
+        warmup_text = "⏳ Preparing isolated worker for shell.run… first cold start can take up to 2 minutes."
+        assert content["body"].endswith(f"\n\n{warmup_text}")
+        assert "<pre><code" in content["formatted_body"]
+        assert content["formatted_body"].endswith(f"<p>{warmup_text}</p>")
+        assert content["formatted_body"].rfind(f"<p>{warmup_text}</p>") > content["formatted_body"].rfind("</pre>")
 
     @pytest.mark.asyncio
-    async def test_finalize_clears_warmup_suffix_on_error(self) -> None:
-        """Errored final bodies should not leak any active warmup suffix text."""
+    @pytest.mark.parametrize(
+        ("terminal_kind", "expected_final_text"),
+        [("cancel", CANCELLED_RESPONSE_NOTE), ("complete", PROGRESS_PLACEHOLDER)],
+    )
+    async def test_send_streaming_response_terminal_update_ignores_late_progress(
+        self,
+        terminal_kind: str,
+        expected_final_text: str,
+    ) -> None:
+        """Late worker progress after terminal shutdown must not re-add the warmup suffix."""
         mock_client = _make_matrix_client_mock()
         captured_texts: list[str] = []
+        late_event_done = threading.Event()
+        late_event_thread: threading.Thread | None = None
 
         async def record_edit(
             _client: object,
@@ -1481,35 +1487,193 @@ class TestStreamingBehavior:
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
-        streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
-            sender_domain="localhost",
-            config=self.config,
-            runtime_paths=runtime_paths_for(self.config),
-        )
-        streaming.event_id = "$existing"
-        streaming.placeholder_progress_sent = True
-        streaming.apply_worker_progress_event(
-            WorkerProgressEvent(
-                tool_name="shell",
-                function_name="run",
-                progress=WorkerReadyProgress(
-                    phase="waiting",
-                    worker_key="worker-a",
-                    backend_name="kubernetes",
-                    elapsed_seconds=10.0,
+        async def wait_for_edit_count(expected_count: int) -> None:
+            for _ in range(200):
+                if len(captured_texts) >= expected_count:
+                    return
+                await asyncio.sleep(0.001)
+            msg = f"Timed out waiting for {expected_count} edits"
+            raise AssertionError(msg)
+
+        async def stream() -> AsyncIterator[str]:
+            nonlocal late_event_thread
+            if False:
+                yield ""
+            pump = get_worker_progress_pump()
+            assert pump is not None
+
+            def emit_late_progress() -> None:
+                pump.shutdown.wait(timeout=1.0)
+                pump.loop.call_soon_threadsafe(
+                    pump.queue.put_nowait,
+                    WorkerProgressEvent(
+                        tool_name="shell",
+                        function_name="run",
+                        progress=WorkerReadyProgress(
+                            phase="waiting",
+                            worker_key="worker-a",
+                            backend_name="kubernetes",
+                            elapsed_seconds=9.0,
+                        ),
+                    ),
+                )
+                late_event_done.set()
+
+            late_event_thread = threading.Thread(target=emit_late_progress, daemon=True)
+            late_event_thread.start()
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
                 ),
-            ),
-        )
+            )
+            await wait_for_edit_count(1)
+            if terminal_kind == "cancel":
+                raise asyncio.CancelledError
+            return
 
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
-            await streaming.finalize(mock_client, error=RuntimeError("worker failed"))
+            if terminal_kind == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await send_streaming_response(
+                        client=mock_client,
+                        room_id="!test:localhost",
+                        reply_to_event_id="$original_123",
+                        thread_id=None,
+                        sender_domain="localhost",
+                        config=self.config,
+                        runtime_paths=runtime_paths_for(self.config),
+                        response_stream=stream(),
+                        existing_event_id="$thinking_123",
+                        adopt_existing_placeholder=True,
+                        room_mode=True,
+                    )
+            else:
+                await send_streaming_response(
+                    client=mock_client,
+                    room_id="!test:localhost",
+                    reply_to_event_id="$original_123",
+                    thread_id=None,
+                    sender_domain="localhost",
+                    config=self.config,
+                    runtime_paths=runtime_paths_for(self.config),
+                    response_stream=stream(),
+                    existing_event_id="$thinking_123",
+                    adopt_existing_placeholder=True,
+                    room_mode=True,
+                )
 
-        assert len(captured_texts) == 1
-        assert captured_texts[0].startswith("**[Response interrupted by an error:")
-        assert "Preparing isolated worker" not in captured_texts[0]
+        assert late_event_thread is not None
+        late_event_thread.join(timeout=1.0)
+        assert late_event_done.is_set()
+        await asyncio.sleep(0.05)
+
+        assert len(captured_texts) == 2
+        assert "Preparing isolated worker" in captured_texts[0]
+        assert "Preparing isolated worker" not in captured_texts[1]
+        assert captured_texts[1] == expected_final_text
+
+    @pytest.mark.asyncio
+    async def test_send_streaming_response_error_update_ignores_late_progress(self) -> None:
+        """Late worker progress after an error must not re-add the warmup suffix."""
+        mock_client = _make_matrix_client_mock()
+        captured_texts: list[str] = []
+        late_event_done = threading.Event()
+        late_event_thread: threading.Thread | None = None
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            captured_texts.append(new_text)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+
+        async def wait_for_edit_count(expected_count: int) -> None:
+            for _ in range(200):
+                if len(captured_texts) >= expected_count:
+                    return
+                await asyncio.sleep(0.001)
+            msg = f"Timed out waiting for {expected_count} edits"
+            raise AssertionError(msg)
+
+        async def failing_stream() -> AsyncIterator[str]:
+            nonlocal late_event_thread
+            if False:
+                yield ""
+            pump = get_worker_progress_pump()
+            assert pump is not None
+
+            def emit_late_progress() -> None:
+                pump.shutdown.wait(timeout=1.0)
+                pump.loop.call_soon_threadsafe(
+                    pump.queue.put_nowait,
+                    WorkerProgressEvent(
+                        tool_name="shell",
+                        function_name="run",
+                        progress=WorkerReadyProgress(
+                            phase="waiting",
+                            worker_key="worker-a",
+                            backend_name="kubernetes",
+                            elapsed_seconds=9.0,
+                        ),
+                    ),
+                )
+                late_event_done.set()
+
+            late_event_thread = threading.Thread(target=emit_late_progress, daemon=True)
+            late_event_thread.start()
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+            await wait_for_edit_count(1)
+            msg = "worker failed"
+            raise RuntimeError(msg)
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(StreamingDeliveryError, match="worker failed"),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=failing_stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+            )
+
+        assert late_event_thread is not None
+        late_event_thread.join(timeout=1.0)
+        assert late_event_done.is_set()
+        await asyncio.sleep(0.05)
+
+        assert len(captured_texts) == 2
+        assert "Preparing isolated worker" in captured_texts[0]
+        assert "Preparing isolated worker" not in captured_texts[1]
+        assert captured_texts[1].startswith("**[Response interrupted by an error:")
 
     @pytest.mark.asyncio
     async def test_worker_warmup_coalesces_parallel_calls_on_same_worker_key(self) -> None:
@@ -1546,8 +1710,8 @@ class TestStreamingBehavior:
 
         body = mock_client.room_send.call_args.kwargs["content"]["body"]
         assert body.count("Preparing isolated worker") == 1
-        assert "`shell.run`" in body
-        assert "`python.execute`" in body
+        assert "shell.run" in body
+        assert "python.execute" in body
 
     @pytest.mark.asyncio
     async def test_worker_warmup_renders_multiple_lines_for_distinct_workers(self) -> None:

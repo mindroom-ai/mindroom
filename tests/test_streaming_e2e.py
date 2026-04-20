@@ -135,6 +135,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
                 ),
             ),
         )
+        await wait_for_delivery_count(4)
         await asyncio.sleep(0.02)
         yield "x" * 300
 
@@ -155,7 +156,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
             streaming_cls=FastProgressStreamingResponse,
         )
 
-    assert len(deliveries) == 5
+    assert len(deliveries) == 6
     assert deliveries[0][0] == "send"
     assert "Thinking..." in deliveries[0][1]
     assert "Preparing isolated worker" not in deliveries[0][1]
@@ -166,9 +167,12 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
     assert "7s elapsed" in deliveries[2][1]
     assert deliveries[3][0] == "edit"
     assert "Preparing isolated worker" not in deliveries[3][1]
-    assert "x" * 300 in deliveries[3][1]
+    assert "Thinking..." in deliveries[3][1]
     assert deliveries[4][0] == "edit"
     assert "Preparing isolated worker" not in deliveries[4][1]
+    assert "x" * 300 in deliveries[4][1]
+    assert deliveries[5][0] == "edit"
+    assert "Preparing isolated worker" not in deliveries[5][1]
 
 
 @pytest.mark.asyncio

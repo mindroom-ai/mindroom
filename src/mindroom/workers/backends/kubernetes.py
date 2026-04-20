@@ -130,14 +130,10 @@ def _build_progress_reporter(
     *,
     worker_key: str,
     backend_name: str,
-    progress_sink: ProgressSink | None,
+    progress_sink: ProgressSink,
 ) -> tuple[Callable[[float], None] | None, Callable[[WorkerReadyPhase, str | None], None]]:
-    if progress_sink is None:
-        return None, _noop_finalize_progress
-
     condition = threading.Condition()
     state = _ProgressReporterState()
-    started_at = time.monotonic()
 
     thread = threading.Thread(
         target=_progress_reporter_loop,
@@ -160,7 +156,6 @@ def _build_progress_reporter(
 
     def finalize(phase: WorkerReadyPhase, error: str | None) -> None:
         with condition:
-            state.latest_elapsed = max(state.latest_elapsed, time.monotonic() - started_at)
             state.reporter_done = True
             condition.notify_all()
         thread.join()
@@ -170,6 +165,8 @@ def _build_progress_reporter(
             worker_key=worker_key,
             backend_name=backend_name,
         )
+        if phase == "ready" and not state.cold_start_emitted:
+            return
         _report_progress(
             progress_sink=progress_sink,
             phase=phase,
@@ -220,6 +217,8 @@ class KubernetesWorkerBackend:
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
+        self._progress_sinks: dict[str, list[ProgressSink]] = {}
+        self._progress_sinks_lock = threading.Lock()
 
     @classmethod
     def from_runtime(
@@ -241,6 +240,31 @@ class KubernetesWorkerBackend:
             worker_grantable_credentials=worker_grantable_credentials,
         )
 
+    def _register_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
+        with self._progress_sinks_lock:
+            self._progress_sinks.setdefault(worker_key, []).append(progress_sink)
+
+    def _unregister_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
+        with self._progress_sinks_lock:
+            sinks = self._progress_sinks.get(worker_key)
+            if sinks is None:
+                return
+            for index, current_sink in enumerate(sinks):
+                if current_sink is progress_sink:
+                    sinks.pop(index)
+                    break
+            if not sinks:
+                self._progress_sinks.pop(worker_key, None)
+
+    def _fanout_progress_sink(self, worker_key: str) -> ProgressSink:
+        def sink(progress: WorkerReadyProgress) -> None:
+            with self._progress_sinks_lock:
+                sinks = list(self._progress_sinks.get(worker_key, ()))
+            for current_sink in sinks:
+                current_sink(progress)
+
+        return sink
+
     def ensure_worker(
         self,
         spec: WorkerSpec,
@@ -249,77 +273,85 @@ class KubernetesWorkerBackend:
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key."""
-        with self._worker_lock(spec.worker_key):
-            timestamp = time.time() if now is None else now
-            worker_key = spec.worker_key
-            worker_id = self._worker_id(worker_key)
-            state_subpath = self._state_subpath(worker_key)
-            existing = self._resources.read_deployment(worker_id)
-            current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
-            should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
-            should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
-            startup_count = (current_handle.startup_count if current_handle is not None else 0) + int(should_restart)
-            created_at = current_handle.created_at if current_handle is not None else timestamp
-            if should_restart:
-                last_started_at = timestamp
-            else:
-                assert current_handle is not None
-                last_started_at = current_handle.last_started_at
-            annotations = resources.metadata_annotations(
-                worker_key=worker_key,
-                state_subpath=state_subpath,
-                created_at=created_at,
-                last_used_at=timestamp,
-                last_started_at=last_started_at,
-                startup_count=startup_count,
-                failure_count=current_handle.failure_count if current_handle is not None else 0,
-                failure_reason=None,
-                status="starting",
-            )
-
-            sync_shared_credentials_to_worker(
-                worker_key,
-                allowed_services=self.worker_grantable_credentials,
-                credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
-            )
-            self._resources.apply_service(worker_id)
-            self._resources.apply_deployment(
-                worker_key=worker_key,
-                worker_id=worker_id,
-                state_subpath=state_subpath,
-                annotations=annotations,
-                replicas=1,
-                private_agent_names=spec.private_agent_names,
-            )
-            poll_reporter: Callable[[float], None] | None = None
-            finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
-            if should_report_progress:
-                poll_reporter, finalize_progress = _build_progress_reporter(
+        worker_key = spec.worker_key
+        if progress_sink is not None:
+            self._register_progress_sink(worker_key, progress_sink)
+        try:
+            with self._worker_lock(worker_key):
+                timestamp = time.time() if now is None else now
+                worker_id = self._worker_id(worker_key)
+                state_subpath = self._state_subpath(worker_key)
+                existing = self._resources.read_deployment(worker_id)
+                current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
+                should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
+                should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
+                startup_count = (current_handle.startup_count if current_handle is not None else 0) + int(
+                    should_restart,
+                )
+                created_at = current_handle.created_at if current_handle is not None else timestamp
+                if should_restart:
+                    last_started_at = timestamp
+                else:
+                    assert current_handle is not None
+                    last_started_at = current_handle.last_started_at
+                annotations = resources.metadata_annotations(
                     worker_key=worker_key,
-                    backend_name=self.backend_name,
-                    progress_sink=progress_sink,
+                    state_subpath=state_subpath,
+                    created_at=created_at,
+                    last_used_at=timestamp,
+                    last_started_at=last_started_at,
+                    startup_count=startup_count,
+                    failure_count=current_handle.failure_count if current_handle is not None else 0,
+                    failure_reason=None,
+                    status="starting",
                 )
-            try:
-                deployment = self._resources.wait_for_ready(
-                    worker_id,
-                    timeout_seconds=self.config.ready_timeout_seconds,
-                    deployment_ready_fn=self._deployment_ready,
-                    on_poll_tick=poll_reporter,
-                )
-            except Exception as exc:
-                failure_reason = str(exc)
-                finalize_progress("failed", failure_reason)
-                self.record_failure(worker_key, failure_reason, now=timestamp)
-                if isinstance(exc, WorkerBackendError):
-                    raise
-                raise WorkerBackendError(failure_reason) from exc
 
-            finalize_progress("ready", None)
-            final_annotations = dict(annotations)
-            final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
-            self._resources.patch_deployment(worker_id, annotations=final_annotations)
-            deployment.metadata.annotations = final_annotations
-            return self._handle_from_deployment(deployment, now=timestamp)
+                sync_shared_credentials_to_worker(
+                    worker_key,
+                    allowed_services=self.worker_grantable_credentials,
+                    credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
+                )
+                self._resources.apply_service(worker_id)
+                self._resources.apply_deployment(
+                    worker_key=worker_key,
+                    worker_id=worker_id,
+                    state_subpath=state_subpath,
+                    annotations=annotations,
+                    replicas=1,
+                    private_agent_names=spec.private_agent_names,
+                )
+                poll_reporter: Callable[[float], None] | None = None
+                finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
+                if should_report_progress:
+                    poll_reporter, finalize_progress = _build_progress_reporter(
+                        worker_key=worker_key,
+                        backend_name=self.backend_name,
+                        progress_sink=self._fanout_progress_sink(worker_key),
+                    )
+                try:
+                    deployment = self._resources.wait_for_ready(
+                        worker_id,
+                        timeout_seconds=self.config.ready_timeout_seconds,
+                        deployment_ready_fn=self._deployment_ready,
+                        on_poll_tick=poll_reporter,
+                    )
+                except Exception as exc:
+                    failure_reason = str(exc)
+                    finalize_progress("failed", failure_reason)
+                    self.record_failure(worker_key, failure_reason, now=timestamp)
+                    if isinstance(exc, WorkerBackendError):
+                        raise
+                    raise WorkerBackendError(failure_reason) from exc
+
+                finalize_progress("ready", None)
+                final_annotations = dict(annotations)
+                final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
+                self._resources.patch_deployment(worker_id, annotations=final_annotations)
+                deployment.metadata.annotations = final_annotations
+                return self._handle_from_deployment(deployment, now=timestamp)
+        finally:
+            if progress_sink is not None:
+                self._unregister_progress_sink(worker_key, progress_sink)
 
     def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Return the current worker handle for one worker key, if present."""
