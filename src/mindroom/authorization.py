@@ -299,7 +299,7 @@ async def get_available_agents_for_sender_authoritative(
             sender_id=sender_id,
             error=str(response),
         )
-        return []
+        return cached_visible_agents
 
     _apply_authoritative_joined_members(room, response.members)
     refreshed_room_agents = _available_agents_from_member_ids(
