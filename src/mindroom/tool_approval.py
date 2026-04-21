@@ -1011,8 +1011,6 @@ class ApprovalManager:
         }
         if pending.resolution_reason:
             content["resolution_reason"] = pending.resolution_reason
-            if pending.status == "denied":
-                content["denial_reason"] = pending.resolution_reason
         return content
 
 

@@ -719,7 +719,7 @@ async def test_request_approval_denies_with_reason(tmp_path: Path) -> None:
     assert resolved.resolution_reason == "Too dangerous"
     assert decision.status == "denied"
     assert decision.reason == "Too dangerous"
-    assert editor.await_args.args[3]["denial_reason"] == "Too dangerous"
+    assert editor.await_args.args[3]["resolution_reason"] == "Too dangerous"
 
 
 @pytest.mark.asyncio
@@ -1634,7 +1634,6 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
             "thread_id": "$thread",
             "resolved_at": "2026-04-12T00:00:00+00:00",
             "resolved_by": "@bas:localhost",
-            "denial_reason": "Too dangerous",
             "resolution_reason": "Too dangerous",
         },
     )
@@ -1646,7 +1645,6 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
         "body": "Denied: run_shell_command",
         "resolved_at": "2026-04-12T00:00:00+00:00",
         "resolved_by": "@bas:localhost",
-        "denial_reason": "Too dangerous",
         "resolution_reason": "Too dangerous",
         "m.relates_to": {
             "rel_type": "m.thread",
