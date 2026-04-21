@@ -100,7 +100,6 @@ class PreparedHookedPayload:
 
     payload: DispatchPayload
     envelope: MessageEnvelope
-    strip_transient_enrichment_after_run: bool
     system_enrichment_items: tuple[EnrichmentItem, ...]
 
 
@@ -159,7 +158,6 @@ class IngressHookRunner:
             message_received_depth=dispatch.envelope.message_received_depth,
         )
         model_prompt = payload.model_prompt
-        strip_transient_enrichment_after_run = False
         if self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH):
             context = MessageEnrichContext(
                 **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
@@ -175,7 +173,6 @@ class IngressHookRunner:
                     if payload.model_prompt
                     else enrichment_block
                 )
-                strip_transient_enrichment_after_run = True
 
         return PreparedHookedPayload(
             payload=DispatchPayload(
@@ -185,7 +182,6 @@ class IngressHookRunner:
                 attachment_ids=payload.attachment_ids,
             ),
             envelope=envelope,
-            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
             system_enrichment_items=(),
         )
 

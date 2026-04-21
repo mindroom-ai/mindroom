@@ -89,7 +89,6 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         media: object | None = None,  # noqa: ARG001
         attachment_ids: list[str] | None = None,  # noqa: ARG001
         model_prompt: str | None = None,  # noqa: ARG001
-        strip_transient_enrichment_after_run: bool = False,  # noqa: ARG001
         system_enrichment_items: tuple[object, ...] = (),  # noqa: ARG001
         response_envelope: object | None = None,  # noqa: ARG001
         correlation_id: str | None = None,  # noqa: ARG001

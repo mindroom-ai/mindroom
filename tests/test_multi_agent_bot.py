@@ -18,7 +18,6 @@ import httpx
 import nio
 import pytest
 import uvicorn
-from agno.db.base import SessionType
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
 from agno.media import Image
@@ -2304,7 +2303,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Shared team responses should preserve enriched history for exact replay."""
+        """Shared team responses should never scrub enriched history after delivery."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -2318,9 +2317,7 @@ class TestAgentBot:
             runtime_paths=runtime_paths_for(config),
         )
         matrix_ids = config.get_ids(runtime_paths_for(config))
-        storage = MagicMock()
-        mock_strip_enrichment = MagicMock()
-        bot._conversation_state_writer.create_storage = MagicMock(return_value=storage)
+        bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
         with (
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
@@ -2330,7 +2327,6 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value="Team reply"),
-                strip_enrichment_from_session_storage=mock_strip_enrichment,
             ),
         ):
             event_id = await bot._generate_team_response_helper(
@@ -2343,20 +2339,10 @@ class TestAgentBot:
                 requester_user_id="@user:localhost",
                 payload=DispatchPayload(prompt="team prompt"),
                 response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                strip_transient_enrichment_after_run=True,
                 correlation_id="corr-team",
             )
 
         assert event_id == "$team"
-        mock_strip_enrichment.assert_called_once_with(
-            storage,
-            MessageTarget.resolve(
-                room_id="!test:localhost",
-                thread_id=None,
-                reply_to_event_id="$team-root",
-            ).session_id,
-            session_type=SessionType.TEAM,
-        )
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_uses_resolved_thread_root_for_placeholder_and_edit(

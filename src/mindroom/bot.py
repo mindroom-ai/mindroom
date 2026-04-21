@@ -1393,7 +1393,6 @@ class AgentBot:
         payload: DispatchPayload,
         response_envelope: MessageEnvelope | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        strip_transient_enrichment_after_run: bool = False,
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
@@ -1418,7 +1417,6 @@ class AgentBot:
                 target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
-                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
             team_agents=team_agents,
@@ -1440,7 +1438,6 @@ class AgentBot:
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        strip_transient_enrichment_after_run: bool = False,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
@@ -1462,7 +1459,7 @@ class AgentBot:
             user_id: User ID of the sender for identifying user messages in history
             media: Optional multimodal inputs (audio/images/files/videos)
             attachment_ids: Attachment IDs available for tool-side file processing
-            model_prompt: Optional model-facing prompt that may include transient enrichment.
+            model_prompt: Optional model-facing prompt for the live request and persisted history.
             system_enrichment_items: Hook-provided transient system prompt fragments to
                 apply for this response.
             response_envelope: Optional normalized inbound envelope for response hooks.
@@ -1495,7 +1492,6 @@ class AgentBot:
                 target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
-                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
         )
@@ -1667,7 +1663,6 @@ class TeamBot(AgentBot):
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        strip_transient_enrichment_after_run: bool = False,
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
@@ -1776,7 +1771,6 @@ class TeamBot(AgentBot):
                 source_kind="message",
             ),
             system_enrichment_items=system_enrichment_items,
-            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
             matrix_run_metadata=matrix_run_metadata,
