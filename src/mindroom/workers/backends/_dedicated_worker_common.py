@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
-from mindroom.constants import RuntimePaths, runtime_env_source_path, serialize_public_runtime_paths
+from mindroom.constants import (
+    RuntimePaths,
+    deserialize_runtime_paths,
+    runtime_env_source_path,
+    serialize_public_runtime_paths,
+)
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
@@ -196,7 +201,7 @@ def resolved_agent_policies_from_runtime_config(runtime_paths: RuntimePaths) -> 
         if isinstance(raw_worker_scope, str) and raw_worker_scope in {"shared", "user", "user_agent"}:
             default_worker_scope = raw_worker_scope
 
-    from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
+    from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index  # noqa: PLC0415
 
     seeds = build_agent_policy_seeds(
         agent_mappings,
@@ -320,9 +325,10 @@ def build_dedicated_worker_runtime_paths(
         extra_reserved_names=_protected_dedicated_worker_env_names(runtime_paths),
     )
 
-    process_env = dict(runtime_paths.process_env)
+    public_runtime_paths = deserialize_runtime_paths(serialize_public_runtime_paths(runtime_paths))
+    process_env = dict(public_runtime_paths.process_env)
     process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-    env_file_values = dict(runtime_paths.env_file_values)
+    env_file_values = dict(public_runtime_paths.env_file_values)
     env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     for blocked_env_name in _blocked_worker_file_env_names(runtime_paths):
         process_env.pop(blocked_env_name, None)

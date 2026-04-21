@@ -596,7 +596,7 @@ class DockerProjectionManager:
         if not agent_mappings:
             return {}
 
-        from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
+        from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index  # noqa: PLC0415
 
         seeds = build_agent_policy_seeds(
             agent_mappings,

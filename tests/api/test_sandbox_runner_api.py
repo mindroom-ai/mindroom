@@ -1139,6 +1139,23 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     assert "MINDROOM_STORAGE_PATH" not in subprocess_context.subprocess_env
 
 
+def test_filter_runtime_tool_init_overrides_keeps_only_safe_declared_fields() -> None:
+    """Runner-side tool rebuilds should preserve only safe init overrides."""
+    filtered = sandbox_runner_module._filter_runtime_tool_init_overrides(
+        "shell",
+        {
+            "base_dir": "agents/general/workspace",
+            "extra_env_passthrough": "GITEA_*",
+            "shell_path_prepend": "/opt/custom/bin",
+        },
+    )
+
+    assert filtered == {
+        "base_dir": "agents/general/workspace",
+        "shell_path_prepend": "/opt/custom/bin",
+    }
+
+
 @pytest.mark.asyncio
 async def test_execute_request_inprocess_reuses_passed_config_without_execution_env(
     monkeypatch: pytest.MonkeyPatch,

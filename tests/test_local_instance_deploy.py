@@ -12,6 +12,7 @@ import yaml
 from rich.console import Console
 
 from tests.conftest import normalize_console_output
+
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None
@@ -306,6 +307,8 @@ def test_setup_tuwunel_directory_preserves_matching_server_name(
     deploy._setup_tuwunel_directory(instance, env_file)
 
     assert marker.exists()
+
+
 def test_remove_instance_preserves_state_when_teardown_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
