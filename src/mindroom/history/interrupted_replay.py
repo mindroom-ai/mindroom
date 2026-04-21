@@ -130,6 +130,7 @@ def build_interrupted_replay_snapshot(
     completed_tools: Sequence[ToolTraceEntry],
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
+    response_event_id: str | None = None,
     interruption_reason: str,
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state."""
@@ -141,7 +142,7 @@ def build_interrupted_replay_snapshot(
         else ()
     )
     source_event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
-    response_event_id = metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+    raw_response_event_id = response_event_id or metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     return InterruptedReplaySnapshot(
         user_message=(user_message or "").strip(),
         partial_text=(partial_text or "").strip(),
@@ -149,7 +150,9 @@ def build_interrupted_replay_snapshot(
         interrupted_tools=tuple(interrupted_tools),
         seen_event_ids=seen_event_ids,
         source_event_id=source_event_id if isinstance(source_event_id, str) and source_event_id else None,
-        response_event_id=response_event_id if isinstance(response_event_id, str) and response_event_id else None,
+        response_event_id=(
+            raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
+        ),
         interruption_reason=interruption_reason,
     )
 
@@ -224,6 +227,7 @@ def persist_interrupted_replay(
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
+            response_event_id=None,
             interruption_reason=interruption_reason,
         ),
         is_team=is_team,

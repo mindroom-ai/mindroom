@@ -1096,6 +1096,75 @@ class TestStreamingBehavior:
         assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
 
     @pytest.mark.asyncio
+    async def test_cancelled_stream_reports_existing_event_id_to_callback(self) -> None:
+        """Cancellation should report the visible placeholder event ID immediately."""
+        mock_client = _make_matrix_client_mock()
+        visible_event_ids: list[str] = []
+
+        async def cancelling_stream() -> AsyncIterator[str]:
+            yield "Partial answer"
+            raise asyncio.CancelledError
+
+        with (
+            patch(
+                "mindroom.streaming.edit_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=cancelling_stream(),
+                existing_event_id="$thinking_123",
+                room_mode=True,
+                visible_event_id_callback=visible_event_ids.append,
+            )
+
+        assert visible_event_ids == ["$thinking_123"]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_stream_reports_new_event_id_to_callback(self) -> None:
+        """Cancellation should report the first newly-created visible event ID."""
+        mock_client = _make_matrix_client_mock()
+        visible_event_ids: list[str] = []
+
+        async def cancelling_stream() -> AsyncIterator[str]:
+            yield "Partial answer"
+            raise asyncio.CancelledError
+
+        with (
+            patch(
+                "mindroom.streaming.send_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$stream-123", content_sent={})),
+            ),
+            patch(
+                "mindroom.streaming.edit_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=cancelling_stream(),
+                room_mode=True,
+                visible_event_id_callback=visible_event_ids.append,
+            )
+
+        assert visible_event_ids == ["$stream-123"]
+
+    @pytest.mark.asyncio
     async def test_sync_restart_stream_preserves_partial_text_with_restart_suffix(self) -> None:
         """Sync-restart cancellation should keep streamed text and append the restart marker."""
         mock_client = _make_matrix_client_mock()

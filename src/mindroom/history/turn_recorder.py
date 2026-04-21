@@ -19,6 +19,8 @@ class TurnRecorder:
 
     user_message: str
     run_metadata: dict[str, Any] | None = None
+    run_id: str | None = None
+    response_event_id: str | None = None
     assistant_text: str = ""
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
@@ -29,6 +31,14 @@ class TurnRecorder:
     def set_run_metadata(self, metadata: dict[str, Any] | None) -> None:
         """Replace the current Matrix run metadata snapshot."""
         self.run_metadata = dict(metadata) if metadata is not None else None
+
+    def set_run_id(self, run_id: str | None) -> None:
+        """Replace the current top-level Agno run identifier."""
+        self.run_id = run_id or None
+
+    def set_response_event_id(self, response_event_id: str | None) -> None:
+        """Replace the current visible Matrix response event identifier."""
+        self.response_event_id = response_event_id or None
 
     def set_assistant_text(self, text: str) -> None:
         """Replace the canonical assistant text observed so far."""
@@ -89,6 +99,7 @@ class TurnRecorder:
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
             run_metadata=self.run_metadata,
+            response_event_id=self.response_event_id,
             interruption_reason=self.interruption_reason or "Run interrupted",
         )
 

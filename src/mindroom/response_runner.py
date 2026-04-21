@@ -466,10 +466,13 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity | None,
         run_id: str | None,
         is_team: bool,
+        response_event_id: str | None = None,
     ) -> None:
         """Persist one interrupted recorder snapshot exactly once."""
         if not recorder.claim_interrupted_persistence():
             return
+        if response_event_id is not None:
+            recorder.set_response_event_id(response_event_id)
         storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
         try:
             persist_interrupted_replay_snapshot(
@@ -477,7 +480,7 @@ class ResponseRunner:
                 session=None,
                 session_id=session_id,
                 scope_id=session_scope.scope_id,
-                run_id=run_id or str(uuid4()),
+                run_id=recorder.run_id or run_id or str(uuid4()),
                 snapshot=recorder.interrupted_snapshot(),
                 is_team=is_team,
             )
@@ -1099,9 +1102,16 @@ class ResponseRunner:
                 raise RuntimeError(msg)
             if message_id is not None:
                 tracked_event_id = message_id
+                team_turn_recorder.set_response_event_id(message_id)
 
             def _note_attempt_run_id(current_run_id: str) -> None:
                 self.deps.stop_manager.update_run_id(message_id, current_run_id)
+                team_turn_recorder.set_run_id(current_run_id)
+
+            def _note_visible_response_event_id(response_event_id: str) -> None:
+                nonlocal tracked_event_id
+                tracked_event_id = response_event_id
+                team_turn_recorder.set_response_event_id(response_event_id)
 
             if use_streaming and (
                 delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
@@ -1154,6 +1164,7 @@ class ResponseRunner:
                                 show_tool_calls=show_tool_calls,
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
+                                visible_event_id_callback=_note_visible_response_event_id,
                             ),
                         )
                         if event_id is not None:
@@ -1167,6 +1178,7 @@ class ResponseRunner:
                             execution_identity=tool_dispatch.execution_identity,
                             run_id=response_run_id,
                             is_team=True,
+                            response_event_id=tracked_event_id,
                         )
                         raise
                     finally:
@@ -1247,6 +1259,7 @@ class ResponseRunner:
                                     execution_identity=tool_dispatch.execution_identity,
                                     run_id=response_run_id,
                                     is_team=True,
+                                    response_event_id=tracked_event_id,
                                 )
                                 raise
                     finally:
@@ -1576,6 +1589,7 @@ class ResponseRunner:
 
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
+            turn_recorder.set_run_id(current_run_id)
 
         async def build_response_text() -> str:
             knowledge = self.deps.knowledge_access.for_agent(
@@ -1626,6 +1640,7 @@ class ResponseRunner:
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
                 is_team=False,
+                response_event_id=request.existing_event_id,
             )
             raise
 
@@ -1647,6 +1662,10 @@ class ResponseRunner:
 
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
+            turn_recorder.set_run_id(current_run_id)
+
+        def note_visible_response_event_id(response_event_id: str) -> None:
+            turn_recorder.set_response_event_id(response_event_id)
 
         knowledge = self.deps.knowledge_access.for_agent(
             self.deps.agent_name,
@@ -1702,6 +1721,7 @@ class ResponseRunner:
                         tool_trace_collector=tool_trace,
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
+                        visible_event_id_callback=note_visible_response_event_id,
                     ),
                 )
                 if request.pipeline_timing is not None:
@@ -1716,6 +1736,7 @@ class ResponseRunner:
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 run_id=run_id,
                 is_team=False,
+                response_event_id=request.existing_event_id,
             )
             raise
 

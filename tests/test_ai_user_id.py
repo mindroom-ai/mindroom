@@ -1466,7 +1466,9 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
         )
         coordinator.deps.delivery_gateway.edit_text = AsyncMock()
 
-        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+            run_id_callback("run-retry")
             started.set()
             await asyncio.sleep(60)
             return "unreachable"
@@ -1483,6 +1485,9 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     assert persisted_session is not None
     assert persisted_session.runs is not None
     persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "run-retry"
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
