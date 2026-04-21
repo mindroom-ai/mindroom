@@ -370,6 +370,33 @@ FINAL_DELIVERY_POLICY: Mapping[FinalDeliveryState, FinalDeliveryPolicy] = Mappin
 
 
 @dataclass(frozen=True)
+class TurnDeliveryResolution:
+    """Typed caller-facing projection of one canonical terminal state."""
+
+    state: FinalDeliveryState
+    visible_response_event_id: str | None
+    response_identity_event_id: str | None
+    turn_completion_event_id: str | None
+    should_mark_handled: bool
+    retryable: bool
+    has_visible_output: bool
+
+    @classmethod
+    def from_outcome(cls, outcome: FinalDeliveryOutcome) -> TurnDeliveryResolution:
+        """Project one canonical outcome into the caller-facing delivery view."""
+        visible_response_event_id = outcome.visible_response_event_id
+        return cls(
+            state=outcome.state,
+            visible_response_event_id=visible_response_event_id,
+            response_identity_event_id=outcome.response_identity_event_id,
+            turn_completion_event_id=outcome.turn_completion_event_id,
+            should_mark_handled=outcome.should_mark_handled,
+            retryable=outcome.retryable,
+            has_visible_output=visible_response_event_id is not None,
+        )
+
+
+@dataclass(frozen=True)
 class FinalDeliveryOutcome:
     """Canonical semantic terminal delivery outcome."""
 

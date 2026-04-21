@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome, TurnDeliveryResolution
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -358,3 +358,59 @@ def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> No
     assert outcome.last_physical_stream_event_id == "$thinking"
     assert outcome.has_any_physical_stream_event is True
     assert outcome.has_rendered_visible_body is False
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_visible", "expected_identity", "expected_completion", "expected_handled"),
+    [
+        pytest.param(
+            _final_visible_delivery(),
+            "$final",
+            "$final",
+            "$final",
+            True,
+            id="final_visible_delivery",
+        ),
+        pytest.param(
+            _kept_prior_visible_stream_after_cancel(),
+            "$stream",
+            None,
+            "$stream",
+            True,
+            id="kept_prior_visible_stream_after_cancel",
+        ),
+        pytest.param(
+            _cancelled_with_visible_note(),
+            "$cancel-note",
+            None,
+            "$cancel-note",
+            True,
+            id="cancelled_with_visible_note",
+        ),
+        pytest.param(
+            _error_without_visible_response(),
+            None,
+            None,
+            None,
+            False,
+            id="error_without_visible_response",
+        ),
+    ],
+)
+def test_turn_delivery_resolution_projects_from_policy_row(
+    outcome: FinalDeliveryOutcome,
+    expected_visible: str | None,
+    expected_identity: str | None,
+    expected_completion: str | None,
+    expected_handled: bool,
+) -> None:
+    """Turn delivery resolution should be a pure projection of one policy row."""
+    resolution = TurnDeliveryResolution.from_outcome(outcome)
+
+    assert resolution.state == outcome.state
+    assert resolution.visible_response_event_id == expected_visible
+    assert resolution.response_identity_event_id == expected_identity
+    assert resolution.turn_completion_event_id == expected_completion
+    assert resolution.should_mark_handled is expected_handled
+    assert resolution.retryable is outcome.retryable
+    assert resolution.has_visible_output is (expected_visible is not None)
