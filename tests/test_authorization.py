@@ -434,6 +434,45 @@ async def test_get_available_agents_for_sender_authoritative_updates_room_cache_
     client.joined_members.assert_awaited_once_with("!test:server")
 
 
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_preserves_invited_members() -> None:
+    """Authoritative refresh should not delete invited users from the cached room."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_router:example.com", "Router", None)
+    room.add_member("@guest:example.com", "Guest", None, invited=True)
+    room.members_synced = False
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_router:example.com": {"display_name": "Router"},
+                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    available = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == ["assistant"]
+    assert "@guest:example.com" in room.users
+    assert "@guest:example.com" in room.invited_users
+
+
 def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that the router agent is always allowed."""
     # Router should always be allowed

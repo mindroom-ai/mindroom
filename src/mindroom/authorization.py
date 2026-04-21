@@ -255,7 +255,8 @@ def _apply_authoritative_joined_members(
     members_by_user_id = {member.user_id: member for member in members}
 
     for user_id in tuple(room.users):
-        if user_id not in members_by_user_id:
+        cached_user = room.users[user_id]
+        if not cached_user.invited and user_id not in members_by_user_id:
             room.remove_member(user_id)
 
     for member in members:
