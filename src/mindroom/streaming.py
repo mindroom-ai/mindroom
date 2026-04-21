@@ -251,6 +251,7 @@ class StreamingResponse:
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
+    visible_event_id_callback: Callable[[str], None] | None = None
     _active_warmups: dict[str, _ActiveWarmup] = field(default_factory=dict, init=False, repr=False)
     _last_send_had_warmup_suffix: bool = field(default=False, init=False, repr=False)
     _needs_warmup_clear_edit: bool = field(default=False, init=False, repr=False)
