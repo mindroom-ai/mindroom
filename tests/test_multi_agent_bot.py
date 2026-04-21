@@ -11577,6 +11577,52 @@ class TestMultiAgentOrchestrator:
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_retries_unsynced_tool_approval_resolution_after_background_start(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A replay missed during startup should be retried after the owning bot recovers."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+
+        bot = MagicMock()
+        bot.agent_name = "code"
+        bot.running = True
+        bot.try_start = AsyncMock(return_value=True)
+        orchestrator.agent_bots = {"code": bot}
+
+        replay_attempts: list[str] = []
+        call_order: list[str] = []
+
+        async def _sync_approval_resolutions() -> None:
+            replay_attempts.append("replay")
+            if len(replay_attempts) == 1:
+                msg = "bot unavailable"
+                raise RuntimeError(msg)
+
+        async def _setup_rooms(_: list[Any]) -> None:
+            call_order.append("setup_rooms")
+
+        def _start_sync_task(entity_name: str, _: object) -> None:
+            call_order.append(f"start_sync:{entity_name}")
+
+        with (
+            patch(
+                "mindroom.orchestrator.sync_unsynced_approval_event_resolutions",
+                side_effect=_sync_approval_resolutions,
+            ),
+            patch.object(orchestrator, "_retry_blocked_mcp_entities", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
+            patch.object(orchestrator, "_start_sync_task", side_effect=_start_sync_task),
+        ):
+            await orchestrator._sync_unsynced_approval_resolutions()
+            await orchestrator._run_bot_start_retry("code")
+
+        assert replay_attempts == ["replay", "replay"]
+        assert call_order == ["setup_rooms", "start_sync:code"]
+        bot.try_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:
         """Matrix readiness must gate initialize(), which creates the internal Matrix user."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))

@@ -622,6 +622,7 @@ class MultiAgentOrchestrator:
                             partial(self._setup_rooms_and_memberships, bots_to_setup),
                             update_runtime_state=False,
                         )
+                    await self._sync_unsynced_approval_resolutions()
                     self._start_sync_task(entity_name, bot)
                     return
 
@@ -1204,6 +1205,13 @@ class MultiAgentOrchestrator:
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
+    async def _sync_unsynced_approval_resolutions(self) -> None:
+        """Replay approval-card edits that were missed before the owning bot was available."""
+        try:
+            await sync_unsynced_approval_event_resolutions()
+        except Exception as exc:
+            logger.warning("tool_approval_resolution_replay_failed", error=str(exc))
+
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
@@ -1230,10 +1238,7 @@ class MultiAgentOrchestrator:
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
-        try:
-            await sync_unsynced_approval_event_resolutions()
-        except Exception as exc:
-            logger.warning("tool_approval_resolution_replay_failed", error=str(exc))
+        await self._sync_unsynced_approval_resolutions()
         interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
         await self._auto_resume_after_restart(interrupted_threads, config)
 
