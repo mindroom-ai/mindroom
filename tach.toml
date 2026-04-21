@@ -922,7 +922,8 @@ depends_on = [
     "mindroom.agents",
     "mindroom.constants",
     "mindroom.matrix.event_info",
-    "mindroom.scheduling", "mindroom.tool_system.skills", "mindroom.tool_system.worker_routing", "mindroom.tool_system.runtime_context",
+    "mindroom.runtime_resolution",
+    "mindroom.scheduling", "mindroom.tool_system.metadata", "mindroom.tool_system.skills", "mindroom.tool_system.worker_routing", "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]

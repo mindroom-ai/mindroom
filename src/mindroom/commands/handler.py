@@ -15,6 +15,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.scheduling import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
@@ -24,6 +25,7 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
+from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     runtime_context_from_dispatch_context,
@@ -53,6 +55,16 @@ if TYPE_CHECKING:
     from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
+
+_SPECIAL_TOOLKIT_FUNCTION_NAMES = {
+    "compact_context": frozenset({"compact_context"}),
+    "delegate": frozenset({"delegate_task"}),
+    "dynamic_tools": frozenset({"list_toolkits", "load_tools", "unload_tools"}),
+    "memory": frozenset(
+        {"add_memory", "search_memories", "list_memories", "get_memory", "update_memory", "delete_memory"},
+    ),
+    "self_config": frozenset({"get_own_config", "update_own_config"}),
+}
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -280,13 +292,21 @@ def _collect_agent_toolkits(
     agent_name: str,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> list[tuple[str, Toolkit]]:
+) -> tuple[list[tuple[str, Toolkit]], dict[str, Exception]]:
     tool_names = get_agent_toolkit_names(agent_name, config)
     if not tool_names:
-        return []
+        return [], {}
 
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
+    agent_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
     toolkits: list[tuple[str, Toolkit]] = []
+    build_errors: dict[str, Exception] = {}
     attempted_tool_count = 0
     value_error_count = 0
     first_value_error: ValueError | None = None
@@ -294,17 +314,19 @@ def _collect_agent_toolkits(
         attempted_tool_count += 1
         try:
             toolkit = build_agent_toolkit(
-                tool_name,
+                tool_name=tool_name,
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
+                agent_runtime=agent_runtime,
                 execution_identity=execution_identity,
             )
             if toolkit is None:
                 continue
             toolkits.append((tool_name, toolkit))
         except ValueError as exc:
+            build_errors[tool_name] = exc
             if first_value_error is None:
                 first_value_error = exc
             value_error_count += 1
@@ -315,24 +337,60 @@ def _collect_agent_toolkits(
                 error=str(exc),
             )
         except ImportError as exc:
+            build_errors[tool_name] = exc
             logger.warning(
                 "Failed to load tool for skill dispatch",
                 tool=tool_name,
                 agent=agent_name,
                 error=str(exc),
             )
-    if (
-        attempted_tool_count > 0
-        and not toolkits
-        and first_value_error is not None
-        and value_error_count == attempted_tool_count
-    ):
+    if attempted_tool_count > 0 and first_value_error is not None and value_error_count == attempted_tool_count:
         raise first_value_error
-    return toolkits
+    return toolkits, build_errors
+
+
+def _toolkit_declared_function_names(tool_name: str) -> frozenset[str]:
+    if tool_name in _SPECIAL_TOOLKIT_FUNCTION_NAMES:
+        return _SPECIAL_TOOLKIT_FUNCTION_NAMES[tool_name]
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None or metadata.factory is None:
+        return frozenset()
+    try:
+        toolkit_type = metadata.factory()
+    except Exception:
+        return frozenset()
+    if not isinstance(toolkit_type, type):
+        return frozenset()
+    return frozenset(
+        name
+        for name, value in vars(toolkit_type).items()
+        if callable(value) and not name.startswith("_") and name != "__init__"
+    )
+
+
+def _matching_tool_build_errors(
+    command_tool: str,
+    build_errors: dict[str, Exception],
+) -> list[Exception]:
+    if "." in command_tool:
+        toolkit_name, _ = command_tool.split(".", 1)
+        error = build_errors.get(toolkit_name)
+        return [error] if error is not None else []
+
+    direct_tool_error = build_errors.get(command_tool)
+    if direct_tool_error is not None:
+        return [direct_tool_error]
+
+    return [
+        error
+        for toolkit_name, error in build_errors.items()
+        if command_tool in _toolkit_declared_function_names(toolkit_name)
+    ]
 
 
 def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
     toolkits: list[tuple[str, Toolkit]],
+    build_errors: dict[str, Exception],
     command_tool: str,
 ) -> tuple[Function | None, Toolkit | None, str | None]:
     if not command_tool:
@@ -371,6 +429,13 @@ def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
         if len(functions) == 1:
             return next(iter(functions.values())), toolkit, None
         return None, None, f"Tool '{command_tool}' exposes multiple functions; specify one."
+
+    matching_build_errors = _matching_tool_build_errors(command_tool, build_errors)
+    if len(matching_build_errors) == 1:
+        return None, None, f"Tool '{command_tool}' failed: {matching_build_errors[0]}"
+    if len(matching_build_errors) > 1:
+        joined_errors = "; ".join(str(error) for error in matching_build_errors)
+        return None, None, f"Tool '{command_tool}' failed: {joined_errors}"
 
     return None, None, f"Tool '{command_tool}' not found for this agent."
 
@@ -471,13 +536,13 @@ async def _run_skill_command_tool(
                 dispatch_context.execution_identity,
             ),
         ):
-            toolkits = _collect_agent_toolkits(
+            toolkits, build_errors = _collect_agent_toolkits(
                 config,
                 agent_name,
                 effective_runtime_paths,
                 execution_identity=dispatch_context.execution_identity,
             )
-            function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
+            function, toolkit, error = _resolve_tool_dispatch_target(toolkits, build_errors, command_tool)
             if error:
                 return f"❌ {error}"
             assert function is not None

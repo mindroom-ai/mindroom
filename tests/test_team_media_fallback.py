@@ -402,7 +402,7 @@ async def test_team_response_retry_scrubs_queued_notice_before_second_attempt() 
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -524,7 +524,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Analyze this.")
         response = await team_response(
@@ -567,7 +567,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -631,7 +631,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -745,7 +745,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -861,7 +861,7 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
         return _prepared_team_execution_context(final_prompt="Analyze this.")
 
     with patch(
-        "mindroom.teams.prepare_bound_team_execution_context",
+        "mindroom.teams.prepare_bound_team_run_context",
         new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
     ):
         await _prepare_materialized_team_execution(
@@ -1007,7 +1007,7 @@ async def test_team_response_scrubs_queued_notices_after_run_exception() -> None
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -1101,7 +1101,7 @@ async def test_team_response_stream_scrubs_queued_notices_after_stream_exception
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
         patch(
@@ -1165,7 +1165,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -1543,7 +1543,7 @@ async def test_team_response_with_turn_recorder_preserves_unseen_event_ids_on_ca
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -2676,7 +2676,7 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2789,7 +2789,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
             "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
@@ -2843,7 +2843,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
             "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
@@ -2911,7 +2911,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
             "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
@@ -2968,7 +2968,7 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
             "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,

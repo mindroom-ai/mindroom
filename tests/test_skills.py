@@ -420,12 +420,13 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
         account_id="account-456",
     )
 
-    toolkits = _collect_agent_toolkits(
+    toolkits, build_errors = _collect_agent_toolkits(
         config,
         "code",
         _runtime_paths(runtime_storage_path),
         execution_identity=identity,
     )
+    assert build_errors == {}
 
     expected_workspace = resolve_agent_runtime(
         "code",
@@ -609,11 +610,12 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
     expected_workspace = agent_workspace_root_path(runtime_storage, "code")
 
     with tool_execution_identity(identity):
-        toolkits = _collect_agent_toolkits(
+        toolkits, build_errors = _collect_agent_toolkits(
             config,
             "code",
             _runtime_paths(runtime_storage, config_path=config_dir / "config.yaml"),
         )
+        assert build_errors == {}
 
     assert [tool_name for tool_name, _ in toolkits] == ["coding"]
     assert captured_calls[0][1]["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
@@ -634,7 +636,8 @@ def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> 
     )
 
     runtime_storage = tmp_path / "runtime-storage"
-    toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+    toolkits, build_errors = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+    assert build_errors == {}
 
     toolkits_by_name = dict(toolkits)
     assert [tool_name for tool_name, _ in toolkits] == ["memory", "self_config", "delegate"]
@@ -659,7 +662,8 @@ def test_collect_agent_toolkits_supports_implicit_agent_only_toolkits(tmp_path: 
     )
 
     runtime_storage = tmp_path / "runtime-storage"
-    toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+    toolkits, build_errors = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+    assert build_errors == {}
 
     toolkits_by_name = dict(toolkits)
     assert [tool_name for tool_name, _ in toolkits] == ["delegate", "self_config"]
@@ -1245,6 +1249,47 @@ async def test_skill_command_tool_dispatch_surfaces_runtime_resolution_errors(tm
 
 
 @pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_surfaces_requested_tool_failure_with_mixed_import_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requested toolkit failure should win over unrelated ImportError noise."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["self_config", "file"]
+    config.agents["code"].include_default_tools = False
+    runtime_paths = _runtime_paths(tmp_path)
+
+    def _build_agent_toolkit(**kwargs: object) -> Toolkit:
+        tool_name = kwargs["tool_name"]
+        assert isinstance(tool_name, str)
+        if tool_name == "self_config":
+            msg = "runtime resolution failed"
+            raise ValueError(msg)
+        if tool_name == "file":
+            msg = "optional dependency missing"
+            raise ImportError(msg)
+        msg = f"Unexpected tool {tool_name}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.commands.handler.build_agent_toolkit", _build_agent_toolkit)
+
+    result = await _run_skill_command_tool(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="code",
+        command_tool="get_own_config",
+        skill_name="dispatch",
+        args_text="",
+        dispatch_context=_skill_dispatch_context(
+            agent_name="code",
+            runtime_paths=runtime_paths,
+        ),
+    )
+
+    assert result == "❌ Tool 'get_own_config' failed: runtime resolution failed"
+
+
+@pytest.mark.asyncio
 async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1342,6 +1387,80 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
         TOOL_METADATA.update(original_metadata)
 
     assert result == "worker-key:skill:dispatch:hello"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_surfaces_requested_tool_failure_when_other_toolkits_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken requested toolkit should not degrade to a misleading not-found error when another toolkit loads."""
+
+    class WorkingTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="working_toolkit", tools=[self.ping])
+
+        def ping(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    class BrokenLookupTools(Toolkit):
+        def __init__(self) -> None:
+            msg = "Credentialed API key is required"
+            raise ValueError(msg)
+
+        def lookup(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="working_toolkit",
+            display_name="Working",
+            description="Working tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def working_toolkit() -> type[Toolkit]:
+            return WorkingTools
+
+        @register_tool_with_metadata(
+            name="broken_lookup_toolkit",
+            display_name="Broken lookup",
+            description="Broken lookup tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def broken_lookup_toolkit() -> type[Toolkit]:
+            return BrokenLookupTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["working_toolkit", "broken_lookup_toolkit"]
+        config.agents["code"].include_default_tools = False
+
+        monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+        monkeypatch.setenv("ACCOUNT_ID", "account-456")
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=resolve_runtime_paths(),
+            agent_name="code",
+            command_tool="lookup",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "❌ Tool 'lookup' failed: Credentialed API key is required"
 
 
 def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:

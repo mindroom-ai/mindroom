@@ -2250,7 +2250,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2290,7 +2290,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2322,7 +2322,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2353,7 +2353,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2391,7 +2391,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2454,7 +2454,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2496,7 +2496,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2730,7 +2730,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3383,7 +3383,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3439,7 +3439,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
