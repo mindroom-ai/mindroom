@@ -216,7 +216,15 @@ def prepare_memory_and_model_context(
     """Return raw memory inputs alongside timestamped model-facing context."""
     model_prompt_content = model_prompt or prompt
     if model_prompt is not None and prompt:
-        if model_prompt == prompt or model_prompt.startswith(f"{prompt}\n\n"):
+        normalized_model_prompt = model_prompt.strip()
+        normalized_prompt = prompt.strip()
+        normalized_model_prompt_without_time = strip_user_turn_time_prefix(normalized_model_prompt)
+        if (
+            normalized_model_prompt == normalized_prompt
+            or normalized_model_prompt.startswith(f"{normalized_prompt}\n\n")
+            or normalized_model_prompt_without_time == normalized_prompt
+            or normalized_model_prompt_without_time.startswith(f"{normalized_prompt}\n\n")
+        ):
             model_prompt_content = model_prompt
         else:
             model_prompt_content = f"{prompt}\n\n{model_prompt}"
@@ -908,14 +916,14 @@ class ResponseRunner:
             request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
-        prepared_prompt = _prefix_user_turn_time(
-            request.model_prompt or request.prompt,
-            timezone=self.deps.runtime.config.timezone,
-        )
-        model_thread_history = _timestamp_thread_history_user_turns(
-            request.thread_history,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
+        _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
+            prepare_memory_and_model_context(
+                request.prompt,
+                request.thread_history,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                model_prompt=request.model_prompt,
+            )
         )
         model_name = select_model_for_team(
             self.deps.agent_name,
