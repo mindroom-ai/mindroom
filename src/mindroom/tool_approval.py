@@ -933,11 +933,14 @@ class ApprovalManager:
         self,
         pending: PendingApproval,
     ) -> dict[str, Any]:
-        content = self._pending_event_content(pending)
-        content["body"] = self._event_body(pending.tool_name, pending.status)
-        content["status"] = pending.status
-        content["resolved_at"] = pending.resolved_at.isoformat() if pending.resolved_at is not None else None
-        content["resolved_by"] = pending.resolved_by
+        content: dict[str, Any] = {
+            "msgtype": "io.mindroom.tool_approval",
+            "body": self._event_body(pending.tool_name, pending.status),
+            "status": pending.status,
+            "thread_id": pending.thread_id,
+            "resolved_at": pending.resolved_at.isoformat() if pending.resolved_at is not None else None,
+            "resolved_by": pending.resolved_by,
+        }
         if pending.resolution_reason:
             content["resolution_reason"] = pending.resolution_reason
             if pending.status == "denied":

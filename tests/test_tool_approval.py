@@ -83,12 +83,25 @@ def _runtime_bound_config(
 
 def _cinny_accepts_tool_approval_payload(payload: dict[str, object]) -> bool:
     """Mirror Cinny's required approval-card field checks."""
+    candidates = []
+    new_content = payload.get("m.new_content")
+    if isinstance(new_content, dict):
+        candidates.append(new_content)
+    candidates.append(payload)
+
+    def _pick(key: str) -> object | None:
+        for candidate in candidates:
+            value = candidate.get(key)
+            if value is not None:
+                return value
+        return None
+
     required_keys = ("approval_id", "tool_name", "agent_name", "requested_at", "expires_at")
-    if not all(isinstance(payload.get(key), str) and payload[key].strip() for key in required_keys):
+    if not all(isinstance(_pick(key), str) and _pick(key).strip() for key in required_keys):
         return False
-    if payload.get("status") not in {"pending", "approved", "denied", "expired"}:
+    if _pick("status") not in {"pending", "approved", "denied", "expired"}:
         return False
-    arguments = payload.get("arguments")
+    arguments = _pick("arguments")
     return isinstance(arguments, dict)
 
 
@@ -192,12 +205,18 @@ def _create_persisted_pending_request(storage_dir: Path, *, event_id: str | None
     return request_id
 
 
-def _create_persisted_resolved_request(storage_dir: Path, *, request_id: str = "persisted-expired") -> str:
+def _create_persisted_resolved_request(
+    storage_dir: Path,
+    *,
+    request_id: str = "persisted-expired",
+    arguments_preview: object | None = None,
+    arguments_preview_truncated: bool = False,
+) -> str:
     payload = {
         "id": request_id,
         "tool_name": "run_shell_command",
-        "arguments_preview": {"command": "echo hi"},
-        "arguments_preview_truncated": False,
+        "arguments_preview": {"command": "echo hi"} if arguments_preview is None else arguments_preview,
+        "arguments_preview_truncated": arguments_preview_truncated,
         "agent_name": "code",
         "transport_agent_name": "code",
         "room_id": "!room:localhost",
@@ -1162,6 +1181,41 @@ async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expire
 
 
 @pytest.mark.asyncio
+async def test_sync_unsynced_approval_event_resolutions_keep_original_argument_shape_for_cinny(
+    tmp_path: Path,
+) -> None:
+    """Replay edits should rely on the original approval payload for unchanged argument fields."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_resolved_request(
+        runtime_paths.storage_root / "approvals",
+        arguments_preview='{"command":"echo hi","prompt":"[truncated]"}',
+        arguments_preview_truncated=True,
+    )
+    editor = AsyncMock(return_value=True)
+    initialize_approval_store(runtime_paths, editor=editor)
+
+    synced_requests = await sync_unsynced_approval_event_resolutions()
+
+    assert [request.id for request in synced_requests] == [request_id]
+    edited_payload = editor.await_args.args[3]
+    assert "arguments" not in edited_payload
+    render_payload = {
+        "approval_id": request_id,
+        "tool_name": "run_shell_command",
+        "arguments": {"command": "echo hi", "prompt": "[truncated]"},
+        "agent_name": "code",
+        "status": "pending",
+        "requested_at": "2026-04-09T12:00:00+00:00",
+        "expires_at": "2026-04-10T12:00:00+00:00",
+        "thread_id": "$thread",
+        "msgtype": "io.mindroom.tool_approval",
+        "body": "🔒 Approval required: run_shell_command",
+        "m.new_content": {key: value for key, value in edited_payload.items() if key != "thread_id"},
+    }
+    assert _cinny_accepts_tool_approval_payload(render_payload)
+
+
+@pytest.mark.asyncio
 async def test_sync_unsynced_approval_event_resolutions_retry_when_editor_sends_no_edit(tmp_path: Path) -> None:
     """Resolved approvals should stay unsynced when the editor reports a no-op."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1326,10 +1380,6 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
         "$approval-event",
         "code",
         {
-            "approval_id": "approval-1",
-            "tool_name": "run_shell_command",
-            "arguments": {"command": "echo hi"},
-            "agent_name": "code",
             "status": "denied",
             "msgtype": "io.mindroom.tool_approval",
             "body": "Denied: run_shell_command",
@@ -1343,10 +1393,6 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
 
     assert edited is True
     new_content = {
-        "approval_id": "approval-1",
-        "tool_name": "run_shell_command",
-        "arguments": {"command": "echo hi"},
-        "agent_name": "code",
         "status": "denied",
         "msgtype": "io.mindroom.tool_approval",
         "body": "Denied: run_shell_command",
@@ -1391,10 +1437,6 @@ async def test_orchestrator_edit_approval_event_supports_room_mode_without_threa
         "$approval-event",
         "code",
         {
-            "approval_id": "approval-1",
-            "tool_name": "run_shell_command",
-            "arguments": {"command": "echo hi"},
-            "agent_name": "code",
             "status": "approved",
             "msgtype": "io.mindroom.tool_approval",
             "body": "Approved: run_shell_command",
@@ -1406,10 +1448,6 @@ async def test_orchestrator_edit_approval_event_supports_room_mode_without_threa
 
     assert edited is True
     new_content = {
-        "approval_id": "approval-1",
-        "tool_name": "run_shell_command",
-        "arguments": {"command": "echo hi"},
-        "agent_name": "code",
         "status": "approved",
         "msgtype": "io.mindroom.tool_approval",
         "body": "Approved: run_shell_command",
