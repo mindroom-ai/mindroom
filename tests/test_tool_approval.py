@@ -1430,8 +1430,8 @@ async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_other_bot_can_process_requester_approval_when_local_reply_policy_denies(tmp_path: Path) -> None:
-    """Approval ownership should be tied to the requester, not the observing bot's local reply policy."""
+async def test_other_bot_rejects_requester_approval_when_local_reply_policy_denies(tmp_path: Path) -> None:
+    """Approval resolution should fail when current reply permissions deny the sender."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -1469,7 +1469,9 @@ async def test_other_bot_can_process_requester_approval_when_local_reply_policy_
     ):
         await bot._handle_reaction_inner(room, reaction)
 
-    decision = await asyncio.wait_for(task, timeout=1)
+    assert task.done() is False
+    await _store.approve(pending.id, resolved_by="@user:localhost")
+    decision = await task
     assert decision.status == "approved"
     assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
 
