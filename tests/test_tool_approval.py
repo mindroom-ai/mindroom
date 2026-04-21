@@ -934,6 +934,27 @@ async def test_handle_approval_resolution_updates_future_and_card(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_programmatic_approve_requires_original_requester(tmp_path: Path) -> None:
+    """Programmatic approval should reject non-requester actors."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+
+    with pytest.raises(PermissionError, match="original requester"):
+        await store.approve(pending.id, resolved_by="@other:localhost")
+
+    resolved = await store.approve(pending.id, resolved_by="@user:localhost")
+    decision = await task
+
+    assert resolved.status == "approved"
+    assert decision.status == "approved"
+    assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
+
+
+@pytest.mark.asyncio
 async def test_handle_reaction_approves_by_event_id(tmp_path: Path) -> None:
     """Reaction approval should resolve the pending request by Matrix event ID."""
     runtime_paths = test_runtime_paths(tmp_path)

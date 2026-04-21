@@ -635,7 +635,7 @@ class ApprovalManager:
         self,
         approval_id: str,
         *,
-        resolved_by: str | None = None,
+        resolved_by: str,
     ) -> PendingApproval:
         """Approve one pending request directly."""
         return await self._resolve_for_callsite(
@@ -650,7 +650,7 @@ class ApprovalManager:
         approval_id: str,
         *,
         reason: str | None = None,
-        resolved_by: str | None = None,
+        resolved_by: str,
     ) -> PendingApproval:
         """Deny one pending request directly."""
         return await self._resolve_for_callsite(
@@ -713,6 +713,13 @@ class ApprovalManager:
         if pending.status != "pending":
             msg = f"Approval request '{approval_id}' is already {pending.status}."
             raise ValueError(msg)
+        if status in {"approved", "denied"}:
+            if not resolved_by:
+                msg = f"Approval request '{approval_id}' requires the original requester to resolve it."
+                raise PermissionError(msg)
+            if resolved_by != pending.approver_user_id:
+                msg = f"Approval request '{approval_id}' can only be resolved by the original requester."
+                raise PermissionError(msg)
         await self._resolve_pending(
             approval_id,
             status=status,
