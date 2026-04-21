@@ -320,6 +320,8 @@ def _create_persisted_pending_request(
     *,
     event_id: str | None = "$approval-event",
     original_event_sender_user_id: str | None = "@mindroom_code:localhost",
+    event_arguments_payload: dict[str, object] | None = None,
+    event_arguments_truncated: bool = False,
 ) -> str:
     request_id = "persisted-pending"
     payload = {
@@ -327,6 +329,10 @@ def _create_persisted_pending_request(
         "tool_name": "run_shell_command",
         "arguments_preview": {"command": "echo hi"},
         "arguments_preview_truncated": False,
+        "event_arguments_payload": {"command": "echo hi"}
+        if event_arguments_payload is None
+        else event_arguments_payload,
+        "event_arguments_truncated": event_arguments_truncated,
         "agent_name": "code",
         "original_event_sender_user_id": original_event_sender_user_id,
         "room_id": "!room:localhost",
@@ -356,12 +362,18 @@ def _create_persisted_resolved_request(
     request_id: str = "persisted-expired",
     arguments_preview: object | None = None,
     arguments_preview_truncated: bool = False,
+    event_arguments_payload: dict[str, object] | None = None,
+    event_arguments_truncated: bool = False,
 ) -> str:
     payload = {
         "id": request_id,
         "tool_name": "run_shell_command",
         "arguments_preview": {"command": "echo hi"} if arguments_preview is None else arguments_preview,
         "arguments_preview_truncated": arguments_preview_truncated,
+        "event_arguments_payload": {"command": "echo hi"}
+        if event_arguments_payload is None
+        else event_arguments_payload,
+        "event_arguments_truncated": event_arguments_truncated,
         "agent_name": "code",
         "original_event_sender_user_id": "@mindroom_code:localhost",
         "room_id": "!room:localhost",
@@ -1535,10 +1547,13 @@ async def test_sync_unsynced_approval_event_resolutions_keep_original_argument_s
 ) -> None:
     """Replay edits should keep a full Cinny-readable replacement payload."""
     runtime_paths = test_runtime_paths(tmp_path)
+    original_event_arguments = {"command": "echo hi", "prompt": "[truncated]"}
     request_id = _create_persisted_resolved_request(
         runtime_paths.storage_root / "approvals",
         arguments_preview='{"command":"echo hi","prompt":"[truncated]"}',
         arguments_preview_truncated=True,
+        event_arguments_payload=original_event_arguments,
+        event_arguments_truncated=True,
     )
     editor = AsyncMock(return_value=True)
     initialize_approval_store(runtime_paths, editor=editor)
@@ -1550,7 +1565,7 @@ async def test_sync_unsynced_approval_event_resolutions_keep_original_argument_s
     assert edited_payload["approval_id"] == request_id
     assert edited_payload["tool_name"] == "run_shell_command"
     assert edited_payload["agent_name"] == "code"
-    assert edited_payload["arguments"] == {"value": '{"command":"echo hi","prompt":"[truncated]"}'}
+    assert edited_payload["arguments"] == original_event_arguments
     assert edited_payload["arguments_truncated"] is True
     assert edited_payload["status"] == "expired"
     assert edited_payload["requested_at"] == "2026-04-09T12:00:00+00:00"
@@ -2335,6 +2350,31 @@ async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_pa
     await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
     decision = await task
     assert decision.status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_resolved_approval_edit_preserves_original_event_arguments_shape(tmp_path: Path) -> None:
+    """Live approval edits should reuse the exact arguments payload from the original event."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(return_value=True)
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments={"command": "echo hi", "prompt": "x" * 5000},
+    )
+
+    assert pending is not None
+    original_event_arguments = json.loads(json.dumps(sender.await_args.args[3]["arguments"]))
+
+    await store.deny(pending.id, reason="Too large", resolved_by="@user:localhost")
+    decision = await task
+
+    assert decision.status == "denied"
+    edited_payload = editor.await_args.args[3]
+    assert edited_payload["arguments"] == original_event_arguments
+    assert edited_payload["arguments_truncated"] is True
 
 
 @pytest.mark.asyncio

@@ -152,11 +152,25 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
 
 
 def _event_arguments_payload(pending: PendingApproval) -> tuple[dict[str, Any], bool]:
-    if pending.arguments:
-        return _build_event_arguments_preview(pending.arguments)
-    if isinstance(pending.arguments_preview, dict):
-        return cast("dict[str, Any]", pending.arguments_preview), pending.arguments_preview_truncated
-    return {"value": pending.arguments_preview}, True
+    return pending.event_arguments_payload, pending.event_arguments_truncated
+
+
+def _load_event_arguments_payload(
+    payload: dict[str, Any],
+    *,
+    arguments_preview_payload: object,
+    arguments_preview_truncated: bool,
+) -> tuple[dict[str, Any], bool]:
+    event_arguments_payload = payload.get("event_arguments_payload")
+    if isinstance(event_arguments_payload, dict):
+        return cast("dict[str, Any]", event_arguments_payload), bool(payload.get("event_arguments_truncated"))
+
+    legacy_arguments = payload.get("arguments")
+    if isinstance(legacy_arguments, dict):
+        return _build_event_arguments_preview(cast("dict[str, Any]", legacy_arguments))
+    if isinstance(arguments_preview_payload, dict):
+        return cast("dict[str, Any]", arguments_preview_payload), arguments_preview_truncated
+    return {"value": arguments_preview_payload}, True
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +210,8 @@ class PendingApproval:
     arguments: dict[str, Any]
     arguments_preview: object
     arguments_preview_truncated: bool
+    event_arguments_payload: dict[str, Any]
+    event_arguments_truncated: bool
     agent_name: str
     room_id: str | None
     thread_id: str | None
@@ -221,6 +237,8 @@ class PendingApproval:
             "tool_name": self.tool_name,
             "arguments_preview": self.arguments_preview,
             "arguments_preview_truncated": self.arguments_preview_truncated,
+            "event_arguments_payload": self.event_arguments_payload,
+            "event_arguments_truncated": self.event_arguments_truncated,
             "agent_name": self.agent_name,
             "room_id": self.room_id,
             "thread_id": self.thread_id,
@@ -256,6 +274,11 @@ class PendingApproval:
                 arguments_preview_truncated = False
         else:
             arguments_preview_truncated = bool(payload.get("arguments_preview_truncated"))
+        event_arguments_payload, event_arguments_truncated = _load_event_arguments_payload(
+            payload,
+            arguments_preview_payload=arguments_preview_payload,
+            arguments_preview_truncated=arguments_preview_truncated,
+        )
         event_id = cast("str | None", payload.get("event_id"))
         original_event_sender_user_id = cast("str | None", payload.get("original_event_sender_user_id"))
         if event_id is None and (
@@ -271,6 +294,8 @@ class PendingApproval:
             arguments={},
             arguments_preview=arguments_preview_payload,
             arguments_preview_truncated=arguments_preview_truncated,
+            event_arguments_payload=event_arguments_payload,
+            event_arguments_truncated=event_arguments_truncated,
             agent_name=cast("str", payload["agent_name"]),
             room_id=cast("str | None", payload.get("room_id")),
             thread_id=cast("str | None", payload.get("thread_id")),
@@ -534,12 +559,15 @@ class ApprovalManager:
 
         requested_at = _utcnow()
         arguments_preview, arguments_preview_truncated = _build_arguments_preview(arguments)
+        event_arguments_payload, event_arguments_truncated = _build_event_arguments_preview(arguments)
         pending = PendingApproval(
             id=uuid4().hex,
             tool_name=tool_name,
             arguments=arguments,
             arguments_preview=arguments_preview,
             arguments_preview_truncated=arguments_preview_truncated,
+            event_arguments_payload=event_arguments_payload,
+            event_arguments_truncated=event_arguments_truncated,
             agent_name=agent_name,
             room_id=room_id,
             thread_id=thread_id,
@@ -655,7 +683,7 @@ class ApprovalManager:
             )
         if pending.approver_user_id != resolved_by:
             return AnchoredApprovalActionResult(handled=False)
-        if status == "approved" and pending.arguments_preview_truncated:
+        if status == "approved" and pending.event_arguments_truncated:
             return AnchoredApprovalActionResult(
                 handled=True,
                 error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
