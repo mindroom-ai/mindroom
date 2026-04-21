@@ -55,7 +55,11 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
-from mindroom.tool_approval import initialize_approval_store, shutdown_approval_store
+from mindroom.tool_approval import (
+    initialize_approval_store,
+    shutdown_approval_store,
+    sync_unsynced_approval_event_resolutions,
+)
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
@@ -1230,6 +1234,10 @@ class MultiAgentOrchestrator:
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
+        try:
+            await sync_unsynced_approval_event_resolutions()
+        except Exception as exc:
+            logger.warning("tool_approval_resolution_replay_failed", error=str(exc))
         interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
         await self._auto_resume_after_restart(interrupted_threads, config)
 

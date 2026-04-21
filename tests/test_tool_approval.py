@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import threading
 from typing import TYPE_CHECKING
@@ -29,6 +30,7 @@ from mindroom.tool_approval import (
     initialize_approval_store,
     resolve_tool_approval_approver,
     shutdown_approval_store,
+    sync_unsynced_approval_event_resolutions,
 )
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
@@ -145,6 +147,61 @@ def _approval_room() -> MagicMock:
     room.room_id = "!room:localhost"
     room.canonical_alias = None
     return room
+
+
+def _create_persisted_pending_request(storage_dir: Path) -> str:
+    request_id = "persisted-pending"
+    payload = {
+        "id": request_id,
+        "tool_name": "run_shell_command",
+        "arguments": {"command": "echo hi"},
+        "agent_name": "code",
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "requester_id": "@user:localhost",
+        "approver_user_id": "@user:localhost",
+        "matched_rule": "run_shell_*",
+        "script_path": None,
+        "requested_at": "2026-04-09T12:00:00+00:00",
+        "expires_at": "2026-04-10T12:00:00+00:00",
+        "status": "pending",
+        "resolution_reason": None,
+        "resolved_at": None,
+        "resolved_by": None,
+        "event_id": "$approval-event",
+        "resolution_synced_at": None,
+    }
+    request_path = storage_dir / f"{request_id}.json"
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    return request_id
+
+
+def _create_persisted_resolved_request(storage_dir: Path, *, request_id: str = "persisted-expired") -> str:
+    payload = {
+        "id": request_id,
+        "tool_name": "run_shell_command",
+        "arguments": {"command": "echo hi"},
+        "agent_name": "code",
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "requester_id": "@user:localhost",
+        "approver_user_id": "@user:localhost",
+        "matched_rule": "run_shell_*",
+        "script_path": None,
+        "requested_at": "2026-04-09T12:00:00+00:00",
+        "expires_at": "2026-04-10T12:00:00+00:00",
+        "status": "expired",
+        "resolution_reason": "MindRoom restarted before approval completed.",
+        "resolved_at": "2026-04-09T12:30:00+00:00",
+        "resolved_by": None,
+        "event_id": "$approval-event",
+        "resolution_synced_at": None,
+    }
+    request_path = storage_dir / f"{request_id}.json"
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    return request_id
 
 
 def _custom_response_event(
@@ -751,6 +808,39 @@ async def test_shutdown_expires_pending_requests(tmp_path: Path) -> None:
     assert decision.status == "expired"
     assert decision.reason == "MindRoom shut down before approval completed."
     assert editor.await_args.args[3]["status"] == "expired"
+
+
+def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: Path) -> None:
+    """Startup should expire persisted pending approvals from a prior process."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_pending_request(runtime_paths.storage_root / "approvals")
+
+    store = initialize_approval_store(runtime_paths)
+
+    assert store.list_pending() == []
+    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "expired"
+    assert payload["resolution_reason"] == "MindRoom restarted before approval completed."
+    assert payload["resolution_synced_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expired_requests(tmp_path: Path) -> None:
+    """Startup reconciliation should edit stale approval cards back to expired."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_resolved_request(runtime_paths.storage_root / "approvals")
+    editor = AsyncMock()
+    initialize_approval_store(runtime_paths, editor=editor)
+
+    synced_requests = await sync_unsynced_approval_event_resolutions()
+
+    assert [request.id for request in synced_requests] == [request_id]
+    editor.assert_awaited_once()
+    assert editor.await_args.args[:3] == ("!room:localhost", "$approval-event", "code")
+    assert editor.await_args.args[3]["status"] == "expired"
+    assert editor.await_args.args[3]["thread_id"] == "$thread"
+    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
+    assert payload["resolution_synced_at"] is not None
 
 
 @pytest.mark.asyncio

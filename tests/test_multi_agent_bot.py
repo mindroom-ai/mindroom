@@ -11527,6 +11527,56 @@ class TestMultiAgentOrchestrator:
         sync_runtime_support_services.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_start_replays_unsynced_tool_approval_resolutions_after_room_setup(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Approval-card reconciliation should run after startup room setup and before runtime support."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.try_start = AsyncMock(return_value=True)
+        bot.stop = AsyncMock()
+        orchestrator.agent_bots = {"router": bot}
+
+        call_order: list[str] = []
+
+        async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
+            call_order.append("wait_for_homeserver")
+
+        async def _setup_rooms(_: list[Any]) -> None:
+            call_order.append("setup_rooms")
+
+        async def _sync_approval_resolutions() -> None:
+            call_order.append("sync_approval_resolutions")
+
+        async def _sync_runtime_support_services(*_: object, **__: object) -> None:
+            call_order.append("support_services")
+
+        with (
+            patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
+            patch(
+                "mindroom.orchestrator.sync_unsynced_approval_event_resolutions",
+                side_effect=_sync_approval_resolutions,
+            ),
+            patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+        ):
+            await _run_orchestrator_start_until_ready(orchestrator)
+
+        assert call_order == [
+            "wait_for_homeserver",
+            "setup_rooms",
+            "sync_approval_resolutions",
+            "support_services",
+        ]
+        bot.try_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:
         """Matrix readiness must gate initialize(), which creates the internal Matrix user."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))

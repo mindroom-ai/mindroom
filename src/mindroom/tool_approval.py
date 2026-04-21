@@ -5,20 +5,23 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import json
+import tempfile
+import threading
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.constants import RuntimePaths, resolve_config_relative_path, safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from types import ModuleType
 
     from mindroom.config.main import Config
@@ -28,9 +31,11 @@ PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 MatrixEventSender = Callable[[str, str, str, dict[str, Any]], Awaitable[str | None]]
 MatrixEventEditor = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
 
+_APPROVALS_DIRNAME = "approvals"
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room and thread."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
+_DEFAULT_RESTART_REASON = "MindRoom restarted before approval completed."
 _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
@@ -49,6 +54,12 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _parse_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromisoformat(value)
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
     """One resolved approval outcome."""
@@ -61,7 +72,7 @@ class ApprovalDecision:
 
 @dataclass(slots=True)
 class PendingApproval:
-    """One live approval request awaiting a human decision."""
+    """One approval request plus any live wait state."""
 
     id: str
     tool_name: str
@@ -75,16 +86,66 @@ class PendingApproval:
     script_path: str | None
     requested_at: datetime
     expires_at: datetime
-    future: Future[ApprovalDecision] = field(repr=False)
+    future: Future[ApprovalDecision] | None = field(default=None, repr=False)
     status: PendingApprovalStatus = "pending"
     resolution_reason: str | None = None
     resolved_at: datetime | None = None
     resolved_by: str | None = None
     event_id: str | None = None
+    resolution_synced_at: datetime | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the persisted approval payload."""
+        return {
+            "id": self.id,
+            "tool_name": self.tool_name,
+            "arguments": self.arguments,
+            "agent_name": self.agent_name,
+            "room_id": self.room_id,
+            "thread_id": self.thread_id,
+            "requester_id": self.requester_id,
+            "approver_user_id": self.approver_user_id,
+            "matched_rule": self.matched_rule,
+            "script_path": self.script_path,
+            "requested_at": self.requested_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "status": self.status,
+            "resolution_reason": self.resolution_reason,
+            "resolved_at": self.resolved_at.isoformat() if self.resolved_at is not None else None,
+            "resolved_by": self.resolved_by,
+            "event_id": self.event_id,
+            "resolution_synced_at": (
+                self.resolution_synced_at.isoformat() if self.resolution_synced_at is not None else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> PendingApproval:
+        """Rebuild one approval payload from disk."""
+        return cls(
+            id=cast("str", payload["id"]),
+            tool_name=cast("str", payload["tool_name"]),
+            arguments=cast("dict[str, Any]", payload["arguments"]),
+            agent_name=cast("str", payload["agent_name"]),
+            room_id=cast("str | None", payload.get("room_id")),
+            thread_id=cast("str | None", payload.get("thread_id")),
+            requester_id=cast("str | None", payload.get("requester_id")),
+            approver_user_id=cast("str", payload["approver_user_id"]),
+            matched_rule=cast("str", payload["matched_rule"]),
+            script_path=cast("str | None", payload.get("script_path")),
+            requested_at=cast("datetime", _parse_datetime(cast("str", payload["requested_at"]))),
+            expires_at=cast("datetime", _parse_datetime(cast("str", payload["expires_at"]))),
+            status=cast("PendingApprovalStatus", payload["status"]),
+            resolution_reason=cast("str | None", payload.get("resolution_reason")),
+            resolved_at=_parse_datetime(cast("str | None", payload.get("resolved_at"))),
+            resolved_by=cast("str | None", payload.get("resolved_by")),
+            event_id=cast("str | None", payload.get("event_id")),
+            resolution_synced_at=_parse_datetime(cast("str | None", payload.get("resolution_synced_at"))),
+        )
 
 
 class ApprovalManager:
-    """Track live approvals in memory and mirror them into Matrix."""
+    """Track live approvals, persist them, and reconcile Matrix cards."""
 
     def __init__(
         self,
@@ -94,15 +155,25 @@ class ApprovalManager:
         editor: MatrixEventEditor | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
+        self._storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
+        self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._send_event = sender
         self._edit_event = editor
+        self._state_lock = threading.Lock()
+        self._requests_by_id: dict[str, PendingApproval] = {}
         self._pending_by_id: dict[str, PendingApproval] = {}
         self._approval_id_by_event_id: dict[str, str] = {}
+        self._load_existing()
 
     @property
     def runtime_storage_root(self) -> Path:
         """Return the runtime storage root bound to this manager."""
         return self._runtime_storage_root
+
+    @property
+    def storage_dir(self) -> Path:
+        """Return the approvals persistence directory."""
+        return self._storage_dir
 
     def configure_transport(
         self,
@@ -116,6 +187,55 @@ class ApprovalManager:
         if editor is not None:
             self._edit_event = editor
 
+    def _request_path(self, approval_id: str) -> Path:
+        return self._storage_dir / f"{approval_id}.json"
+
+    def _persist_request(self, pending: PendingApproval) -> None:
+        target_path = self._request_path(pending.id)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self._storage_dir,
+            prefix=f"{pending.id}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(pending.to_dict(), handle, sort_keys=True)
+            handle.write("\n")
+            tmp_path = Path(handle.name)
+        safe_replace(tmp_path, target_path)
+
+    def _store_request(self, pending: PendingApproval) -> None:
+        with self._state_lock:
+            self._requests_by_id[pending.id] = pending
+            if pending.status == "pending":
+                self._pending_by_id[pending.id] = pending
+            if pending.event_id is not None and pending.status == "pending":
+                self._approval_id_by_event_id[pending.event_id] = pending.id
+
+    def _load_existing(self) -> None:
+        loaded_requests: dict[str, PendingApproval] = {}
+        for request_path in sorted(self._storage_dir.glob("*.json")):
+            try:
+                payload = json.loads(request_path.read_text(encoding="utf-8"))
+                pending = PendingApproval.from_dict(cast("dict[str, Any]", payload))
+            except Exception:
+                logger.exception("Failed to load persisted approval request", path=str(request_path))
+                continue
+            loaded_requests[pending.id] = pending
+
+        with self._state_lock:
+            self._requests_by_id = loaded_requests
+
+        for pending in loaded_requests.values():
+            if pending.status == "pending":
+                pending.status = "expired"
+                pending.resolution_reason = _DEFAULT_RESTART_REASON
+                pending.resolved_at = _utcnow()
+                pending.resolved_by = None
+                pending.resolution_synced_at = None
+                self._persist_request(pending)
+
     def get_request(self, approval_id: str) -> PendingApproval | None:
         """Return one pending approval by ID."""
         return self._pending_by_id.get(approval_id)
@@ -124,6 +244,20 @@ class ApprovalManager:
         """Return pending approvals ordered by request time."""
         pending = [approval for approval in self._pending_by_id.values() if approval.status == "pending"]
         return sorted(pending, key=lambda approval: approval.requested_at)
+
+    def list_unsynced_resolved(self) -> list[PendingApproval]:
+        """Return resolved approvals whose Matrix cards still need one edit."""
+        requests = [
+            approval
+            for approval in self._requests_by_id.values()
+            if (
+                approval.status != "pending"
+                and approval.room_id is not None
+                and approval.event_id is not None
+                and approval.resolution_synced_at is None
+            )
+        ]
+        return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
 
     def _preflight_request_decision(
         self,
@@ -205,10 +339,11 @@ class ApprovalManager:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
 
         pending.event_id = event_id
-        self._pending_by_id[pending.id] = pending
-        self._approval_id_by_event_id[event_id] = pending.id
+        self._store_request(pending)
+        self._persist_request(pending)
 
         try:
+            assert pending.future is not None
             wrapped_future = asyncio.wrap_future(pending.future)
             return await asyncio.wait_for(asyncio.shield(wrapped_future), timeout=max(timeout_seconds, 0.0))
         except TimeoutError:
@@ -398,14 +533,15 @@ class ApprovalManager:
     def abort_pending(self, *, reason: str) -> None:
         """Expire every live approval without awaiting Matrix edits."""
         for pending in list(self._pending_by_id.values()):
-            self._apply_decision(
+            decision = self._apply_decision(
                 pending,
                 status="expired",
                 reason=reason,
                 resolved_by=None,
             )
-        self._pending_by_id.clear()
-        self._approval_id_by_event_id.clear()
+            if decision is not None:
+                self._persist_request(pending)
+            self._discard(pending.id)
 
     async def _resolve_for_callsite(
         self,
@@ -451,7 +587,8 @@ class ApprovalManager:
         if decision is None:
             return None
 
-        await self._edit_resolved_event(pending, decision)
+        self._persist_request(pending)
+        await self._edit_resolved_event(pending)
         return decision
 
     def _apply_decision(
@@ -462,24 +599,26 @@ class ApprovalManager:
         reason: str | None,
         resolved_by: str | None,
     ) -> ApprovalDecision | None:
-        if pending.status != "pending" or pending.future.done():
+        future = pending.future
+        if pending.status != "pending" or (future is not None and future.done()):
             return None
 
         decision = self._new_decision(status=status, reason=reason, resolved_by=resolved_by)
-        try:
-            pending.future.set_result(decision)
-        except InvalidStateError:
-            return None
+        if future is not None:
+            try:
+                future.set_result(decision)
+            except InvalidStateError:
+                return None
         pending.status = status
         pending.resolution_reason = reason
         pending.resolved_at = decision.resolved_at
         pending.resolved_by = resolved_by
+        pending.resolution_synced_at = None
         return decision
 
     async def _edit_resolved_event(
         self,
         pending: PendingApproval,
-        decision: ApprovalDecision,
     ) -> None:
         if self._edit_event is None or pending.room_id is None or pending.event_id is None:
             return
@@ -488,7 +627,7 @@ class ApprovalManager:
                 pending.room_id,
                 pending.event_id,
                 pending.agent_name,
-                self._resolved_event_content(pending, decision),
+                self._resolved_event_content(pending),
             )
         except Exception:
             logger.warning(
@@ -499,12 +638,25 @@ class ApprovalManager:
                 agent_name=pending.agent_name,
                 exc_info=True,
             )
+            return
+        pending.resolution_synced_at = _utcnow()
+        self._persist_request(pending)
 
     def _discard(self, approval_id: str) -> None:
         pending = self._pending_by_id.pop(approval_id, None)
         if pending is None or pending.event_id is None:
             return
         self._approval_id_by_event_id.pop(pending.event_id, None)
+
+    async def sync_unsynced_resolved(self) -> list[PendingApproval]:
+        """Replay any resolved approval cards that were never edited in Matrix."""
+        synced_requests: list[PendingApproval] = []
+        for pending in self.list_unsynced_resolved():
+            previous_synced_at = pending.resolution_synced_at
+            await self._edit_resolved_event(pending)
+            if pending.resolution_synced_at != previous_synced_at:
+                synced_requests.append(pending)
+        return synced_requests
 
     @staticmethod
     def _new_decision(
@@ -562,17 +714,16 @@ class ApprovalManager:
     def _resolved_event_content(
         self,
         pending: PendingApproval,
-        decision: ApprovalDecision,
     ) -> dict[str, Any]:
         content = self._pending_event_content(pending)
         content["body"] = self._event_body(pending.tool_name, pending.status)
-        content["status"] = decision.status
-        content["resolved_at"] = decision.resolved_at.isoformat()
-        content["resolved_by"] = decision.resolved_by
-        if decision.reason:
-            content["resolution_reason"] = decision.reason
-            if decision.status == "denied":
-                content["denial_reason"] = decision.reason
+        content["status"] = pending.status
+        content["resolved_at"] = pending.resolved_at.isoformat() if pending.resolved_at is not None else None
+        content["resolved_by"] = pending.resolved_by
+        if pending.resolution_reason:
+            content["resolution_reason"] = pending.resolution_reason
+            if pending.status == "denied":
+                content["denial_reason"] = pending.resolution_reason
         return content
 
 
@@ -710,6 +861,14 @@ def get_approval_store() -> ApprovalManager | None:
     return _MANAGER
 
 
+async def sync_unsynced_approval_event_resolutions() -> list[PendingApproval]:
+    """Replay any resolved approval cards that were not edited before restart."""
+    manager = get_approval_store()
+    if manager is None:
+        return []
+    return await manager.sync_unsynced_resolved()
+
+
 def initialize_approval_store(
     runtime_paths: RuntimePaths,
     *,
@@ -719,7 +878,8 @@ def initialize_approval_store(
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
 
-    if _MANAGER is not None and _MANAGER.runtime_storage_root == runtime_paths.storage_root:
+    storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
+    if _MANAGER is not None and _MANAGER.storage_dir == storage_dir:
         _MANAGER.configure_transport(sender=sender, editor=editor)
         return _MANAGER
 
