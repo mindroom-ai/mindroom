@@ -14,6 +14,7 @@ StreamTerminalOperation = Literal["none", "send", "edit"]
 StreamTerminalResult = Literal["not_attempted", "succeeded", "failed", "cancelled"]
 TerminalStatus = Literal["completed", "cancelled", "error"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
+VisibleDeliveryKind = Literal["sent", "edited"]
 FinalDeliveryState = Literal[
     "final_visible_delivery",
     "kept_prior_visible_stream_after_completed_terminal_failure",
@@ -203,6 +204,7 @@ class FinalDeliveryOutcome:
     final_visible_event_id: str | None
     last_physical_stream_event_id: str | None
     final_visible_body: str | None
+    delivery_kind: VisibleDeliveryKind | None = None
     failure_reason: str | None = None
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     extra_content: Mapping[str, Any] = EMPTY_MAPPING
@@ -239,6 +241,9 @@ class FinalDeliveryOutcome:
         if not rule.allows_final_visible_body and self.final_visible_body is not None:
             msg = f"{self.state} forbids final_visible_body"
             raise ValueError(msg)
+        if self.final_visible_event_id is None and self.delivery_kind is not None:
+            msg = f"{self.state} forbids delivery_kind without final_visible_event_id"
+            raise ValueError(msg)
         if rule.requires_prior_visible_stream and self.last_physical_stream_event_id is None:
             msg = f"{self.state} requires last_physical_stream_event_id"
             raise ValueError(msg)
@@ -256,6 +261,25 @@ class FinalDeliveryOutcome:
         """Return whether any visible response exists, even if only a prior stream survived."""
         return self.final_visible_event_id is not None or self.last_physical_stream_event_id is not None
 
+    @property
+    def event_id(self) -> str | None:
+        """Return the final logical visible response event id for compatibility callers."""
+        return self.final_visible_event_id
+
+    @property
+    def response_text(self) -> str:
+        """Return the final visible body for compatibility callers."""
+        return self.final_visible_body or ""
+
+    @property
+    def suppressed(self) -> bool:
+        """Return whether this terminal outcome ended in one suppression state."""
+        return self.state in {
+            "suppressed_without_visible_response",
+            "suppressed_redacted",
+            "suppression_cleanup_failed",
+        }
+
     @classmethod
     def final_visible_delivery(
         cls,
@@ -263,6 +287,7 @@ class FinalDeliveryOutcome:
         final_visible_event_id: str,
         final_visible_body: str,
         last_physical_stream_event_id: str | None = None,
+        delivery_kind: VisibleDeliveryKind | None = None,
         failure_reason: str | None = None,
         tool_trace: Sequence[ToolTraceEntry] = (),
         extra_content: Mapping[str, Any] | None = None,
@@ -276,6 +301,7 @@ class FinalDeliveryOutcome:
             final_visible_event_id=final_visible_event_id,
             last_physical_stream_event_id=last_physical_stream_event_id,
             final_visible_body=final_visible_body,
+            delivery_kind=delivery_kind,
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace),
             extra_content=extra_content or EMPTY_MAPPING,
@@ -356,6 +382,7 @@ class FinalDeliveryOutcome:
         final_visible_event_id: str,
         final_visible_body: str,
         last_physical_stream_event_id: str | None = None,
+        delivery_kind: VisibleDeliveryKind | None = None,
         failure_reason: str | None = None,
         tool_trace: Sequence[ToolTraceEntry] = (),
         extra_content: Mapping[str, Any] | None = None,
@@ -369,6 +396,7 @@ class FinalDeliveryOutcome:
             final_visible_event_id=final_visible_event_id,
             last_physical_stream_event_id=last_physical_stream_event_id,
             final_visible_body=final_visible_body,
+            delivery_kind=delivery_kind,
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace),
             extra_content=extra_content or EMPTY_MAPPING,
@@ -465,6 +493,7 @@ class FinalDeliveryOutcome:
         final_visible_event_id: str,
         final_visible_body: str,
         last_physical_stream_event_id: str | None = None,
+        delivery_kind: VisibleDeliveryKind | None = None,
         failure_reason: str | None = None,
         tool_trace: Sequence[ToolTraceEntry] = (),
         extra_content: Mapping[str, Any] | None = None,
@@ -478,6 +507,7 @@ class FinalDeliveryOutcome:
             final_visible_event_id=final_visible_event_id,
             last_physical_stream_event_id=last_physical_stream_event_id,
             final_visible_body=final_visible_body,
+            delivery_kind=delivery_kind,
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace),
             extra_content=extra_content or EMPTY_MAPPING,

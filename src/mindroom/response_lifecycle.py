@@ -14,12 +14,12 @@ if TYPE_CHECKING:
     from agno.db.base import SessionType
     from agno.db.sqlite import SqliteDb
 
+    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-    from .delivery_gateway import DeliveryResult
     from .response_runner import ResponseRequest, ResponseRunner
 
 
@@ -42,9 +42,7 @@ class SessionStartedWatch:
 class DeliveryOutcome:
     """Terminal delivery facts for lifecycle finalization."""
 
-    delivery_result: DeliveryResult | None = None
-    delivery_failure_reason: str | None = None
-    tracked_event_id: str | None = None
+    final_delivery_outcome: FinalDeliveryOutcome
 
 
 class ResponseLifecycle:
@@ -112,42 +110,26 @@ class ResponseLifecycle:
         self,
         outcome: DeliveryOutcome,
         *,
-        build_post_response_outcome: Callable[[str | None], ResponseOutcome],
+        build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> str | None:
-        """Run outer lifecycle finalization and return the resolved visible event id."""
-        delivery_result = outcome.delivery_result
-        if self.runner._is_cancelled_delivery_result(delivery_result):
-            await self.runner.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=self.correlation_id,
-                envelope=self.response_envelope,
-                visible_response_event_id=outcome.tracked_event_id,
-                response_kind=self.response_kind,
-                failure_reason=outcome.delivery_failure_reason
-                or (delivery_result.failure_reason if delivery_result is not None else None),
-            )
-
-        resolved_event_id = self.runner.resolve_response_event_id(
-            delivery_result=delivery_result,
-            tracked_event_id=outcome.tracked_event_id,
-            existing_event_id=self.request.existing_event_id,
-            existing_event_is_placeholder=self.request.existing_event_is_placeholder,
-        )
-        resolved_event_id = await self.apply_effects_safely(
-            resolved_event_id=resolved_event_id,
-            post_response_outcome=lambda: build_post_response_outcome(resolved_event_id),
+        """Run outer lifecycle finalization and return the canonical final visible event id."""
+        final_delivery_outcome = outcome.final_delivery_outcome
+        final_visible_event_id = await self.apply_effects_safely(
+            response_event_id=final_delivery_outcome.final_visible_event_id,
+            post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
         self.runner._emit_pipeline_timing_summary(
             self.request,
-            outcome=self.runner._response_outcome(delivery_result),
+            outcome=self.runner._response_outcome(final_delivery_outcome),
         )
-        return resolved_event_id
+        return final_visible_event_id
 
     async def apply_effects_safely(
         self,
         *,
-        resolved_event_id: str | None,
+        response_event_id: str | None,
         post_response_outcome: ResponseOutcome | Callable[[], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> str | None:
@@ -158,21 +140,21 @@ class ResponseLifecycle:
                 post_response_deps() if callable(post_response_deps) else post_response_deps,
             )
         except asyncio.CancelledError as error:
-            if resolved_event_id is None:
+            if response_event_id is None:
                 raise
             self.runner._log_post_response_effects_failure(
                 response_kind=self.response_kind,
-                response_event_id=resolved_event_id,
+                response_event_id=response_event_id,
                 error=error,
             )
-            return resolved_event_id
+            return response_event_id
         except Exception as error:
-            if resolved_event_id is None:
+            if response_event_id is None:
                 raise
             self.runner._log_post_response_effects_failure(
                 response_kind=self.response_kind,
-                response_event_id=resolved_event_id,
+                response_event_id=response_event_id,
                 error=error,
             )
-            return resolved_event_id
-        return resolved_event_id
+            return response_event_id
+        return response_event_id

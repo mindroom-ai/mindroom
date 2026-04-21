@@ -13,12 +13,14 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     ResponseHookService,
 )
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -78,6 +80,21 @@ def _envelope(*, agent_name: str = "code", body: str = "hello") -> MessageEnvelo
         mentioned_agents=(),
         agent_name=agent_name,
         source_kind="message",
+    )
+
+
+def _stream_transport_outcome(
+    *,
+    event_id: str = "$stream",
+    body: str = "visible response",
+) -> StreamTransportOutcome:
+    return StreamTransportOutcome(
+        last_physical_stream_event_id=event_id,
+        terminal_operation="send",
+        terminal_result="succeeded",
+        terminal_status="completed",
+        rendered_body=body,
+        visible_body_state="visible_body",
     )
 
 
@@ -364,15 +381,13 @@ async def test_suppressed_delivery_emits_cancelled_hook(
         result = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                streamed_event_id="$stream",
-                streamed_text="suppressed",
-                delivery_kind="sent",
+                stream_transport_outcome=_stream_transport_outcome(body="suppressed"),
+                initial_delivery_kind="sent",
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-suppressed-streamed",
                 tool_trace=None,
                 extra_content=None,
-                cleanup_suppressed_streamed_event=False,
             ),
         )
 
@@ -456,15 +471,13 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         delivery_result = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                streamed_event_id="$stream",
-                streamed_text="visible response",
-                delivery_kind="sent",
+                stream_transport_outcome=_stream_transport_outcome(),
+                initial_delivery_kind="sent",
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-late-streamed",
                 tool_trace=None,
                 extra_content=None,
-                cleanup_suppressed_streamed_event=False,
             ),
         )
 
@@ -496,3 +509,53 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     assert delivery_result.delivery_kind == expected_delivery_kind
     assert delivery_result.response_text == "visible response"
     assert cancelled_seen == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_visible_note_emits_cancelled_hook_not_after_response(tmp_path: Path) -> None:
+    """A visible cancellation note is still a cancelled terminal outcome, not after_response."""
+    after_seen: list[str] = []
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def on_after(ctx: AfterResponseContext) -> None:
+        del ctx
+        after_seen.append("after")
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins([_plugin("test-cancelled-note", [on_after, on_cancelled])])
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    with patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)):
+        result = await gateway.deliver_cancelled_visible_note(
+            CancelledVisibleNoteRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$event"),
+                event_id="$visible",
+                existing_event_is_placeholder=True,
+                restart=False,
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-cancelled-note",
+            ),
+        )
+
+    assert result.state == "cancelled_with_visible_note"
+    assert result.final_visible_event_id == "$visible"
+    assert after_seen == []
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$visible"

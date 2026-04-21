@@ -59,7 +59,13 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.delivery_gateway import DeliveryResult
+from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
+    DeliveryResult,
+    FinalDeliveryRequest,
+    FinalizeStreamedResponseRequest,
+)
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
@@ -104,6 +110,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    make_conversation_cache_mock,
     make_event_cache_mock,
     resolve_response_thread_root_for_test,
 )
@@ -257,7 +264,7 @@ def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNam
     )
 
 
-def _build_response_runner(
+def _build_response_runner(  # noqa: C901, PLR0915
     bot: MagicMock,
     *,
     config: Config,
@@ -282,6 +289,7 @@ def _build_response_runner(
     bot.show_tool_calls = False
     bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
+    bot._conversation_resolver.deps = SimpleNamespace(conversation_cache=make_conversation_cache_mock())
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=message_target or MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
     )
@@ -317,26 +325,89 @@ def _build_response_runner(
     )
     bot._edit_message = AsyncMock(return_value=True)
     delivery_gateway = MagicMock()
-    delivery_gateway.deliver_final = AsyncMock(
-        return_value=MagicMock(
-            event_id="$response_id",
-            response_text="Hello!",
-            delivery_kind="sent",
-        ),
-    )
+
+    async def _deliver_final(request: object) -> DeliveryResult:
+        request = cast("FinalDeliveryRequest", request)
+        if request.existing_event_id is not None:
+            return DeliveryResult(
+                event_id=request.existing_event_id,
+                response_text=request.response_text,
+                delivery_kind="edited",
+            )
+        if request.skip_mentions:
+            event_id = await delivery_gateway.send_text(
+                SimpleNamespace(response_text=request.response_text),
+            )
+        else:
+            event_id = "$response_id"
+        return DeliveryResult(
+            event_id=event_id,
+            response_text=request.response_text,
+            delivery_kind="sent" if event_id is not None else None,
+        )
+
+    delivery_gateway.deliver_final = AsyncMock(side_effect=_deliver_final)
     delivery_gateway.deliver_stream = AsyncMock(return_value=("$msg_id", "Hello!"))
     delivery_gateway.edit_text = AsyncMock()
     delivery_gateway.send_text = AsyncMock(return_value="$thinking")
-    delivery_gateway.finalize_streamed_response = AsyncMock(
-        return_value=MagicMock(
-            event_id="$response_id",
-            response_text="Hello!",
-            delivery_kind="sent",
-        ),
-    )
+
+    async def _finalize_streamed_response(request: object) -> DeliveryResult:
+        request = cast("FinalizeStreamedResponseRequest", request)
+        event_id = request.stream_transport_outcome.last_physical_stream_event_id
+        return DeliveryResult(
+            event_id=event_id,
+            response_text=request.stream_transport_outcome.accumulated_text,
+            delivery_kind=request.initial_delivery_kind if event_id is not None else None,
+        )
+
+    delivery_gateway.finalize_streamed_response = AsyncMock(side_effect=_finalize_streamed_response)
+
+    async def _deliver_cancelled_visible_note(request: object) -> FinalDeliveryOutcome:
+        request = cast("CancelledVisibleNoteRequest", request)
+        edited = await delivery_gateway.edit_text(
+            SimpleNamespace(
+                target=request.target,
+                event_id=request.event_id,
+                new_text="cancelled",
+                extra_content={},
+            ),
+        )
+        if edited:
+            return FinalDeliveryOutcome.cancelled_with_visible_note(
+                final_visible_event_id=request.event_id,
+                final_visible_body="cancelled",
+                last_physical_stream_event_id=request.event_id if request.existing_event_is_placeholder else None,
+                delivery_kind="edited",
+                failure_reason="cancelled_by_user",
+            )
+        if request.existing_event_is_placeholder:
+            return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+                last_physical_stream_event_id=request.event_id,
+                final_visible_body="cancelled",
+                failure_reason="cancelled_by_user",
+            )
+        return FinalDeliveryOutcome.cancelled_without_visible_response(
+            failure_reason="cancelled_by_user",
+        )
+
+    delivery_gateway.deliver_cancelled_visible_note = AsyncMock(side_effect=_deliver_cancelled_visible_note)
     delivery_gateway.deps = SimpleNamespace(
         response_hooks=SimpleNamespace(emit_cancelled_response=AsyncMock()),
     )
+
+    async def emit_terminal_outcome_hooks(**kwargs: object) -> object:
+        outcome = kwargs["outcome"]
+        if isinstance(outcome, FinalDeliveryOutcome) and outcome.state != "final_visible_delivery":
+            await delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=kwargs["correlation_id"],
+                envelope=kwargs["envelope"],
+                visible_response_event_id=outcome.final_visible_event_id or outcome.last_physical_stream_event_id,
+                response_kind=kwargs["response_kind"],
+                failure_reason=outcome.failure_reason,
+            )
+        return outcome
+
+    delivery_gateway.emit_terminal_outcome_hooks = AsyncMock(side_effect=emit_terminal_outcome_hooks)
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
@@ -2944,7 +3015,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
             team_mode="coordinate",
         )
 
-    assert event_id == "$response_id"
+    assert event_id == "$thinking"
     assert mock_team_response.await_args is not None
     message = mock_team_response.await_args.kwargs["message"]
     assert "What is in the image?" in message

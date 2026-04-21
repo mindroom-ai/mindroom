@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     from agno.db.base import SessionType
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult
+    from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -35,8 +36,7 @@ if TYPE_CHECKING:
 class ResponseOutcome:
     """Terminal response facts needed for post-delivery side effects."""
 
-    resolved_event_id: str | None
-    delivery_result: DeliveryResult | None
+    final_delivery_outcome: FinalDeliveryOutcome
     response_run_id: str | None = None
     session_id: str | None = None
     session_type: SessionType | None = None
@@ -248,34 +248,32 @@ async def apply_post_response_effects(
     deps: PostResponseEffectsDeps,
 ) -> None:
     """Apply the shared side effects that happen after response delivery is known."""
-    delivery_result = outcome.delivery_result
-    delivered_event_id = delivery_result.event_id if delivery_result is not None else None
+    final_outcome = outcome.final_delivery_outcome
+    delivered_event_id = final_outcome.final_visible_event_id
     delivered_interactive_target = bool(
-        delivered_event_id is not None and delivery_result is not None and not delivery_result.suppressed,
-    )
-    should_dispatch_compaction = bool(
-        delivered_event_id is not None
-        and delivery_result is not None
-        and (not delivery_result.suppressed or outcome.dispatch_compaction_when_suppressed),
+        final_outcome.has_final_visible_delivery and delivered_event_id is not None,
     )
 
     if (
         delivered_interactive_target
         and deps.register_interactive is not None
-        and delivery_result is not None
-        and delivery_result.option_map
-        and delivery_result.options_list
+        and final_outcome.option_map
+        and final_outcome.options_list
         and outcome.interactive_target is not None
     ):
         assert delivered_event_id is not None
         await deps.register_interactive(
             delivered_event_id,
             outcome.interactive_target,
-            delivery_result.option_map,
-            delivery_result.options_list,
+            dict(final_outcome.option_map),
+            [dict(item) for item in final_outcome.options_list],
         )
 
-    if should_dispatch_compaction and deps.dispatch_compaction_notices is not None and outcome.compaction_outcomes:
+    if (
+        final_outcome.has_final_visible_delivery
+        and deps.dispatch_compaction_notices is not None
+        and outcome.compaction_outcomes
+    ):
         assert delivered_event_id is not None
         await deps.dispatch_compaction_notices(
             delivered_event_id,
@@ -297,22 +295,21 @@ async def apply_post_response_effects(
 
     if (
         outcome.response_run_id is not None
-        and outcome.resolved_event_id is not None
+        and final_outcome.final_visible_event_id is not None
         and deps.persist_response_event_id is not None
     ):
         try:
-            deps.persist_response_event_id(outcome.response_run_id, outcome.resolved_event_id)
+            deps.persist_response_event_id(outcome.response_run_id, final_outcome.final_visible_event_id)
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",
                 session_id=outcome.session_id,
                 run_id=outcome.response_run_id,
-                response_event_id=outcome.resolved_event_id,
+                response_event_id=final_outcome.final_visible_event_id,
             )
 
     if (
-        outcome.resolved_event_id is not None
-        and (delivery_result is None or not delivery_result.suppressed)
+        final_outcome.has_final_visible_delivery
         and outcome.thread_summary_room_id is not None
         and outcome.thread_summary_thread_id is not None
         and (
