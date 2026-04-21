@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 from contextlib import suppress
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
@@ -48,6 +50,155 @@ def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     bot.client = mock_client
     bot.event_cache = make_event_cache_mock()
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
+
+
+def _write_plugin_removal_test_files(tmp_path: Path) -> Path:
+    """Create one minimal plugin used by config-reload teardown tests."""
+    plugin_root = tmp_path / "plugins" / "removed-task-plugin"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "removed-task-plugin", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    return hooks_path
+
+
+def _write_plugin_removal_test_config(tmp_path: Path, *, with_plugin: bool) -> None:
+    """Write one minimal config for config-reload plugin teardown tests."""
+    config_data = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Helpful",
+                "model": "default",
+                "rooms": ["lobby"],
+            },
+        },
+        "authorization": {"global_users": ["@owner:localhost"]},
+        "plugins": [{"path": "./plugins/removed-task-plugin"}] if with_plugin else [],
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(config_data, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+async def _noop_prepare_user_account(
+    self: MultiAgentOrchestrator,
+    config: Config,
+    *,
+    update_runtime_state: bool,
+) -> None:
+    del self, config, update_runtime_state
+
+
+async def _noop_sync_mcp_manager(
+    self: MultiAgentOrchestrator,
+    config: Config,
+) -> set[str]:
+    del self, config
+    return set()
+
+
+async def _noop_sync_event_cache_service(
+    self: MultiAgentOrchestrator,
+    config: Config,
+) -> None:
+    del self, config
+
+
+async def _noop_sync_runtime_support_services(
+    self: MultiAgentOrchestrator,
+    config: Config,
+    *,
+    start_watcher: bool,
+) -> None:
+    del self, config, start_watcher
+
+
+async def _noop_setup_rooms_and_memberships(
+    self: MultiAgentOrchestrator,
+    bots: list[AgentBot],
+) -> None:
+    del self, bots
+
+
+async def _noop_emit_config_reloaded(
+    self: MultiAgentOrchestrator,
+    *,
+    new_config: Config,
+    changed_entities: set[str],
+    added_entities: set[str],
+    removed_entities: set[str],
+    plugin_changes: tuple[str, ...],
+) -> None:
+    del self, new_config, changed_entities, added_entities, removed_entities, plugin_changes
+
+
+def _noop_start_sync_task(
+    self: MultiAgentOrchestrator,
+    entity_name: str,
+    bot: AgentBot,
+) -> None:
+    del self, entity_name, bot
+
+
+async def _noop_try_start(self: AgentBot) -> bool:
+    self.running = True
+    return True
+
+
+async def _noop_stop(self: AgentBot, reason: str = "shutdown") -> None:
+    del reason
+    self.running = False
+
+
+def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch bot and orchestrator runtime helpers unrelated to plugin teardown."""
+    monkeypatch.setattr(
+        "mindroom.orchestrator.MultiAgentOrchestrator._prepare_user_account",
+        _noop_prepare_user_account,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestrator.MultiAgentOrchestrator._sync_mcp_manager",
+        _noop_sync_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestrator.MultiAgentOrchestrator._sync_event_cache_service",
+        _noop_sync_event_cache_service,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestrator.MultiAgentOrchestrator._sync_runtime_support_services",
+        _noop_sync_runtime_support_services,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships",
+        _noop_setup_rooms_and_memberships,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestrator.MultiAgentOrchestrator._emit_config_reloaded",
+        _noop_emit_config_reloaded,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestrator.MultiAgentOrchestrator._start_sync_task",
+        _noop_start_sync_task,
+    )
+    monkeypatch.setattr("mindroom.bot.AgentBot.try_start", _noop_try_start)
+    monkeypatch.setattr("mindroom.bot.TeamBot.try_start", _noop_try_start)
+    monkeypatch.setattr("mindroom.bot.AgentBot.stop", _noop_stop)
+    monkeypatch.setattr("mindroom.bot.TeamBot.stop", _noop_stop)
 
 
 def test_config_reload_drain_state_tracks_wait_warning_force_and_reset() -> None:
@@ -646,6 +797,53 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
         assert orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
         assert _get_plugin_skill_roots() == []
     finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_update_config_cancels_tasks_for_removed_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Config-driven plugin removal should tear down the old live plugin runtime."""
+    hooks_path = _write_plugin_removal_test_files(tmp_path)
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        _write_plugin_removal_test_config(tmp_path, with_plugin=True)
+        _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        await orchestrator.initialize()
+
+        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
+        package_root = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module_name.split(".", 1)[0]
+        hooks_module._AUTO_POKE_TASK = task
+
+        _write_plugin_removal_test_config(tmp_path, with_plugin=False)
+        updated = await orchestrator.update_config()
+        await asyncio.sleep(0)
+
+        assert updated is True
+        assert task.cancelled()
+        assert hooks_path.resolve() not in plugin_module._MODULE_IMPORT_CACHE
+        assert not any(
+            module_name == package_root or module_name.startswith(f"{package_root}.") for module_name in sys.modules
+        )
+        assert not orchestrator.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()

@@ -1203,10 +1203,9 @@ class MultiAgentOrchestrator:
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
-        new_hook_registry = self._build_hook_registry(new_config)
 
         if not self.config:
-            return await self._load_initial_config(new_config, new_hook_registry)
+            return await self._load_initial_config(new_config, self._build_hook_registry(new_config))
 
         current_config = self._require_config()
         plugin_changes = self._plugin_change_paths(current_config, new_config)
@@ -1227,6 +1226,11 @@ class MultiAgentOrchestrator:
             current_config,
             new_config,
             plan.changed_mcp_servers,
+        )
+        new_hook_registry = (
+            reload_plugins(new_config, self.runtime_paths, skip_broken_plugins=True).hook_registry
+            if plugin_changes
+            else self.hook_registry
         )
 
         # Only apply the new config after validation and account checks succeed.
