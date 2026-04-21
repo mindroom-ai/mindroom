@@ -900,6 +900,7 @@ async def test_handle_reaction_approves_by_event_id(tmp_path: Path) -> None:
         room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@user:localhost",
+        transport_agent_name="code",
     )
     decision = await task
 
@@ -922,6 +923,7 @@ async def test_handle_reaction_requires_original_requester(tmp_path: Path) -> No
         room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@other:localhost",
+        transport_agent_name="code",
     )
 
     assert handled is False
@@ -932,6 +934,7 @@ async def test_handle_reaction_requires_original_requester(tmp_path: Path) -> No
         room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@user:localhost",
+        transport_agent_name="code",
     )
     decision = await task
 
@@ -952,6 +955,7 @@ async def test_handle_reply_denies_by_event_id(tmp_path: Path) -> None:
         room_id="!room:localhost",
         reason="No destructive commands",
         resolved_by="@user:localhost",
+        transport_agent_name="code",
     )
     decision = await task
 
@@ -1477,6 +1481,61 @@ async def test_other_bot_rejects_requester_approval_when_local_reply_policy_deni
 
 
 @pytest.mark.asyncio
+async def test_only_transport_bot_can_resolve_pending_tool_call(tmp_path: Path) -> None:
+    """Only the transport bot that sent the card may resolve it in a multi-bot room."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    transport_bot = _agent_bot(tmp_path, config=config, agent_name="code")
+    other_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(other_bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await other_bot._handle_reaction_inner(room, reaction)
+
+    assert task.done() is False
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(transport_bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await transport_bot._handle_reaction_inner(room, reaction)
+
+    decision = await task
+    assert decision.status == "approved"
+    assert editor.await_args.args[:3] == ("!room:localhost", "$approval", "code")
+    assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
+
+
+@pytest.mark.asyncio
 async def test_bot_custom_approval_response_event_resolves_pending_call(tmp_path: Path) -> None:
     """Cinny's custom approval-response event should resolve the pending approval."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1526,6 +1585,7 @@ async def test_handle_custom_response_requires_matching_room_and_event_id(tmp_pa
         status="denied",
         reason="Wrong room",
         resolved_by="@user:localhost",
+        transport_agent_name="code",
     )
     handled_wrong_event = await store.handle_custom_response(
         approval_event_id="$other-approval",
@@ -1533,6 +1593,7 @@ async def test_handle_custom_response_requires_matching_room_and_event_id(tmp_pa
         status="denied",
         reason="Wrong event",
         resolved_by="@user:localhost",
+        transport_agent_name="code",
     )
 
     assert handled_wrong_room is False

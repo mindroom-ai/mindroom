@@ -276,6 +276,7 @@ class ApprovalManager:
         approval_event_id: str,
         room_id: str,
         resolved_by: str,
+        transport_agent_name: str,
     ) -> PendingApproval | None:
         with self._state_lock:
             approval_id = self._approval_id_by_event_id.get(approval_event_id)
@@ -287,6 +288,7 @@ class ApprovalManager:
                 or pending.event_id != approval_event_id
                 or pending.room_id != room_id
                 or pending.approver_user_id != resolved_by
+                or pending.transport_agent_name != transport_agent_name
             ):
                 return None
             return pending
@@ -517,12 +519,14 @@ class ApprovalManager:
         status: Literal["approved", "denied"],
         reason: str | None,
         resolved_by: str,
+        transport_agent_name: str,
     ) -> bool:
         """Resolve one Matrix-anchored approval action against the original approval card."""
         pending = self._anchored_pending_request(
             approval_event_id=approval_event_id,
             room_id=room_id,
             resolved_by=resolved_by,
+            transport_agent_name=transport_agent_name,
         )
         if pending is None:
             return False
@@ -544,6 +548,7 @@ class ApprovalManager:
         room_id: str,
         reaction_key: str,
         resolved_by: str,
+        transport_agent_name: str,
     ) -> bool:
         """Approve one request from a reaction on the approval card."""
         if reaction_key not in _APPROVE_REACTION_KEYS:
@@ -554,6 +559,7 @@ class ApprovalManager:
             status="approved",
             reason=None,
             resolved_by=resolved_by,
+            transport_agent_name=transport_agent_name,
         )
 
     async def handle_reply(
@@ -563,6 +569,7 @@ class ApprovalManager:
         room_id: str,
         reason: str | None,
         resolved_by: str,
+        transport_agent_name: str,
     ) -> bool:
         """Deny one request from a reply to the approval card."""
         trimmed_reason = reason.strip() if isinstance(reason, str) else ""
@@ -572,6 +579,7 @@ class ApprovalManager:
             status="denied",
             reason=trimmed_reason or None,
             resolved_by=resolved_by,
+            transport_agent_name=transport_agent_name,
         )
 
     async def handle_custom_response(
@@ -582,6 +590,7 @@ class ApprovalManager:
         status: Literal["approved", "denied"],
         reason: str | None,
         resolved_by: str,
+        transport_agent_name: str,
     ) -> bool:
         """Resolve one custom approval response anchored to the original approval card."""
         trimmed_reason = reason.strip() if isinstance(reason, str) else ""
@@ -591,6 +600,7 @@ class ApprovalManager:
             status=status,
             reason=trimmed_reason or None,
             resolved_by=resolved_by,
+            transport_agent_name=transport_agent_name,
         )
 
     async def approve(

@@ -1408,6 +1408,7 @@ class AgentBot:
                 status=status,
                 reason=reason,
                 resolved_by=event.sender,
+                transport_agent_name=self.agent_name,
             ),
         )
 
@@ -1454,6 +1455,7 @@ class AgentBot:
                 room_id=room.room_id,
                 reason=event.body,
                 resolved_by=event.sender,
+                transport_agent_name=self.agent_name,
             ),
         )
 
@@ -1469,6 +1471,7 @@ class AgentBot:
                 room_id=room.room_id,
                 reaction_key=event.key,
                 resolved_by=event.sender,
+                transport_agent_name=self.agent_name,
             ),
         ):
             return
