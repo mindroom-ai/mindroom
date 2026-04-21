@@ -398,6 +398,9 @@ def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
 
     if "." in command_tool:
         toolkit_name, function_name = command_tool.split(".", 1)
+        toolkit_error = build_errors.get(toolkit_name)
+        if toolkit_error is not None:
+            return None, None, f"Tool '{command_tool}' failed: {toolkit_error}"
         for registered_name, toolkit in toolkits:
             if registered_name != toolkit_name:
                 continue

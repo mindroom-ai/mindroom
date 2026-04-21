@@ -414,7 +414,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
     with (
         patch("mindroom.teams._create_team_instance", return_value=prepared_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -487,7 +487,7 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
     with (
         patch("mindroom.teams._create_team_instance", return_value=prepared_team),
         patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):

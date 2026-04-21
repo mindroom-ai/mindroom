@@ -1463,6 +1463,69 @@ async def test_skill_command_tool_dispatch_surfaces_requested_tool_failure_when_
     assert result == "❌ Tool 'lookup' failed: Credentialed API key is required"
 
 
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_surfaces_requested_qualified_toolkit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Qualified toolkit.function dispatch should surface the toolkit build failure."""
+
+    class BrokenLookupTools(Toolkit):
+        def __init__(self, api_key: str | None = None) -> None:
+            if not api_key:
+                msg = "Credentialed API key is required"
+                raise ValueError(msg)
+            super().__init__(name="broken_lookup_tools", tools=[self.lookup])
+
+        def lookup(self, query: str) -> str:
+            return query
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="broken_lookup_toolkit",
+            display_name="Broken Lookup",
+            description="Broken lookup tool",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.REQUIRES_CONFIG,
+            setup_type=SetupType.API_KEY,
+        )
+        def broken_lookup_toolkit() -> type[Toolkit]:
+            return BrokenLookupTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["broken_lookup_toolkit"]
+        config.agents["code"].include_default_tools = False
+        monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+        monkeypatch.setenv("ACCOUNT_ID", "account-456")
+        runtime_paths = _runtime_paths(tmp_path)
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="broken_lookup_toolkit.lookup",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=runtime_paths,
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "❌ Tool 'broken_lookup_toolkit.lookup' failed: Credentialed API key is required"
+
+
 def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:
     """Skills in the agent workspace skills/ dir should be discovered."""
     storage = tmp_path / "storage"
