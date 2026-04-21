@@ -180,6 +180,15 @@ class _ActiveWarmup:
     last_event: WorkerReadyProgress
 
 
+@dataclass(frozen=True, slots=True)
+class _DeliveryRequest:
+    """One non-terminal stream delivery request for the single delivery owner."""
+
+    progress_hint: bool = False
+    force_refresh: bool = False
+    allow_empty_progress: bool = False
+
+
 def _render_worker_status_line(warmup: _ActiveWarmup, *, show_tool_calls: bool) -> str:
     """Render one worker warmup line without leaking hidden tool metadata."""
     labels = ", ".join(warmup.tool_labels)
@@ -595,9 +604,9 @@ class ReplacementStreamingResponse(StreamingResponse):
 
 
 async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
-    client: nio.AsyncClient,
     response_stream: AsyncIterator[_StreamInputChunk],
     streaming: StreamingResponse,
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
 ) -> None:
     """Consume stream chunks and apply incremental message updates."""
     pending_tools: list[tuple[str, int]] = []
@@ -616,7 +625,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if not streaming.show_tool_calls:
                 if chunk.tool is not None:
                     streaming._ensure_hidden_tool_gap()
-                await streaming._throttled_send(client, progress_hint=True)
+                _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
 
             tool_index = len(streaming.tool_trace) + 1
@@ -638,7 +647,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                             "Missing pending tool start in streaming response; skipping completion marker",
                             tool_name=tool_name,
                         )
-                        await streaming._throttled_send(client, progress_hint=True)
+                        _queue_delivery_request(delivery_queue, progress_hint=True)
                         continue
                     _, tool_index = pending_tools.pop(match_pos)
                     streaming.accumulated_text, trace_entry = complete_pending_tool_block(
@@ -660,9 +669,9 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                             trace_len=len(streaming.tool_trace),
                         )
                 else:
-                    await streaming._throttled_send(client, progress_hint=True)
+                    _queue_delivery_request(delivery_queue, progress_hint=True)
                     continue
-                await streaming._throttled_send(client)
+                _queue_delivery_request(delivery_queue)
                 continue
             text_chunk = ""
         else:
@@ -670,14 +679,16 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             continue
 
         if text_chunk:
-            await streaming.update_content(text_chunk, client)
+            streaming._clear_terminal_warmups()
+            streaming._update(text_chunk)
+            _queue_delivery_request(delivery_queue)
 
 
 async def _drain_worker_progress_events(
-    client: nio.AsyncClient,
     streaming: StreamingResponse,
     queue: asyncio.Queue[WorkerProgressEvent],
     pump: WorkerProgressPump,
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
 ) -> None:
     """Apply worker progress events to side-band state and refresh the current stream body."""
     while True:
@@ -688,15 +699,11 @@ async def _drain_worker_progress_events(
             if pump.shutdown.is_set():
                 return
             if streaming._needs_warmup_clear_edit:
-                sent = await streaming._send_or_edit_message(
-                    client,
+                _queue_delivery_request(
+                    delivery_queue,
+                    force_refresh=True,
                     allow_empty_progress=not streaming.accumulated_text.strip(),
                 )
-                if pump.shutdown.is_set():
-                    return
-                if sent:
-                    streaming.last_update = time.time()
-                    streaming.chars_since_last_update = 0
                 continue
             should_refresh = (
                 bool(streaming.accumulated_text.strip())
@@ -707,7 +714,7 @@ async def _drain_worker_progress_events(
                 continue
             if pump.shutdown.is_set():
                 return
-            await streaming._throttled_send(client, progress_hint=True)
+            _queue_delivery_request(delivery_queue, progress_hint=True)
 
 
 async def _shutdown_worker_progress_drain(
@@ -734,6 +741,90 @@ def _raise_progress_delivery_error(error: Exception) -> NoReturn:
     raise error
 
 
+def _queue_delivery_request(
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    *,
+    progress_hint: bool = False,
+    force_refresh: bool = False,
+    allow_empty_progress: bool = False,
+) -> None:
+    """Queue one non-terminal delivery request for the single delivery owner."""
+    delivery_queue.put_nowait(
+        _DeliveryRequest(
+            progress_hint=progress_hint,
+            force_refresh=force_refresh,
+            allow_empty_progress=allow_empty_progress,
+        ),
+    )
+
+
+async def _drive_stream_delivery(
+    client: nio.AsyncClient,
+    streaming: StreamingResponse,
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+) -> None:
+    """Own all non-terminal stream sends and edits from one supervised task."""
+    stop_after_current = False
+
+    while True:
+        request = await delivery_queue.get()
+        if request is None:
+            return
+
+        merged_request = request
+        while True:
+            try:
+                next_request = delivery_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if next_request is None:
+                stop_after_current = True
+                break
+            merged_request = _DeliveryRequest(
+                progress_hint=merged_request.progress_hint or next_request.progress_hint,
+                force_refresh=merged_request.force_refresh or next_request.force_refresh,
+                allow_empty_progress=merged_request.allow_empty_progress or next_request.allow_empty_progress,
+            )
+
+        if merged_request.force_refresh:
+            sent = await streaming._send_or_edit_message(
+                client,
+                allow_empty_progress=merged_request.allow_empty_progress,
+            )
+            if sent:
+                streaming.last_update = time.time()
+                streaming.chars_since_last_update = 0
+        else:
+            await streaming._throttled_send(client, progress_hint=merged_request.progress_hint)
+
+        if stop_after_current:
+            return
+
+
+async def _shutdown_stream_delivery(
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_task: asyncio.Task[None] | None,
+) -> Exception | None:
+    """Stop the single delivery owner before terminal stream finalization."""
+    if delivery_task is None:
+        return None
+    if not delivery_task.done():
+        delivery_queue.put_nowait(None)
+    try:
+        await asyncio.wait_for(delivery_task, timeout=0.5)
+    except asyncio.CancelledError:
+        return None
+    except TimeoutError:
+        if not delivery_task.done():
+            delivery_task.cancel()
+            with suppress(asyncio.CancelledError, TimeoutError, Exception):
+                await asyncio.wait_for(delivery_task, timeout=0.5)
+        return None
+    except Exception as exc:
+        return exc
+    return None
+
+
 async def _cancel_stream_consumer(stream_task: asyncio.Task[None]) -> None:
     """Cancel chunk consumption after a progress-delivery failure wins ownership."""
     if stream_task.done():
@@ -745,34 +836,66 @@ async def _cancel_stream_consumer(stream_task: asyncio.Task[None]) -> None:
         await asyncio.wait_for(stream_task, timeout=0.5)
 
 
+async def _handle_auxiliary_task_completion(
+    done_tasks: set[asyncio.Task[None]],
+    task: asyncio.Task[None] | None,
+    *,
+    stream_task: asyncio.Task[None],
+    monitored_tasks: set[asyncio.Task[None]],
+) -> bool:
+    """Surface one auxiliary-task failure through the normal streaming contract."""
+    if task is None or task not in done_tasks:
+        return False
+
+    if task.cancelled():
+        await _cancel_stream_consumer(stream_task)
+        raise asyncio.CancelledError
+
+    task_error = task.exception()
+    if task_error is not None:
+        await _cancel_stream_consumer(stream_task)
+        if not isinstance(task_error, Exception):
+            raise task_error
+        _raise_progress_delivery_error(task_error)
+
+    monitored_tasks.discard(task)
+    return True
+
+
 async def _consume_stream_with_progress_supervision(
-    client: nio.AsyncClient,
     response_stream: AsyncIterator[_StreamInputChunk],
     streaming: StreamingResponse,
     progress_task: asyncio.Task[None] | None,
+    delivery_task: asyncio.Task[None] | None,
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
 ) -> None:
     """Abort chunk consumption as soon as the worker-progress drain fails."""
-    stream_task = asyncio.create_task(_consume_streaming_chunks(client, response_stream, streaming))
+    stream_task = asyncio.create_task(_consume_streaming_chunks(response_stream, streaming, delivery_queue))
     monitored_tasks: set[asyncio.Task[None]] = {stream_task}
     if progress_task is not None:
         monitored_tasks.add(progress_task)
+    if delivery_task is not None:
+        monitored_tasks.add(delivery_task)
 
     try:
         while True:
             done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
 
-            if progress_task is not None and progress_task in done:
-                if progress_task.cancelled():
-                    await _cancel_stream_consumer(stream_task)
-                    raise asyncio.CancelledError
-                progress_error = progress_task.exception()
-                if progress_error is not None:
-                    await _cancel_stream_consumer(stream_task)
-                    if not isinstance(progress_error, Exception):
-                        raise progress_error
-                    _raise_progress_delivery_error(progress_error)
-                monitored_tasks.discard(progress_task)
+            if await _handle_auxiliary_task_completion(
+                done,
+                progress_task,
+                stream_task=stream_task,
+                monitored_tasks=monitored_tasks,
+            ):
                 progress_task = None
+
+            if await _handle_auxiliary_task_completion(
+                done,
+                delivery_task,
+                stream_task=stream_task,
+                monitored_tasks=monitored_tasks,
+            ):
+                delivery_task = None
 
             if stream_task in done:
                 await stream_task
@@ -848,31 +971,46 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         await streaming.update_content(header, client)
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
     progress_task: asyncio.Task[None] | None = None
+    delivery_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
     with worker_progress_pump_scope(loop, worker_progress_queue) as pump:
+        delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
         progress_task = asyncio.create_task(
-            _drain_worker_progress_events(client, streaming, worker_progress_queue, pump),
+            _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
         )
         try:
             await _consume_stream_with_progress_supervision(
-                client,
                 response_stream,
                 streaming,
                 progress_task,
+                delivery_task,
+                delivery_queue,
             )
             progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None
+            delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            delivery_task = None
             if progress_error is not None:
                 _raise_progress_delivery_error(progress_error)
+            if delivery_error is not None:
+                _raise_progress_delivery_error(delivery_error)
         except asyncio.CancelledError as exc:
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None
+            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            delivery_task = None
             if cleanup_error is not None:
                 logger.warning(
                     "Worker progress drain raised during cancellation cleanup",
                     error=str(cleanup_error),
+                )
+            if delivery_cleanup_error is not None:
+                logger.warning(
+                    "Stream delivery controller raised during cancellation cleanup",
+                    error=str(delivery_cleanup_error),
                 )
             if is_sync_restart_cancel(exc):
                 logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
@@ -889,10 +1027,17 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             logger.exception("Streaming response failed", error=str(e))
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None
+            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            delivery_task = None
             if cleanup_error is not None and cleanup_error is not e:
                 logger.warning(
                     "Worker progress drain raised during error cleanup",
                     error=str(cleanup_error),
+                )
+            if delivery_cleanup_error is not None and delivery_cleanup_error is not e:
+                logger.warning(
+                    "Stream delivery controller raised during error cleanup",
+                    error=str(delivery_cleanup_error),
                 )
             await streaming.finalize(client, error=e)
             if tool_trace_collector is not None:
@@ -911,6 +1056,12 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 logger.warning(
                     "Worker progress drain raised during final cleanup",
                     error=str(cleanup_error),
+                )
+            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            if delivery_cleanup_error is not None:
+                logger.warning(
+                    "Stream delivery controller raised during final cleanup",
+                    error=str(delivery_cleanup_error),
                 )
 
     if tool_trace_collector is not None:

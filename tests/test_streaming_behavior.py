@@ -1531,6 +1531,80 @@ class TestStreamingBehavior:
         assert accumulated == "hello"
 
     @pytest.mark.asyncio
+    async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:
+        """Warmup refreshes and content refreshes should not edit the same event concurrently."""
+        mock_client = _make_matrix_client_mock()
+        first_warmup_edit_started = asyncio.Event()
+        release_warmup_edit = asyncio.Event()
+        max_in_flight = 0
+        in_flight = 0
+
+        class ImmediateStreamingResponse(StreamingResponse):
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)
+                self.update_interval = 0.0
+                self.min_update_interval = 0.0
+                self.progress_update_interval = 0.0
+                self.min_char_update_interval = 0.0
+                self.update_char_threshold = 1
+                self.min_update_char_threshold = 1
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            try:
+                if "Preparing isolated worker" in new_text and "hello" not in new_text:
+                    first_warmup_edit_started.set()
+                    await release_warmup_edit.wait()
+                return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+            finally:
+                in_flight -= 1
+
+        async def stream() -> AsyncIterator[str]:
+            pump = get_worker_progress_pump()
+            assert pump is not None
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+            await first_warmup_edit_started.wait()
+            asyncio.get_running_loop().call_later(0.05, release_warmup_edit.set)
+            yield "hello"
+
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+                streaming_cls=ImmediateStreamingResponse,
+            )
+
+        assert max_in_flight == 1
+
+    @pytest.mark.asyncio
     async def test_worker_warmup_suffix_renders_and_clears_without_touching_accumulated_text(self) -> None:
         """Warmup notices should render as side-band text and disappear on ready."""
         mock_client = _make_matrix_client_mock()
