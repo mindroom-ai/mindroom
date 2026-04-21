@@ -52,7 +52,7 @@ from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
-from mindroom.tool_approval import get_approval_store
+from mindroom.tool_approval import AnchoredApprovalActionResult, get_approval_store
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -1062,6 +1062,9 @@ class AgentBot:
 
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            orchestrator = self.orchestrator
+            if orchestrator is not None:
+                await orchestrator._handle_bot_ready(self)
             self._maybe_start_startup_thread_prewarm()
 
         if first_sync_response or has_deferred_overdue_tasks():
@@ -1414,13 +1417,13 @@ class AgentBot:
         await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
+            approval_event_id=approval_event_id,
             action=lambda approval_manager: approval_manager.handle_custom_response(
                 approval_event_id=approval_event_id,
                 room_id=room.room_id,
                 status=status,
                 reason=reason,
                 resolved_by=event.sender,
-                transport_agent_name=self.agent_name,
             ),
         )
 
@@ -1458,33 +1461,24 @@ class AgentBot:
         reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
         if reply_to_event_id is None:
             return False
-        transport_agent_name = approval_manager.pending_transport_agent_name_for_event(
+        pending = approval_manager.anchored_request_for_event(
             approval_event_id=reply_to_event_id,
             room_id=room.room_id,
         )
-        if transport_agent_name is None:
+        if pending is None:
             return False
-        if transport_agent_name != self.agent_name:
-            return self._approval_transport_bot_is_live(transport_agent_name)
 
         return await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
+            approval_event_id=reply_to_event_id,
             action=lambda resolved_approval_manager: resolved_approval_manager.handle_reply(
                 approval_event_id=reply_to_event_id,
                 room_id=room.room_id,
                 reason=_strip_matrix_rich_reply_fallback(event.body),
                 resolved_by=event.sender,
-                transport_agent_name=self.agent_name,
             ),
         )
-
-    def _approval_transport_bot_is_live(self, transport_agent_name: str) -> bool:
-        """Return whether the approval's transport bot still exists in the live registry."""
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return True
-        return transport_agent_name in orchestrator.agent_bots
 
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""
@@ -1493,12 +1487,12 @@ class AgentBot:
         if await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
+            approval_event_id=event.reacts_to,
             action=lambda approval_manager: approval_manager.handle_reaction(
                 approval_event_id=event.reacts_to,
                 room_id=room.room_id,
                 reaction_key=event.key,
                 resolved_by=event.sender,
-                transport_agent_name=self.agent_name,
             ),
         ):
             return
@@ -1565,6 +1559,41 @@ class AgentBot:
             correlation_id=event.event_id,
         )
 
+    async def _send_tool_approval_error_response(
+        self,
+        *,
+        room_id: str,
+        approval_event_id: str,
+        thread_id: str | None,
+        reason: str,
+    ) -> None:
+        """Post one non-resolving approval-response error anchored to the original card."""
+        assert self.client is not None
+        relates_to: dict[str, object] = {"m.in_reply_to": {"event_id": approval_event_id}}
+        if thread_id is not None:
+            relates_to = {
+                "rel_type": "m.thread",
+                "event_id": thread_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": approval_event_id},
+            }
+        response = await self.client.room_send(
+            room_id=room_id,
+            message_type="io.mindroom.tool_approval_response",
+            content={
+                "status": "error",
+                "reason": reason,
+                "m.relates_to": relates_to,
+            },
+        )
+        if not isinstance(response, nio.RoomSendResponse):
+            self.logger.warning(
+                "Failed to send approval error response event",
+                room_id=room_id,
+                approval_event_id=approval_event_id,
+                response=str(response),
+            )
+
     def _sender_can_resolve_tool_approval(self, room: nio.MatrixRoom, sender_id: str) -> bool:
         """Return whether the sender is currently allowed to act on a tool approval."""
         if not is_authorized_sender(
@@ -1584,7 +1613,8 @@ class AgentBot:
         *,
         room: nio.MatrixRoom,
         sender_id: str,
-        action: Callable[[ApprovalManager], Awaitable[bool]],
+        approval_event_id: str,
+        action: Callable[[ApprovalManager], Awaitable[AnchoredApprovalActionResult]],
     ) -> bool:
         """Resolve one approval action only when the sender still has access."""
         approval_manager = get_approval_store()
@@ -1592,7 +1622,15 @@ class AgentBot:
             return False
         if not self._sender_can_resolve_tool_approval(room, sender_id):
             return False
-        return await action(approval_manager)
+        result = await action(approval_manager)
+        if result.error_reason is not None:
+            await self._send_tool_approval_error_response(
+                room_id=room.room_id,
+                approval_event_id=approval_event_id,
+                thread_id=result.thread_id,
+                reason=result.error_reason,
+            )
+        return result.handled
 
     async def _on_media_message(
         self,
