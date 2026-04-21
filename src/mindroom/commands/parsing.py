@@ -17,6 +17,8 @@ class CommandType(Enum):
     """Types of commands supported."""
 
     HELP = "help"
+    APPROVE_TOOL = "approve_tool"
+    DENY_TOOL = "deny_tool"
     SCHEDULE = "schedule"
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
@@ -34,6 +36,8 @@ _COMMAND_DOCS = {
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.EDIT_SCHEDULE: ("!edit_schedule <id> <task>", "Edit an existing scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
+    CommandType.APPROVE_TOOL: ("!approve <request_id>", "Approve a pending tool request"),
+    CommandType.DENY_TOOL: ("!deny <request_id> [reason]", "Deny a pending tool request"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.HI: ("!hi", "Show welcome message"),
     CommandType.SKILL: ("!skill <name> [args]", "Run a skill by name"),
@@ -86,6 +90,8 @@ class _CommandParser:
 
     # Command patterns
     HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
+    APPROVE_TOOL_PATTERN = re.compile(r"^!approve\s+(\S+)$", re.IGNORECASE)
+    DENY_TOOL_PATTERN = re.compile(r"^!deny\s+(\S+)(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
     SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
     LIST_SCHEDULES_PATTERN = re.compile(r"^!(?:list|inspect)[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
@@ -128,6 +134,28 @@ class _CommandParser:
             return Command(
                 type=CommandType.HELP,
                 args={"topic": topic},
+                raw_text=message,
+            )
+
+        # !approve command
+        match = self.APPROVE_TOOL_PATTERN.match(message)
+        if match:
+            return Command(
+                type=CommandType.APPROVE_TOOL,
+                args={"request_id": match.group(1).strip()},
+                raw_text=message,
+            )
+
+        # !deny command
+        match = self.DENY_TOOL_PATTERN.match(message)
+        if match:
+            reason = match.group(2)
+            return Command(
+                type=CommandType.DENY_TOOL,
+                args={
+                    "request_id": match.group(1).strip(),
+                    "reason": reason.strip() if reason else None,
+                },
                 raw_text=message,
             )
 
@@ -269,6 +297,27 @@ Examples:
 Notes:
 - Skills must be enabled on the target agent and marked `user-invocable: true`.
 - When a skill uses `command-dispatch: tool`, the tool runs directly with raw args."""
+
+    if topic == "approve":
+        return """**Approve Command**
+
+Usage: `!approve <request_id>` - Approve a pending tool request in the current room/thread
+
+Example:
+- `!approve abc123`
+
+Use the request ID from the tool approval prompt message."""
+
+    if topic == "deny":
+        return """**Deny Command**
+
+Usage: `!deny <request_id> [reason]` - Deny a pending tool request in the current room/thread
+
+Examples:
+- `!deny abc123`
+- `!deny abc123 Too risky for this room`
+
+Use the request ID from the tool approval prompt message."""
 
     if topic in {"list_schedules", "inspect_schedules"}:
         return """**List Schedules Command**

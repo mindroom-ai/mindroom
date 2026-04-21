@@ -132,6 +132,26 @@ def test_skill_command() -> None:
     assert command.args["skill_name"] is None
 
 
+def test_tool_approval_commands() -> None:
+    """Tool approval commands should parse request IDs and optional deny reasons."""
+    command = command_parser.parse("!approve abc123")
+    assert command is not None
+    assert command.type == CommandType.APPROVE_TOOL
+    assert command.args["request_id"] == "abc123"
+
+    command = command_parser.parse("!deny abc123")
+    assert command is not None
+    assert command.type == CommandType.DENY_TOOL
+    assert command.args["request_id"] == "abc123"
+    assert command.args["reason"] is None
+
+    command = command_parser.parse("!deny abc123 too risky for production")
+    assert command is not None
+    assert command.type == CommandType.DENY_TOOL
+    assert command.args["request_id"] == "abc123"
+    assert command.args["reason"] == "too risky for production"
+
+
 def test_all_commands_have_documentation() -> None:
     """Test that all CommandType values have documentation."""
     # Check that all commands have documentation (except UNKNOWN which is special)
@@ -217,6 +237,8 @@ def test_get_command_help() -> None:
     assert "!list_schedules" in help_text
     assert "!cancel_schedule" in help_text
     assert "!edit_schedule" in help_text
+    assert "!approve" in help_text
+    assert "!deny" in help_text
 
     # Specific command help
     schedule_help = get_command_help("schedule")

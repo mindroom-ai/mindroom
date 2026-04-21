@@ -409,13 +409,13 @@ async def test_initialize_approval_store_expires_pending_requests_before_rebindi
 
     assert second_store is not first_store
     assert get_approval_store() is second_store
-    assert second_store.list_pending_records() == []
+    assert second_store.list_pending() == []
 
     expired_request = first_store.get_request(request.id)
     assert expired_request is not None
     assert expired_request.status == "expired"
     assert expired_request.resolution_reason == "MindRoom reinitialized before approval completed."
-    assert first_store.list_pending_records() == []
+    assert first_store.list_pending() == []
     assert request._future is not None
     assert request._future.done()
     assert request._future.result() == "expired"
@@ -467,12 +467,12 @@ def test_cross_thread_resolution_wakes_waiter(tmp_path: Path) -> None:
     assert result_holder["status"] == "approved"
 
 
-def test_approval_store_is_thread_safe_under_concurrent_access(tmp_path: Path) -> None:  # noqa: C901, PLR0915
-    """Concurrent request creation, reads, and subscriber churn should not race."""
+def test_approval_store_is_thread_safe_under_concurrent_access(tmp_path: Path) -> None:
+    """Concurrent request creation and reads should not race."""
     runtime_paths = test_runtime_paths(tmp_path)
     store = initialize_approval_store(runtime_paths)
     created_count = 200
-    start_barrier = threading.Barrier(3)
+    start_barrier = threading.Barrier(2)
     stop = threading.Event()
     errors: list[BaseException] = []
     errors_lock = threading.Lock()
@@ -504,12 +504,6 @@ def test_approval_store_is_thread_safe_under_concurrent_access(tmp_path: Path) -
         finally:
             stop.set()
 
-    async def _churn_subscribers() -> None:
-        while not stop.is_set():
-            queue = store.subscribe()
-            await asyncio.sleep(0)
-            store.unsubscribe(queue)
-
     def _creator_thread() -> None:
         try:
             start_barrier.wait()
@@ -517,35 +511,24 @@ def test_approval_store_is_thread_safe_under_concurrent_access(tmp_path: Path) -
         except BaseException as exc:
             _record_error(exc)
 
-    def _subscriber_thread() -> None:
-        try:
-            start_barrier.wait()
-            asyncio.run(_churn_subscribers())
-        except BaseException as exc:
-            _record_error(exc)
-
     def _reader_thread() -> None:
         try:
             start_barrier.wait()
             while not stop.is_set():
-                store.list_pending_records()
+                store.list_pending()
         except BaseException as exc:
             _record_error(exc)
 
     creator_thread = threading.Thread(target=_creator_thread)
-    subscriber_thread = threading.Thread(target=_subscriber_thread)
     reader_thread = threading.Thread(target=_reader_thread)
     creator_thread.start()
-    subscriber_thread.start()
     reader_thread.start()
 
     creator_thread.join(timeout=10)
     stop.set()
-    subscriber_thread.join(timeout=10)
     reader_thread.join(timeout=10)
 
     assert not creator_thread.is_alive()
-    assert not subscriber_thread.is_alive()
     assert not reader_thread.is_alive()
     assert errors == []
-    assert len(store.list_pending_records()) == created_count
+    assert len(store.list_pending()) == created_count

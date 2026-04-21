@@ -95,6 +95,9 @@ authorization:
 #     - match: run_shell_command
 #       script: ./approval_scripts/shell_review.py
 #       timeout_days: 3
+# The approval script must export check(tool_name, arguments, agent_name).
+# Return true to require approval for that call, or false to auto-approve it.
+# MindRoom posts approval prompts in Matrix and expects !approve <request_id> or !deny <request_id> [reason].
 
 # Default settings for all agents
 defaults:

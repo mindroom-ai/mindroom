@@ -18,6 +18,8 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
 from mindroom.bot import AgentBot
+from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -1274,13 +1276,21 @@ async def test_tool_approval_gate_runs_before_before_call_hooks(tmp_path: Path) 
         runtime_paths=runtime_paths,
     )
     assert bridge is not None
+    runtime_context = replace(
+        _tool_runtime_context(
+            tmp_path,
+            hook_message_sender=AsyncMock(return_value="$approval-prompt"),
+        ),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     async def next_func(**kwargs: object) -> str:
         del kwargs
         seen.append("tool")
         return "ok"
 
-    with tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
         task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
         await asyncio.sleep(0)
         store = get_approval_store()
@@ -1330,9 +1340,17 @@ async def test_tool_approval_deny_emits_after_call_as_blocked(tmp_path: Path) ->
         runtime_paths=runtime_paths,
     )
     assert bridge is not None
+    runtime_context = replace(
+        _tool_runtime_context(
+            tmp_path,
+            hook_message_sender=AsyncMock(return_value="$approval-prompt"),
+        ),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
         task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
         await asyncio.sleep(0)
         store = get_approval_store()
@@ -1389,9 +1407,17 @@ async def test_tool_approval_expiry_emits_after_call_as_blocked(tmp_path: Path) 
         runtime_paths=runtime_paths,
     )
     assert bridge is not None
+    runtime_context = replace(
+        _tool_runtime_context(
+            tmp_path,
+            hook_message_sender=AsyncMock(return_value="$approval-prompt"),
+        ),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert next_func.await_count == 0
@@ -1402,6 +1428,116 @@ async def test_tool_approval_expiry_emits_after_call_as_blocked(tmp_path: Path) 
         "Adjust your approach — try a different tool or different arguments."
     )
     assert after_seen == [(True, result, None)]
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_is_announced_in_matrix_and_resolved_via_command(tmp_path: Path) -> None:
+    """Matrix approval prompts should be actionable through the router command path."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=[],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "rules": [
+                    {"match": "read_file", "action": "require_approval"},
+                ],
+            },
+        ),
+        runtime_paths,
+    )
+    initialize_approval_store(runtime_paths)
+
+    hook_message_sender = AsyncMock(return_value="$approval-prompt")
+    runtime_context = replace(
+        _tool_runtime_context(
+            tmp_path,
+            hook_message_sender=hook_message_sender,
+        ),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        execution_identity=_execution_identity(),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> str:
+        del kwargs
+        return "ok"
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
+        await asyncio.sleep(0)
+
+        store = get_approval_store()
+        assert store is not None
+        pending = store.list_pending()
+        assert len(pending) == 1
+        request = pending[0]
+
+        hook_message_sender.assert_awaited_once()
+        assert hook_message_sender.await_args.args[0] == "!room:localhost"
+        assert request.id in hook_message_sender.await_args.args[1]
+        assert hook_message_sender.await_args.args[2] == "$resolved-thread"
+
+        context = CommandHandlerContext(
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            logger=MagicMock(),
+            derive_conversation_context=AsyncMock(return_value=(True, "$resolved-thread", [])),
+            conversation_cache=MagicMock(),
+            event_cache=make_event_cache_mock(),
+            requester_user_id_for_event=MagicMock(return_value="@user:localhost"),
+            build_message_target=MagicMock(
+                return_value=MessageTarget.resolve("!room:localhost", "$resolved-thread", "$command-event"),
+            ),
+            record_handled_turn=MagicMock(),
+            send_response=AsyncMock(return_value="$approval-response"),
+            send_skill_command_response=AsyncMock(return_value=None),
+            run_skill_command_tool=AsyncMock(return_value=""),
+        )
+        room = SimpleNamespace(room_id="!room:localhost")
+        event = SimpleNamespace(
+            sender="@user:localhost",
+            event_id="$command-event",
+            body=f"!approve {request.id}",
+            source={"content": {"body": f"!approve {request.id}"}},
+        )
+        command = Command(
+            type=CommandType.APPROVE_TOOL,
+            args={"request_id": request.id},
+            raw_text=f"!approve {request.id}",
+        )
+
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@user:localhost",
+        )
+        result = await task
+
+    assert result == "ok"
+    resolved_request = store.get_request(request.id)
+    assert resolved_request is not None
+    assert resolved_request.status == "approved"
+    assert resolved_request.resolved_by == "@user:localhost"
+    context.send_response.assert_awaited_once()
+    assert context.send_response.await_args.args[2] == (f"✅ Approved tool request `{request.id}` for `read_file`.")
 
 
 @pytest.mark.asyncio

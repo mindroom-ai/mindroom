@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import time
+from contextlib import suppress
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
@@ -60,6 +62,7 @@ ToolHookResult = Any
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
 logger = get_logger(__name__)
+_APPROVAL_ARGUMENTS_CHAR_LIMIT = 4000
 
 
 @dataclass(slots=True)
@@ -192,6 +195,144 @@ def _resolve_tool_context(
 
 def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
+
+
+def _format_tool_approval_arguments(arguments: dict[str, Any]) -> str:
+    try:
+        rendered = json.dumps(arguments, indent=2, sort_keys=True, default=str)
+    except TypeError:
+        rendered = repr(arguments)
+    if len(rendered) <= _APPROVAL_ARGUMENTS_CHAR_LIMIT:
+        return rendered
+    return rendered[: _APPROVAL_ARGUMENTS_CHAR_LIMIT - len("\n... (truncated)")] + "\n... (truncated)"
+
+
+def _format_tool_approval_prompt(approval_request: ApprovalRequest) -> str:
+    lines = [
+        "Approval required before this tool call can run.",
+        "",
+        f"Request ID: `{approval_request.id}`",
+        f"Agent: `{approval_request.agent_name}`",
+        f"Tool: `{approval_request.tool_name}`",
+    ]
+    if approval_request.requester_id:
+        lines.append(f"Requested by: `{approval_request.requester_id}`")
+    lines.extend(
+        [
+            f"Expires at: `{approval_request.expires_at.isoformat()}`",
+            "",
+            "Arguments:",
+            "```json",
+            _format_tool_approval_arguments(approval_request.arguments),
+            "```",
+            "",
+            f"Approve with `!approve {approval_request.id}`.",
+            f"Deny with `!deny {approval_request.id} <reason>`.",
+        ],
+    )
+    return "\n".join(lines)
+
+
+async def _announce_tool_approval_request(
+    resolved_context: _ResolvedToolContext,
+    approval_request: ApprovalRequest,
+) -> bool:
+    if resolved_context.message_sender is None or resolved_context.room_id is None:
+        return False
+
+    try:
+        event_id = await resolved_context.message_sender(
+            resolved_context.room_id,
+            _format_tool_approval_prompt(approval_request),
+            approval_request.thread_id,
+            "tool_approval",
+            {
+                "com.mindroom.tool_approval_id": approval_request.id,
+                "com.mindroom.tool_approval_status": approval_request.status,
+                "com.mindroom.tool_name": approval_request.tool_name,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send tool approval prompt",
+            approval_request_id=approval_request.id,
+            room_id=resolved_context.room_id,
+            thread_id=approval_request.thread_id,
+        )
+        return False
+
+    return event_id is not None
+
+
+async def _maybe_block_for_unavailable_tool_approval_transport(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    has_after_hooks: bool,
+    started_at: float,
+    store: ApprovalStore | None,
+) -> str | None:
+    if store is None:
+        return await _blocked_tool_result(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            reason="Tool approval is required but the approval store is not initialized.",
+            has_after_hooks=has_after_hooks,
+            started_at=started_at,
+        )
+    if resolved_context.channel != "matrix":
+        return await _blocked_tool_result(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            reason=(
+                "Tool approval is only supported in Matrix conversations. "
+                "Approval-gated tools are hidden on approval-free surfaces."
+            ),
+            has_after_hooks=has_after_hooks,
+            started_at=started_at,
+        )
+    return None
+
+
+async def _maybe_block_for_undeliverable_tool_approval_prompt(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    has_after_hooks: bool,
+    started_at: float,
+    store: ApprovalStore,
+    approval_request: ApprovalRequest,
+) -> str | None:
+    if await _announce_tool_approval_request(resolved_context, approval_request):
+        return None
+
+    with suppress(LookupError, ValueError):
+        await store.expire(
+            approval_request.id,
+            reason="Failed to deliver the Matrix tool approval prompt.",
+        )
+    return await _blocked_tool_result(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        reason="Tool approval could not be requested in Matrix.",
+        has_after_hooks=has_after_hooks,
+        started_at=started_at,
+    )
 
 
 def _approval_status_reason(status: str, reason: str | None) -> str:
@@ -387,17 +528,19 @@ async def _maybe_block_for_tool_approval(
         return None
 
     store = get_approval_store()
-    if store is None:
-        return await _blocked_tool_result(
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            reason="Tool approval is required but the approval store is not initialized.",
-            has_after_hooks=has_after_hooks,
-            started_at=started_at,
-        )
+    blocked_result = await _maybe_block_for_unavailable_tool_approval_transport(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        has_after_hooks=has_after_hooks,
+        started_at=started_at,
+        store=store,
+    )
+    if blocked_result is not None:
+        return blocked_result
+    assert store is not None
 
     approval_request = await store.create_request(
         tool_name=tool_name,
@@ -414,19 +557,34 @@ async def _maybe_block_for_tool_approval(
         script_path=script_path,
         timeout_seconds=timeout_seconds,
     )
-    approval_request = await _wait_for_tool_approval(store, approval_request)
-    if approval_request.status == "approved":
-        return None
-
-    return await _blocked_tool_result(
+    blocked_result = await _maybe_block_for_undeliverable_tool_approval_prompt(
         hook_registry=hook_registry,
         resolved_context=resolved_context,
         hook_arguments=hook_arguments,
         args=args,
         tool_name=tool_name,
-        reason=_approval_status_reason(approval_request.status, approval_request.resolution_reason),
         has_after_hooks=has_after_hooks,
         started_at=started_at,
+        store=store,
+        approval_request=approval_request,
+    )
+    if blocked_result is not None:
+        return blocked_result
+
+    approval_request = await _wait_for_tool_approval(store, approval_request)
+    return (
+        None
+        if approval_request.status == "approved"
+        else await _blocked_tool_result(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            reason=_approval_status_reason(approval_request.status, approval_request.resolution_reason),
+            has_after_hooks=has_after_hooks,
+            started_at=started_at,
+        )
     )
 
 

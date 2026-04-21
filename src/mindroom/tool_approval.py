@@ -8,7 +8,6 @@ import inspect
 import json
 import tempfile
 import threading
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
@@ -142,79 +141,12 @@ class ApprovalRequest:
         )
 
 
-@dataclass(slots=True)
-class ApprovalSubscription:
-    """One live approval subscription with batched cross-thread wakeups."""
-
-    loop: asyncio.AbstractEventLoop
-    _items: deque[dict[str, Any]] = field(default_factory=deque, repr=False)
-    _state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _notifier: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
-    _scheduled: bool = field(default=False, repr=False)
-    _active: bool = field(default=True, repr=False)
-
-    def push(
-        self,
-        event: dict[str, Any],
-        *,
-        current_loop: asyncio.AbstractEventLoop | None,
-    ) -> bool:
-        """Append one event and schedule at most one wakeup while items remain queued."""
-        should_notify = False
-        with self._state_lock:
-            if not self._active:
-                return True
-            self._items.append(event)
-            if not self._scheduled:
-                self._scheduled = True
-                should_notify = True
-        if not should_notify:
-            return True
-        try:
-            if current_loop is self.loop:
-                self._notifier.set()
-            else:
-                self.loop.call_soon_threadsafe(self._notifier.set)
-        except RuntimeError:
-            self.close()
-            return False
-        return True
-
-    async def get(self) -> dict[str, Any]:
-        """Wait for the next approval event."""
-        while True:
-            with self._state_lock:
-                if self._items:
-                    item = self._items.popleft()
-                    if not self._items:
-                        self._scheduled = False
-                        self._notifier.clear()
-                    return item
-                self._scheduled = False
-                self._notifier.clear()
-            await self._notifier.wait()
-
-    def close(self) -> None:
-        """Deactivate one subscription and drop queued events."""
-        with self._state_lock:
-            self._active = False
-            self._items.clear()
-            self._scheduled = False
-        if not self.loop.is_closed():
-            try:
-                self.loop.call_soon_threadsafe(self._notifier.set)
-            except RuntimeError:
-                return
-
-
 class ApprovalStore:
-    """In-memory store with per-request JSON persistence and live subscribers."""
+    """In-memory store with per-request JSON persistence."""
 
     def __init__(self, storage_dir: Path) -> None:
         self._requests: dict[str, ApprovalRequest] = {}
-        self._subscribers: dict[int, ApprovalSubscription] = {}
         self._state_lock = threading.Lock()
-        self._subscriber_lock = threading.Lock()
         self._resolve_lock = asyncio.Lock()
         self._storage_dir = storage_dir
         self._storage_dir.mkdir(parents=True, exist_ok=True)
@@ -274,7 +206,6 @@ class ApprovalStore:
         future_loop: asyncio.AbstractEventLoop | None,
     ) -> None:
         self._persist_request(request)
-        self._broadcast("updated", request)
 
         if future is not None and future_loop is not None and not future.done():
             try:
@@ -285,34 +216,6 @@ class ApprovalStore:
                     request_id=request.id,
                     status=status,
                 )
-
-    def _broadcast(self, event_type: Literal["created", "updated"], request: ApprovalRequest) -> None:
-        stale_subscribers: list[int] = []
-        with self._subscriber_lock:
-            subscribers = list(self._subscribers.values())
-        if not subscribers:
-            return
-
-        event = {"type": event_type, "approval": request.to_dict()}
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            current_loop = None
-        for subscriber in subscribers:
-            if subscriber.loop.is_closed():
-                stale_subscribers.append(id(subscriber))
-                continue
-            if not subscriber.push(event, current_loop=current_loop):
-                stale_subscribers.append(id(subscriber))
-        if stale_subscribers:
-            removed_subscribers: list[ApprovalSubscription] = []
-            with self._subscriber_lock:
-                for subscriber_id in stale_subscribers:
-                    removed = self._subscribers.pop(subscriber_id, None)
-                    if removed is not None:
-                        removed_subscribers.append(removed)
-            for subscriber in removed_subscribers:
-                subscriber.close()
 
     def _expire_loaded_pending_requests(self) -> None:
         pending_requests: list[ApprovalRequest] = []
@@ -354,39 +257,6 @@ class ApprovalStore:
             pending_requests = [request for request in self._requests.values() if request.status == "pending"]
         return sorted(pending_requests, key=lambda request: request.created_at)
 
-    def list_pending_records(self) -> list[dict[str, Any]]:
-        """Return pending approval records for API responses."""
-        with self._state_lock:
-            pending_requests = sorted(
-                (request for request in self._requests.values() if request.status == "pending"),
-                key=lambda request: request.created_at,
-            )
-        return [request.to_dict() for request in pending_requests]
-
-    def subscribe(self) -> ApprovalSubscription:
-        """Register one live subscriber queue on the current event loop."""
-        subscription = ApprovalSubscription(loop=asyncio.get_running_loop())
-        with self._subscriber_lock:
-            self._subscribers[id(subscription)] = subscription
-        return subscription
-
-    def unsubscribe(self, subscription: ApprovalSubscription) -> None:
-        """Remove one subscriber queue."""
-        removed: ApprovalSubscription | None = None
-        with self._subscriber_lock:
-            removed = self._subscribers.pop(id(subscription), None)
-        if removed is not None:
-            removed.close()
-
-    def clear_subscribers(self) -> None:
-        """Drop every live subscriber."""
-        subscribers: list[ApprovalSubscription] = []
-        with self._subscriber_lock:
-            subscribers = list(self._subscribers.values())
-            self._subscribers.clear()
-        for subscriber in subscribers:
-            subscriber.close()
-
     def expire_pending_requests(self, *, reason: str) -> None:
         """Expire every pending request and wake any live waiters."""
         pending_request_ids = [request.id for request in self.list_pending()]
@@ -423,7 +293,7 @@ class ApprovalStore:
         script_path: str | None,
         timeout_seconds: float,
     ) -> ApprovalRequest:
-        """Create, persist, and broadcast one pending approval request."""
+        """Create and persist one pending approval request."""
         created_at = _utcnow()
         request = ApprovalRequest(
             id=uuid4().hex,
@@ -447,7 +317,6 @@ class ApprovalStore:
         with self._state_lock:
             self._requests[request.id] = request
         self._persist_request(request)
-        self._broadcast("created", request)
         return request
 
     async def resolve(
@@ -627,7 +496,6 @@ def initialize_approval_store(runtime_paths: RuntimePaths) -> ApprovalStore:
         return _STORE
     if _STORE is not None:
         _STORE.expire_pending_requests(reason=_DEFAULT_REINITIALIZE_REASON)
-        _STORE.clear_subscribers()
 
     store = ApprovalStore(storage_dir)
     store.load_existing()
@@ -638,7 +506,7 @@ def initialize_approval_store(runtime_paths: RuntimePaths) -> ApprovalStore:
 async def shutdown_approval_store(
     reason: str = _DEFAULT_SHUTDOWN_REASON,
 ) -> None:
-    """Expire pending approvals, clear subscribers, and drop the module-level store."""
+    """Expire pending approvals and drop the module-level store."""
     global _STORE
 
     store = _STORE
@@ -647,6 +515,5 @@ async def shutdown_approval_store(
         return
 
     store.expire_pending_requests(reason=reason)
-    store.clear_subscribers()
     _STORE = None
     _SCRIPT_CACHE.clear()
