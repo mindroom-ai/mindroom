@@ -2906,7 +2906,7 @@ def test_create_agent_shares_culture_manager_for_same_culture(
     model.id = "gpt-4o-mini"
     runtime_paths = _runtime_paths(tmp_path)
     bound_config = _bind_runtime_paths(config, runtime_paths)
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+    with patch("mindroom.agents.get_model_instance", return_value=model):
         _create_agent_for_test(
             "agent_one",
             config=bound_config,
@@ -2972,7 +2972,7 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     model = MagicMock()
     model.id = "gpt-4o-mini"
     runtime_paths = _runtime_paths(tmp_path)
-    with patch("mindroom.model_loading.get_model_instance", return_value=model) as mock_get_model_instance:
+    with patch("mindroom.agents.get_model_instance", return_value=model) as mock_get_model_instance:
         _create_agent_for_test(
             "agent_one",
             config=_bind_runtime_paths(config, runtime_paths),
@@ -3048,7 +3048,7 @@ def test_create_private_agent_scopes_culture_storage_per_requester(
         session_id=None,
     )
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+    with patch("mindroom.agents.get_model_instance", return_value=model):
         _create_agent_for_test(
             "general",
             config=bound_config,
@@ -3136,7 +3136,7 @@ def test_private_agents_share_culture_manager_within_same_requester_scope(
     created_culture_manager = MagicMock(name="shared_private_culture_manager")
     mock_culture_manager_class.return_value = created_culture_manager
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+    with patch("mindroom.agents.get_model_instance", return_value=model):
         _create_agent_for_test(
             "agent_one",
             config=bound_config,
@@ -3222,7 +3222,7 @@ def test_private_user_agent_agents_share_culture_manager_within_same_requester_s
     created_culture_manager = MagicMock(name="shared_private_culture_manager")
     mock_culture_manager_class.return_value = created_culture_manager
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+    with patch("mindroom.agents.get_model_instance", return_value=model):
         _create_agent_for_test(
             "agent_one",
             config=bound_config,

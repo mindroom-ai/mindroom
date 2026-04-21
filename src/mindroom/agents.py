@@ -28,6 +28,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
+from mindroom.model_loading import get_model_instance
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
@@ -909,8 +910,6 @@ def _load_agent_model_instance(
     runtime_paths: constants.RuntimePaths,
     model_name: str,
 ) -> Model:
-    from mindroom.model_loading import get_model_instance  # noqa: PLC0415
-
     return get_model_instance(config, runtime_paths, model_name)
 
 
