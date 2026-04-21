@@ -8,7 +8,8 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai import cached_agent_run, get_model_instance
+from mindroom.ai import get_model_instance
+from mindroom.ai_runtime import cached_agent_run
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:

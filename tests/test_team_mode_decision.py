@@ -175,7 +175,10 @@ class TestDetermineTeamMode:
             mock_agent = AsyncMock()
             mock_agent.arun.side_effect = Exception("AI service unavailable")
 
-            with patch("mindroom.teams.Agent", return_value=mock_agent):
+            with (
+                patch("mindroom.teams.Agent", return_value=mock_agent),
+                patch("mindroom.teams.logger") as mock_logger,
+            ):
                 result = await _select_team_mode_for_test(
                     "Do something",
                     ["email", "phone"],
@@ -184,6 +187,8 @@ class TestDetermineTeamMode:
 
                 # Should fallback to COLLABORATE on error
                 assert result == TeamMode.COLLABORATE
+                mock_logger.exception.assert_not_called()
+                mock_logger.warning.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_select_team_mode_unexpected_response(self, mock_config):

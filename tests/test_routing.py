@@ -200,6 +200,20 @@ def test_teams_public_seam_exports_status_helpers() -> None:
     assert "is_errored_run_output" in teams_module.__all__
 
 
+def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
+    """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
+    agents_module = importlib.import_module("mindroom.agents")
+    ai_module = importlib.import_module("mindroom.ai")
+
+    assert "create_state_storage_db" not in agents_module.__all__
+    assert "get_agent_runtime_sqlite_dbs" not in agents_module.__all__
+
+    assert "attach_media_to_run_input" not in ai_module.__all__
+    assert "copy_run_input" not in ai_module.__all__
+    assert "cleanup_queued_notice_state" not in ai_module.__all__
+    assert "cached_agent_run" not in ai_module.__all__
+
+
 def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:
     """Flattened seam helpers should expose only the current typed contract."""
     teams_module = importlib.import_module("mindroom.teams")
@@ -218,10 +232,13 @@ def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:
 
 
 def test_flattened_seams_do_not_reintroduce_back_edge_imports() -> None:
-    """Seam modules should not import back-edge dependencies that recreate architectural cycles."""
+    """The bounded architecture cleanup should not leave the removed direct back-edges in place."""
     forbidden_imports = {
         Path("src/mindroom/agents.py"): {"mindroom.ai"},
         Path("src/mindroom/api/credentials.py"): {"mindroom.api.main"},
+        Path("src/mindroom/custom_tools/delegate.py"): {"mindroom.agents"},
+        Path("src/mindroom/history/runtime.py"): {"mindroom.ai"},
+        Path("src/mindroom/memory/auto_flush.py"): {"mindroom.ai"},
     }
 
     for module_path, forbidden_targets in forbidden_imports.items():
@@ -233,12 +250,29 @@ def test_flattened_seams_do_not_reintroduce_back_edge_imports() -> None:
 
 
 def test_tach_seam_map_does_not_codify_known_domain_cycles() -> None:
-    """Tach seam declarations should enforce one-way ownership across curated domain boundaries."""
+    """Tach should match the direct cycle cuts this seam cleanup actually enforces."""
     tach_config = tomllib.loads(Path("tach.toml").read_text(encoding="utf-8"))
     depends_on_by_path = {module["path"]: set(module.get("depends_on", [])) for module in tach_config["modules"]}
+    interfaces_by_module = {
+        tuple(interface["from"]): set(interface["expose"]) for interface in tach_config["interfaces"]
+    }
 
     assert "mindroom.ai" not in depends_on_by_path["mindroom.agents"]
     assert "mindroom.api.main" not in depends_on_by_path["mindroom.api.credentials"]
+    assert "mindroom.agents" not in depends_on_by_path["mindroom.custom_tools.delegate"]
+    assert "mindroom.ai" not in depends_on_by_path["mindroom.history.runtime"]
+    assert "mindroom.ai" not in depends_on_by_path["mindroom.memory"]
+    assert "mindroom.ai" not in depends_on_by_path["mindroom.memory.auto_flush"]
+
+    agents_interface = interfaces_by_module[("mindroom.agents",)]
+    assert "create_state_storage_db" not in agents_interface
+    assert "get_agent_runtime_sqlite_dbs" not in agents_interface
+
+    ai_interface = interfaces_by_module[("mindroom.ai",)]
+    assert "attach_media_to_run_input" not in ai_interface
+    assert "copy_run_input" not in ai_interface
+    assert "cleanup_queued_notice_state" not in ai_interface
+    assert "cached_agent_run" not in ai_interface
 
 
 class TestAIRouting:

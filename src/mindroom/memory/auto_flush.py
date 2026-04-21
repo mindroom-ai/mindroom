@@ -17,6 +17,7 @@ from agno.session.agent import AgentSession
 from mindroom.agents import create_session_storage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.model_loading import get_model_instance
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -501,9 +502,6 @@ async def _extract_memory_summary(
     execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> str | None:
-    # Deferred to avoid circular import: mindroom.ai imports from the mindroom.memory facade.
-    from mindroom.ai import get_model_instance  # noqa: PLC0415
-
     extractor = config.memory.auto_flush.extractor
     if not lines:
         return None

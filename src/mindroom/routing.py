@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.agents import describe_agent
+from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message

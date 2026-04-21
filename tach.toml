@@ -24,6 +24,7 @@ source_roots = ["src"]
 path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
+    "mindroom.ai_runtime",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
@@ -49,6 +50,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.agent_descriptions",
+    "mindroom.agent_storage",
     "mindroom.agent_prompts",
     "mindroom.constants",
     "mindroom.credentials",
@@ -72,9 +75,40 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.agent_descriptions"
+depends_on = ["mindroom.constants"]
+visibility = [
+    "mindroom.agents",
+    "mindroom.custom_tools.delegate",
+    "mindroom.routing",
+]
+
+[[modules]]
+path = "mindroom.agent_storage"
+depends_on = []
+visibility = [
+    "mindroom.agents",
+    "mindroom.history.runtime",
+]
+
+[[modules]]
 path = "mindroom.agent_prompts"
 depends_on = []
 visibility = ["mindroom.agents"]
+
+[[modules]]
+path = "mindroom.ai_runtime"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.media_fallback",
+    "mindroom.media_inputs",
+]
+visibility = [
+    "mindroom.ai",
+    "mindroom.teams",
+    "mindroom.thread_summary",
+    "mindroom.topic_generator",
+]
 
 [[modules]]
 path = "mindroom.model_loading"
@@ -86,7 +120,12 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.vertex_claude_prompt_cache",
 ]
-visibility = ["mindroom.ai", "mindroom.agents"]
+visibility = [
+    "mindroom.ai",
+    "mindroom.agents",
+    "mindroom.history.runtime",
+    "mindroom.memory.auto_flush",
+]
 
 [[modules]]
 path = "mindroom.agent_policy"
@@ -116,7 +155,7 @@ depends_on = ["mindroom.memory"]
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.agent_descriptions",
     "mindroom.ai",
     "mindroom.config.main",
     "mindroom.constants",
@@ -289,12 +328,13 @@ visibility = [
 path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.agents",
-    "mindroom.ai",
+    "mindroom.agent_storage",
     "mindroom.history.compaction",
     "mindroom.history.policy",
     "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.logging_config",
+    "mindroom.model_loading",
     "mindroom.timing",
     "mindroom.token_budget",
 ]
@@ -380,7 +420,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.routing"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.agent_descriptions",
     "mindroom.ai",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
@@ -392,6 +432,7 @@ path = "mindroom.teams"
 depends_on = [
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.ai_runtime",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.execution_preparation",
@@ -448,7 +489,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.memory"
 depends_on = [
-    "mindroom.ai",
     "mindroom.config.main",
     "mindroom.constants", "mindroom.tool_system.worker_routing",
     "mindroom.memory._policy",
@@ -468,9 +508,9 @@ depends_on = [
 path = "mindroom.memory.auto_flush"
 depends_on = [
     "mindroom.agents",
-    "mindroom.ai",
     "mindroom.logging_config",
     "mindroom.memory.functions",
+    "mindroom.model_loading",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
 ]
@@ -543,6 +583,7 @@ visibility = ["mindroom.memory", "mindroom.memory.functions"]
 path = "mindroom.topic_generator"
 depends_on = [
     "mindroom.ai",
+    "mindroom.ai_runtime",
     "mindroom.logging_config",
 ]
 
@@ -1004,6 +1045,7 @@ depends_on = []
 path = "mindroom.thread_summary"
 depends_on = [
     "mindroom.ai",
+    "mindroom.ai_runtime",
     "mindroom.matrix.client_delivery",
 ]
 
@@ -1147,8 +1189,6 @@ expose = [
     "build_agent_toolkit",
     "get_agent_toolkit_names",
     "create_session_storage",
-    "create_state_storage_db",
-    "get_agent_runtime_sqlite_dbs",
     "get_agent_session",
     "get_team_session",
     "remove_run_by_event_id",
@@ -1218,15 +1258,11 @@ from = ["mindroom.runtime_resolution"]
 expose = [
     "AIStreamChunk",
     "append_inline_media_fallback_to_run_input",
-    "attach_media_to_run_input",
-    "copy_run_input",
     "queued_message_signal_context",
-    "cleanup_queued_notice_state",
     "scrub_queued_notice_session_context",
     "install_queued_message_notice_hook",
     "get_model_instance",
     "build_matrix_run_metadata",
-    "cached_agent_run",
     "ai_response",
     "stream_agent_response",
 ]

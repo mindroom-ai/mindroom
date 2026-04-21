@@ -39,7 +39,6 @@ from mindroom.ai import (
     PreparedAgentRun,
     _prepare_agent_and_prompt,
     ai_response,
-    append_inline_media_fallback_prompt,
     build_matrix_run_metadata,
     should_retry_without_inline_media,
     stream_agent_response,
@@ -78,6 +77,7 @@ from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.matrix.identity import MatrixID
+from mindroom.media_fallback import append_inline_media_fallback_prompt
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget

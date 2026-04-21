@@ -12,10 +12,9 @@ from typing import TYPE_CHECKING, Literal
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom.agent_storage import create_state_storage_db, get_agent_runtime_sqlite_dbs
 from mindroom.agents import (
     create_session_storage,
-    create_state_storage_db,
-    get_agent_runtime_sqlite_dbs,
     get_agent_session,
     get_team_session,
 )
@@ -48,6 +47,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.logging_config import get_logger
+from mindroom.model_loading import get_model_instance
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
 
@@ -127,8 +127,6 @@ def _load_compaction_model(
     runtime_paths: RuntimePaths,
     model_name: str,
 ) -> Model:
-    from mindroom.ai import get_model_instance  # noqa: PLC0415
-
     return get_model_instance(config, runtime_paths, model_name)
 
 
