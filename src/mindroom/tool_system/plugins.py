@@ -23,7 +23,7 @@ from mindroom.tool_system.registry_state import (
     _snapshot_plugin_tool_registrations,
     _synchronize_plugin_tools,
 )
-from mindroom.tool_system.skills import set_plugin_skill_roots
+from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,6 +61,16 @@ class PluginReloadResult:
     hook_registry: HookRegistry
     active_plugin_names: tuple[str, ...]
     cancelled_task_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPluginReload:
+    """Prepared plugin runtime state that is safe to apply later."""
+
+    hook_registry: HookRegistry
+    active_plugin_names: tuple[str, ...]
+    tool_registry_snapshot: Any
+    plugin_skill_roots: tuple[Path, ...]
 
 
 def _hook_display_name(callback: HookCallback) -> str:
@@ -160,6 +170,54 @@ def get_configured_plugin_roots(
     return tuple(dict.fromkeys(roots))
 
 
+def prepare_plugin_reload(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = False,
+) -> PreparedPluginReload:
+    """Build one fresh plugin snapshot without mutating the live runtime."""
+    with _locked_tool_registry_state():
+        package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
+        previous_snapshot = _capture_tool_registry_snapshot()
+        previous_plugin_skill_roots = tuple(get_plugin_skill_roots())
+        try:
+            _clear_plugin_reload_caches()
+            _evict_synthetic_plugin_subtrees(package_roots)
+            plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
+            return PreparedPluginReload(
+                hook_registry=HookRegistry.from_plugins(plugins),
+                active_plugin_names=tuple(plugin.name for plugin in plugins),
+                tool_registry_snapshot=_capture_tool_registry_snapshot(),
+                plugin_skill_roots=tuple(get_plugin_skill_roots()),
+            )
+        finally:
+            _restore_tool_registry_snapshot(previous_snapshot)
+            set_plugin_skill_roots(previous_plugin_skill_roots)
+
+
+def apply_prepared_plugin_reload(
+    prepared_reload: PreparedPluginReload,
+    *,
+    cancelled_task_count: int = 0,
+    cancel_existing_tasks: bool = False,
+) -> PluginReloadResult:
+    """Commit one previously prepared plugin runtime snapshot."""
+    with _locked_tool_registry_state():
+        if cancel_existing_tasks:
+            package_roots = {
+                cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
+            }
+            cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
+        _restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
+        set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
+    return PluginReloadResult(
+        hook_registry=prepared_reload.hook_registry,
+        active_plugin_names=prepared_reload.active_plugin_names,
+        cancelled_task_count=cancelled_task_count,
+    )
+
+
 def reload_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -169,12 +227,13 @@ def reload_plugins(
     """Tear down the live plugin runtime and rebuild it from the current config."""
     package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
     cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
-    _clear_plugin_reload_caches()
-    _evict_synthetic_plugin_subtrees(package_roots)
-    plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
-    return PluginReloadResult(
-        hook_registry=HookRegistry.from_plugins(plugins),
-        active_plugin_names=tuple(plugin.name for plugin in plugins),
+    prepared_reload = prepare_plugin_reload(
+        config,
+        runtime_paths,
+        skip_broken_plugins=skip_broken_plugins,
+    )
+    return apply_prepared_plugin_reload(
+        prepared_reload,
         cancelled_task_count=cancelled_task_count,
     )
 
