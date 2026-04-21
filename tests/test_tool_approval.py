@@ -699,13 +699,56 @@ async def test_request_approval_times_out_and_edits_card(tmp_path: Path) -> None
         timeout_seconds=0,
     )
 
-    assert pending is not None
+    del pending
     decision = await task
 
     assert decision.status == "expired"
     assert decision.reason == "Tool approval request timed out."
     assert editor.await_args.args[3]["status"] == "expired"
     assert store.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_request_approval_uses_absolute_expiry_after_delayed_send(tmp_path: Path) -> None:
+    """The approval deadline should be enforced from the advertised expires_at, not from delivery completion."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    send_started = asyncio.Event()
+
+    async def delayed_sender(*_args: object) -> str:
+        send_started.set()
+        await asyncio.sleep(0.2)
+        return "$approval"
+
+    sender = AsyncMock(side_effect=delayed_sender)
+    editor = AsyncMock()
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="run_shell_command",
+            arguments={"command": "echo hi"},
+            agent_name="code",
+            transport_agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            matched_rule="run_shell_*",
+            script_path=None,
+            timeout_seconds=0.05,
+        ),
+    )
+    await send_started.wait()
+
+    pending = store.list_pending()
+    assert len(pending) == 1
+
+    decision = await task
+
+    assert decision.status == "expired"
+    assert decision.reason == "Tool approval request timed out."
+    assert editor.await_args.args[3]["status"] == "expired"
+    with pytest.raises(LookupError, match=pending[0].id):
+        await store.approve(pending[0].id, resolved_by="@user:localhost")
 
 
 @pytest.mark.asyncio

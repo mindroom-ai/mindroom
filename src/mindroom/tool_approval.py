@@ -557,25 +557,7 @@ class ApprovalManager:
             await self._edit_resolved_event(pending)
 
         try:
-            assert pending.future is not None
-            wrapped_future = asyncio.wrap_future(pending.future)
-            return await asyncio.wait_for(asyncio.shield(wrapped_future), timeout=max(timeout_seconds, 0.0))
-        except TimeoutError:
-            decision = await self._resolve_pending(
-                pending.id,
-                status="expired",
-                reason=_DEFAULT_TIMEOUT_REASON,
-                resolved_by=None,
-            )
-            return decision or self._decision_from_pending(pending)
-        except asyncio.CancelledError:
-            await self._resolve_pending(
-                pending.id,
-                status="expired",
-                reason=_DEFAULT_CANCELLED_REASON,
-                resolved_by=None,
-            )
-            raise
+            return await self._await_approval_decision(pending)
         finally:
             self._discard(pending.id)
 
@@ -869,6 +851,40 @@ class ApprovalManager:
         pending.resolution_synced_at = _utcnow()
         self._persist_request(pending)
 
+    async def _await_approval_decision(self, pending: PendingApproval) -> ApprovalDecision:
+        """Wait for one approval result using the already-advertised absolute expiry."""
+        try:
+            assert pending.future is not None
+            if pending.future.done():
+                return pending.future.result()
+            remaining_seconds = self._remaining_timeout_seconds(pending)
+            if remaining_seconds <= 0:
+                decision = await self._resolve_pending(
+                    pending.id,
+                    status="expired",
+                    reason=_DEFAULT_TIMEOUT_REASON,
+                    resolved_by=None,
+                )
+                return decision or self._decision_from_pending(pending)
+            wrapped_future = asyncio.wrap_future(pending.future)
+            return await asyncio.wait_for(asyncio.shield(wrapped_future), timeout=remaining_seconds)
+        except TimeoutError:
+            decision = await self._resolve_pending(
+                pending.id,
+                status="expired",
+                reason=_DEFAULT_TIMEOUT_REASON,
+                resolved_by=None,
+            )
+            return decision or self._decision_from_pending(pending)
+        except asyncio.CancelledError:
+            await self._resolve_pending(
+                pending.id,
+                status="expired",
+                reason=_DEFAULT_CANCELLED_REASON,
+                resolved_by=None,
+            )
+            raise
+
     def _discard(self, approval_id: str) -> None:
         with self._state_lock:
             pending = self._pending_by_id.pop(approval_id, None)
@@ -910,6 +926,11 @@ class ApprovalManager:
             resolved_by=pending.resolved_by,
             resolved_at=resolved_at,
         )
+
+    @staticmethod
+    def _remaining_timeout_seconds(pending: PendingApproval) -> float:
+        """Return the remaining time before the advertised approval deadline."""
+        return max(0.0, (pending.expires_at - _utcnow()).total_seconds())
 
     @staticmethod
     def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:
