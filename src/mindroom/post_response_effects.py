@@ -249,10 +249,8 @@ async def apply_post_response_effects(
 ) -> None:
     """Apply the shared side effects that happen after response delivery is known."""
     final_outcome = outcome.final_delivery_outcome
-    delivered_event_id = final_outcome.final_visible_event_id
-    delivered_interactive_target = bool(
-        final_outcome.has_final_visible_delivery and delivered_event_id is not None,
-    )
+    delivered_event_id = final_outcome.logical_response_event_id
+    delivered_interactive_target = delivered_event_id is not None
 
     if (
         delivered_interactive_target
@@ -269,11 +267,7 @@ async def apply_post_response_effects(
             [dict(item) for item in final_outcome.options_list],
         )
 
-    if (
-        final_outcome.has_final_visible_delivery
-        and deps.dispatch_compaction_notices is not None
-        and outcome.compaction_outcomes
-    ):
+    if delivered_event_id is not None and deps.dispatch_compaction_notices is not None and outcome.compaction_outcomes:
         assert delivered_event_id is not None
         await deps.dispatch_compaction_notices(
             delivered_event_id,
@@ -295,21 +289,21 @@ async def apply_post_response_effects(
 
     if (
         outcome.response_run_id is not None
-        and final_outcome.final_visible_event_id is not None
+        and delivered_event_id is not None
         and deps.persist_response_event_id is not None
     ):
         try:
-            deps.persist_response_event_id(outcome.response_run_id, final_outcome.final_visible_event_id)
+            deps.persist_response_event_id(outcome.response_run_id, delivered_event_id)
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",
                 session_id=outcome.session_id,
                 run_id=outcome.response_run_id,
-                response_event_id=final_outcome.final_visible_event_id,
+                response_event_id=delivered_event_id,
             )
 
     if (
-        final_outcome.has_final_visible_delivery
+        delivered_event_id is not None
         and outcome.thread_summary_room_id is not None
         and outcome.thread_summary_thread_id is not None
         and (

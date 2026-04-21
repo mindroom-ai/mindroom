@@ -80,6 +80,26 @@ class StreamingDeliveryError(Exception):
         self.transport_outcome = transport_outcome
 
 
+class StreamingDeliveryCancelled(asyncio.CancelledError):
+    """Preserve the finalized stream state when delivery is cancelled mid-response."""
+
+    def __init__(
+        self,
+        error: asyncio.CancelledError,
+        *,
+        event_id: str | None,
+        accumulated_text: str,
+        tool_trace: list[ToolTraceEntry],
+        transport_outcome: StreamTransportOutcome | None = None,
+    ) -> None:
+        super().__init__(*error.args)
+        self.error = error
+        self.event_id = event_id
+        self.accumulated_text = accumulated_text
+        self.tool_trace = tool_trace.copy()
+        self.transport_outcome = transport_outcome
+
+
 def _format_stream_error_note(error: Exception) -> str:
     """Return a concise user-facing note for stream-time exceptions."""
     normalized_error = " ".join(str(error).split())
@@ -701,7 +721,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             await streaming.update_content(text_chunk, client)
 
 
-async def send_streaming_response(
+async def send_streaming_response(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
@@ -780,7 +800,15 @@ async def send_streaming_response(
                 exc_info=True,
             )
             transport_outcome = await streaming.finalize(client, cancelled=True)
-        raise
+        if tool_trace_collector is not None:
+            tool_trace_collector[:] = streaming.tool_trace
+        raise StreamingDeliveryCancelled(
+            exc,
+            event_id=streaming.event_id,
+            accumulated_text=streaming.accumulated_text,
+            tool_trace=streaming.tool_trace,
+            transport_outcome=transport_outcome,
+        ) from exc
     except Exception as e:
         logger.exception("Streaming response failed", error=str(e))
         transport_outcome = await streaming.finalize(client, error=e)

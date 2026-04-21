@@ -6,7 +6,9 @@ from types import MappingProxyType
 
 import pytest
 
+from mindroom.delivery_gateway import DeliveryResult
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.response_runner import _coerce_final_delivery_outcome
 from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -25,6 +27,37 @@ def test_canonical_keep_prior_visible_stream_after_cancel_keeps_physical_visibil
     assert outcome.last_physical_stream_event_id == "$stream"
     assert outcome.has_any_visible_response is True
     assert outcome.has_final_visible_delivery is False
+    assert outcome.visible_response_event_id == "$stream"
+
+
+def test_canonical_cancelled_with_visible_response_preserves_visible_event_id_without_claiming_success() -> None:
+    """Cancelled terminal states can preserve a visible event without claiming a cancellation note landed."""
+    outcome = FinalDeliveryOutcome.cancelled_with_visible_response(
+        final_visible_event_id="$existing",
+        failure_reason="cancelled_by_user",
+    )
+
+    assert outcome.state == "cancelled_with_visible_response"
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.final_visible_event_id == "$existing"
+    assert outcome.final_visible_body is None
+    assert outcome.visible_response_event_id == "$existing"
+
+
+def test_coerce_final_delivery_outcome_does_not_promote_failed_visible_delivery_into_success() -> None:
+    """Legacy fallback coercion must preserve terminal failure when a visible stream errored."""
+    outcome = _coerce_final_delivery_outcome(
+        DeliveryResult(
+            event_id="$visible",
+            response_text="partial",
+            delivery_kind="sent",
+            failure_reason="boom",
+        ),
+    )
+
+    assert outcome.state != "final_visible_delivery"
+    assert outcome.terminal_status == "error"
+    assert outcome.visible_response_event_id == "$visible"
 
 
 def test_contract_final_visible_delivery_freezes_mutable_snapshots() -> None:

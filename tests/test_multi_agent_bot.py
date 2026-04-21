@@ -53,6 +53,7 @@ from mindroom.constants import (
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryResult, FinalDeliveryRequest, SuppressedPlaceholderCleanupError
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionOutcome
 from mindroom.history.types import HistoryScope
@@ -98,7 +99,7 @@ from mindroom.orchestrator import (
 from mindroom.response_runner import ResponseRequest, ResponseRunner, _merge_response_extra_content
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryCancelled, StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import ToolTraceEntry
@@ -1961,7 +1962,7 @@ class TestAgentBot:
 
         captured_extra_content_ref: list[dict[str, Any] | None] = [None]
 
-        async def _consuming_send_streaming(*args: object, **kwargs: object) -> tuple[str, str]:
+        async def _consuming_send_streaming(*args: object, **kwargs: object) -> StreamTransportOutcome:
             captured_extra_content_ref[0] = kwargs.get("extra_content")
             stream = args[7]
             try:
@@ -1969,9 +1970,20 @@ class TestAgentBot:
                     pass
             except asyncio.CancelledError:
                 pass
-            # In production, send_streaming_response catches CancelledError,
-            # sends the final edit, then re-raises. We simulate the re-raise.
-            raise asyncio.CancelledError
+            raise StreamingDeliveryCancelled(
+                asyncio.CancelledError("cancel"),
+                event_id="$stream-123",
+                accumulated_text="partial",
+                tool_trace=[],
+                transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$stream-123",
+                    terminal_operation="send",
+                    terminal_result="succeeded",
+                    terminal_status="cancelled",
+                    rendered_body="partial",
+                    visible_body_state="visible_body",
+                ),
+            )
 
         with (
             patch(
@@ -1979,13 +1991,12 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 side_effect=_consuming_send_streaming,
             ),
-            pytest.raises(asyncio.CancelledError),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_runner.process_and_respond_streaming(
+            outcome = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Cancel me",
@@ -1995,6 +2006,9 @@ class TestAgentBot:
                 ),
             )
 
+        assert isinstance(outcome, FinalDeliveryOutcome)
+        assert outcome.state == "kept_prior_visible_stream_after_cancel"
+        assert outcome.event_id == "$stream-123"
         # The extra_content dict (mutable reference) was populated during iteration
         extra = captured_extra_content_ref[0]
         assert extra is not None
@@ -2045,7 +2059,8 @@ class TestAgentBot:
             )
 
         assert delivery.event_id == "$terminal"
-        assert delivery.delivery_kind == "sent"
+        assert delivery.state == "kept_prior_visible_stream_after_error"
+        assert delivery.delivery_kind is None
         assert "Response interrupted by an error" in delivery.response_text
 
     @pytest.mark.asyncio

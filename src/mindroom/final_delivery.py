@@ -20,6 +20,7 @@ FinalDeliveryState = Literal[
     "kept_prior_visible_stream_after_completed_terminal_failure",
     "kept_prior_visible_stream_after_cancel",
     "kept_prior_visible_stream_after_error",
+    "cancelled_with_visible_response",
     "cancelled_with_visible_note",
     "cancelled_without_visible_response",
     "suppressed_without_visible_response",
@@ -151,6 +152,10 @@ LEGAL_FINAL_DELIVERY_STATES: Mapping[FinalDeliveryState, _StateRule] = MappingPr
             allows_final_visible_event=False,
             requires_prior_visible_stream=True,
         ),
+        "cancelled_with_visible_response": _StateRule(
+            terminal_status="cancelled",
+            requires_final_visible_event=True,
+        ),
         "cancelled_with_visible_note": _StateRule(
             terminal_status="cancelled",
             requires_final_visible_event=True,
@@ -183,7 +188,6 @@ LEGAL_FINAL_DELIVERY_STATES: Mapping[FinalDeliveryState, _StateRule] = MappingPr
         "error_with_visible_response": _StateRule(
             terminal_status="error",
             requires_final_visible_event=True,
-            requires_final_visible_body=True,
         ),
         "error_without_visible_response": _StateRule(
             terminal_status="error",
@@ -254,7 +258,7 @@ class FinalDeliveryOutcome:
     @property
     def has_final_visible_delivery(self) -> bool:
         """Return whether terminal delivery landed as a visible response event."""
-        return self.final_visible_event_id is not None
+        return self.state == "final_visible_delivery"
 
     @property
     def has_any_visible_response(self) -> bool:
@@ -262,9 +266,31 @@ class FinalDeliveryOutcome:
         return self.final_visible_event_id is not None or self.last_physical_stream_event_id is not None
 
     @property
+    def visible_response_event_id(self) -> str | None:
+        """Return the event id of the currently visible terminal event, including cancellation notes."""
+        return self.final_visible_event_id or self.last_physical_stream_event_id
+
+    @property
+    def logical_response_event_id(self) -> str | None:
+        """Return the visible response event id that downstream should preserve as the response identity."""
+        if self.state in {
+            "final_visible_delivery",
+            "cancelled_with_visible_response",
+            "error_with_visible_response",
+        }:
+            return self.final_visible_event_id
+        if self.state in {
+            "kept_prior_visible_stream_after_completed_terminal_failure",
+            "kept_prior_visible_stream_after_cancel",
+            "kept_prior_visible_stream_after_error",
+        }:
+            return self.last_physical_stream_event_id
+        return None
+
+    @property
     def event_id(self) -> str | None:
         """Return the final logical visible response event id for compatibility callers."""
-        return self.final_visible_event_id
+        return self.logical_response_event_id
 
     @property
     def response_text(self) -> str:
@@ -373,6 +399,35 @@ class FinalDeliveryOutcome:
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace),
             extra_content=extra_content or EMPTY_MAPPING,
+        )
+
+    @classmethod
+    def cancelled_with_visible_response(
+        cls,
+        *,
+        final_visible_event_id: str,
+        final_visible_body: str | None = None,
+        last_physical_stream_event_id: str | None = None,
+        delivery_kind: VisibleDeliveryKind | None = None,
+        failure_reason: str | None = None,
+        tool_trace: Sequence[ToolTraceEntry] = (),
+        extra_content: Mapping[str, Any] | None = None,
+        option_map: Mapping[str, str] | None = None,
+        options_list: Sequence[Mapping[str, str]] | None = None,
+    ) -> FinalDeliveryOutcome:
+        """Build the cancelled state where a prior visible response remains on screen."""
+        return cls(
+            state="cancelled_with_visible_response",
+            terminal_status="cancelled",
+            final_visible_event_id=final_visible_event_id,
+            last_physical_stream_event_id=last_physical_stream_event_id,
+            final_visible_body=final_visible_body,
+            delivery_kind=delivery_kind,
+            failure_reason=failure_reason,
+            tool_trace=tuple(tool_trace),
+            extra_content=extra_content or EMPTY_MAPPING,
+            option_map=option_map,
+            options_list=tuple(options_list) if options_list is not None else None,
         )
 
     @classmethod
@@ -491,7 +546,7 @@ class FinalDeliveryOutcome:
         cls,
         *,
         final_visible_event_id: str,
-        final_visible_body: str,
+        final_visible_body: str | None = None,
         last_physical_stream_event_id: str | None = None,
         delivery_kind: VisibleDeliveryKind | None = None,
         failure_reason: str | None = None,

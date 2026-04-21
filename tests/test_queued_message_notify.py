@@ -286,6 +286,39 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_preserve_surviving_visible_stream_event_for_persistence_and_summary() -> None:
+    """A visible streamed reply that survives terminal failure must still drive downstream bookkeeping."""
+    queue_thread_summary = MagicMock()
+    persist_response_event_id = MagicMock()
+
+    await apply_post_response_effects(
+        ResponseOutcome(
+            final_delivery_outcome=FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
+                last_physical_stream_event_id="$response",
+                failure_reason="terminal_update_failed",
+            ),
+            response_run_id="run-1",
+            interactive_target=MessageTarget.resolve(
+                room_id="!room:localhost",
+                thread_id="$thread",
+                reply_to_event_id="$event",
+            ),
+            thread_summary_room_id="!room:localhost",
+            thread_summary_thread_id="$thread",
+            thread_summary_message_count_hint=3,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            persist_response_event_id=persist_response_event_id,
+            queue_thread_summary=queue_thread_summary,
+        ),
+    )
+
+    persist_response_event_id.assert_called_once_with("run-1", "$response")
+    queue_thread_summary.assert_called_once_with("!room:localhost", "$thread", 3)
+
+
+@pytest.mark.asyncio
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)

@@ -373,7 +373,7 @@ class DeliveryGateway:
         await self._emit_cancelled_response_best_effort(
             correlation_id=correlation_id,
             envelope=envelope,
-            visible_response_event_id=outcome.final_visible_event_id or outcome.last_physical_stream_event_id,
+            visible_response_event_id=outcome.visible_response_event_id,
             response_kind=response_kind,
             failure_reason=outcome.failure_reason,
         )
@@ -397,6 +397,12 @@ class DeliveryGateway:
         """Return the current streamed body snapshot used for hook and outcome decisions."""
         return outcome.rendered_body or ""
 
+    def _visible_stream_event_id(self, outcome: StreamTransportOutcome) -> str | None:
+        """Return the streamed event id only when the stream showed real visible body text."""
+        if outcome.visible_body_state != "visible_body":
+            return None
+        return outcome.last_physical_stream_event_id
+
     async def _redact_visible_response_event(
         self,
         *,
@@ -405,6 +411,7 @@ class DeliveryGateway:
         response_kind: str,
         response_envelope: MessageEnvelope,
         correlation_id: str,
+        redaction_reason: str,
         failure_reason: str | None = None,
         tool_trace: list[ToolTraceEntry] | None = None,
         extra_content: dict[str, Any] | None = None,
@@ -421,7 +428,7 @@ class DeliveryGateway:
             redacted = await self.deps.redact_message_event(
                 room_id=room_id,
                 event_id=event_id,
-                reason="Suppressed response",
+                reason=redaction_reason,
             )
         except asyncio.CancelledError as error:
             return FinalDeliveryOutcome.suppression_cleanup_failed(
@@ -494,14 +501,13 @@ class DeliveryGateway:
                 return outcome
 
             if existing_event_is_placeholder:
-                return FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
-                    last_physical_stream_event_id=existing_event_id,
-                    final_visible_body=display_text,
+                return FinalDeliveryOutcome.error_without_visible_response(
                     failure_reason="delivery_failed",
                     tool_trace=tool_trace or (),
                     extra_content=extra_content,
                 )
-            return FinalDeliveryOutcome.error_without_visible_response(
+            return FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id=existing_event_id,
                 failure_reason="delivery_failed",
                 tool_trace=tool_trace or (),
                 extra_content=extra_content,
@@ -695,16 +701,22 @@ class DeliveryGateway:
                 correlation_id=request.correlation_id,
             )
             if visible_response_event_id is not None:
-                return await self._redact_visible_response_event(
+                cleanup_outcome = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
                     event_id=visible_response_event_id,
                     response_kind=request.response_kind,
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
+                    redaction_reason="Suppressed placeholder response",
                     failure_reason="suppressed_by_hook",
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 )
+                if cleanup_outcome.state == "suppression_cleanup_failed":
+                    raise SuppressedPlaceholderCleanupError(
+                        cleanup_outcome.failure_reason or "suppressed placeholder cleanup failed",
+                    )
+                return cleanup_outcome
             return FinalDeliveryOutcome.suppressed_without_visible_response(
                 failure_reason="suppressed_by_hook",
                 tool_trace=draft.tool_trace or (),
@@ -748,14 +760,13 @@ class DeliveryGateway:
                 extra_content=extra_content,
             )
         elif request.existing_event_is_placeholder:
-            outcome = FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
-                last_physical_stream_event_id=request.event_id,
-                final_visible_body=cancelled_text,
+            outcome = FinalDeliveryOutcome.cancelled_without_visible_response(
                 failure_reason=failure_reason,
                 extra_content=extra_content,
             )
         else:
-            outcome = FinalDeliveryOutcome.cancelled_without_visible_response(
+            outcome = FinalDeliveryOutcome.cancelled_with_visible_response(
+                final_visible_event_id=request.event_id,
                 failure_reason=failure_reason,
                 extra_content=extra_content,
             )
@@ -845,58 +856,64 @@ class DeliveryGateway:
         """Apply hooks and any final edit needed after streamed delivery completes."""
         stream_outcome = request.stream_transport_outcome
         streamed_event_id = stream_outcome.last_physical_stream_event_id
+        visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
         streamed_text = self._current_stream_body(stream_outcome)
 
         if stream_outcome.terminal_status == "cancelled":
-            await self._emit_cancelled_response_best_effort(
-                correlation_id=request.correlation_id,
-                envelope=request.response_envelope,
-                visible_response_event_id=streamed_event_id,
-                response_kind=request.response_kind,
-                failure_reason=stream_outcome.failure_reason,
-            )
-            if streamed_event_id is not None:
-                return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
-                    last_physical_stream_event_id=streamed_event_id,
+            if visible_stream_event_id is not None:
+                outcome = FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+                    last_physical_stream_event_id=visible_stream_event_id,
                     final_visible_body=streamed_text or None,
                     failure_reason=stream_outcome.failure_reason,
                     tool_trace=request.tool_trace or (),
                     extra_content=request.extra_content,
                 )
-            return FinalDeliveryOutcome.cancelled_without_visible_response(
-                failure_reason=stream_outcome.failure_reason,
-                tool_trace=request.tool_trace or (),
-                extra_content=request.extra_content,
+            else:
+                outcome = FinalDeliveryOutcome.cancelled_without_visible_response(
+                    failure_reason=stream_outcome.failure_reason,
+                    tool_trace=request.tool_trace or (),
+                    extra_content=request.extra_content,
+                )
+            return await self.emit_terminal_outcome_hooks(
+                outcome=outcome,
+                correlation_id=request.correlation_id,
+                envelope=request.response_envelope,
+                response_kind=request.response_kind,
             )
 
         if stream_outcome.terminal_status == "error":
-            if streamed_event_id is not None:
-                return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
-                    last_physical_stream_event_id=streamed_event_id,
+            if visible_stream_event_id is not None:
+                outcome = FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
+                    last_physical_stream_event_id=visible_stream_event_id,
                     final_visible_body=streamed_text or None,
                     failure_reason=stream_outcome.failure_reason,
                     tool_trace=request.tool_trace or (),
                     extra_content=request.extra_content,
                 )
-            return FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason=stream_outcome.failure_reason,
-                tool_trace=request.tool_trace or (),
-                extra_content=request.extra_content,
-            )
-
-        if stream_outcome.visible_body_state != "visible_body":
-            if streamed_event_id is not None:
-                return FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
-                    last_physical_stream_event_id=streamed_event_id,
-                    final_visible_body=streamed_text or None,
-                    failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+            else:
+                outcome = FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason=stream_outcome.failure_reason,
                     tool_trace=request.tool_trace or (),
                     extra_content=request.extra_content,
                 )
-            return FinalDeliveryOutcome.error_without_visible_response(
+            return await self.emit_terminal_outcome_hooks(
+                outcome=outcome,
+                correlation_id=request.correlation_id,
+                envelope=request.response_envelope,
+                response_kind=request.response_kind,
+            )
+
+        if stream_outcome.visible_body_state != "visible_body":
+            outcome = FinalDeliveryOutcome.error_without_visible_response(
                 failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
                 tool_trace=request.tool_trace or (),
                 extra_content=request.extra_content,
+            )
+            return await self.emit_terminal_outcome_hooks(
+                outcome=outcome,
+                correlation_id=request.correlation_id,
+                envelope=request.response_envelope,
+                response_kind=request.response_kind,
             )
 
         draft = await self.deps.response_hooks.apply_before_response(
@@ -911,21 +928,27 @@ class DeliveryGateway:
             await self._emit_cancelled_response_best_effort(
                 correlation_id=request.correlation_id,
                 envelope=request.response_envelope,
-                visible_response_event_id=streamed_event_id,
+                visible_response_event_id=visible_stream_event_id,
                 response_kind=request.response_kind,
                 failure_reason="suppressed_by_hook",
             )
             if streamed_event_id is not None:
-                return await self._redact_visible_response_event(
+                cleanup_outcome = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
                     event_id=streamed_event_id,
                     response_kind=request.response_kind,
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
+                    redaction_reason="Suppressed streamed response",
                     failure_reason="suppressed_by_hook",
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 )
+                if cleanup_outcome.state == "suppression_cleanup_failed":
+                    raise SuppressedPlaceholderCleanupError(
+                        cleanup_outcome.failure_reason or "suppressed streamed cleanup failed",
+                    )
+                return cleanup_outcome
             return FinalDeliveryOutcome.suppressed_without_visible_response(
                 failure_reason="suppressed_by_hook",
                 tool_trace=draft.tool_trace or (),

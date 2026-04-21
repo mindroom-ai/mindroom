@@ -65,7 +65,7 @@ from mindroom.delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
 )
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
@@ -94,7 +94,7 @@ from mindroom.response_runner import (
     ResponseRunnerDeps,
     prepare_memory_and_model_context,
 )
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryCancelled, StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -351,13 +351,41 @@ def _build_response_runner(  # noqa: C901, PLR0915
     delivery_gateway.edit_text = AsyncMock()
     delivery_gateway.send_text = AsyncMock(return_value="$thinking")
 
-    async def _finalize_streamed_response(request: object) -> DeliveryResult:
+    async def _finalize_streamed_response(request: object) -> FinalDeliveryOutcome:
         request = cast("FinalizeStreamedResponseRequest", request)
         event_id = request.stream_transport_outcome.last_physical_stream_event_id
-        return DeliveryResult(
-            event_id=event_id,
-            response_text=request.stream_transport_outcome.accumulated_text,
-            delivery_kind=request.initial_delivery_kind if event_id is not None else None,
+        has_visible_body = request.stream_transport_outcome.visible_body_state == "visible_body"
+        failure_reason = request.stream_transport_outcome.failure_reason
+        response_text = request.stream_transport_outcome.accumulated_text
+        if request.stream_transport_outcome.terminal_status == "cancelled":
+            if has_visible_body and event_id is not None:
+                return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+                    last_physical_stream_event_id=event_id,
+                    final_visible_body=response_text or None,
+                    failure_reason=failure_reason,
+                )
+            return FinalDeliveryOutcome.cancelled_without_visible_response(
+                failure_reason=failure_reason,
+            )
+        if request.stream_transport_outcome.terminal_status == "error":
+            if has_visible_body and event_id is not None:
+                return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
+                    last_physical_stream_event_id=event_id,
+                    final_visible_body=response_text or None,
+                    failure_reason=failure_reason,
+                )
+            return FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason=failure_reason,
+            )
+        if not has_visible_body or event_id is None:
+            return FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason=failure_reason or "stream_completed_without_visible_body",
+            )
+        return FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id=event_id,
+            final_visible_body=response_text,
+            delivery_kind=request.initial_delivery_kind,
+            failure_reason=failure_reason,
         )
 
     delivery_gateway.finalize_streamed_response = AsyncMock(side_effect=_finalize_streamed_response)
@@ -381,12 +409,11 @@ def _build_response_runner(  # noqa: C901, PLR0915
                 failure_reason="cancelled_by_user",
             )
         if request.existing_event_is_placeholder:
-            return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
-                last_physical_stream_event_id=request.event_id,
-                final_visible_body="cancelled",
+            return FinalDeliveryOutcome.cancelled_without_visible_response(
                 failure_reason="cancelled_by_user",
             )
-        return FinalDeliveryOutcome.cancelled_without_visible_response(
+        return FinalDeliveryOutcome.cancelled_with_visible_response(
+            final_visible_event_id=request.event_id,
             failure_reason="cancelled_by_user",
         )
 
@@ -1060,6 +1087,55 @@ async def test_send_skill_command_response_passes_user_id_to_ai_response(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_send_skill_command_response_labels_delivery_and_terminal_hooks_as_skill_command(tmp_path: Path) -> None:
+    """Skill-command delivery must preserve response_kind through delivery and hook emission."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Skill response")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
+            return_value=DeliveryResult(
+                event_id="$skill-reply",
+                response_text="Skill response",
+                delivery_kind="sent",
+            ),
+        )
+        coordinator.deps.delivery_gateway.emit_terminal_outcome_hooks = AsyncMock(
+            side_effect=lambda **kwargs: kwargs["outcome"],
+        )
+
+        event_id = await coordinator.send_skill_command_response(
+            room_id="!test:localhost",
+            reply_to_event_id="$user_msg",
+            thread_id="$thread-root",
+            thread_history=(),
+            prompt="Use demo skill",
+            agent_name="general",
+            user_id="@alice:localhost",
+        )
+
+    assert event_id == "$skill-reply"
+    delivered_request = cast("FinalDeliveryRequest", coordinator.deps.delivery_gateway.deliver_final.await_args.args[0])
+    assert delivered_request.response_kind == "skill_command"
+    assert coordinator.deps.delivery_gateway.emit_terminal_outcome_hooks.await_args.kwargs["response_kind"] == (
+        "skill_command"
+    )
+
+
+@pytest.mark.asyncio
 async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
     tmp_path: Path,
 ) -> None:
@@ -1523,14 +1599,16 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
 
         mock_ai.side_effect = fake_ai_response
 
-        with pytest.raises(asyncio.CancelledError, match="cancel"):
-            await coordinator.process_and_respond(
-                replace(
-                    _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                    existing_event_id="$thinking",
-                ),
-            )
+        delivery = await coordinator.process_and_respond(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                existing_event_id="$thinking",
+            ),
+        )
 
+    assert delivery.state == "cancelled_with_visible_note"
+    assert delivery.visible_response_event_id == "$thinking"
+    assert delivery.failure_reason == "cancelled_by_user"
     assert sequence == [
         "ai",
         "started:!test:localhost:$thread-root:$thread-root",
@@ -1581,12 +1659,28 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async def consume_delivery_and_cancel(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_cancel(request: object) -> StreamTransportOutcome:
             accumulated = ""
-            async for chunk in request.response_stream:
-                accumulated += str(chunk)
-                sequence.append(f"deliver:{accumulated}")
-            return "$msg_id", accumulated
+            try:
+                async for chunk in request.response_stream:
+                    accumulated += str(chunk)
+                    sequence.append(f"deliver:{accumulated}")
+            except asyncio.CancelledError as exc:
+                raise StreamingDeliveryCancelled(
+                    exc,
+                    event_id="$thinking",
+                    accumulated_text=accumulated,
+                    tool_trace=[],
+                    transport_outcome=StreamTransportOutcome(
+                        last_physical_stream_event_id="$thinking",
+                        terminal_operation="edit",
+                        terminal_result="succeeded",
+                        terminal_status="cancelled",
+                        rendered_body=accumulated,
+                        visible_body_state="visible_body",
+                    ),
+                ) from exc
+            pytest.fail("expected streaming cancellation")
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_cancel
 
@@ -1609,14 +1703,16 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        with pytest.raises(asyncio.CancelledError, match="cancel"):
-            await coordinator.process_and_respond_streaming(
-                replace(
-                    _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
-                    existing_event_id="$thinking",
-                ),
-            )
+        delivery = await coordinator.process_and_respond_streaming(
+            replace(
+                _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+                existing_event_id="$thinking",
+            ),
+        )
 
+    assert delivery.state == "kept_prior_visible_stream_after_cancel"
+    assert delivery.event_id == "$thinking"
+    assert delivery.failure_reason == "cancelled_by_user"
     assert sequence == [
         "stream",
         "deliver:Hello!",
@@ -2163,7 +2259,7 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
             "visible_response_event_id"
         ]
-        == "$thinking"
+        is None
     )
     assert (
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
@@ -2171,6 +2267,51 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
         ]
         == "plain boom"
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_avoids_streaming_over_existing_non_placeholder_event(tmp_path: Path) -> None:
+    """Editing a real existing reply must stay on the non-streaming final-delivery path."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.process_and_respond = AsyncMock(
+            return_value=FinalDeliveryOutcome.final_visible_delivery(
+                final_visible_event_id="$existing",
+                final_visible_body="Updated",
+                delivery_kind="edited",
+            ),
+        )
+        coordinator.process_and_respond_streaming = AsyncMock(
+            side_effect=AssertionError("streaming path should not run"),
+        )
+
+        event_id = await coordinator.generate_response_locked(
+            replace(
+                _response_request(
+                    prompt="Hello",
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                ),
+                existing_event_id="$existing",
+                existing_event_is_placeholder=False,
+            ),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id == "$existing"
+    coordinator.process_and_respond.assert_awaited_once()
+    coordinator.process_and_respond_streaming.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2677,8 +2818,12 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        with suppress(asyncio.CancelledError):
+        try:
             await response_function("$thinking")
+        except StreamingDeliveryCancelled:
+            raise
+        except asyncio.CancelledError:
+            pass
         return "$thinking"
 
     with (
@@ -2772,8 +2917,12 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        with suppress(asyncio.CancelledError):
+        try:
             await response_function("$thinking")
+        except StreamingDeliveryCancelled:
+            raise
+        except asyncio.CancelledError:
+            pass
         return "$thinking"
 
     with (
@@ -2827,7 +2976,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_cancellation(
+async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_cancellation(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
     """session:started should still fire when a cancelled team stream has already persisted the session."""
@@ -2856,8 +3005,12 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        with suppress(asyncio.CancelledError):
+        try:
             await response_function("$thinking")
+        except StreamingDeliveryCancelled:
+            raise
+        except asyncio.CancelledError:
+            pass
         return "$thinking"
 
     with (
@@ -2881,12 +3034,28 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
-        async def consume_delivery_and_cancel(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_cancel(request: object) -> StreamTransportOutcome:
             accumulated = ""
-            async for chunk in request.response_stream:
-                accumulated += str(chunk)
-                sequence.append(f"deliver:{accumulated}")
-            return "$team-msg", accumulated
+            try:
+                async for chunk in request.response_stream:
+                    accumulated += str(chunk)
+                    sequence.append(f"deliver:{accumulated}")
+            except asyncio.CancelledError as exc:
+                raise StreamingDeliveryCancelled(
+                    exc,
+                    event_id="$thinking",
+                    accumulated_text=accumulated,
+                    tool_trace=[],
+                    transport_outcome=StreamTransportOutcome(
+                        last_physical_stream_event_id="$thinking",
+                        terminal_operation="edit",
+                        terminal_result="succeeded",
+                        terminal_status="cancelled",
+                        rendered_body=accumulated,
+                        visible_body_state="visible_body",
+                    ),
+                ) from exc
+            pytest.fail("expected streaming cancellation")
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_cancel
 
@@ -2915,7 +3084,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert event_id is None
+    assert event_id == "$thinking"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -3093,7 +3262,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
             "visible_response_event_id"
         ]
-        == "$team-msg"
+        is None
     )
 
 

@@ -559,3 +559,61 @@ async def test_cancelled_visible_note_emits_cancelled_hook_not_after_response(tm
     assert after_seen == []
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id == "$visible"
+
+
+@pytest.mark.asyncio
+async def test_stream_terminal_error_emits_cancelled_hook_once_for_visible_stream(tmp_path: Path) -> None:
+    """Visible streamed terminal errors must emit message:cancelled exactly once."""
+    after_seen: list[str] = []
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def on_after(ctx: AfterResponseContext) -> None:
+        del ctx
+        after_seen.append("after")
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins([_plugin("test-stream-error", [on_after, on_cancelled])])
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    result = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$stream",
+                terminal_operation="send",
+                terminal_result="failed",
+                terminal_status="error",
+                rendered_body="partial",
+                visible_body_state="visible_body",
+                failure_reason="terminal_update_failed",
+            ),
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-stream-error",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert result.state == "kept_prior_visible_stream_after_error"
+    assert after_seen == []
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$stream"
+    assert cancelled_seen[0].failure_reason == "terminal_update_failed"
