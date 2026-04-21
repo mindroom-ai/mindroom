@@ -878,6 +878,58 @@ async def test_request_approval_expires_when_matrix_send_fails(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_request_approval_discards_pending_request_when_matrix_send_returns_none(tmp_path: Path) -> None:
+    """Send failures that return no event ID should not leak pending requests in memory."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    store = initialize_approval_store(runtime_paths, sender=AsyncMock(return_value=None), editor=AsyncMock())
+
+    decision = await store.request_approval(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        transport_agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=60,
+    )
+
+    assert decision.status == "expired"
+    assert store._pending_by_id == {}
+
+
+@pytest.mark.asyncio
+async def test_request_approval_discards_pending_request_when_matrix_send_raises(tmp_path: Path) -> None:
+    """Exceptions during send should not leak pending requests in memory."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(side_effect=RuntimeError("send failed")),
+        editor=AsyncMock(),
+    )
+
+    decision = await store.request_approval(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        transport_agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=60,
+    )
+
+    assert decision.status == "expired"
+    assert store._pending_by_id == {}
+
+
+@pytest.mark.asyncio
 async def test_request_approval_persists_request_before_matrix_send(tmp_path: Path) -> None:
     """Approval state should be durable before the Matrix transport is attempted."""
     runtime_paths = test_runtime_paths(tmp_path)

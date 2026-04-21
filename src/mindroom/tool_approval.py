@@ -535,6 +535,7 @@ class ApprovalManager:
                 reason=_DEFAULT_SEND_FAILURE_REASON,
                 resolved_by=None,
             )
+            self._discard(pending.id)
             return decision or self._decision_from_pending(pending)
 
         self._set_event_id(pending.id, event_id)
