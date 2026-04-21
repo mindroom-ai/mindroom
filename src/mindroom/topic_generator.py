@@ -8,7 +8,8 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai import cached_agent_run, get_model_instance
+from mindroom import model_loading
+from mindroom.ai_runtime import cached_agent_run
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -85,7 +86,7 @@ Examples:
 
 Generate the topic:"""
 
-    model = get_model_instance(config, runtime_paths, "default")
+    model = model_loading.get_model_instance(config, runtime_paths, "default")
 
     agent = Agent(
         name="TopicGenerator",

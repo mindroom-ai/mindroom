@@ -43,7 +43,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
-from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
+from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
 from tests.conftest import (
     TEST_PASSWORD,
@@ -440,6 +440,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             reply_to_event_id="$event",
             active_event_ids=frozenset(),
             response_sender_id="@mindroom_code:localhost",
+            current_sender_id=None,
             compaction_outcomes_collector=[],
             configured_team_name=None,
             system_enrichment_items=system_items,
@@ -450,6 +451,75 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
     assert rendered in _team_system_message(team)
     assert all(agent.additional_context == rendered for agent in member_agents)
     assert all(rendered in _agent_system_message(agent) for agent in member_agents)
+
+
+@pytest.mark.asyncio
+async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_path: Path) -> None:
+    """Prepared team execution should expose prompt helpers without exporting its carrier type."""
+    import mindroom.teams as teams_module  # noqa: PLC0415
+
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    member_agents = [_agent("code", "CodeAgent"), _agent("research", "ResearchAgent")]
+    prepared_team = Team(
+        id="team-code-research",
+        name="Code + Research",
+        members=member_agents,
+        model=Ollama(id="test-model"),
+    )
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["code", "research"],
+        agents=member_agents,
+        display_names=["CodeAgent", "ResearchAgent"],
+        materialized_agent_names={"code", "research"},
+        failed_agent_names=[],
+    )
+
+    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> _FakePreparedExecution:
+        return _FakePreparedExecution(
+            messages=(Message(role="user", content="prepared team prompt"),),
+            unseen_event_ids=[],
+            compaction_outcomes=[],
+        )
+
+    assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
+
+    with (
+        patch("mindroom.teams._create_team_instance", return_value=prepared_team),
+        patch(
+            "mindroom.teams.prepare_bound_team_execution_context",
+            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+        ),
+    ):
+        team = build_materialized_team_instance(
+            requested_agent_names=team_members.requested_agent_names,
+            agents=team_members.agents,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=None,
+            model_name=None,
+            configured_team_name=None,
+        )
+        prepared_execution = await prepare_materialized_team_execution(
+            scope_context=None,
+            agents=team_members.agents,
+            team=team,
+            message="Coordinate",
+            thread_history=[],
+            config=config,
+            runtime_paths=runtime_paths,
+            active_model_name=None,
+            reply_to_event_id="$event",
+            active_event_ids=frozenset(),
+            response_sender_id="@mindroom_code:localhost",
+            current_sender_id=None,
+            compaction_outcomes_collector=[],
+            configured_team_name=None,
+        )
+
+    assert prepared_execution.prepared_prompt == "prepared team prompt"
+    assert prepared_execution.context_messages == ()
 
 
 @pytest.mark.asyncio

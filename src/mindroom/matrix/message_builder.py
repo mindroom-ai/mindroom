@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 from mdit_py_plugins.dollarmath import dollarmath_plugin
-from pygments import highlight as _pygments_highlight
+from pygments import highlight
 from pygments.formatters.html import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
@@ -403,7 +403,7 @@ def _highlight(code: str, lang: str, _attrs: str) -> str:
         lexer = get_lexer_by_name(lang)
     except ClassNotFound:
         return ""
-    return _pygments_highlight(code, lexer, _HIGHLIGHT_FORMATTER)
+    return highlight(code, lexer, _HIGHLIGHT_FORMATTER)
 
 
 def _render_preserved_math_inline(

@@ -14,7 +14,8 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai import cached_agent_run, get_model_instance
+from mindroom import model_loading
+from mindroom.ai_runtime import cached_agent_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
@@ -294,7 +295,7 @@ async def _generate_summary(
 ) -> str | None:
     """Generate a one-line summary of a thread conversation via LLM."""
     model_name = config.defaults.thread_summary_model or "default"
-    model = get_model_instance(config, runtime_paths, model_name)
+    model = model_loading.get_model_instance(config, runtime_paths, model_name)
     if isinstance(model, _SupportsTemperature):
         model.temperature = _SUMMARY_TEMPERATURE
     else:

@@ -13,7 +13,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -946,6 +946,11 @@ def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
     return tool_id
 
 
+def _raise_unmaterializable_team(team_name: str, reason: str | None) -> NoReturn:
+    msg = reason or f"Team '{team_name}' cannot be materialized"
+    raise ValueError(msg)
+
+
 def _resolve_started_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
     tool_call_id = _extract_tool_call_id(tool)
 
@@ -1151,28 +1156,35 @@ def _build_team(
         include_openai_compat_guidance=True,
         reason_prefix=f"Team '{team_name}'",
     )
+    try:
+        final_resolution = resolve_configured_team(
+            team_name,
+            requested_members,
+            mode,
+            config,
+            runtime_paths,
+            materializable_agent_names=team_members.materialized_agent_names,
+        )
+        if final_resolution.outcome is not TeamOutcome.TEAM:
+            _raise_unmaterializable_team(team_name, final_resolution.reason)
 
-    final_resolution = resolve_configured_team(
-        team_name,
-        requested_members,
-        mode,
-        config,
-        runtime_paths,
-        materializable_agent_names=team_members.materialized_agent_names,
-    )
-    if final_resolution.outcome is not TeamOutcome.TEAM:
-        raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
-
-    team = build_materialized_team_instance(
-        requested_agent_names=team_members.requested_agent_names,
-        agents=team_members.agents,
-        mode=mode,
-        config=config,
-        runtime_paths=runtime_paths,
-        model_name=model_name,
-        configured_team_name=team_name,
-        scope_context=scope_context,
-    )
+        team = build_materialized_team_instance(
+            requested_agent_names=team_members.requested_agent_names,
+            agents=team_members.agents,
+            mode=mode,
+            config=config,
+            runtime_paths=runtime_paths,
+            model_name=model_name,
+            configured_team_name=team_name,
+            scope_context=scope_context,
+        )
+    except Exception:
+        close_team_runtime_sqlite_dbs(
+            agents=team_members.agents,
+            team_db=None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
+        )
+        raise
     return team_members.agents, team, mode
 
 
@@ -1211,6 +1223,7 @@ async def _prepare_openai_team_run_input(
         reply_to_event_id=None,
         active_event_ids=frozenset(),
         response_sender_id=None,
+        current_sender_id=None,
         compaction_outcomes_collector=None,
         configured_team_name=team_name,
         matrix_run_metadata=None,

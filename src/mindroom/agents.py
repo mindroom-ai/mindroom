@@ -20,7 +20,8 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 import mindroom.tools  # noqa: F401
-from mindroom import agent_prompts, constants
+from mindroom import agent_prompts, agent_storage, constants, model_loading
+from mindroom.agent_descriptions import describe_agent
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
@@ -74,8 +75,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Maximum length for instruction descriptions to include in agent summary
-_MAX_INSTRUCTION_LENGTH = 100
 _DEFAULT_MIND_AGENT_NAME = "mind"
 _DEFAULT_MIND_CONTEXT_FILES = (
     "SOUL.md",
@@ -114,7 +113,7 @@ class _AdditionalContextChunk:
 
 
 @dataclass(frozen=True)
-class AgentToolInitContext:
+class _AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
     workspace_path: Path | None
@@ -411,7 +410,7 @@ def build_agent_tool_init_context(
     agent_name: str,
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> AgentToolInitContext:
+) -> _AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_runtime = resolve_agent_runtime(
         agent_name,
@@ -423,10 +422,10 @@ def build_agent_tool_init_context(
     return _tool_init_context_from_runtime(agent_runtime)
 
 
-def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> AgentToolInitContext:
+def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> _AgentToolInitContext:
     """Build tool-init settings from an already-resolved agent runtime."""
     workspace_path = agent_runtime.tool_base_dir
-    return AgentToolInitContext(
+    return _AgentToolInitContext(
         workspace_path=workspace_path,
         execution_scope=agent_runtime.execution_scope,
         routing_agent_is_private=agent_runtime.is_private,
@@ -442,7 +441,7 @@ def build_agent_toolkit(  # noqa: PLR0911
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
     tool_config_overrides: dict[str, object] | None = None,
-    tool_init_context: AgentToolInitContext,
+    tool_init_context: _AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
     delegation_depth: int = 0,
@@ -666,14 +665,6 @@ def _build_dynamic_tooling_instruction_block(
     )
 
 
-def get_agent_runtime_sqlite_dbs(agent: Agent) -> tuple[SqliteDb | None, SqliteDb | None]:
-    """Return the runtime-owned SQLite handles attached to one agent."""
-    history_db = agent.db if isinstance(agent.db, SqliteDb) else None
-    learning = agent.learning
-    learning_db = learning.db if isinstance(learning, LearningMachine) and isinstance(learning.db, SqliteDb) else None
-    return history_db, learning_db
-
-
 def create_session_storage(
     agent_name: str,
     config: Config,
@@ -691,20 +682,7 @@ def create_session_storage(
     )
 
 
-def create_state_storage_db(
-    storage_name: str,
-    state_root: Path,
-    *,
-    subdir: str,
-    session_table: str,
-) -> SqliteDb:
-    """Create a persistent SQLite database from an already-resolved state root."""
-    db_dir = state_root / subdir
-    db_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{storage_name}.db"))
-
-
-def enable_all_history_replay(entity: Agent | Team) -> None:
+def _enable_all_history_replay(entity: Agent | Team) -> None:
     """Undo Agno's default three-run history fallback."""
     entity.num_history_runs = None
 
@@ -725,7 +703,7 @@ def _create_agent_state_db(
         runtime_paths,
         execution_identity=execution_identity,
     ).state_root
-    return create_state_storage_db(
+    return agent_storage.create_state_storage_db(
         storage_name=agent_name,
         state_root=state_storage_path,
         subdir=subdir,
@@ -924,17 +902,6 @@ def _resolve_agent_dynamic_tool_selection(
     )
 
 
-@timed("system_prompt_assembly.agent_create.model_instance")
-def _load_agent_model_instance(
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    model_name: str,
-) -> Model:
-    from mindroom.ai import get_model_instance  # noqa: PLC0415
-
-    return get_model_instance(config, runtime_paths, model_name)
-
-
 @timed("system_prompt_assembly.agent_create.skills_load")
 def _load_agent_skills(
     agent_name: str,
@@ -1027,7 +994,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     storage = (
         history_storage
         if history_storage is not None
-        else create_state_storage_db(
+        else agent_storage.create_state_storage_db(
             agent_name,
             agent_runtime.state_root,
             subdir="sessions",
@@ -1079,7 +1046,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 error=str(exc),
             )
     learning_storage = (
-        create_state_storage_db(
+        agent_storage.create_state_storage_db(
             storage_name=agent_name,
             state_root=agent_runtime.state_root,
             subdir="learning",
@@ -1142,7 +1109,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = _load_agent_model_instance(config, runtime_paths, model_name)
+    model = model_loading.get_model_instance(config, runtime_paths, model_name)
     logger.info(
         "create_agent",
         agent=agent_name,
@@ -1261,7 +1228,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     if include_all_history:
-        enable_all_history_replay(agent)
+        _enable_all_history_replay(agent)
 
     logger.info(
         "Created agent",
@@ -1272,67 +1239,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     return agent
-
-
-def describe_agent(agent_name: str, config: Config) -> str:
-    """Generate a description of an agent or team based on its configuration.
-
-    Args:
-        agent_name: Name of the agent or team to describe
-        config: Application configuration
-
-    Returns:
-        Human-readable description of the agent or team
-
-    """
-    # Handle built-in router agent
-    if agent_name == ROUTER_AGENT_NAME:
-        return (
-            "router\n"
-            "  - Route messages to the most appropriate agent based on context and expertise.\n"
-            "  - Analyzes incoming messages and determines which agent is best suited to respond."
-        )
-
-    # Check if it's a team
-    if agent_name in config.teams:
-        team_config = config.teams[agent_name]
-        parts = [f"{agent_name}"]
-        if team_config.role:
-            parts.append(f"- {team_config.role}")
-        parts.append(f"- Team of agents: {', '.join(team_config.agents)}")
-        parts.append(f"- Collaboration mode: {team_config.mode}")
-        return "\n  ".join(parts)
-
-    # Check if agent exists
-    if agent_name not in config.agents:
-        return f"{agent_name}: Unknown agent or team"
-
-    agent_config = config.agents[agent_name]
-
-    # Start with agent name (not display name, for routing consistency)
-    parts = [f"{agent_name}"]
-    if agent_config.role:
-        parts.append(f"- {agent_config.role}")
-
-    # Add tools if any
-    effective_tools = config.get_agent_tools(agent_name)
-    if effective_tools:
-        tool_list = ", ".join(effective_tools)
-        parts.append(f"- Tools: {tool_list}")
-
-    # Add delegation targets if any
-    if agent_config.delegate_to:
-        delegate_list = ", ".join(agent_config.delegate_to)
-        parts.append(f"- Can delegate to: {delegate_list}")
-
-    # Add key instructions if any
-    if agent_config.instructions:
-        # Take first instruction as it's usually the most descriptive
-        first_instruction = agent_config.instructions[0]
-        if len(first_instruction) < _MAX_INSTRUCTION_LENGTH:  # Only include if reasonably short
-            parts.append(f"- {first_instruction}")
-
-    return "\n  ".join(parts)
 
 
 def get_agent_ids_for_room(
@@ -1376,3 +1282,20 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
         return config.agents[entity_name].rooms
 
     return []
+
+
+__all__ = [
+    "build_agent_tool_init_context",
+    "build_agent_toolkit",
+    "create_agent",
+    "create_session_storage",
+    "describe_agent",
+    "ensure_default_agent_workspaces",
+    "get_agent_ids_for_room",
+    "get_agent_session",
+    "get_agent_toolkit_names",
+    "get_rooms_for_entity",
+    "get_team_session",
+    "remove_run_by_event_id",
+    "show_tool_calls_for_agent",
+]

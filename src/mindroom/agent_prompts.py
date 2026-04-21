@@ -141,7 +141,6 @@ Agent: I'll create a Python function for email validation with proper error hand
 
 ```python
 import re
-from typing import bool
 
 def validate_email(email: str) -> bool:
     \"\"\"

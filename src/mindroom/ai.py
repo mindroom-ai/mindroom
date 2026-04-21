@@ -3,25 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
 from agno.db.base import SessionType
-from agno.models.anthropic import Claude
-from agno.models.cerebras import Cerebras
-from agno.models.deepseek import DeepSeek
-from agno.models.google import Gemini
-from agno.models.groq import Groq
 from agno.models.message import Message
 from agno.models.metrics import Metrics
-from agno.models.ollama import Ollama
-from agno.models.openai import OpenAIChat
-from agno.models.openrouter import OpenRouter
-from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
     RunCancelledEvent,
@@ -33,10 +21,8 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
+from mindroom import ai_runtime
 from mindroom.agents import create_agent
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -46,10 +32,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    runtime_env_path,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     prepare_agent_execution_context,
@@ -76,10 +59,9 @@ from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
-    install_llm_request_logging,
 )
 from mindroom.logging_config import get_logger
-from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
+from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.timing import DispatchPipelineTiming, timed
@@ -90,15 +72,12 @@ from mindroom.tool_system.events import (
     format_tool_completed_event,
     format_tool_started_event,
 )
-from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Generator, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
 
     from agno.agent import Agent
-    from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
-    from agno.models.base import Model
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
@@ -113,25 +92,11 @@ logger = get_logger(__name__)
 __all__ = [
     "AIStreamChunk",
     "ai_response",
-    "cleanup_queued_notice_state",
-    "get_model_instance",
-    "install_queued_message_notice_hook",
-    "queued_message_signal_context",
-    "scrub_queued_notice_session_context",
+    "build_matrix_run_metadata",
     "stream_agent_response",
 ]
-
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-type ModelRunInput = str | Sequence[Message]
 _AI_RUN_METADATA_VERSION = 1
-_QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
-_QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
-QUEUED_MESSAGE_NOTICE_TEXT = (
-    "[SYSTEM NOTICE] A new message from the user has arrived in this thread while you were working. "
-    "You should wrap up your current work and produce a final text response now. "
-    "Avoid further tool calls unless strictly necessary. "
-    "The new message will be handled in your next turn."
-)
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:
@@ -176,7 +141,7 @@ def _compose_current_turn_prompt(
 
 
 @dataclass(frozen=True)
-class PreparedAgentRun:
+class _PreparedAgentRun:
     """Prepared agent invocation state after history planning."""
 
     agent: Agent
@@ -192,277 +157,7 @@ class PreparedAgentRun:
     @property
     def run_input(self) -> list[Message]:
         """Return a deep-copied mutable message list for one provider call."""
-        return _copy_run_input(self.messages)
-
-
-def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
-    """Coerce legacy string input into canonical provider messages."""
-    if isinstance(run_input, str):
-        return [Message(role="user", content=run_input)]
-    return [message.model_copy(deep=True) for message in run_input]
-
-
-def _copy_run_input(run_input: ModelRunInput) -> list[Message]:
-    """Deep-copy canonical run input so retries can mutate safely."""
-    return _normalize_run_input(run_input)
-
-
-def _attach_media_to_run_input(
-    run_input: ModelRunInput,
-    media_inputs: MediaInputs,
-) -> list[Message]:
-    """Attach media to the current user message."""
-    run_messages = _copy_run_input(run_input)
-    current_message = run_messages[-1]
-    current_message.audio = media_inputs.audio
-    current_message.images = media_inputs.images
-    current_message.files = media_inputs.files
-    current_message.videos = media_inputs.videos
-    return run_messages
-
-
-def _append_inline_media_fallback_to_run_input(run_input: ModelRunInput) -> list[Message]:
-    """Append the inline-media fallback note to the current user turn."""
-    run_messages = _copy_run_input(run_input)
-    current_message = run_messages[-1]
-    current_text = current_message.content if isinstance(current_message.content, str) else ""
-    current_message.content = append_inline_media_fallback_prompt(current_text)
-    current_message.audio = None
-    current_message.images = None
-    current_message.files = None
-    current_message.videos = None
-    return run_messages
-
-
-class _SupportsQueuedMessageState(Protocol):
-    def has_pending_human_messages(self) -> bool: ...
-
-
-@dataclass
-class _QueuedMessageNoticeContext:
-    state: _SupportsQueuedMessageState | None
-
-
-_queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] = ContextVar(
-    "queued_message_notice_context",
-    default=None,
-)
-
-
-@contextmanager
-def queued_message_signal_context(
-    signal: _SupportsQueuedMessageState | None,
-) -> Generator[None, None, None]:
-    """Bind one queued-message signal to the current async task."""
-    token = _queued_message_notice_context.set(
-        _QueuedMessageNoticeContext(state=signal),
-    )
-    try:
-        yield
-    finally:
-        _queued_message_notice_context.reset(token)
-
-
-def _has_queued_notice_marker(message: Message) -> bool:
-    provider_data = message.provider_data
-    return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) is True
-
-
-def _is_queued_notice_message(message: Message) -> bool:
-    """Return whether one Agno message is the hidden queued-message notice."""
-    return _has_queued_notice_marker(message)
-
-
-def _strip_queued_notice_messages(messages: list[Message] | None) -> bool:
-    """Remove queued-message notices from one mutable message list."""
-    if not messages:
-        return False
-    filtered_messages = [message for message in messages if not _is_queued_notice_message(message)]
-    if len(filtered_messages) == len(messages):
-        return False
-    messages[:] = filtered_messages
-    return True
-
-
-def _append_queued_notice_if_needed(
-    *,
-    messages: list[Message],
-    function_call_results: Sequence[Message],
-) -> None:
-    _strip_queued_notice_messages(messages)
-    if any(message.stop_after_tool_call for message in function_call_results):
-        return
-    notice_context = _queued_message_notice_context.get()
-    if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
-        return
-    messages.append(
-        Message(
-            role="user",
-            content=QUEUED_MESSAGE_NOTICE_TEXT,
-            provider_data={_QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
-        ),
-    )
-
-
-def _cleanup_queued_notice_from_run_output(run_output: RunOutput | TeamRunOutput | None) -> bool:
-    """Remove queued-message notices from one returned run output."""
-    if run_output is None:
-        return False
-    changed = _strip_queued_notice_messages(run_output.messages)
-    if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
-        for member_response in run_output.member_responses:
-            if isinstance(member_response, RunOutput | TeamRunOutput):
-                changed = _cleanup_queued_notice_from_run_output(member_response) or changed
-    return changed
-
-
-def _load_session_for_cleanup(
-    raw_session: AgentSession | TeamSession | dict[str, object],
-    *,
-    session_type: SessionType,
-) -> AgentSession | TeamSession | None:
-    """Deserialize one stored Agno session for queued-notice cleanup."""
-    if isinstance(raw_session, dict):
-        session_mapping = cast("dict[str, Any]", raw_session)
-        return (
-            TeamSession.from_dict(session_mapping)
-            if session_type is SessionType.TEAM
-            else AgentSession.from_dict(session_mapping)
-        )
-    return raw_session
-
-
-def _strip_queued_notice_from_session(
-    session: AgentSession | TeamSession,
-) -> bool:
-    changed = False
-    for run in session.runs or []:
-        if isinstance(run, (RunOutput, TeamRunOutput)):
-            changed = _cleanup_queued_notice_from_run_output(run) or changed
-    return changed
-
-
-def strip_queued_notice_from_session_storage(
-    storage: SqliteDb,
-    session_id: str,
-    *,
-    session_type: SessionType = SessionType.AGENT,
-) -> bool:
-    """Remove queued-message notices from one persisted Agno session."""
-    raw_session = storage.get_session(session_id, session_type)
-    if raw_session is None:
-        return False
-    session = _load_session_for_cleanup(
-        cast("AgentSession | TeamSession | dict[str, object]", raw_session),
-        session_type=session_type,
-    )
-    if session is None:
-        return False
-    changed = _strip_queued_notice_from_session(session)
-    if changed:
-        storage.upsert_session(session)
-    return changed
-
-
-def cleanup_queued_notice_state(
-    *,
-    run_output: RunOutput | TeamRunOutput | None,
-    storage: SqliteDb | None,
-    session_id: str | None,
-    session_type: SessionType,
-    entity_name: str,
-) -> None:
-    """Strip queued-message notices from returned and persisted run state."""
-    _cleanup_queued_notice_from_run_output(run_output)
-    if storage is None or not session_id:
-        return
-    try:
-        strip_queued_notice_from_session_storage(
-            storage,
-            session_id,
-            session_type=session_type,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to strip queued-message notice from session history",
-            entity=entity_name,
-            session_id=session_id,
-            session_type=session_type.value,
-        )
-
-
-def scrub_queued_notice_session_context(
-    *,
-    scope_context: ScopeSessionContext | None,
-    entity_name: str,
-) -> None:
-    """Strip stale queued-message notices from the loaded session before replay."""
-    if scope_context is None or scope_context.session is None:
-        return
-    try:
-        if _strip_queued_notice_from_session(scope_context.session):
-            scope_context.storage.upsert_session(scope_context.session)
-    except Exception:
-        logger.exception(
-            "Failed to strip queued-message notice from loaded session history",
-            entity=entity_name,
-            session_id=scope_context.session.session_id,
-            session_type="team" if isinstance(scope_context.session, TeamSession) else "agent",
-        )
-
-
-def install_queued_message_notice_hook(model: Model) -> None:
-    """Append a hidden notice after tool results when a newer message is queued."""
-    try:
-        original_format_function_call_results = model.format_function_call_results
-        model_dict = vars(model)
-    except (AttributeError, TypeError):
-        return
-    if model_dict.get(_QUEUED_MESSAGE_NOTICE_HOOK_ATTR) is True:
-        return
-    setattr(model, _QUEUED_MESSAGE_NOTICE_HOOK_ATTR, True)
-
-    def _format_function_call_results_with_notice(
-        messages: list[Message],
-        function_call_results: list[Message],
-        compress_tool_results: bool = False,
-        **kwargs: object,
-    ) -> None:
-        original_format_function_call_results(
-            messages=messages,
-            function_call_results=function_call_results,
-            compress_tool_results=compress_tool_results,
-            **kwargs,
-        )
-        _append_queued_notice_if_needed(
-            messages=messages,
-            function_call_results=function_call_results,
-        )
-
-    def _handle_function_call_media_with_notice(
-        messages: list[Message],
-        function_call_results: list[Message],
-        send_media_to_model: bool = True,
-    ) -> None:
-        original_handle_function_call_media(
-            messages=messages,
-            function_call_results=function_call_results,
-            send_media_to_model=send_media_to_model,
-        )
-        # Agno appends follow-up media user messages after format_function_call_results(),
-        # so reapply the queued notice here to keep it as the final prompt message.
-        _append_queued_notice_if_needed(
-            messages=messages,
-            function_call_results=function_call_results,
-        )
-
-    model_dict["format_function_call_results"] = _format_function_call_results_with_notice
-    try:
-        original_handle_function_call_media = model._handle_function_call_media
-    except AttributeError:
-        return
-
-    model_dict["_handle_function_call_media"] = _handle_function_call_media_with_notice
+        return ai_runtime.copy_run_input(self.messages)
 
 
 def _empty_request_metric_totals() -> dict[str, int]:
@@ -551,11 +246,6 @@ class _PendingStreamingTool:
     trace_entry: ToolTraceEntry
     tool_call_id: str | None = None
     visible_tool_index: int | None = None
-
-
-def _canonical_provider(provider: str) -> str:
-    """Return normalized provider key for model dispatch."""
-    return provider.strip().lower().replace("-", "_")
 
 
 def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
@@ -811,165 +501,6 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     return {AI_RUN_METADATA_KEY: payload}
 
 
-def _create_model_for_provider(  # noqa: C901, PLR0912
-    provider: str,
-    model_id: str,
-    model_config: ModelConfig,
-    extra_kwargs: dict,
-    runtime_paths: RuntimePaths,
-) -> Model:
-    """Create a model instance for a specific provider.
-
-    Args:
-        provider: The AI provider name
-        model_id: The model identifier
-        model_config: The model configuration object
-        extra_kwargs: Additional keyword arguments for the model
-        runtime_paths: Explicit runtime context for provider credentials and host resolution.
-
-    Returns:
-        Instantiated model for the provider
-
-    Raises:
-        ValueError: If provider not supported
-
-    """
-    canonical_provider = _canonical_provider(provider)
-
-    if canonical_provider not in {"ollama", "vertexai_claude"} and "api_key" not in extra_kwargs:
-        api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-        if api_key:
-            extra_kwargs["api_key"] = api_key
-
-    if canonical_provider == "vertexai_claude":
-        if "project_id" not in extra_kwargs:
-            project_id = runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
-            if project_id:
-                extra_kwargs["project_id"] = project_id
-        if "region" not in extra_kwargs:
-            region = runtime_paths.env_value("CLOUD_ML_REGION")
-            if region:
-                extra_kwargs["region"] = region
-        if "base_url" not in extra_kwargs:
-            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
-            if base_url:
-                extra_kwargs["base_url"] = base_url
-        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
-        if "credentials" not in client_params and (
-            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        ):
-            google_auth = importlib.import_module("google.auth")
-            load_credentials_from_file = google_auth.load_credentials_from_file
-            credentials, _project_id = load_credentials_from_file(
-                str(google_application_credentials),
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            client_params["credentials"] = credentials
-        if client_params:
-            extra_kwargs["client_params"] = client_params
-
-    if canonical_provider in {"anthropic", "vertexai_claude"}:
-        extra_kwargs.setdefault("cache_system_prompt", True)
-        extra_kwargs.setdefault("extended_cache_time", True)
-
-    # Handle Ollama separately due to special host configuration
-    if canonical_provider == "ollama":
-        # Priority: model config > env/CredentialsManager > default
-        # This allows per-model host configuration in config.yaml
-        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
-        logger.debug("using_ollama_host", host=host)
-        return Ollama(id=model_id, host=host, **extra_kwargs)
-
-    # Handle OpenRouter separately due to API key capture timing issue
-    if canonical_provider == "openrouter":
-        # OpenRouter needs the API key passed explicitly because it captures
-        # the environment variable at import time, not at instantiation time
-        api_key = extra_kwargs.pop("api_key", None)
-        if not api_key:
-            api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-        if not api_key:
-            logger.warning("No OpenRouter API key found in environment or CredentialsManager")
-        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
-
-    # Map providers to their model classes for simple instantiation
-    provider_map: dict[str, type[Model]] = {
-        "openai": OpenAIChat,
-        "anthropic": Claude,
-        "gemini": Gemini,
-        "google": Gemini,
-        "vertexai_claude": VertexAIClaude,
-        "cerebras": Cerebras,
-        "groq": Groq,
-        "deepseek": DeepSeek,
-    }
-
-    model_class = provider_map.get(canonical_provider)
-    if model_class is not None:
-        return model_class(id=model_id, **extra_kwargs)
-
-    msg = f"Unsupported AI provider: {provider}"
-    raise ValueError(msg)
-
-
-def get_model_instance(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    model_name: str = "default",
-) -> Model:
-    """Get a model instance from config.yaml.
-
-    Args:
-        config: Application configuration
-        runtime_paths: Explicit runtime context for model credentials and env-backed settings.
-        model_name: Name of the model configuration to use (default: "default")
-
-    Returns:
-        Instantiated model
-
-    Raises:
-        ValueError: If model not found or provider not supported
-
-    """
-    if model_name not in config.models:
-        available = ", ".join(sorted(config.models.keys()))
-        msg = f"Unknown model: {model_name}. Available models: {available}"
-        raise ValueError(msg)
-
-    model_config = config.models[model_name]
-    provider = model_config.provider
-    model_id = model_config.id
-
-    logger.info("Using AI model", model=model_name, provider=provider, id=model_id)
-
-    # Get extra kwargs if specified
-    extra_kwargs = dict(model_config.extra_kwargs or {})
-
-    # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    model_creds = creds_manager.load_credentials(f"model:{model_name}")
-    model_api_key = model_creds.get("api_key") if model_creds else None
-
-    if model_api_key:
-        extra_kwargs["api_key"] = model_api_key
-
-    model = _create_model_for_provider(
-        provider,
-        model_id,
-        model_config,
-        extra_kwargs,
-        runtime_paths,
-    )
-    if config.debug.log_llm_requests:
-        install_llm_request_logging(
-            model,
-            agent_name=model_name,
-            debug_config=config.debug,
-            default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
-        )
-    install_vertex_claude_prompt_cache_hook(model)
-    return model
-
-
 def _normalized_string_list(values: object) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -1129,7 +660,7 @@ def _attempt_request_log_context(
     reply_to_event_id: str | None,
     prompt: str,
     model_prompt: str | None,
-    attempt_prompt: ModelRunInput,
+    attempt_prompt: ai_runtime.ModelRunInput,
     metadata: dict[str, object] | None,
 ) -> dict[str, object]:
     """Build request-log context for the exact prompt used by one provider attempt."""
@@ -1140,7 +671,7 @@ def _attempt_request_log_context(
         reply_to_event_id=reply_to_event_id,
         prompt=prompt,
         model_prompt=model_prompt,
-        full_prompt=render_prepared_messages_text(_normalize_run_input(attempt_prompt)),
+        full_prompt=render_prepared_messages_text(ai_runtime.copy_run_input(attempt_prompt)),
         metadata=metadata,
     )
 
@@ -1162,34 +693,10 @@ async def _stream_with_request_log_context[StreamEventT](
         yield event
 
 
-async def cached_agent_run(
-    agent: Agent,
-    run_input: ModelRunInput,
-    session_id: str,
-    *,
-    user_id: str | None = None,
-    run_id: str | None = None,
-    run_id_callback: Callable[[str], None] | None = None,
-    media: MediaInputs | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> RunOutput:
-    """Shared wrapper for one `agent.arun()` call."""
-    media_inputs = media or MediaInputs()
-    _note_attempt_run_id(run_id_callback, run_id)
-    prepared_input = _attach_media_to_run_input(run_input, media_inputs)
-    return await agent.arun(
-        prepared_input,
-        session_id=session_id,
-        user_id=user_id,
-        run_id=run_id,
-        metadata=metadata,
-    )
-
-
 @timed("model_request_to_completion")
 async def _run_cached_agent_attempt(
     agent: Agent,
-    run_input: ModelRunInput,
+    run_input: ai_runtime.ModelRunInput,
     session_id: str,
     *,
     user_id: str | None = None,
@@ -1201,7 +708,7 @@ async def _run_cached_agent_attempt(
 ) -> RunOutput:
     """Run one non-streaming Agno request with timing instrumentation."""
     del timing_scope
-    return await cached_agent_run(
+    return await ai_runtime.cached_agent_run(
         agent,
         run_input,
         session_id,
@@ -1257,7 +764,7 @@ async def _prepare_agent_and_prompt(
     include_openai_compat_guidance: bool = False,
     timing_scope: str | None = None,
     model_prompt: str | None = None,
-) -> PreparedAgentRun:
+) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
     Returns the prepared run input plus history bookkeeping for one agent turn.
@@ -1358,7 +865,7 @@ async def _prepare_agent_and_prompt(
         agent=agent_name,
         full_prompt=render_prepared_messages_text(run_messages),
     )
-    return PreparedAgentRun(
+    return _PreparedAgentRun(
         agent=agent,
         messages=run_messages,
         unseen_event_ids=unseen_event_ids,
@@ -1472,7 +979,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             execution_identity=execution_identity,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            scrub_queued_notice_session_context(
+            ai_runtime.scrub_queued_notice_session_context(
                 scope_context=scope_context,
                 entity_name=agent_name,
             )
@@ -1513,7 +1020,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
             if agent.model is not None:
-                install_queued_message_notice_hook(agent.model)
+                ai_runtime.install_queued_message_notice_hook(agent.model)
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1524,7 +1031,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 turn_recorder.set_run_metadata(metadata)
 
             response: RunOutput | None = None
-            attempt_prompt = _copy_run_input(run_input)
+            attempt_prompt = ai_runtime.copy_run_input(run_input)
             attempt_media_inputs = media_inputs
 
             try:
@@ -1566,7 +1073,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=str(e),
                             )
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1585,7 +1092,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=error_text,
                             )
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1597,7 +1104,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
                 assert response is not None
             finally:
-                cleanup_queued_notice_state(
+                ai_runtime.cleanup_queued_notice_state(
                     run_output=response,
                     storage=scope_context.storage if scope_context is not None else None,
                     session_id=session_id,
@@ -1904,7 +1411,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             execution_identity=execution_identity,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            scrub_queued_notice_session_context(
+            ai_runtime.scrub_queued_notice_session_context(
                 scope_context=scope_context,
                 entity_name=agent_name,
             )
@@ -1946,7 +1453,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
             if agent.model is not None:
-                install_queued_message_notice_hook(agent.model)
+                ai_runtime.install_queued_message_notice_hook(agent.model)
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1956,7 +1463,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
 
-            attempt_prompt = _copy_run_input(run_input)
+            attempt_prompt = ai_runtime.copy_run_input(run_input)
             attempt_media_inputs = media_inputs
             state = _StreamingAttemptState()
 
@@ -1989,7 +1496,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             metadata=metadata,
                         )
                         with bind_llm_request_log_context(**request_context):
-                            prepared_input = _attach_media_to_run_input(
+                            prepared_input = ai_runtime.attach_media_to_run_input(
                                 attempt_prompt,
                                 attempt_media_inputs,
                             )
@@ -2027,7 +1534,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             log_message="Retrying streaming AI response without inline media after validation error",
                             agent_name=agent_name,
                         ):
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -2036,7 +1543,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         return
 
                     if state.retry_requested:
-                        attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                        attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                         attempt_media_inputs = MediaInputs()
                         attempt_run_id = _next_retry_run_id(run_id)
                         continue
@@ -2133,7 +1640,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         completed_tools=state.completed_tools,
                     )
             finally:
-                cleanup_queued_notice_state(
+                ai_runtime.cleanup_queued_notice_state(
                     run_output=None,
                     storage=scope_context.storage if scope_context is not None else None,
                     session_id=session_id,

@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.agents import describe_agent
-from mindroom.ai import get_model_instance
+from mindroom import model_loading
+from mindroom.agent_descriptions import describe_agent
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
@@ -82,7 +82,7 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         # Get router model from config
         router_model_name = config.router.model
 
-        model = get_model_instance(config, runtime_paths, router_model_name)
+        model = model_loading.get_model_instance(config, runtime_paths, router_model_name)
         logger.info(
             "using_router_model",
             model_name=router_model_name,
@@ -154,3 +154,9 @@ async def suggest_agent_for_message(
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
     return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)
+
+
+__all__ = [
+    "suggest_agent",
+    "suggest_agent_for_message",
+]

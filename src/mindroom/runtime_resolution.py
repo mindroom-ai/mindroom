@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class _ResolvedAgentExecution:
+class ResolvedAgentExecution:
     """Resolved execution scope for one `(agent_name, execution_identity)` materialization."""
 
     agent_name: str
@@ -147,7 +147,7 @@ def resolve_agent_execution(
     agent_name: str,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-) -> _ResolvedAgentExecution:
+) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
     policy = resolve_agent_policy_from_data(
         agent_name,
@@ -168,7 +168,7 @@ def resolve_agent_execution(
         if resolved_worker_execution.worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
             raise ValueError(msg)
-    return _ResolvedAgentExecution(
+    return ResolvedAgentExecution(
         agent_name=agent_name,
         policy=policy,
         execution_scope=execution_scope,
@@ -291,3 +291,14 @@ def resolve_knowledge_binding(
             refresh_enabled and (agent_runtime.policy.request_scoped_knowledge_enabled or not start_watchers)
         ),
     )
+
+
+__all__ = [
+    "ResolvedAgentExecution",
+    "ResolvedAgentRuntime",
+    "ResolvedKnowledgeBinding",
+    "resolve_agent_execution",
+    "resolve_agent_runtime",
+    "resolve_knowledge_binding",
+    "resolve_private_requester_scope_root",
+]

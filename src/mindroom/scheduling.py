@@ -19,7 +19,7 @@ from cron_descriptor import get_description
 from croniter import croniter
 from pydantic import BaseModel, Field
 
-from mindroom.ai import get_model_instance
+from mindroom import model_loading
 from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
@@ -685,7 +685,7 @@ Examples of event/condition phrasing to include in the message (do not include t
 - @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.
 """
 
-    model = get_model_instance(config, runtime_paths, "default")
+    model = model_loading.get_model_instance(config, runtime_paths, "default")
 
     agent = Agent(
         name="WorkflowParser",

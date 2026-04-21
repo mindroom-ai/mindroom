@@ -40,6 +40,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope, ResolvedReplayPlan
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -3061,7 +3062,7 @@ class TestTeamCompletion:
     def test_team_member_materialization_failure_returns_friendly_500(self, team_app_client: TestClient) -> None:
         """Configured team failures should surface the user-facing materialization error."""
         with (
-            patch("mindroom.teams.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.model_loading.get_model_instance", return_value=MagicMock()),
             patch("mindroom.teams.get_agent_knowledge", return_value=None),
             patch(
                 "mindroom.teams.create_agent",
@@ -3483,7 +3484,7 @@ class TestTeamCompletion:
         )
         with (
             patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.teams.get_model_instance"),
+            patch("mindroom.model_loading.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             mock_create.return_value = MagicMock(name="GeneralAgent")
@@ -3499,7 +3500,7 @@ class TestTeamCompletion:
         """Coordinate mode sets delegate_to_all_members=False on Team."""
         with (
             patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.teams.get_model_instance"),
+            patch("mindroom.model_loading.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             mock_create.return_value = MagicMock(name="GeneralAgent")
@@ -3546,7 +3547,7 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.teams.get_model_instance"),
+            patch("mindroom.model_loading.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
@@ -3590,7 +3591,7 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.teams.get_model_instance", return_value="openai:test-model"),
+            patch("mindroom.model_loading.get_model_instance", return_value="openai:test-model"),
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
@@ -3598,6 +3599,54 @@ class TestTeamCompletion:
 
         assert team.num_history_runs is None
         assert team.num_history_messages is None
+
+    def test_build_team_closes_materialized_agents_when_resolution_rejects_team(self) -> None:
+        """Configured-team validation failures should close partially built member resources."""
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            router=RouterConfig(model="default"),
+            teams={
+                "coord_team": TeamConfig(
+                    display_name="Coord Team",
+                    role="Coordinated team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+        )
+        built_agent = _make_test_agent("GeneralAgent")
+
+        with (
+            patch(
+                "mindroom.api.openai_compat.materialize_exact_team_members",
+                return_value=ResolvedExactTeamMembers(
+                    requested_agent_names=["general"],
+                    agents=[built_agent],
+                    display_names=["GeneralAgent"],
+                    materialized_agent_names={"general"},
+                    failed_agent_names=[],
+                ),
+            ),
+            patch(
+                "mindroom.api.openai_compat.resolve_configured_team",
+                return_value=SimpleNamespace(
+                    outcome=openai_compat.TeamOutcome.NONE,
+                    reason="Team 'coord_team' cannot be materialized",
+                ),
+            ),
+            patch("mindroom.api.openai_compat.close_team_runtime_sqlite_dbs") as mock_close,
+        ):
+            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
+
+            with pytest.raises(ValueError, match="cannot be materialized"):
+                _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+
+        mock_close.assert_called_once_with(
+            agents=[built_agent],
+            team_db=None,
+            shared_scope_storage=None,
+        )
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""
@@ -3627,7 +3676,7 @@ class TestTeamCompletion:
         mock_knowledge = MagicMock()
         with (
             patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.teams.get_model_instance"),
+            patch("mindroom.model_loading.get_model_instance"),
             patch("mindroom.teams.get_agent_knowledge", return_value=mock_knowledge),
             patch("agno.team.Team.__init__", return_value=None),
         ):

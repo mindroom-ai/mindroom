@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.mindroom.ai import get_model_instance
+from mindroom.model_loading import get_model_instance
 from src.mindroom.config.main import Config
 from src.mindroom.constants import RuntimePaths, resolve_runtime_paths
 
@@ -69,7 +69,7 @@ class TestGeminiIntegration:
             ),
         }
 
-        with patch("src.mindroom.ai.get_api_key_for_provider") as mock_get_api_key:
+        with patch("mindroom.model_loading.get_api_key_for_provider") as mock_get_api_key:
             mock_get_api_key.return_value = "test-google-api-key"
             with patch.dict("os.environ", {}, clear=True):
                 get_model_instance(config, runtime_paths, "test_model")

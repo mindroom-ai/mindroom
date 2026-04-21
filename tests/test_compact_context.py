@@ -402,7 +402,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 
     with (
         patch(
-            "mindroom.ai.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -566,7 +566,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     summary_mock = AsyncMock()
     with (
         patch(
-            "mindroom.ai.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -617,7 +617,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     agent = _agent()
     with (
         patch(
-            "mindroom.ai.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -689,7 +689,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
 
     with (
         patch(
-            "mindroom.ai.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

@@ -233,7 +233,7 @@ class TestDynamicConfigUpdate:
         request = "whenever i get an email with title urgent, notify @callagent to send me a text"
 
         # Mock the AI model to return a proper workflow
-        with patch("mindroom.scheduling.get_model_instance") as mock_get_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             mock_agent = MagicMock()
             mock_response = MagicMock()
 

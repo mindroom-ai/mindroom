@@ -206,7 +206,7 @@ Expected outcome: Only authorized human reactions on actively tracked runs cance
 
 ## 6. Teams And Multi-Agent Collaboration
 
-Source anchors: `src/mindroom/teams.py`, `src/mindroom/team_runtime_resolution.py`, `src/mindroom/bot.py`.
+Source anchors: `src/mindroom/teams.py`, `src/mindroom/team_exact_members.py`, `src/mindroom/bot.py`.
 
 - [ ] `TEAM-001` Address a configured team that runs in `coordinate` mode.
 Expected outcome: The coordinator assigns distinct subtasks, synthesizes the outputs, and returns a final team response instead of raw duplicated member answers.
