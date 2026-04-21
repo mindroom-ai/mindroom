@@ -40,7 +40,12 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
-from mindroom.tool_approval import get_approval_store, initialize_approval_store, shutdown_approval_store
+from mindroom.tool_approval import (
+    SentApprovalEvent,
+    get_approval_store,
+    initialize_approval_store,
+    shutdown_approval_store,
+)
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -237,7 +242,7 @@ def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> A
 def _initialize_test_approval_store(runtime_paths: RuntimePaths) -> None:
     initialize_approval_store(
         runtime_paths,
-        sender=AsyncMock(return_value="$approval"),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost")),
         editor=AsyncMock(),
     )
 
@@ -1229,6 +1234,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
     client = MagicMock()
+    client.user_id = "@mindroom_code:localhost"
     client.room_send = AsyncMock(side_effect=mock_room_send)
     bot = MagicMock()
     bot.client = client
@@ -1294,6 +1300,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     orchestrator._capture_runtime_loop()
 
     client = MagicMock()
+    client.user_id = "@mindroom_code:localhost"
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
     )
@@ -1363,7 +1370,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     assert result.status == "success"
     assert result.result == "HI"
     client.room_send.assert_awaited_once()
-    assert editor.await_args.args[2]["status"] == "approved"
+    assert editor.await_args.args[3]["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -1384,7 +1391,7 @@ async def test_tool_approval_uses_transport_agent_for_detached_team_member_runs(
         ),
         runtime_paths,
     )
-    sender = AsyncMock(return_value="$approval")
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_general:localhost"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     dispatch_context = _dispatch_context(
         ToolExecutionIdentity(
@@ -1442,7 +1449,7 @@ async def test_tool_approval_uses_transport_agent_for_delegated_live_runs(tmp_pa
         ),
         runtime_paths,
     )
-    sender = AsyncMock(return_value="$approval")
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_general:localhost"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     delegated_runtime_context = replace(
         _tool_runtime_context(tmp_path),
@@ -1504,7 +1511,7 @@ async def test_tool_approval_rejects_internal_mindroom_user_requester(tmp_path: 
         ),
         runtime_paths,
     )
-    sender = AsyncMock(return_value="$approval")
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     internal_user_id = config.get_mindroom_user_id(runtime_paths)
     assert internal_user_id is not None
@@ -1764,7 +1771,7 @@ async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Pa
 async def test_tool_before_call_decline_short_circuits_tool_approval(tmp_path: Path) -> None:
     """Denied policy hooks should prevent approval cards from being shown."""
     runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value="$approval")
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     config = bind_runtime_paths(
         Config(

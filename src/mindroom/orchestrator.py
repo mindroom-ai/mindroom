@@ -57,6 +57,7 @@ from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
+    SentApprovalEvent,
     initialize_approval_store,
     shutdown_approval_store,
     sync_unsynced_approval_event_resolutions,
@@ -398,7 +399,7 @@ class MultiAgentOrchestrator:
         thread_id: str | None,
         agent_name: str,
         content: dict[str, Any],
-    ) -> str | None:
+    ) -> SentApprovalEvent | None:
         """Send one custom approval event into the active Matrix thread."""
         return await self._run_on_runtime_loop(
             lambda: self._send_approval_event_now(room_id, thread_id, agent_name, content),
@@ -410,7 +411,7 @@ class MultiAgentOrchestrator:
         thread_id: str | None,
         agent_name: str,
         content: dict[str, Any],
-    ) -> str | None:
+    ) -> SentApprovalEvent | None:
         """Send one custom approval event on the current loop."""
         bot = self._get_bot_by_agent_name(agent_name)
         if bot is None or bot.client is None:
@@ -424,7 +425,16 @@ class MultiAgentOrchestrator:
             content=send_content,
         )
         if isinstance(response, nio.RoomSendResponse):
-            return str(response.event_id)
+            sender_user_id = bot.client.user_id
+            if not isinstance(sender_user_id, str) or not sender_user_id:
+                logger.warning(
+                    "Approval sender bot is missing a Matrix user id",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                )
+                return None
+            return SentApprovalEvent(event_id=str(response.event_id), sender_user_id=sender_user_id)
         logger.warning(
             "Failed to send approval Matrix event",
             room_id=room_id,
@@ -438,27 +448,22 @@ class MultiAgentOrchestrator:
         self,
         room_id: str,
         event_id: str,
+        original_event_sender_user_id: str,
         new_content: dict[str, Any],
     ) -> bool:
         """Edit one previously sent approval event."""
         return await self._run_on_runtime_loop(
-            lambda: self._edit_approval_event_now(room_id, event_id, new_content),
+            lambda: self._edit_approval_event_now(room_id, event_id, original_event_sender_user_id, new_content),
         )
 
-    def _pick_room_bot_for_approval(self, room_id: str) -> AgentBot | TeamBot | None:
-        """Return one live room bot that can send and later clean up approval traffic."""
+    def _pick_room_bot_for_approval(self, room_id: str, sender_user_id: str) -> AgentBot | TeamBot | None:
+        """Return the live bot that originally sent the approval card."""
+        del room_id
         for bot in self.agent_bots.values():
             if not bot.running or bot.client is None:
                 continue
-            if room_id not in bot.client.rooms:
-                continue
             user_id = bot.client.user_id
-            if not isinstance(user_id, str) or not user_id:
-                continue
-            room = bot.client.rooms[room_id]
-            if not room.power_levels.can_user_send_message(user_id, "m.room.message"):
-                continue
-            if not room.power_levels.can_user_redact(user_id):
+            if user_id != sender_user_id:
                 continue
             return bot
         return None
@@ -467,10 +472,11 @@ class MultiAgentOrchestrator:
         self,
         room_id: str,
         event_id: str,
+        original_event_sender_user_id: str,
         new_content: dict[str, Any],
     ) -> bool:
         """Edit one previously sent approval event on the current loop."""
-        bot = self._pick_room_bot_for_approval(room_id)
+        bot = self._pick_room_bot_for_approval(room_id, original_event_sender_user_id)
         if bot is None or bot.client is None:
             return False
 

@@ -1559,7 +1559,7 @@ class AgentBot:
             correlation_id=event.event_id,
         )
 
-    async def _send_tool_approval_error_response(
+    async def _send_tool_approval_notice(
         self,
         *,
         room_id: str,
@@ -1567,28 +1567,27 @@ class AgentBot:
         thread_id: str | None,
         reason: str,
     ) -> None:
-        """Post one non-resolving approval-response error anchored to the original card."""
+        """Post one threaded notice anchored to the original approval card."""
         assert self.client is not None
-        relates_to: dict[str, object] = {"m.in_reply_to": {"event_id": approval_event_id}}
-        if thread_id is not None:
-            relates_to = {
-                "rel_type": "m.thread",
-                "event_id": thread_id,
-                "is_falling_back": True,
-                "m.in_reply_to": {"event_id": approval_event_id},
-            }
+        thread_root_event_id = thread_id or approval_event_id
+        relates_to: dict[str, object] = {
+            "rel_type": "m.thread",
+            "event_id": thread_root_event_id,
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": approval_event_id},
+        }
         response = await self.client.room_send(
             room_id=room_id,
-            message_type="io.mindroom.tool_approval_response",
+            message_type="m.room.message",
             content={
-                "status": "error",
-                "reason": reason,
+                "msgtype": "m.notice",
+                "body": reason,
                 "m.relates_to": relates_to,
             },
         )
         if not isinstance(response, nio.RoomSendResponse):
             self.logger.warning(
-                "Failed to send approval error response event",
+                "Failed to send approval notice",
                 room_id=room_id,
                 approval_event_id=approval_event_id,
                 response=str(response),
@@ -1624,7 +1623,7 @@ class AgentBot:
             return False
         result = await action(approval_manager)
         if result.error_reason is not None:
-            await self._send_tool_approval_error_response(
+            await self._send_tool_approval_notice(
                 room_id=room.room_id,
                 approval_event_id=approval_event_id,
                 thread_id=result.thread_id,

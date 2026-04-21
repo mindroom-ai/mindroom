@@ -12158,7 +12158,7 @@ class TestMultiAgentOrchestrator:
                     "arguments_preview": {"command": "echo hi"},
                     "arguments_preview_truncated": False,
                     "agent_name": "code",
-                    "transport_agent_name": "code",
+                    "original_event_sender_user_id": "@mindroom_general:localhost",
                     "room_id": "!room:localhost",
                     "thread_id": "$thread",
                     "requester_id": "@user:localhost",
@@ -12274,7 +12274,11 @@ class TestMultiAgentOrchestrator:
 
             assert updated is True
             editor.assert_awaited_once()
-            assert editor.await_args.args[:2] == ("!room:localhost", "$approval-event")
+            assert editor.await_args.args[:3] == (
+                "!room:localhost",
+                "$approval-event",
+                "@mindroom_general:localhost",
+            )
             assert request_path.exists() is False
         finally:
             await shutdown_approval_store()
