@@ -65,6 +65,15 @@ _SPECIAL_TOOLKIT_FUNCTION_NAMES = {
     ),
     "self_config": frozenset({"get_own_config", "update_own_config"}),
 }
+_TOOLKIT_INFRASTRUCTURE_FUNCTION_NAMES = frozenset(
+    {
+        "close",
+        "connect",
+        "get_async_functions",
+        "get_functions",
+        "register",
+    },
+)
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -307,11 +316,7 @@ def _collect_agent_toolkits(
     )
     toolkits: list[tuple[str, Toolkit]] = []
     build_errors: dict[str, Exception] = {}
-    attempted_tool_count = 0
-    value_error_count = 0
-    first_value_error: ValueError | None = None
     for tool_name in tool_names:
-        attempted_tool_count += 1
         try:
             toolkit = build_agent_toolkit(
                 tool_name=tool_name,
@@ -327,9 +332,6 @@ def _collect_agent_toolkits(
             toolkits.append((tool_name, toolkit))
         except ValueError as exc:
             build_errors[tool_name] = exc
-            if first_value_error is None:
-                first_value_error = exc
-            value_error_count += 1
             logger.warning(
                 "Failed to load tool for skill dispatch",
                 tool=tool_name,
@@ -344,8 +346,6 @@ def _collect_agent_toolkits(
                 agent=agent_name,
                 error=str(exc),
             )
-    if attempted_tool_count > 0 and first_value_error is not None and value_error_count == attempted_tool_count:
-        raise first_value_error
     return toolkits, build_errors
 
 
@@ -363,8 +363,11 @@ def _toolkit_declared_function_names(tool_name: str) -> frozenset[str]:
         return frozenset()
     return frozenset(
         name
-        for name, value in vars(toolkit_type).items()
-        if callable(value) and not name.startswith("_") and name != "__init__"
+        for name, value in inspect.getmembers(toolkit_type, callable)
+        if callable(value)
+        and not name.startswith("_")
+        and name != "__init__"
+        and name not in _TOOLKIT_INFRASTRUCTURE_FUNCTION_NAMES
     )
 
 

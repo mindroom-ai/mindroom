@@ -11,6 +11,7 @@ import pytest
 from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
+from mindroom.agents import build_agent_toolkit
 from mindroom.commands.handler import (
     _collect_agent_toolkits,
     _run_skill_command_tool,
@@ -1524,6 +1525,76 @@ async def test_skill_command_tool_dispatch_surfaces_requested_qualified_toolkit_
         TOOL_METADATA.update(original_metadata)
 
     assert result == "❌ Tool 'broken_lookup_toolkit.lookup' failed: Credentialed API key is required"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_surfaces_requested_inherited_tool_failure_when_all_toolkits_fail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unqualified function dispatch should still find inherited toolkit methods after all builds fail."""
+
+    class BaseLookupTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="base_lookup_tools", tools=[self.lookup])
+
+        def lookup(self, query: str) -> str:
+            return query
+
+    class BrokenLookupTools(BaseLookupTools):
+        def __init__(self) -> None:
+            msg = "lookup toolkit failed"
+            raise ValueError(msg)
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="broken_lookup_toolkit",
+            display_name="Broken Lookup",
+            description="Broken lookup tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def broken_lookup_toolkit() -> type[Toolkit]:
+            return BrokenLookupTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["self_config", "broken_lookup_toolkit"]
+        config.agents["code"].include_default_tools = False
+        runtime_paths = _runtime_paths(tmp_path)
+        original_build_agent_toolkit = build_agent_toolkit
+
+        def fake_build_agent_toolkit(*, tool_name: str, **kwargs: object) -> Toolkit | None:
+            if tool_name == "self_config":
+                msg = "self_config failed first"
+                raise ValueError(msg)
+            return original_build_agent_toolkit(tool_name=tool_name, **kwargs)
+
+        monkeypatch.setattr("mindroom.commands.handler.build_agent_toolkit", fake_build_agent_toolkit)
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="lookup",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=runtime_paths,
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "❌ Tool 'lookup' failed: lookup toolkit failed"
 
 
 def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:
