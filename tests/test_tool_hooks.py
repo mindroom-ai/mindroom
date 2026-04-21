@@ -1490,6 +1490,56 @@ async def test_tool_approval_uses_transport_agent_for_delegated_live_runs(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_tool_approval_rejects_internal_mindroom_user_requester(tmp_path: Path) -> None:
+    """Internal system dispatches should fail fast instead of creating an unresolvable approval."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value="$approval")
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+    internal_user_id = config.get_mindroom_user_id(runtime_paths)
+    assert internal_user_id is not None
+    internal_execution_identity = replace(_execution_identity(), requester_id=internal_user_id)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(internal_execution_identity),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    next_func = AsyncMock(return_value="should not run")
+    with tool_execution_identity(internal_execution_identity):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert next_func.await_count == 0
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: read_file\n"
+        "Reason: Tool approval requires a human requester.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    sender.assert_not_awaited()
+    store = get_approval_store()
+    assert store is not None
+    assert store.list_pending() == []
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_context(tmp_path: Path) -> None:
     """Nested tool execution should stay attributed to the bridge agent, not the parent runtime context."""
     before_seen: list[str] = []

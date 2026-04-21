@@ -958,6 +958,8 @@ def resolve_tool_approval_approver(
         return None
     if requester_id in config.bot_accounts:
         return None
+    if requester_id == config.get_mindroom_user_id(runtime_paths):
+        return None
     return requester_id
 
 
