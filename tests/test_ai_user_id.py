@@ -1932,7 +1932,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     assert event_id is None
     assert model_prompts
     assert model_prompts[0] != "Hello"
-    assert model_prompts[0].startswith('User: <msg from="@alice:localhost">')
+    assert 'Current message:\n<msg from="@alice:localhost">' in model_prompts[0]
     assert "Hello" in model_prompts[0]
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
