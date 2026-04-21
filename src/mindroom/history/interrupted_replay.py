@@ -15,7 +15,12 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agents import get_agent_session, get_team_session
-from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY
+from mindroom.constants import (
+    MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+)
 from mindroom.tool_system.events import ToolTraceEntry, render_tool_trace_for_context
 
 if TYPE_CHECKING:
@@ -42,8 +47,30 @@ class InterruptedReplaySnapshot:
     interrupted_tools: tuple[ToolTraceEntry, ...]
     seen_event_ids: tuple[str, ...]
     source_event_id: str | None
+    source_event_ids: tuple[str, ...]
+    source_event_prompts: tuple[tuple[str, str], ...]
     response_event_id: str | None
     interruption_reason: str
+
+
+def _normalized_string_tuple(values: object) -> tuple[str, ...]:
+    if not isinstance(values, list):
+        return ()
+    normalized: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
+
+
+def _normalized_prompt_items(values: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(values, dict):
+        return ()
+    normalized: list[tuple[str, str]] = []
+    for key, value in values.items():
+        if isinstance(key, str) and key and isinstance(value, str):
+            normalized.append((key, value))
+    return tuple(normalized)
 
 
 def _render_interrupted_tool_trace(events: Sequence[ToolTraceEntry]) -> str:
@@ -82,6 +109,10 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
     }
     if snapshot.source_event_id is not None:
         metadata[MATRIX_EVENT_ID_METADATA_KEY] = snapshot.source_event_id
+    if snapshot.source_event_ids:
+        metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = list(snapshot.source_event_ids)
+    if snapshot.source_event_prompts:
+        metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(snapshot.source_event_prompts)
     if snapshot.response_event_id is not None:
         metadata[_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = snapshot.response_event_id
     return metadata
@@ -135,13 +166,10 @@ def build_interrupted_replay_snapshot(
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state."""
     metadata = run_metadata if isinstance(run_metadata, Mapping) else {}
-    raw_seen_event_ids = metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
-    seen_event_ids = (
-        tuple(event_id for event_id in raw_seen_event_ids if isinstance(event_id, str) and event_id)
-        if isinstance(raw_seen_event_ids, list)
-        else ()
-    )
+    seen_event_ids = _normalized_string_tuple(metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY))
     source_event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
+    source_event_ids = _normalized_string_tuple(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
+    source_event_prompts = _normalized_prompt_items(metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY))
     raw_response_event_id = response_event_id or metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     return InterruptedReplaySnapshot(
         user_message=(user_message or "").strip(),
@@ -150,6 +178,8 @@ def build_interrupted_replay_snapshot(
         interrupted_tools=tuple(interrupted_tools),
         seen_event_ids=seen_event_ids,
         source_event_id=source_event_id if isinstance(source_event_id, str) and source_event_id else None,
+        source_event_ids=source_event_ids,
+        source_event_prompts=source_event_prompts,
         response_event_id=(
             raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
         ),

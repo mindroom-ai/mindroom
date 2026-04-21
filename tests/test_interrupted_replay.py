@@ -66,6 +66,8 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_an
         ),
         seen_event_ids=("e1", "e2"),
         source_event_id="e1",
+        source_event_ids=(),
+        source_event_prompts=(),
         response_event_id="$reply",
         interruption_reason="user_cancelled",
     )
@@ -105,6 +107,8 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
         interrupted_tools=(),
         seen_event_ids=("e1", "e2"),
         source_event_id="e1",
+        source_event_ids=(),
+        source_event_prompts=(),
         response_event_id="$reply",
         interruption_reason="user_cancelled",
     )
@@ -121,6 +125,42 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
         "matrix_event_id": "e1",
         "matrix_response_event_id": "$reply",
         "matrix_seen_event_ids": ["e1", "e2"],
+        "mindroom_original_status": "cancelled",
+        "mindroom_replay_state": "interrupted",
+    }
+
+
+def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> None:
+    """Interrupted replay runs should round-trip the same coalesced metadata as completed runs."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        partial_text="Half done",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={
+            "matrix_event_id": "$anchor",
+            "matrix_seen_event_ids": ["$first", "$anchor"],
+            "matrix_source_event_ids": ["$first", "$anchor"],
+            "matrix_source_event_prompts": {"$first": "first", "$anchor": "anchor"},
+        },
+        response_event_id="$reply",
+        interruption_reason="user_cancelled",
+    )
+
+    run = build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-123",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert run.metadata == {
+        "matrix_event_id": "$anchor",
+        "matrix_response_event_id": "$reply",
+        "matrix_seen_event_ids": ["$first", "$anchor"],
+        "matrix_source_event_ids": ["$first", "$anchor"],
+        "matrix_source_event_prompts": {"$first": "first", "$anchor": "anchor"},
         "mindroom_original_status": "cancelled",
         "mindroom_replay_state": "interrupted",
     }
