@@ -1465,7 +1465,7 @@ class AgentBot:
         if transport_agent_name is None:
             return False
         if transport_agent_name != self.agent_name:
-            return True
+            return self._approval_transport_bot_is_live(transport_agent_name)
 
         return await self._handle_tool_approval_action(
             room=room,
@@ -1478,6 +1478,13 @@ class AgentBot:
                 transport_agent_name=self.agent_name,
             ),
         )
+
+    def _approval_transport_bot_is_live(self, transport_agent_name: str) -> bool:
+        """Return whether the approval's transport bot still exists in the live registry."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            return True
+        return transport_agent_name in orchestrator.agent_bots
 
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""

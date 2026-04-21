@@ -1865,6 +1865,41 @@ async def test_other_bot_skips_tool_approval_reply_instead_of_treating_it_as_cha
 
 
 @pytest.mark.asyncio
+async def test_other_bot_falls_through_when_approval_transport_bot_is_gone(tmp_path: Path) -> None:
+    """Replies should not be swallowed after hot reload removes the approval transport bot."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    other_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    other_bot.orchestrator = MagicMock(agent_bots={"general": other_bot})
+    other_bot._turn_controller.handle_text_event = AsyncMock()
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    event = _reply_event(event_id="$reply", body="deny this")
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(other_bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await other_bot._on_message(room, event)
+
+    assert task.done() is False
+    assert other_bot._turn_controller.handle_text_event.await_count == 1
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
+
+
+@pytest.mark.asyncio
 async def test_requester_can_resolve_approval_when_local_reply_policy_denies(tmp_path: Path) -> None:
     """Approval resolution should still work for the stored requester despite reply-policy changes."""
     runtime_paths = test_runtime_paths(tmp_path)
