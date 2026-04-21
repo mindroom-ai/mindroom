@@ -43,6 +43,7 @@ from mindroom.teams import (
     TeamOutcome,
     build_materialized_team_instance,
     format_team_response,
+    is_cancelled_run_output,
     is_errored_run_output,
     materialize_exact_team_members,
     prepare_materialized_team_execution,
@@ -1181,6 +1182,11 @@ def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
     return "\n\n".join(parts) if parts else str(response.content or "")
 
 
+def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether a fallback team output ended in a terminal non-success state."""
+    return is_errored_run_output(response) or is_cancelled_run_output(response)
+
+
 async def _prepare_openai_team_run_input(
     *,
     scope_context: ScopeSessionContext | None,
@@ -1277,11 +1283,11 @@ async def _non_stream_team_completion(
             except Exception:
                 logger.exception("Team execution failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
-            if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
+            if isinstance(response, (TeamRunOutput, RunOutput)) and _is_failed_team_output(response):
                 logger.warning(
-                    "Team response returned error",
+                    "Team response returned terminal failure",
                     team=team_name,
-                    error=str(response.content or "Unknown team error"),
+                    error=str(response.content or "Unknown team failure"),
                 )
                 return _error_response(500, "Team execution failed", error_type="server_error")
             response_text = (
@@ -1415,9 +1421,9 @@ async def _stream_team_completion(  # noqa: C901
         if first_event is None:
             await _cleanup()
             return _error_response(500, "Team returned empty response", error_type="server_error")
-        first_error = _extract_team_stream_error(first_event)
+        first_error = _extract_team_stream_failure(first_event)
         if first_error is not None:
-            logger.warning("Team streaming returned error", team=team_name, error=first_error)
+            logger.warning("Team streaming returned terminal failure", team=team_name, error=first_error)
             await _cleanup()
             return _error_response(500, "Team execution failed", error_type="server_error")
 
@@ -1449,13 +1455,13 @@ async def _stream_team_completion(  # noqa: C901
         raise
 
 
-def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput) -> str | None:
-    """Extract explicit error text from a team stream event."""
+def _extract_team_stream_failure(event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput) -> str | None:
+    """Extract explicit terminal-failure text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
-    if isinstance(event, (TeamRunOutput, RunOutput)) and is_errored_run_output(event):
+    if isinstance(event, (TeamRunOutput, RunOutput)) and _is_failed_team_output(event):
         formatted_output = _format_team_output(event).strip()
-        return formatted_output or "Unknown team error"
+        return formatted_output or "Unknown team failure"
     return None
 
 
@@ -1535,8 +1541,8 @@ async def _team_stream_event_generator(
     # 3. Remaining events
     try:
         async for event in stream:
-            if _extract_team_stream_error(event) is not None:
-                logger.warning("Team stream emitted error event", team=team_name)
+            if _extract_team_stream_failure(event) is not None:
+                logger.warning("Team stream emitted terminal failure", team=team_name)
                 pending = _finalize_pending_tools(tool_state)
                 if pending:
                     yield _chunk(pending)
