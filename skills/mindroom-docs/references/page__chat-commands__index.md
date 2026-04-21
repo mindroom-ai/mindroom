@@ -202,7 +202,7 @@ Force-reload every configured plugin from disk. Admin-only.
 !reload-plugins
 ```
 
-Plugins are also auto-reloaded on file save (~1s after save) — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details. This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
+Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details. This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
 
 **Reply format:**
 

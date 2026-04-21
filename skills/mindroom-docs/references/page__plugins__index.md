@@ -385,7 +385,7 @@ Plugins can ship typed event hooks for message enrichment, response transformati
 
 ## Live development (hot reload)
 
-Plugins hot-reload automatically. When you edit any file inside a configured plugin directory, MindRoom detects the change within about one second, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code. No service restart and no agent session disruption.
+Plugins hot-reload automatically. When you edit any file inside a configured plugin directory, MindRoom notices the change on the next poll, waits out the debounce window, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code. In practice the new code is usually live about 1-2 seconds after a save. No service restart and no agent session disruption.
 
 ### How it works
 
@@ -407,7 +407,7 @@ journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload com
 #    The new code path is live.
 ```
 
-You can break and fix a plugin freely. A broken save can raise an import or runtime error, deactivate the affected plugin set, and the next valid save reloads it successfully. There is no quarantine, failure threshold, or cooldown. Each save just reloads.
+You can break and fix a plugin freely. A broken save that prevents reload, such as an import error or plugin validation error, can deactivate the affected plugin set, and the next valid save reloads it successfully. A hook that only raises at runtime is different: that failure is logged for that event, and the hook is tried again on the next matching event. There is no quarantine, failure threshold, or cooldown. Each save just reloads.
 
 ### Manual reload
 
