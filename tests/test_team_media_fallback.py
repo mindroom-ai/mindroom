@@ -563,6 +563,196 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
 
 
 @pytest.mark.asyncio
+async def test_team_response_scrubs_queued_notices_after_run_exception() -> None:
+    """Failed team runs should still remove hidden queued-message notices from history."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-queued-error",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        scope_context.storage.upsert_session(scope_context.session)
+
+    prepared_scope_context = None
+    team_id = "team_general"
+    mock_team = _make_test_team(name="General Team", team_id=team_id)
+    boom_error = "boom"
+
+    async def fake_arun(*_args: object, **_kwargs: object) -> TeamRunOutput:
+        assert prepared_scope_context is not None
+        mock_team.db = prepared_scope_context.storage
+        assert prepared_scope_context.session is not None
+        _cleanup_and_store(
+            mock_team,
+            TeamRunOutput(
+                run_id="run-error",
+                team_id=team_id,
+                team_name="General Team",
+                session_id="session-queued-error",
+                content="intermediate response",
+                messages=[_queued_notice_message()],
+                status=RunStatus.completed,
+            ),
+            prepared_scope_context.session,
+        )
+        raise RuntimeError(boom_error)
+
+    mock_team.arun = AsyncMock(side_effect=fake_arun)
+
+    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> PreparedExecutionContext:
+        nonlocal prepared_scope_context
+        scope_context = kwargs["scope_context"]
+        assert scope_context is not None
+        assert scope_context.session is not None
+        prepared_scope_context = scope_context
+        assert not any(_has_queued_notice(run.messages) for run in scope_context.session.runs or [])
+        return _prepared_team_execution_context(final_prompt="Analyze this.")
+
+    with (
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch(
+            "mindroom.teams.core.prepare_bound_team_execution_context",
+            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+        ),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-queued-error",
+        )
+
+    assert "boom" in response
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-queued-error",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert not any(_has_queued_notice(run.messages) for run in scope_context.session.runs or [])
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_scrubs_queued_notices_after_stream_exception() -> None:
+    """Streaming team failures should still scrub hidden queued-message notices."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-stream-queued-error",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        scope_context.storage.upsert_session(scope_context.session)
+
+    prepared_scope_context = None
+    team_id = "team_general"
+    mock_team = _make_test_team(name="General Team", team_id=team_id)
+    boom_error = "boom"
+
+    async def failing_raw_stream() -> AsyncIterator[object]:
+        if False:
+            yield None
+        assert prepared_scope_context is not None
+        mock_team.db = prepared_scope_context.storage
+        assert prepared_scope_context.session is not None
+        _cleanup_and_store(
+            mock_team,
+            TeamRunOutput(
+                run_id="run-stream-error",
+                team_id=team_id,
+                team_name="General Team",
+                session_id="session-stream-queued-error",
+                content="intermediate response",
+                messages=[_queued_notice_message()],
+                status=RunStatus.completed,
+            ),
+            prepared_scope_context.session,
+        )
+        raise RuntimeError(boom_error)
+
+    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> PreparedExecutionContext:
+        nonlocal prepared_scope_context
+        scope_context = kwargs["scope_context"]
+        assert scope_context is not None
+        assert scope_context.session is not None
+        prepared_scope_context = scope_context
+        assert not any(_has_queued_notice(run.messages) for run in scope_context.session.runs or [])
+        return _prepared_team_execution_context(final_prompt="Analyze this.")
+
+    async def fake_team_response_stream_raw(**_kwargs: object) -> AsyncIterator[object]:
+        return failing_raw_stream()
+
+    with (
+        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch(
+            "mindroom.teams.core.prepare_bound_team_execution_context",
+            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+        ),
+        patch(
+            "mindroom.teams.core._team_response_stream_raw",
+            new=AsyncMock(side_effect=fake_team_response_stream_raw),
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[config.get_ids(runtime_paths)["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                session_id="session-stream-queued-error",
+            )
+        ]
+
+    assert "boom" in "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-stream-queued-error",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert not any(_has_queued_notice(run.messages) for run in scope_context.session.runs or [])
+
+
+@pytest.mark.asyncio
 async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     """Successful Matrix team runs should mark the triggering and unseen events as consumed."""
     config = _build_test_config()
