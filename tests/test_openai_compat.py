@@ -3317,6 +3317,50 @@ class TestTeamCompletion:
         run_input = mock_team.arun.call_args.args[0]
         assert run_input == "user: Start\n\nassistant: Ack\n\nFollow-up"
 
+    def test_team_non_streaming_preserves_full_request_history_for_ad_hoc_team_runs(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """Ad hoc team runs must not apply Matrix-specific truncation to request history."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        long_body = "L" * 250
+        request_messages: list[dict[str, str]] = [
+            {"role": "user", "content": "msg 0"},
+            {"role": "assistant", "content": long_body},
+        ]
+        request_messages.extend(
+            {
+                "role": "user" if idx % 2 == 0 else "assistant",
+                "content": "Final prompt" if idx == 34 else f"msg {idx}",
+            }
+            for idx in range(2, 35)
+        )
+
+        mock_team = _make_test_team()
+        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
+        mock_team.add_history_to_context = True
+        mock_team.num_history_runs = 3
+        mock_team.num_history_messages = None
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": request_messages},
+            )
+
+        assert response.status_code == 200
+        run_input = mock_team.arun.call_args.args[0]
+        assert "user: msg 0" in run_input
+        assert f"assistant: {long_body}" in run_input
+        assert run_input.endswith("Final prompt")
+
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(
         self,
         team_app_client: TestClient,

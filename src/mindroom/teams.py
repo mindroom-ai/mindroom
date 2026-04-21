@@ -40,6 +40,7 @@ from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
+    ThreadHistoryRenderLimits,
     prepare_bound_team_execution_context,
 )
 from mindroom.history.runtime import (
@@ -92,6 +93,11 @@ _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in t
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
 _TeamStreamChunk = str | StructuredStreamChunk
 _NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
+_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
+    max_messages=30,
+    max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+    missing_sender_label="Unknown",
+)
 
 
 class TeamMode(str, Enum):
@@ -1316,6 +1322,7 @@ async def prepare_materialized_team_execution(
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     current_sender_id: str | None = None,
+    thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
     scrub_queued_notice_session_context(
@@ -1346,9 +1353,7 @@ async def prepare_materialized_team_execution(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         compaction_outcomes_collector=compaction_outcomes_collector,
-        fallback_max_messages=30,
-        fallback_max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
-        fallback_missing_sender_label="Unknown",
+        thread_history_render_limits=thread_history_render_limits,
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
@@ -1456,6 +1461,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 current_sender_id=user_id,
+                thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             )
             prepared_prompt = prepared_execution.prepared_prompt
             run_metadata = prepared_execution.run_metadata
@@ -1756,6 +1762,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 current_sender_id=user_id,
+                thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             )
             prepared_run_input = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids
