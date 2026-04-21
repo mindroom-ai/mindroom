@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 ApprovalAction = Literal["auto_approve", "require_approval"]
 _ALLOWED_APPROVAL_ACTIONS = {"auto_approve", "require_approval"}
+_MAX_TIMEOUT_DAYS = 36500.0
 
 
 def _coerce_positive_float(value: object) -> float | None:
@@ -32,6 +33,9 @@ def _validate_positive_timeout_days(timeout_days: float | None, *, field_name: s
         return
     if not math.isfinite(timeout_days) or timeout_days <= 0:
         msg = f"{field_name} must be a finite number greater than 0"
+        raise ValueError(msg)
+    if timeout_days > _MAX_TIMEOUT_DAYS:
+        msg = f"{field_name} must be at most {_MAX_TIMEOUT_DAYS:g}"
         raise ValueError(msg)
 
 

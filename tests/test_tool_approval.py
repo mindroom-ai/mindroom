@@ -431,10 +431,22 @@ def test_config_rejects_non_finite_tool_approval_timeout_days() -> None:
         )
 
 
+def test_config_rejects_unrepresentable_tool_approval_timeout_days() -> None:
+    """Config validation should reject approval windows that would overflow datetime arithmetic."""
+    with pytest.raises(ValidationError, match="tool_approval.timeout_days must be at most 36500"):
+        Config(
+            **_base_config_kwargs(),
+            tool_approval={"timeout_days": 36501},
+        )
+
+
 def test_programmatic_tool_approval_models_reject_invalid_values() -> None:
     """Direct model construction should enforce the same approval validation rules."""
     with pytest.raises(ValidationError, match="tool_approval.timeout_days must be a finite number greater than 0"):
         ToolApprovalConfig(timeout_days=float("nan"))
+
+    with pytest.raises(ValidationError, match="tool_approval.timeout_days must be at most 36500"):
+        ToolApprovalConfig(timeout_days=36501)
 
     with pytest.raises(ValidationError, match="tool_approval.rules\\[\\]\\.match must not be empty"):
         ApprovalRuleConfig(match="", action="require_approval")
