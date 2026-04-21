@@ -250,3 +250,11 @@ def test_get_command_help() -> None:
     edit_help = get_command_help("edit_schedule")
     assert "Edit Schedule Command" in edit_help
     assert "edit_schedule" in edit_help
+
+    reload_help = get_command_help("reload-plugins")
+    assert "Reload Plugins Command" in reload_help
+    assert "!reload-plugins" in reload_help
+    assert "Admin only" in reload_help
+
+    reload_help_alias = get_command_help("reload_plugins")
+    assert reload_help_alias == reload_help

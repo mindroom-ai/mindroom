@@ -588,6 +588,53 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
     assert all(".pytest_cache" not in path.parts for path in changed_paths)
 
 
+@pytest.mark.asyncio
+async def test_manual_plugin_reload_consumes_pending_watcher_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A manual reload should consume the current dirty save so the watcher does not reload it again."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.05)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    reload_call_count = 0
+
+    def record_reload(config: Config, runtime_paths: object) -> PluginReloadResult:
+        nonlocal reload_call_count
+        del config, runtime_paths
+        reload_call_count += 1
+        return PluginReloadResult(HookRegistry.empty(), ("demo",), 0)
+
+    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        with patch("mindroom.orchestrator.reload_plugins", side_effect=record_reload):
+            hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+            await asyncio.sleep(0.02)
+            await orchestrator.reload_plugins_now(source="command")
+            await asyncio.sleep(0.12)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    assert reload_call_count == 1
+
+
 def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
     """Plugin tree snapshots should ignore Git metadata files inside watched repos."""
     plugin_root = tmp_path / "plugins" / "demo"

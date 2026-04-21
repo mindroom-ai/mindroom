@@ -276,6 +276,18 @@ Notes:
 - Skills must be enabled on the target agent and marked `user-invocable: true`.
 - When a skill uses `command-dispatch: tool`, the tool runs directly with raw args."""
 
+    if topic in {"reload-plugins", "reload_plugins"}:
+        return """**Reload Plugins Command**
+
+Usage: `!reload-plugins` - Force-reload all configured plugins from disk
+
+Alternative syntax: `!reload_plugins`
+
+Notes:
+- Admin only. Caller must be in `authorization.global_users`.
+- Use this when you want to force a plugin reload immediately instead of waiting for the file watcher.
+- The reply shows the active plugin set and the count of cancelled background tasks."""
+
     if topic in {"list_schedules", "inspect_schedules"}:
         return """**List Schedules Command**
 

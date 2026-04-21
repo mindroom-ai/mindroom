@@ -224,6 +224,7 @@ class MultiAgentOrchestrator:
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
+    _plugin_watch_state_revision: int = field(default=0, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
     def __post_init__(self) -> None:
@@ -739,6 +740,31 @@ class MultiAgentOrchestrator:
         _sync_plugin_root_snapshots(configured_roots, self._plugin_watch_last_snapshot_by_root)
         return configured_roots
 
+    def _replace_plugin_watch_snapshots(
+        self,
+        configured_roots: tuple[Path, ...],
+        root_snapshots: dict[Path, dict[Path, int]],
+    ) -> None:
+        """Replace watcher baselines and clear any stale pending dirty state."""
+        _replace_plugin_root_snapshots(
+            configured_roots,
+            root_snapshots,
+            self._plugin_watch_last_snapshot_by_root,
+        )
+        self._plugin_watch_state_revision += 1
+
+    def _refresh_plugin_watch_state(self, config: Config | None = None) -> tuple[Path, ...]:
+        """Capture fresh watcher baselines for the current plugin roots."""
+        active_config = self.config if config is None else config
+        configured_roots = (
+            get_configured_plugin_roots(active_config, self.runtime_paths) if active_config is not None else ()
+        )
+        self._replace_plugin_watch_snapshots(
+            configured_roots,
+            _capture_plugin_root_snapshots(configured_roots),
+        )
+        return configured_roots
+
     async def reload_plugins_now(
         self,
         *,
@@ -764,9 +790,11 @@ class MultiAgentOrchestrator:
                     self.runtime_paths,
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
+                self._refresh_plugin_watch_state(config)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
+            self._refresh_plugin_watch_state(config)
             logger.info(
                 "Plugin reload complete",
                 source=source,
@@ -801,10 +829,9 @@ class MultiAgentOrchestrator:
                 prepared_plugin_reload,
                 cancel_existing_tasks=True,
             ).hook_registry
-            _replace_plugin_root_snapshots(
+            self._replace_plugin_watch_snapshots(
                 prepared_plugin_roots,
                 prepared_plugin_root_snapshots,
-                self._plugin_watch_last_snapshot_by_root,
             )
             self._activate_hook_registry(new_hook_registry)
             return pre_stopped_mcp_entities
@@ -1646,6 +1673,7 @@ async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
         await asyncio.sleep(0.1)
 
     configured_roots = orchestrator._sync_plugin_watch_roots()
+    watch_state_revision = orchestrator._plugin_watch_state_revision
 
     while orchestrator.running:
         await asyncio.sleep(file_watcher._WATCH_SCAN_INTERVAL_SECONDS)
@@ -1656,6 +1684,10 @@ async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
                 continue
 
             configured_roots = orchestrator._sync_plugin_watch_roots(config)
+            if watch_state_revision != orchestrator._plugin_watch_state_revision:
+                pending_changes.clear()
+                last_change_at = None
+                watch_state_revision = orchestrator._plugin_watch_state_revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
             changed_paths = _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
 
