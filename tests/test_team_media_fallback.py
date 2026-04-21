@@ -41,6 +41,7 @@ from mindroom.teams import (
     TeamMode,
     _materialize_team_members,
     _team_response_stream_raw,
+    prepare_materialized_team_execution,
     team_response,
     team_response_stream,
 )
@@ -1399,7 +1400,48 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
 
     assert len(chunks) == 1
     assert "Streamed team response" in str(chunks[0])
-    assert mock_raw.await_args.kwargs["prompt"] == "Previous team reply\n\nAnalyze this."
+    assert mock_raw.await_args.kwargs["prompt"] == "assistant: Previous team reply\n\nAnalyze this."
+
+
+@pytest.mark.asyncio
+async def test_prepare_materialized_team_execution_caps_matrix_fallback_thread_context() -> None:
+    """Matrix fallback replay must stay bounded to the recent short thread context."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    agents = [_make_test_agent("GeneralAgent")]
+    team = _make_test_team()
+    long_body = "x" * 250
+    thread_history = [
+        make_visible_message(event_id=f"old-{idx}", sender=f"user{idx}", body=f"old message {idx}") for idx in range(5)
+    ]
+    thread_history.extend(
+        make_visible_message(event_id=f"keep-{idx}", sender=f"user{idx}", body=f"recent message {idx}")
+        for idx in range(30)
+    )
+    thread_history.append(make_visible_message(event_id="long", sender="user-long", body=long_body))
+
+    prepared = await prepare_materialized_team_execution(
+        scope_context=None,
+        agents=agents,
+        team=team,
+        message="Analyze this.",
+        thread_history=thread_history,
+        config=config,
+        runtime_paths=runtime_paths,
+        active_model_name="default",
+        reply_to_event_id=None,
+        active_event_ids=frozenset(),
+        response_sender_id=None,
+        compaction_outcomes_collector=None,
+        configured_team_name=None,
+    )
+
+    assert "old message 0" not in prepared.prepared_prompt
+    assert "old message 4" not in prepared.prepared_prompt
+    assert "recent message 5" in prepared.prepared_prompt
+    assert "recent message 29" in prepared.prepared_prompt
+    assert long_body not in prepared.prepared_prompt
+    assert prepared.prepared_prompt.endswith("Analyze this.")
 
 
 def test_agno_team_message_normalization_drops_assistant_context() -> None:

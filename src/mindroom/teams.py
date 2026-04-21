@@ -110,6 +110,17 @@ class _PreparedMaterializedTeamExecution:
     unseen_event_ids: list[str]
 
 
+def _render_team_run_input(messages: Sequence[Message]) -> str:
+    """Render prepared messages into the string form Agno teams actually consume."""
+    rendered_chunks: list[str] = []
+    for message in messages:
+        if not message.content:
+            continue
+        content = str(message.content)
+        rendered_chunks.append(f"assistant: {content}" if message.role == "assistant" else content)
+    return "\n\n".join(rendered_chunks)
+
+
 def _next_retry_run_id(run_id: str | None) -> str | None:
     """Return a fresh Agno run identifier for a retry attempt."""
     if run_id is None:
@@ -1335,6 +1346,9 @@ async def prepare_materialized_team_execution(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        fallback_max_messages=30,
+        fallback_max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+        fallback_missing_sender_label="Unknown",
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
@@ -1344,7 +1358,7 @@ async def prepare_materialized_team_execution(
         extra_metadata=matrix_run_metadata,
     )
     return _PreparedMaterializedTeamExecution(
-        prepared_prompt=prepared_execution.final_prompt,
+        prepared_prompt=_render_team_run_input(prepared_execution.messages),
         run_metadata=run_metadata,
         unseen_event_ids=prepared_execution.unseen_event_ids,
     )

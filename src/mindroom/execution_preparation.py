@@ -269,11 +269,14 @@ def _context_message_from_visible_message(
     message: ResolvedVisibleMessage,
     *,
     response_sender_id: str | None,
+    missing_sender_label: str | None = None,
 ) -> Message:
     """Convert one visible Matrix message into a structured Agno message."""
     if response_sender_id is not None and message.sender == response_sender_id:
         return Message(role="assistant", content=message.body)
     speaker_label = _message_speaker_label(message)
+    if not speaker_label:
+        speaker_label = missing_sender_label
     if speaker_label:
         return Message(role="user", content=f"{speaker_label}: {message.body}")
     return Message(role="user", content=message.body)
@@ -283,12 +286,20 @@ def _context_messages_from_visible_messages(
     messages: Sequence[ResolvedVisibleMessage],
     *,
     response_sender_id: str | None,
+    max_messages: int | None = None,
+    max_message_length: int | None = None,
+    missing_sender_label: str | None = None,
 ) -> tuple[Message, ...]:
     """Convert visible Matrix context into provider-native message objects."""
+    visible_messages = messages[-max_messages:] if max_messages is not None else messages
     return tuple(
-        _context_message_from_visible_message(message, response_sender_id=response_sender_id)
-        for message in messages
-        if message.body
+        _context_message_from_visible_message(
+            message,
+            response_sender_id=response_sender_id,
+            missing_sender_label=missing_sender_label,
+        )
+        for message in visible_messages
+        if message.body and (max_message_length is None or len(message.body) < max_message_length)
     )
 
 
@@ -366,6 +377,9 @@ def _build_thread_history_messages(
     *,
     response_sender_id: str | None,
     current_sender_id: str | None = None,
+    max_messages: int | None = None,
+    max_message_length: int | None = None,
+    missing_sender_label: str | None = None,
 ) -> tuple[Message, ...]:
     """Return canonical request messages for fallback full-thread replay."""
     if not thread_history:
@@ -375,6 +389,9 @@ def _build_thread_history_messages(
         context_messages=_context_messages_from_visible_messages(
             thread_history,
             response_sender_id=response_sender_id,
+            max_messages=max_messages,
+            max_message_length=max_message_length,
+            missing_sender_label=missing_sender_label,
         ),
         current_sender_id=current_sender_id,
     )
@@ -475,6 +492,9 @@ async def _prepare_execution_context_common(
     config: Config,
     prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str, str | None], int],
+    fallback_max_messages: int | None = None,
+    fallback_max_message_length: int | None = None,
+    fallback_missing_sender_label: str | None = None,
     timing_scope: str | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
@@ -488,6 +508,9 @@ async def _prepare_execution_context_common(
             thread_history,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
+            max_messages=fallback_max_messages,
+            max_message_length=fallback_max_message_length,
+            missing_sender_label=fallback_missing_sender_label,
         )
     )
 
@@ -605,6 +628,9 @@ async def prepare_agent_execution_context(
             full_prompt=prepared_prompt,
             fallback_full_prompt=replay_fallback_prompt,
         ),
+        fallback_max_messages=None,
+        fallback_max_message_length=None,
+        fallback_missing_sender_label=None,
         timing_scope=timing_scope,
     )
 
@@ -626,6 +652,9 @@ async def prepare_bound_team_execution_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    fallback_max_messages: int | None = None,
+    fallback_max_message_length: int | None = None,
+    fallback_missing_sender_label: str | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
 
@@ -663,4 +692,7 @@ async def prepare_bound_team_execution_context(
             full_prompt=prepared_prompt,
             fallback_full_prompt=replay_fallback_prompt,
         ),
+        fallback_max_messages=fallback_max_messages,
+        fallback_max_message_length=fallback_max_message_length,
+        fallback_missing_sender_label=fallback_missing_sender_label,
     )
