@@ -1222,15 +1222,15 @@ class MultiAgentOrchestrator:
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
 
-        pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-            current_config,
-            new_config,
-            plan.changed_mcp_servers,
-        )
         new_hook_registry = (
             reload_plugins(new_config, self.runtime_paths, skip_broken_plugins=True).hook_registry
             if plugin_changes
             else self.hook_registry
+        )
+        pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+            current_config,
+            new_config,
+            plan.changed_mcp_servers,
         )
 
         # Only apply the new config after validation and account checks succeed.

@@ -80,6 +80,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
@@ -10191,6 +10192,64 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is old_hook_registry
         mock_set_scheduling_hook_registry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_config_does_not_stop_mcp_entities_before_plugin_reload_succeeds(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plugin reload validation must happen before any MCP-driven entity shutdown."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        current_config = Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/current"],
+        )
+        new_config = Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/updated"],
+        )
+
+        orchestrator.config = current_config
+        bot = _mock_managed_bot(current_config)
+        bot.running = True
+        orchestrator.agent_bots = {"general": bot}
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers={"demo-server"},
+            all_new_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        stop_entities_before_mcp_sync = AsyncMock(return_value={"general"})
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=new_config),
+            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch.object(
+                orchestrator,
+                "_stop_entities_before_mcp_sync",
+                new=stop_entities_before_mcp_sync,
+            ),
+            patch(
+                "mindroom.orchestrator.reload_plugins",
+                side_effect=RuntimeError("broken plugin"),
+            ),
+            pytest.raises(RuntimeError, match="broken plugin"),
+        ):
+            await orchestrator.update_config()
+
+        stop_entities_before_mcp_sync.assert_not_awaited()
+        assert bot.running is True
+        assert orchestrator.config is current_config
 
     @pytest.mark.asyncio
     async def test_update_config_initializes_shared_event_cache_for_unchanged_bots(self, tmp_path: Path) -> None:
