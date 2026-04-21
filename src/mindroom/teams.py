@@ -45,7 +45,6 @@ from mindroom.history.runtime import (
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
-    scrub_scope_session_queued_notices,
 )
 from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
@@ -277,7 +276,7 @@ def _scrub_team_retry_notice_state(
     entity_name: str,
 ) -> None:
     """Strip queued-message notices from the loaded team session before retry."""
-    scrub_scope_session_queued_notices(
+    ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
         entity_name=entity_name,
     )

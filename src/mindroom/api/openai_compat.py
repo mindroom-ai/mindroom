@@ -27,6 +27,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from mindroom import ai_runtime
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -39,7 +40,6 @@ from mindroom.history.runtime import (
     apply_replay_plan,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
-    scrub_scope_session_queued_notices,
 )
 from mindroom.knowledge import get_agent_knowledge, initialize_shared_knowledge_managers
 from mindroom.logging_config import get_logger
@@ -1216,7 +1216,7 @@ async def _prepare_openai_team_run_input(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
 ) -> str:
     """Prepare the canonical prompt text for one OpenAI-compatible team run."""
-    scrub_scope_session_queued_notices(
+    ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
         entity_name=team_name,
     )

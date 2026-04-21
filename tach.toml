@@ -104,6 +104,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
+    "mindroom.api.openai_compat",
     "mindroom.history.runtime",
     "mindroom.response_runner",
     "mindroom.teams",
@@ -182,6 +183,7 @@ depends_on = ["mindroom.constants", "mindroom.matrix.client_room_admin", "mindro
 path = "mindroom.api.openai_compat"
 depends_on = [
     "mindroom.ai",
+    "mindroom.ai_runtime",
     "mindroom.constants",
     "mindroom.execution_preparation",
     "mindroom.history.runtime",
@@ -336,7 +338,6 @@ path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.agents",
     "mindroom.agent_storage",
-    "mindroom.ai_runtime",
     "mindroom.history.compaction",
     "mindroom.history.policy",
     "mindroom.history.storage",

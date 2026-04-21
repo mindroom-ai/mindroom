@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Literal
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom import ai_runtime, model_loading
+from mindroom import model_loading
 from mindroom.agent_storage import create_state_storage_db, get_agent_runtime_sqlite_dbs
 from mindroom.agents import (
     create_session_storage,
@@ -79,18 +79,6 @@ def _load_compaction_model(
 ) -> Model:
     """Load the compaction model with dedicated history-preparation timing."""
     return model_loading.get_model_instance(config, runtime_paths, model_name)
-
-
-def scrub_scope_session_queued_notices(
-    scope_context: ScopeSessionContext | None,
-    *,
-    entity_name: str,
-) -> None:
-    """Strip queued-message notices from one loaded scope session before replay."""
-    ai_runtime.scrub_queued_notice_session_context(
-        scope_context=scope_context,
-        entity_name=entity_name,
-    )
 
 
 @dataclass(frozen=True)

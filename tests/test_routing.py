@@ -6,7 +6,7 @@ import importlib
 import importlib.util
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -169,9 +169,31 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
         for attr in attrs:
             with pytest.raises(AttributeError):
                 getattr(module, attr)
+            assert attr not in getattr(module, "__all__", ())
 
     model_loading_module = importlib.import_module("mindroom.model_loading")
     assert callable(model_loading_module.get_model_instance)
+
+
+def test_flattened_seams_reject_legacy_delegation_signature_shims() -> None:
+    """The flattened delegation seam should reject the removed visiting shim at runtime."""
+    config = Config(
+        agents={
+            "alpha": AgentConfig(
+                display_name="Alpha",
+                rooms=[],
+            ),
+        },
+    )
+    agent_policy_module = importlib.import_module("mindroom.agent_policy")
+    agent_policy_get_closure = cast("Any", agent_policy_module.get_agent_delegation_closure)
+    config_get_closure = cast("Any", config.get_agent_delegation_closure)
+
+    with pytest.raises(TypeError, match="visiting"):
+        agent_policy_get_closure("alpha", {}, visiting=set())
+
+    with pytest.raises(TypeError, match="visiting"):
+        config_get_closure("alpha", visiting=set())
 
 
 class TestAIRouting:

@@ -1211,6 +1211,40 @@ async def test_skill_command_tool_dispatch_threads_config_path_to_self_config(tm
 
 
 @pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_surfaces_runtime_resolution_errors(tmp_path: Path) -> None:
+    """Skill dispatch should surface request-scoped runtime failures instead of degrading them to tool misses."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["self_config"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./missing-template",
+    )
+    config_path = tmp_path / "config.yaml"
+    config.save_to_yaml(config_path)
+    runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
+
+    result = await _run_skill_command_tool(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="code",
+        command_tool="get_own_config",
+        skill_name="dispatch",
+        args_text="",
+        dispatch_context=_skill_dispatch_context(
+            agent_name="code",
+            runtime_paths=runtime_paths,
+            requester_user_id="@alice:example.org",
+        ),
+    )
+
+    assert result.startswith("❌ Tool 'get_own_config' failed:")
+    assert "Workspace template directory does not exist" in result
+    assert "not found for this agent" not in result
+
+
+@pytest.mark.asyncio
 async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

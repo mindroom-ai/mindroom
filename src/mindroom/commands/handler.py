@@ -281,9 +281,17 @@ def _collect_agent_toolkits(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[tuple[str, Toolkit]]:
+    tool_names = get_agent_toolkit_names(agent_name, config)
+    if not tool_names:
+        return []
+
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
     toolkits: list[tuple[str, Toolkit]] = []
-    for tool_name in get_agent_toolkit_names(agent_name, config):
+    attempted_tool_count = 0
+    value_error_count = 0
+    first_value_error: ValueError | None = None
+    for tool_name in tool_names:
+        attempted_tool_count += 1
         try:
             toolkit = build_agent_toolkit(
                 tool_name,
@@ -296,13 +304,30 @@ def _collect_agent_toolkits(
             if toolkit is None:
                 continue
             toolkits.append((tool_name, toolkit))
-        except (ImportError, ValueError) as exc:
+        except ValueError as exc:
+            if first_value_error is None:
+                first_value_error = exc
+            value_error_count += 1
             logger.warning(
                 "Failed to load tool for skill dispatch",
                 tool=tool_name,
                 agent=agent_name,
                 error=str(exc),
             )
+        except ImportError as exc:
+            logger.warning(
+                "Failed to load tool for skill dispatch",
+                tool=tool_name,
+                agent=agent_name,
+                error=str(exc),
+            )
+    if (
+        attempted_tool_count > 0
+        and not toolkits
+        and first_value_error is not None
+        and value_error_count == attempted_tool_count
+    ):
+        raise first_value_error
     return toolkits
 
 
