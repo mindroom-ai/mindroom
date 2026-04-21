@@ -27,7 +27,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import PreparedExecutionContext, ThreadHistoryRenderLimits
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
@@ -38,6 +38,7 @@ from mindroom.team_runtime_resolution import (
     resolve_live_shared_agent_names,
 )
 from mindroom.teams import (
+    _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
     TeamMode,
     _materialize_team_members,
     _team_response_stream_raw,
@@ -336,6 +337,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     assert scope_context is not None
     assert scope_context.scope.kind == "team"
     assert mock_prepare.await_args.kwargs["compaction_outcomes_collector"] is collector
+    assert mock_prepare.await_args.kwargs["thread_history_render_limits"] == _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS
 
 
 @pytest.mark.asyncio
@@ -1400,12 +1402,13 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
 
     assert len(chunks) == 1
     assert "Streamed team response" in str(chunks[0])
+    assert mock_prepare.await_args.kwargs["thread_history_render_limits"] == _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS
     assert mock_raw.await_args.kwargs["prompt"] == "assistant: Previous team reply\n\nAnalyze this."
 
 
 @pytest.mark.asyncio
-async def test_prepare_materialized_team_execution_caps_matrix_fallback_thread_context() -> None:
-    """Matrix fallback replay must stay bounded to the recent short thread context."""
+async def test_prepare_materialized_team_execution_applies_explicit_thread_history_render_limits() -> None:
+    """Explicit thread-history render limits should bound prompt stuffing for Matrix fallback replay."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     agents = [_make_test_agent("GeneralAgent")]
@@ -1434,6 +1437,11 @@ async def test_prepare_materialized_team_execution_caps_matrix_fallback_thread_c
         response_sender_id=None,
         compaction_outcomes_collector=None,
         configured_team_name=None,
+        thread_history_render_limits=ThreadHistoryRenderLimits(
+            max_messages=30,
+            max_message_length=200,
+            missing_sender_label="Unknown",
+        ),
     )
 
     assert "old message 0" not in prepared.prepared_prompt

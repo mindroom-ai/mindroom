@@ -98,6 +98,15 @@ class PreparedExecutionContext:
         return self.messages[:-1]
 
 
+@dataclass(frozen=True)
+class ThreadHistoryRenderLimits:
+    """Optional limits for rendering visible thread history back into prompt messages."""
+
+    max_messages: int | None = None
+    max_message_length: int | None = None
+    missing_sender_label: str | None = None
+
+
 def _wrap_msg_body(sender: str, body: str) -> str:
     """Render one Matrix message as a <msg from="..."><![CDATA[...]]></msg> tag."""
     safe_body = body.replace("]]>", "]]]]><![CDATA[>")
@@ -492,9 +501,7 @@ async def _prepare_execution_context_common(
     config: Config,
     prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str, str | None], int],
-    fallback_max_messages: int | None = None,
-    fallback_max_message_length: int | None = None,
-    fallback_missing_sender_label: str | None = None,
+    thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     timing_scope: str | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
@@ -508,9 +515,13 @@ async def _prepare_execution_context_common(
             thread_history,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
-            max_messages=fallback_max_messages,
-            max_message_length=fallback_max_message_length,
-            missing_sender_label=fallback_missing_sender_label,
+            max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
+            max_message_length=(
+                thread_history_render_limits.max_message_length if thread_history_render_limits else None
+            ),
+            missing_sender_label=(
+                thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
+            ),
         )
     )
 
@@ -628,9 +639,7 @@ async def prepare_agent_execution_context(
             full_prompt=prepared_prompt,
             fallback_full_prompt=replay_fallback_prompt,
         ),
-        fallback_max_messages=None,
-        fallback_max_message_length=None,
-        fallback_missing_sender_label=None,
+        thread_history_render_limits=None,
         timing_scope=timing_scope,
     )
 
@@ -652,9 +661,7 @@ async def prepare_bound_team_execution_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    fallback_max_messages: int | None = None,
-    fallback_max_message_length: int | None = None,
-    fallback_missing_sender_label: str | None = None,
+    thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
 
@@ -692,7 +699,5 @@ async def prepare_bound_team_execution_context(
             full_prompt=prepared_prompt,
             fallback_full_prompt=replay_fallback_prompt,
         ),
-        fallback_max_messages=fallback_max_messages,
-        fallback_max_message_length=fallback_max_message_length,
-        fallback_missing_sender_label=fallback_missing_sender_label,
+        thread_history_render_limits=thread_history_render_limits,
     )
