@@ -913,8 +913,29 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert runtime.file_memory_root == runtime.workspace.root
 
 
-def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_shared_bases(tmp_path: Path) -> None:
-    """Shared agents with a workspace should expose canonical knowledge symlinks inside it."""
+def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_workspace_local_shared_bases(
+    tmp_path: Path,
+) -> None:
+    """Workspace-local shared knowledge should be exposed through a canonical workspace symlink."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    knowledge_root = tmp_path / "agents" / "general" / "workspace" / "research"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(path=str(knowledge_root))
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / "research"
+    assert knowledge_link.is_symlink()
+    assert knowledge_link.resolve() == knowledge_root.resolve()
+
+
+def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_external_shared_bases(tmp_path: Path) -> None:
+    """Shared knowledge outside the workspace should not get a misleading in-workspace alias."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     knowledge_root = tmp_path / "research"
@@ -927,8 +948,8 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_shared_base
 
     assert runtime.workspace is not None
     knowledge_link = runtime.workspace.root / "knowledge" / "research"
-    assert knowledge_link.is_symlink()
-    assert knowledge_link.resolve() == knowledge_root.resolve()
+    assert not knowledge_link.exists()
+    assert not knowledge_link.is_symlink()
 
 
 def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bases(tmp_path: Path) -> None:
@@ -958,6 +979,13 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
         execution_identity=identity,
         create=True,
     )
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
 
     assert runtime.workspace is not None
     private_base_id = config.get_agent_private_knowledge_base_id("general")
@@ -965,6 +993,86 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
     assert knowledge_link.resolve() == (runtime.workspace.root / "kb_repo").resolve()
+
+
+def test_resolve_agent_runtime_removes_stale_workspace_knowledge_links(tmp_path: Path) -> None:
+    """Removing a bound knowledge base should remove its canonical workspace alias."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    knowledge_root = tmp_path / "agents" / "general" / "workspace" / "research"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(path=str(knowledge_root))
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / "research"
+    assert knowledge_link.is_symlink()
+
+    config.agents["general"].knowledge_bases = []
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / "research"
+    assert not knowledge_link.exists()
+    assert not knowledge_link.is_symlink()
+
+
+def test_resolve_agent_runtime_reuses_existing_workspace_local_knowledge_directory(tmp_path: Path) -> None:
+    """A knowledge base already rooted at the canonical path should be reused as-is."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    knowledge_root = tmp_path / "agents" / "general" / "workspace" / "knowledge" / "research"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(path=str(knowledge_root))
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / "research"
+    assert knowledge_link.exists()
+    assert not knowledge_link.is_symlink()
+
+
+def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_private_root_dot_path(tmp_path: Path) -> None:
+    """A private knowledge path of '.' should not mirror the whole workspace inside itself."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        knowledge=AgentPrivateKnowledgeConfig(path="."),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="s1",
+    )
+
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    private_base_id = config.get_agent_private_knowledge_base_id("general")
+    assert private_base_id is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
+    assert not knowledge_link.exists()
+    assert not knowledge_link.is_symlink()
 
 
 def test_private_workspace_template_preserves_metadata_and_backfills_missing_files(tmp_path: Path) -> None:
