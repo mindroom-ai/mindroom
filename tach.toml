@@ -1252,6 +1252,7 @@ from = ["mindroom.tool_system.sandbox_proxy"]
 expose = [
     "build_agent_skills",
     "clear_skill_cache",
+    "get_plugin_skill_roots",
     "get_skill_snapshot",
     "get_user_skills_dir",
     "list_skill_listings",

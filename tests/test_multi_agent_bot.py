@@ -99,6 +99,8 @@ from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
@@ -10240,7 +10242,7 @@ class TestMultiAgentOrchestrator:
                 new=stop_entities_before_mcp_sync,
             ),
             patch(
-                "mindroom.orchestrator.reload_plugins",
+                "mindroom.orchestrator.prepare_plugin_reload",
                 side_effect=RuntimeError("broken plugin"),
             ),
             pytest.raises(RuntimeError, match="broken plugin"),
@@ -10250,6 +10252,108 @@ class TestMultiAgentOrchestrator:
         stop_entities_before_mcp_sync.assert_not_awaited()
         assert bot.running is True
         assert orchestrator.config is current_config
+
+    @pytest.mark.asyncio
+    async def test_update_config_does_not_leak_plugin_state_before_config_commit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plugin validation during config reload must not mutate live plugin state on later failure."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        plugin_root = tmp_path / "plugins" / "updated"
+        skill_dir = plugin_root / "skills" / "updated-skill"
+        skill_dir.mkdir(parents=True)
+        (plugin_root / "mindroom.plugin.json").write_text(
+            '{"name":"updated","tools_module":"tools.py","hooks_module":"hooks.py","skills":["skills"]}',
+            encoding="utf-8",
+        )
+        (plugin_root / "tools.py").write_text(
+            "from agno.tools import Toolkit\n"
+            "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+            "\n"
+            "class UpdatedTool(Toolkit):\n"
+            "    def __init__(self) -> None:\n"
+            "        super().__init__(name='updated', tools=[])\n"
+            "\n"
+            "@register_tool_with_metadata(\n"
+            "    name='updated_plugin_tool',\n"
+            "    display_name='Updated Plugin Tool',\n"
+            "    description='updated plugin tool',\n"
+            "    category=ToolCategory.DEVELOPMENT,\n"
+            ")\n"
+            "def updated_plugin_tools():\n"
+            "    return UpdatedTool\n",
+            encoding="utf-8",
+        )
+        (plugin_root / "hooks.py").write_text(
+            "from mindroom.hooks import hook\n"
+            "\n"
+            "@hook('message:received')\n"
+            "async def audit(ctx):\n"
+            "    del ctx\n"
+            "    return None\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: updated-skill\ndescription: demo\n---\n",
+            encoding="utf-8",
+        )
+
+        current_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=[],
+            ),
+            tmp_path,
+        )
+        new_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=["./plugins/updated"],
+            ),
+            tmp_path,
+        )
+
+        orchestrator.config = current_config
+        old_hook_registry = HookRegistry.empty()
+        orchestrator.hook_registry = old_hook_registry
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers={"demo-server"},
+            all_new_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        original_plugin_skill_roots = _get_plugin_skill_roots()
+        set_plugin_skill_roots([])
+        try:
+            with (
+                patch("mindroom.orchestrator.load_config", return_value=new_config),
+                patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+                patch.object(
+                    orchestrator,
+                    "_stop_entities_before_mcp_sync",
+                    new=AsyncMock(side_effect=RuntimeError("stop failed")),
+                ),
+                pytest.raises(RuntimeError, match="stop failed"),
+            ):
+                await orchestrator.update_config()
+
+            assert orchestrator.config is current_config
+            assert orchestrator.hook_registry is old_hook_registry
+            assert "updated_plugin_tool" not in TOOL_METADATA
+            assert _get_plugin_skill_roots() == []
+        finally:
+            set_plugin_skill_roots(original_plugin_skill_roots)
 
     @pytest.mark.asyncio
     async def test_update_config_initializes_shared_event_cache_for_unchanged_bots(self, tmp_path: Path) -> None:

@@ -65,9 +65,12 @@ from mindroom.runtime_state import (
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
+    PreparedPluginReload,
+    apply_prepared_plugin_reload,
     deactivate_plugins,
     get_configured_plugin_roots,
     load_plugins,
+    prepare_plugin_reload,
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
@@ -1222,10 +1225,8 @@ class MultiAgentOrchestrator:
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
 
-        new_hook_registry = (
-            reload_plugins(new_config, self.runtime_paths, skip_broken_plugins=True).hook_registry
-            if plugin_changes
-            else self.hook_registry
+        prepared_plugin_reload: PreparedPluginReload | None = (
+            prepare_plugin_reload(new_config, self.runtime_paths, skip_broken_plugins=True) if plugin_changes else None
         )
         pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
             current_config,
@@ -1236,6 +1237,12 @@ class MultiAgentOrchestrator:
         # Only apply the new config after validation and account checks succeed.
         self.config = new_config
         self._sync_plugin_watch_roots(new_config)
+        new_hook_registry = self.hook_registry
+        if prepared_plugin_reload is not None:
+            new_hook_registry = apply_prepared_plugin_reload(
+                prepared_plugin_reload,
+                cancel_existing_tasks=True,
+            ).hook_registry
         self._activate_hook_registry(new_hook_registry)
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
         await self._sync_event_cache_service(new_config)
