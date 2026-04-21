@@ -4569,6 +4569,23 @@ class TestThreadingBehavior:
                 del room_id, name, log_exceptions
                 return asyncio.create_task(update_coro_factory())
 
+            def queue_thread_update(
+                self,
+                room_id: str,
+                thread_id: str,
+                update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
+                *,
+                name: str,
+                log_exceptions: bool = True,
+            ) -> asyncio.Task[object]:
+                del thread_id
+                return self.queue_room_update(
+                    room_id,
+                    update_coro_factory,
+                    name=name,
+                    log_exceptions=log_exceptions,
+                )
+
         cache_ops.runtime.event_cache_write_coordinator = _InlineCoordinator()
         resolver = MagicMock()
         resolver.resolve_thread_impact_for_mutation = AsyncMock(
@@ -5495,6 +5512,88 @@ class TestThreadingBehavior:
             await asyncio.wait_for(
                 coordinator.wait_for_thread_idle("!test:localhost", "$thread-c:localhost"),
                 timeout=0.1,
+            )
+            assert first_thread_task.done() is False
+            assert second_thread_task.done() is False
+        finally:
+            release_first_thread.set()
+            release_second_thread.set()
+            if not cancelled_room_task.done():
+                cancelled_room_task.cancel()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    first_thread_task,
+                    second_thread_task,
+                    cancelled_room_task,
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_thread_history_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
+        """Public thread-history reads should bypass cancelled room fences without waiting for other threads."""
+        first_thread_started = asyncio.Event()
+        release_first_thread = asyncio.Event()
+        second_thread_started = asyncio.Event()
+        release_second_thread = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(coordinator=coordinator),
+        )
+
+        async def first_thread_update() -> None:
+            first_thread_started.set()
+            await release_first_thread.wait()
+
+        async def second_thread_update() -> None:
+            second_thread_started.set()
+            await release_second_thread.wait()
+
+        async def cancelled_room_update() -> None:
+            msg = "Cancelled room cache update should not start"
+            raise AssertionError(msg)
+
+        access._reads.fetch_thread_history_from_client = AsyncMock(
+            return_value=thread_history_result(
+                [_message(event_id="$thread-c:localhost", body="Root")],
+                is_full_history=True,
+            ),
+        )
+        first_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-a:localhost",
+            first_thread_update,
+            name="matrix_cache_first_thread_update",
+        )
+        second_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-b:localhost",
+            second_thread_update,
+            name="matrix_cache_second_thread_update",
+        )
+        await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
+        await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
+
+        cancelled_room_task = coordinator.queue_room_update(
+            "!test:localhost",
+            cancelled_room_update,
+            name="matrix_cache_cancelled_room_update",
+        )
+        try:
+            cancelled_room_task.cancel()
+            await asyncio.gather(cancelled_room_task, return_exceptions=True)
+
+            history = await asyncio.wait_for(
+                access.get_thread_history("!test:localhost", "$thread-c:localhost"),
+                timeout=0.1,
+            )
+
+            assert [message.body for message in history] == ["Root"]
+            access._reads.fetch_thread_history_from_client.assert_awaited_once_with(
+                "!test:localhost",
+                "$thread-c:localhost",
             )
             assert first_thread_task.done() is False
             assert second_thread_task.done() is False

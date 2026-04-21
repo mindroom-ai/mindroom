@@ -94,6 +94,7 @@ class ThreadReadPolicy:
                 thread_id,
                 load,
                 name=name,
+                ignore_cancelled_room_fences=True,
             ),
         )
 

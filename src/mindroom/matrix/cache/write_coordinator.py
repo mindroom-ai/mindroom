@@ -32,6 +32,7 @@ class _QueuedUpdate:
     task: _UpdateTask
     start_signal: asyncio.Future[None]
     thread_id: str | None = None
+    ignore_cancelled_room_fences: bool = False
     started: bool = False
 
 
@@ -86,6 +87,7 @@ class EventCacheWriteCoordinator(Protocol):
         update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
         *,
         name: str,
+        ignore_cancelled_room_fences: bool = False,
     ) -> object:
         """Run one thread-scoped update through the ordered thread barrier."""
 
@@ -247,25 +249,27 @@ class _EventCacheWriteCoordinator:
         entry: _RoomQueueEntry,
         *,
         room_barrier_pending: bool,
-    ) -> bool:
+        cancelled_room_fence_pending: bool,
+    ) -> tuple[bool, bool]:
         if isinstance(entry, _QueuedRoomFence):
-            return True
+            return room_barrier_pending, True
 
         if entry.started:
-            return room_barrier_pending or entry.kind == "room"
+            return room_barrier_pending or entry.kind == "room", cancelled_room_fence_pending
 
         if entry.kind == "room":
             if state.active_room is None and not state.active_threads:
                 self._start_entry(room_id, state, entry)
-            return True
+            return True, cancelled_room_fence_pending
 
         assert entry.thread_id is not None
-        if room_barrier_pending or state.active_room is not None:
-            return True
+        cancelled_room_fence_blocks_entry = cancelled_room_fence_pending and not entry.ignore_cancelled_room_fences
+        if room_barrier_pending or cancelled_room_fence_blocks_entry or state.active_room is not None:
+            return room_barrier_pending, cancelled_room_fence_pending
         if entry.thread_id in state.active_threads:
-            return False
+            return room_barrier_pending, cancelled_room_fence_pending
         self._start_entry(room_id, state, entry)
-        return False
+        return room_barrier_pending, cancelled_room_fence_pending
 
     def _reevaluate_room(self, room_id: str) -> None:
         state = self._room_states.get(room_id)
@@ -276,12 +280,14 @@ class _EventCacheWriteCoordinator:
         self._drop_leading_room_fences(state)
 
         room_barrier_pending = False
+        cancelled_room_fence_pending = False
         for entry in state.entries:
-            room_barrier_pending = self._reevaluate_entry(
+            room_barrier_pending, cancelled_room_fence_pending = self._reevaluate_entry(
                 room_id,
                 state,
                 entry,
                 room_barrier_pending=room_barrier_pending,
+                cancelled_room_fence_pending=cancelled_room_fence_pending,
             )
 
         self._cleanup_room_state(room_id)
@@ -351,6 +357,7 @@ class _EventCacheWriteCoordinator:
         name: str,
         log_exceptions: bool,
         emit_room_timing: bool = False,
+        ignore_cancelled_room_fences: bool = False,
     ) -> asyncio.Task[object]:
         room_state = self._room_state(room_id)
         instrument_timing = emit_room_timing and timing_enabled()
@@ -414,6 +421,7 @@ class _EventCacheWriteCoordinator:
             task=task,
             start_signal=start_signal,
             thread_id=thread_id,
+            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
         )
 
         room_state.entries.append(entry)
@@ -553,14 +561,17 @@ class _EventCacheWriteCoordinator:
         update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
         *,
         name: str,
+        ignore_cancelled_room_fences: bool = False,
     ) -> object:
         """Run one thread-scoped operation through the ordered thread barrier and await its result."""
-        return await self.queue_thread_update(
-            room_id,
-            thread_id,
-            update_coro_factory,
+        return await self._queue_update(
+            room_id=room_id,
+            thread_id=thread_id,
+            kind="thread",
+            update_coro_factory=update_coro_factory,
             name=name,
             log_exceptions=False,
+            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
         )
 
     async def _wait_for_room_idle_without_timing(self, room_id: str) -> None:
