@@ -471,15 +471,18 @@ class ResponseRunner:
         if not recorder.claim_interrupted_persistence():
             return
         storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
-        persist_interrupted_replay_snapshot(
-            storage=storage,
-            session=None,
-            session_id=session_id,
-            scope_id=session_scope.scope_id,
-            run_id=run_id or str(uuid4()),
-            snapshot=recorder.interrupted_snapshot(),
-            is_team=is_team,
-        )
+        try:
+            persist_interrupted_replay_snapshot(
+                storage=storage,
+                session=None,
+                session_id=session_id,
+                scope_id=session_scope.scope_id,
+                run_id=run_id or str(uuid4()),
+                snapshot=recorder.interrupted_snapshot(),
+                is_team=is_team,
+            )
+        finally:
+            storage.close()
 
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder, reason: str) -> None:
         """Mark one recorder interrupted unless lower layers already captured richer state."""

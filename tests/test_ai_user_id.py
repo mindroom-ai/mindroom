@@ -393,6 +393,73 @@ def _build_response_runner(
     )
 
 
+def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> None:
+    """Runner-owned interrupted replay should always close the opened storage handle."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    storage = MagicMock()
+    coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.mark_interrupted("Run interrupted")
+
+    with patch("mindroom.response_runner.persist_interrupted_replay_snapshot") as mock_persist:
+        coordinator._persist_interrupted_turn(
+            recorder=recorder,
+            session_scope=HistoryScope(kind="agent", scope_id="general"),
+            session_id="session1",
+            execution_identity=None,
+            run_id="run-1",
+            is_team=False,
+        )
+
+    mock_persist.assert_called_once()
+    storage.close.assert_called_once_with()
+
+
+def test_persist_interrupted_turn_closes_storage_when_write_fails(tmp_path: Path) -> None:
+    """Runner-owned interrupted replay should close storage even if persistence raises."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    storage = MagicMock()
+    coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.mark_interrupted("Run interrupted")
+
+    with (
+        patch(
+            "mindroom.response_runner.persist_interrupted_replay_snapshot",
+            side_effect=RuntimeError("boom"),
+        ),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        coordinator._persist_interrupted_turn(
+            recorder=recorder,
+            session_scope=HistoryScope(kind="agent", scope_id="general"),
+            session_id="session1",
+            execution_identity=None,
+            run_id="run-1",
+            is_team=False,
+        )
+
+    storage.close.assert_called_once_with()
+
+
 def _response_request(
     *,
     room_id: str = "!test:localhost",
