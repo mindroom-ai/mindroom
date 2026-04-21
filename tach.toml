@@ -131,10 +131,21 @@ depends_on = [
     "mindroom.constants",
     "mindroom.tool_system.events",
 ]
+visibility = [
+    "mindroom.ai",
+    "mindroom.history.turn_recorder",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
 
 [[modules]]
 path = "mindroom.history.turn_recorder"
 depends_on = ["mindroom.history.interrupted_replay"]
+visibility = [
+    "mindroom.ai",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
 
 [[modules]]
 path = "mindroom.hooks.matrix_admin"
@@ -213,6 +224,12 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.matrix.rooms",
     "mindroom.tool_system.events",
+]
+visibility = [
+    "mindroom.api.openai_compat",
+    "mindroom.bot",
+    "mindroom.response_runner",
+    "mindroom.turn_policy",
 ]
 
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
