@@ -5361,6 +5361,76 @@ class TestThreadingBehavior:
         assert third_update_started.is_set()
 
     @pytest.mark.asyncio
+    async def test_cancelled_room_cache_update_keeps_follow_up_thread_update_behind_all_predecessors(
+        self,
+    ) -> None:
+        """Cancelling a room update must not let a later thread update skip unfinished room predecessors."""
+        first_thread_started = asyncio.Event()
+        second_thread_started = asyncio.Event()
+        release_second_thread = asyncio.Event()
+        follow_up_thread_started = asyncio.Event()
+        owner = object()
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+
+        async def first_thread_update() -> None:
+            first_thread_started.set()
+            await asyncio.Future()
+
+        async def second_thread_update() -> None:
+            second_thread_started.set()
+            await release_second_thread.wait()
+
+        async def cancelled_room_update() -> None:
+            msg = "Cancelled room cache update should not start"
+            raise AssertionError(msg)
+
+        async def follow_up_thread_update() -> None:
+            follow_up_thread_started.set()
+
+        coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-a:localhost",
+            first_thread_update,
+            name="matrix_cache_first_thread_update",
+        )
+        coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-b:localhost",
+            second_thread_update,
+            name="matrix_cache_second_thread_update",
+        )
+        await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
+        await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
+
+        cancelled_room_task = coordinator.queue_room_update(
+            "!test:localhost",
+            cancelled_room_update,
+            name="matrix_cache_cancelled_room_update",
+        )
+        coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-c:localhost",
+            follow_up_thread_update,
+            name="matrix_cache_follow_up_thread_update",
+        )
+        await asyncio.sleep(0)
+        assert follow_up_thread_started.is_set() is False
+
+        cancelled_room_task.cancel()
+        await asyncio.gather(cancelled_room_task, return_exceptions=True)
+
+        await asyncio.sleep(0)
+        assert follow_up_thread_started.is_set() is False
+
+        release_second_thread.set()
+        await wait_for_background_tasks(timeout=1.0, owner=owner)
+
+        assert follow_up_thread_started.is_set()
+
+    @pytest.mark.asyncio
     async def test_run_room_update_does_not_log_handled_exception_as_background_failure(self) -> None:
         """Awaited room updates should not be logged as unhandled background task failures."""
         owner = object()

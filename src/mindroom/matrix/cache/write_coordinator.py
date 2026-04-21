@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
 
 _UpdateTask = asyncio.Task[Any]
-_TaskPredecessorMap = weakref.WeakKeyDictionary[_UpdateTask, _UpdateTask | None]
+_TaskPredecessorMap = weakref.WeakKeyDictionary[_UpdateTask, tuple[_UpdateTask, ...]]
+_TaskTailPredecessorMap = weakref.WeakKeyDictionary[_UpdateTask, _UpdateTask | None]
 
 
 class EventCacheWriteCoordinator(Protocol):
@@ -89,7 +90,15 @@ class _EventCacheWriteCoordinator:
         default_factory=weakref.WeakKeyDictionary,
         init=False,
     )
+    _room_tail_predecessors: _TaskTailPredecessorMap = field(
+        default_factory=weakref.WeakKeyDictionary,
+        init=False,
+    )
     _thread_update_predecessors: _TaskPredecessorMap = field(
+        default_factory=weakref.WeakKeyDictionary,
+        init=False,
+    )
+    _thread_tail_predecessors: _TaskTailPredecessorMap = field(
         default_factory=weakref.WeakKeyDictionary,
         init=False,
     )
@@ -104,14 +113,11 @@ class _EventCacheWriteCoordinator:
         return pending_tasks
 
     def _pending_chain_tasks(self, task: _UpdateTask | None) -> set[_UpdateTask]:
-        pending_tasks: set[_UpdateTask] = set()
-        seen: set[_UpdateTask] = set()
-        current = task
-        while current is not None and current not in seen:
-            seen.add(current)
-            if not current.done():
-                pending_tasks.add(current)
-            current = self._pending_predecessor(current)
+        if task is None:
+            return set()
+        pending_tasks = set(self._pending_predecessors(task))
+        if not task.done():
+            pending_tasks.add(task)
         return pending_tasks
 
     def _emit_idle_wait_timing(
@@ -133,9 +139,14 @@ class _EventCacheWriteCoordinator:
             pending_task_count=pending_task_count,
         )
 
-    def _pending_predecessor_from_map(
+    def _task_predecessors(self, task: _UpdateTask) -> tuple[_UpdateTask, ...]:
+        if task in self._thread_update_predecessors:
+            return self._thread_update_predecessors.get(task, ())
+        return self._room_update_predecessors.get(task, ())
+
+    def _pending_tail_predecessor_from_map(
         self,
-        predecessor_map: _TaskPredecessorMap,
+        predecessor_map: _TaskTailPredecessorMap,
         task: _UpdateTask,
     ) -> _UpdateTask | None:
         predecessor = predecessor_map.get(task)
@@ -145,10 +156,21 @@ class _EventCacheWriteCoordinator:
             predecessor = predecessor_map.get(predecessor)
         return predecessor
 
-    def _pending_predecessor(self, task: _UpdateTask) -> _UpdateTask | None:
-        if task in self._thread_update_predecessors:
-            return self._pending_predecessor_from_map(self._thread_update_predecessors, task)
-        return self._pending_predecessor_from_map(self._room_update_predecessors, task)
+    def _pending_predecessors(self, task: _UpdateTask) -> tuple[_UpdateTask, ...]:
+        pending_predecessors: list[_UpdateTask] = []
+        queued_predecessors = list(self._task_predecessors(task))
+        seen_predecessors: set[_UpdateTask] = set()
+        while queued_predecessors:
+            predecessor = queued_predecessors.pop(0)
+            if predecessor in seen_predecessors:
+                continue
+            seen_predecessors.add(predecessor)
+            if not predecessor.done():
+                pending_predecessors.append(predecessor)
+                continue
+            if predecessor.cancelled():
+                queued_predecessors.extend(self._task_predecessors(predecessor))
+        return tuple(pending_predecessors)
 
     async def _await_predecessors(
         self,
@@ -169,9 +191,7 @@ class _EventCacheWriteCoordinator:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     raise
-                replacement_predecessor = self._pending_predecessor(predecessor)
-                if replacement_predecessor is not None:
-                    pending_predecessors.append(replacement_predecessor)
+                pending_predecessors.extend(self._pending_predecessors(predecessor))
             except Exception as exc:
                 self.logger.debug(
                     "Previous room cache update failed before follow-up update",
@@ -195,7 +215,7 @@ class _EventCacheWriteCoordinator:
     def _clear_room_tail(self, room_id: str, done_task: asyncio.Task[object]) -> None:
         if self._room_update_tasks.get(room_id) is not done_task:
             return
-        predecessor = self._pending_predecessor_from_map(self._room_update_predecessors, done_task)
+        predecessor = self._pending_tail_predecessor_from_map(self._room_tail_predecessors, done_task)
         if done_task.cancelled() and predecessor is not None:
             self._set_room_tail(room_id, predecessor)
             return
@@ -210,7 +230,7 @@ class _EventCacheWriteCoordinator:
         key = (room_id, thread_id)
         if self._thread_update_tasks.get(key) is not done_task:
             return
-        predecessor = self._pending_predecessor_from_map(self._thread_update_predecessors, done_task)
+        predecessor = self._pending_tail_predecessor_from_map(self._thread_tail_predecessors, done_task)
         if done_task.cancelled() and predecessor is not None:
             self._set_thread_tail(room_id, thread_id, predecessor)
             return
@@ -257,9 +277,10 @@ class _EventCacheWriteCoordinator:
         self,
         *,
         room_id: str,
-        previous_task: _UpdateTask | None,
         previous_tasks: tuple[_UpdateTask, ...],
         predecessor_map: _TaskPredecessorMap,
+        tail_predecessor: _UpdateTask | None,
+        tail_predecessor_map: _TaskTailPredecessorMap,
         register_task: typing.Callable[[asyncio.Task[object]], None],
         clear_task: typing.Callable[[asyncio.Task[object]], None],
         update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
@@ -320,7 +341,8 @@ class _EventCacheWriteCoordinator:
             owner=self.background_task_owner,
             log_exceptions=log_exceptions,
         )
-        predecessor_map[task] = previous_task
+        predecessor_map[task] = previous_tasks
+        tail_predecessor_map[task] = tail_predecessor
         register_task(task)
         task.add_done_callback(clear_task)
         return task
@@ -357,9 +379,10 @@ class _EventCacheWriteCoordinator:
         previous_room_task = self._room_update_tasks.get(room_id)
         return self._queue_update(
             room_id=room_id,
-            previous_task=previous_room_task,
             previous_tasks=self._room_predecessors(room_id),
             predecessor_map=self._room_update_predecessors,
+            tail_predecessor=previous_room_task,
+            tail_predecessor_map=self._room_tail_predecessors,
             register_task=lambda task: self._set_room_tail(room_id, task),
             clear_task=lambda done_task: self._clear_room_tail(room_id, done_task),
             update_coro_factory=update_coro_factory,
@@ -397,9 +420,10 @@ class _EventCacheWriteCoordinator:
         previous_thread_task = self._thread_update_tasks.get(key)
         return self._queue_update(
             room_id=room_id,
-            previous_task=previous_thread_task,
             previous_tasks=self._thread_predecessors(room_id, thread_id),
             predecessor_map=self._thread_update_predecessors,
+            tail_predecessor=previous_thread_task,
+            tail_predecessor_map=self._thread_tail_predecessors,
             register_task=lambda task: self._set_thread_tail(room_id, thread_id, task),
             clear_task=lambda done_task: self._clear_thread_tail(room_id, thread_id, done_task),
             update_coro_factory=update_coro_factory,
@@ -500,4 +524,6 @@ class _EventCacheWriteCoordinator:
         self._thread_update_tasks.clear()
         self._thread_update_tasks_by_room.clear()
         self._room_update_predecessors.clear()
+        self._room_tail_predecessors.clear()
         self._thread_update_predecessors.clear()
+        self._thread_tail_predecessors.clear()
