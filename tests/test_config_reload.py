@@ -23,7 +23,7 @@ from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
-from mindroom.orchestration.plugin_watch import _watch_plugins_task
+from mindroom.orchestration.plugin_watch import watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -292,7 +292,7 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
         (ignored_root / "hooks.py").write_text("VALUE = 2\n", encoding="utf-8")
@@ -349,7 +349,7 @@ async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
         hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
@@ -397,7 +397,7 @@ async def test_plugin_watcher_catches_first_save_after_startup(
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.01)
         hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
@@ -451,7 +451,7 @@ async def test_plugin_watcher_catches_first_save_after_config_switch(
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.08)
         orchestrator.config = second_config
@@ -509,7 +509,7 @@ async def test_plugin_watcher_does_not_reload_on_config_switch_without_plugin_ed
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.08)
         orchestrator.config = second_config
@@ -568,7 +568,7 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
         hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
@@ -620,7 +620,7 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
         reload_call_count += 1
         return PluginReloadResult(HookRegistry.empty(), ("demo",), 0)
 
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
         with patch("mindroom.orchestrator.reload_plugins", side_effect=record_reload):
@@ -694,7 +694,7 @@ async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
         raise RuntimeError(error_message)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
-    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
         hooks_path.write_text("VALUE = 2\n", encoding="utf-8")

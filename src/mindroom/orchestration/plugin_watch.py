@@ -37,7 +37,7 @@ class _PluginWatcherRuntime(Protocol):
         """Rebuild and atomically swap the live plugin registry snapshot."""
 
 
-async def _watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
+async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
     """Watch configured plugin roots and hot-reload them after debounced edits."""
     last_snapshot_by_root = orchestrator._plugin_watch_last_snapshot_by_root
     pending_changes = set()
@@ -64,7 +64,7 @@ async def _watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 last_change_at = None
                 watch_state_revision = orchestrator._plugin_watch_state_revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
-            changed_paths = _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
+            changed_paths = collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
 
             if changed_paths:
                 pending_changes.update(changed_paths)
@@ -95,7 +95,7 @@ def _filter_pending_plugin_changes(
     return {path for path in pending_changes if _path_is_under_any_root(path, configured_roots)}
 
 
-def _collect_plugin_root_changes(
+def collect_plugin_root_changes(
     configured_roots: tuple[Path, ...],
     last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> set[Path]:
@@ -111,7 +111,7 @@ def _collect_plugin_root_changes(
     return changed_paths
 
 
-def _sync_plugin_root_snapshots(
+def sync_plugin_root_snapshots(
     configured_roots: tuple[Path, ...],
     last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> None:
@@ -126,12 +126,12 @@ def _sync_plugin_root_snapshots(
         last_snapshot_by_root[root] = file_watcher._tree_snapshot(root)
 
 
-def _capture_plugin_root_snapshots(configured_roots: tuple[Path, ...]) -> dict[Path, dict[Path, int]]:
+def capture_plugin_root_snapshots(configured_roots: tuple[Path, ...]) -> dict[Path, dict[Path, int]]:
     """Return the current watcher baselines for one explicit plugin-root set."""
     return {root: file_watcher._tree_snapshot(root) for root in configured_roots}
 
 
-def _replace_plugin_root_snapshots(
+def replace_plugin_root_snapshots(
     configured_roots: tuple[Path, ...],
     root_snapshots: dict[Path, dict[Path, int]],
     last_snapshot_by_root: dict[Path, dict[Path, int]],

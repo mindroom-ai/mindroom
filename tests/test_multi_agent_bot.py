@@ -83,7 +83,7 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
-from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
+from mindroom.orchestration.plugin_watch import collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
@@ -10437,7 +10437,7 @@ class TestMultiAgentOrchestrator:
             loaded_hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
             assert loaded_hooks_module.VALUE == 1
 
-            changed_paths = _collect_plugin_root_changes(
+            changed_paths = collect_plugin_root_changes(
                 tuple(orchestrator._plugin_watch_last_snapshot_by_root),
                 orchestrator._plugin_watch_last_snapshot_by_root,
             )

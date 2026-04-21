@@ -84,10 +84,10 @@ from .orchestration.config_updates import (
     build_config_update_plan,
 )
 from .orchestration.plugin_watch import (
-    _capture_plugin_root_snapshots,
-    _replace_plugin_root_snapshots,
-    _sync_plugin_root_snapshots,
-    _watch_plugins_task,
+    capture_plugin_root_snapshots,
+    replace_plugin_root_snapshots,
+    sync_plugin_root_snapshots,
+    watch_plugins_task,
 )
 from .orchestration.rooms import (
     get_authorized_user_ids_to_invite,
@@ -743,7 +743,7 @@ class MultiAgentOrchestrator:
         configured_roots = (
             get_configured_plugin_roots(active_config, self.runtime_paths) if active_config is not None else ()
         )
-        _sync_plugin_root_snapshots(configured_roots, self._plugin_watch_last_snapshot_by_root)
+        sync_plugin_root_snapshots(configured_roots, self._plugin_watch_last_snapshot_by_root)
         return configured_roots
 
     def _replace_plugin_watch_snapshots(
@@ -752,7 +752,7 @@ class MultiAgentOrchestrator:
         root_snapshots: dict[Path, dict[Path, int]],
     ) -> None:
         """Replace watcher baselines and clear any stale pending dirty state."""
-        _replace_plugin_root_snapshots(
+        replace_plugin_root_snapshots(
             configured_roots,
             root_snapshots,
             self._plugin_watch_last_snapshot_by_root,
@@ -767,7 +767,7 @@ class MultiAgentOrchestrator:
         )
         self._replace_plugin_watch_snapshots(
             configured_roots,
-            _capture_plugin_root_snapshots(configured_roots),
+            capture_plugin_root_snapshots(configured_roots),
         )
         return configured_roots
 
@@ -819,7 +819,7 @@ class MultiAgentOrchestrator:
         """Stage and commit plugin changes without interleaving live reloads."""
         async with self._plugin_reload_lock:
             prepared_plugin_roots = get_configured_plugin_roots(new_config, self.runtime_paths)
-            prepared_plugin_root_snapshots = _capture_plugin_root_snapshots(prepared_plugin_roots)
+            prepared_plugin_root_snapshots = capture_plugin_root_snapshots(prepared_plugin_roots)
             prepared_plugin_reload = prepare_plugin_reload(
                 new_config,
                 self.runtime_paths,
@@ -1770,7 +1770,7 @@ async def main(
                 lambda: _watch_config_task(orchestrator.config_path, orchestrator),
                 "config_watcher_supervisor",
             ),
-            ("plugins watcher", lambda: _watch_plugins_task(orchestrator), "plugins_watcher_supervisor"),
+            ("plugins watcher", lambda: watch_plugins_task(orchestrator), "plugins_watcher_supervisor"),
             ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
         ]
 
