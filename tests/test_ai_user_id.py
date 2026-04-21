@@ -3143,6 +3143,66 @@ class TestUserIdPassthrough:
         ]
 
     @pytest.mark.asyncio
+    async def test_ai_response_persists_incomplete_cancelled_tools_as_interrupted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Cancelled non-streaming runs must not serialize unfinished tools as completed."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        cancelled_run = RunOutput(
+            run_id="run-123",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result=None,
+                ),
+            ],
+            status=RunStatus.cancelled,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=cancelled_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                )
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n[tool:run_shell_command interrupted]\n"
+                "  args: cmd=pwd\n"
+                "  result: <interrupted before completion>\n\n"
+                "[interrupted]",
+            ),
+        ]
+
+    @pytest.mark.asyncio
     async def test_ai_response_with_turn_recorder_defers_interrupted_persistence_to_runner(
         self,
         tmp_path: Path,
@@ -4360,6 +4420,91 @@ class TestUserIdPassthrough:
                 "  result: /app\n"
                 "[tool:save_file interrupted]\n"
                 "  args: file_name=main.py\n"
+                "  result: <interrupted before completion>\n\n"
+                "[interrupted]",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_preserves_pending_tool_identity_for_same_named_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming cancellation must not confuse concurrent same-named tools in one agent scope."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Half done")
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                ),
+            )
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-2",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "ls"},
+                ),
+            )
+            yield ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            )
+            yield RunCancelledEvent(
+                run_id="run-3",
+                session_id="session1",
+                reason="Run run-3 was cancelled",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(asyncio.CancelledError):
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                ):
+                    pass
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n"
+                "[tool:run_shell_command completed]\n"
+                "  args: cmd=pwd\n"
+                "  result: /app\n"
+                "[tool:run_shell_command interrupted]\n"
+                "  args: cmd=ls\n"
                 "  result: <interrupted before completion>\n\n"
                 "[interrupted]",
             ),

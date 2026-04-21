@@ -46,6 +46,8 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
+    split_interrupted_tool_trace,
+    tool_execution_call_id,
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -104,6 +106,15 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
     missing_sender_label="Unknown",
 )
+
+
+@dataclass
+class _PendingTeamTool:
+    scope_key: str
+    tool_name: str
+    trace_entry: ToolTraceEntry
+    tool_call_id: str | None = None
+    visible_tool_index: int | None = None
 
 
 class TeamMode(str, Enum):
@@ -1064,6 +1075,20 @@ def _extract_completed_team_tool_trace(response: TeamRunOutput | RunOutput) -> l
     return trace
 
 
+def _extract_cancelled_team_tool_trace(
+    response: TeamRunOutput | RunOutput,
+) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
+    """Extract completed and interrupted tool calls from a cancelled team response."""
+    completed_trace, interrupted_trace = split_interrupted_tool_trace(response.tools)
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            if isinstance(member_response, TeamRunOutput | RunOutput):
+                member_completed, member_interrupted = _extract_cancelled_team_tool_trace(member_response)
+                completed_trace.extend(member_completed)
+                interrupted_trace.extend(member_interrupted)
+    return completed_trace, interrupted_trace
+
+
 def _is_cancellation_boilerplate(content: str) -> bool:
     """Return whether one string is just Agno cancellation boilerplate."""
     normalized = content.strip().lower()
@@ -1575,13 +1600,13 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 if isinstance(response, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(response):
                     persisted_session_id = response.session_id or session_id
                     partial_text = _extract_interrupted_team_partial_text(response)
-                    completed_tools = _extract_completed_team_tool_trace(response)
+                    completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
                     if turn_recorder is not None:
                         turn_recorder.record_interrupted(
                             run_metadata=run_metadata,
                             assistant_text=partial_text,
                             completed_tools=completed_tools,
-                            interrupted_tools=[],
+                            interrupted_tools=interrupted_tools,
                         )
                     if turn_recorder is None and persisted_session_id is not None:
                         persist_interrupted_replay(
@@ -1591,7 +1616,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             user_message=replay_user_message,
                             partial_text=partial_text,
                             completed_tools=completed_tools,
-                            interrupted_tools=[],
+                            interrupted_tools=interrupted_tools,
                             run_metadata=run_metadata,
                             is_team=True,
                         )
@@ -1826,7 +1851,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     canonical_per_member: dict[str, str] = {}
     canonical_consensus = ""
     completed_tools: list[ToolTraceEntry] = []
-    pending_tools: list[tuple[str, ToolTraceEntry]] = []
+    pending_tools: list[_PendingTeamTool] = []
 
     def _empty_canonical_partial_text() -> str:
         return ""
@@ -1891,7 +1916,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             visible_consensus: str = ""
             tool_trace: list[ToolTraceEntry] = []
             next_tool_index = 1
-            pending_visible_tools: list[tuple[str, int, str]] = []
 
             def _scope_key_for_agent(agent_name: str) -> str:
                 return f"agent:{agent_name}"
@@ -1937,6 +1961,31 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             render_canonical_partial_text = _current_canonical_partial_text
 
+            def _find_pending_tool_index(
+                *,
+                scope_key: str,
+                tool: ToolExecution | None,
+            ) -> int | None:
+                call_id = tool_execution_call_id(tool)
+                if call_id is not None:
+                    for pos in range(len(pending_tools) - 1, -1, -1):
+                        pending_tool = pending_tools[pos]
+                        if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
+                            return pos
+                info = extract_tool_completed_info(tool)
+                if not info:
+                    return None
+                tool_name, _ = info
+                for pos in range(len(pending_tools) - 1, -1, -1):
+                    pending_tool = pending_tools[pos]
+                    if (
+                        pending_tool.scope_key == scope_key
+                        and pending_tool.tool_call_id is None
+                        and pending_tool.tool_name == tool_name
+                    ):
+                        return pos
+                return None
+
             def _start_tool(
                 *,
                 scope_key: str,
@@ -1947,14 +1996,21 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 tool_index = next_tool_index if show_tool_calls else None
                 tool_msg, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
                 if trace_entry is not None:
-                    pending_tools.append((scope_key, trace_entry))
+                    pending_tools.append(
+                        _PendingTeamTool(
+                            scope_key=scope_key,
+                            tool_name=trace_entry.tool_name,
+                            trace_entry=trace_entry,
+                            tool_call_id=tool_execution_call_id(tool),
+                            visible_tool_index=tool_index,
+                        ),
+                    )
                 if not show_tool_calls or tool_index is None:
                     return
                 if tool_msg:
                     apply_visible_text(tool_msg)
                 if trace_entry is not None:
                     tool_trace.append(trace_entry)
-                    pending_visible_tools.append((trace_entry.tool_name, tool_index, scope_key))
                 next_tool_index += 1
 
             def _complete_tool(
@@ -1969,31 +2025,15 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     return
 
                 tool_name, result = info
-                pending_trace_pos = next(
-                    (
-                        pos
-                        for pos in range(len(pending_tools) - 1, -1, -1)
-                        if pending_tools[pos][0] == scope_key and pending_tools[pos][1].tool_name == tool_name
-                    ),
-                    None,
-                )
-                if pending_trace_pos is not None:
-                    pending_tools.pop(pending_trace_pos)
+                pending_trace_pos = _find_pending_tool_index(scope_key=scope_key, tool=tool)
+                pending_tool = pending_tools.pop(pending_trace_pos) if pending_trace_pos is not None else None
                 _, completed_trace = format_tool_completed_event(tool)
                 if completed_trace is not None:
                     completed_tools.append(completed_trace)
                 if not show_tool_calls:
                     return
 
-                match_pos = next(
-                    (
-                        pos
-                        for pos in range(len(pending_visible_tools) - 1, -1, -1)
-                        if pending_visible_tools[pos][0] == tool_name and pending_visible_tools[pos][2] == scope_key
-                    ),
-                    None,
-                )
-                if match_pos is None:
+                if pending_tool is None or pending_tool.visible_tool_index is None:
                     logger.warning(
                         "Missing pending tool start in team stream; skipping completion marker",
                         tool_name=tool_name,
@@ -2001,17 +2041,16 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     )
                     return
 
-                _, tool_index, _ = pending_visible_tools.pop(match_pos)
                 updated_text, trace_entry = complete_pending_tool_block(
                     get_visible_text(),
                     tool_name,
                     result,
-                    tool_index=tool_index,
+                    tool_index=pending_tool.visible_tool_index,
                 )
                 set_visible_text(updated_text)
 
-                if 0 < tool_index <= len(tool_trace):
-                    existing_entry = tool_trace[tool_index - 1]
+                if 0 < pending_tool.visible_tool_index <= len(tool_trace):
+                    existing_entry = tool_trace[pending_tool.visible_tool_index - 1]
                     existing_entry.type = "tool_call_completed"
                     existing_entry.result_preview = trace_entry.result_preview
                     existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
@@ -2019,7 +2058,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     logger.warning(
                         "Missing tool trace slot in team stream for completion",
                         tool_name=tool_name,
-                        tool_index=tool_index,
+                        tool_index=pending_tool.visible_tool_index,
                         trace_len=len(tool_trace),
                     )
 
@@ -2063,7 +2102,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     completed_tools = []
                     next_tool_index = 1
                     pending_tools = []
-                    pending_visible_tools = []
                     emitted_output = False
                     retry_requested = False
 
@@ -2084,13 +2122,13 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         if isinstance(event, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(event):
                             persisted_session_id = event.session_id or session_id
                             partial_text = _extract_interrupted_team_partial_text(event)
-                            completed_tool_trace = _extract_completed_team_tool_trace(event)
+                            completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
                             if turn_recorder is not None:
                                 turn_recorder.record_interrupted(
                                     run_metadata=run_metadata,
                                     assistant_text=partial_text,
                                     completed_tools=completed_tool_trace,
-                                    interrupted_tools=[],
+                                    interrupted_tools=interrupted_tool_trace,
                                 )
                             if turn_recorder is None and persisted_session_id is not None:
                                 persist_interrupted_replay(
@@ -2100,7 +2138,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     user_message=replay_user_message,
                                     partial_text=partial_text,
                                     completed_tools=completed_tool_trace,
-                                    interrupted_tools=[],
+                                    interrupted_tools=interrupted_tool_trace,
                                     run_metadata=run_metadata,
                                     is_team=True,
                                 )
@@ -2184,7 +2222,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
                         if isinstance(event, TeamRunCancelledEvent):
                             persisted_session_id = event.session_id or session_id
-                            interrupted_tool_trace = [trace_entry for _, trace_entry in pending_tools]
+                            interrupted_tool_trace = [pending.trace_entry for pending in pending_tools]
                             partial_text = render_canonical_partial_text()
                             if turn_recorder is not None:
                                 turn_recorder.record_interrupted(
@@ -2287,7 +2325,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 ),
                 assistant_text=render_canonical_partial_text(),
                 completed_tools=completed_tools,
-                interrupted_tools=[trace_entry for _, trace_entry in pending_tools],
+                interrupted_tools=[pending.trace_entry for pending in pending_tools],
             )
         elif not standalone_interrupted_replay_persisted and session_id is not None:
             persist_interrupted_replay(
@@ -2297,7 +2335,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 user_message=replay_user_message,
                 partial_text=render_canonical_partial_text(),
                 completed_tools=completed_tools,
-                interrupted_tools=[trace_entry for _, trace_entry in pending_tools],
+                interrupted_tools=[pending.trace_entry for pending in pending_tools],
                 run_metadata=build_matrix_run_metadata(
                     reply_to_event_id,
                     unseen_event_ids,

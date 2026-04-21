@@ -21,12 +21,18 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
 )
-from mindroom.tool_system.events import ToolTraceEntry, render_tool_trace_for_context
+from mindroom.tool_system.events import (
+    ToolTraceEntry,
+    format_tool_completed_event,
+    format_tool_started_event,
+    render_tool_trace_for_context,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.db.sqlite import SqliteDb
+    from agno.models.response import ToolExecution
 
     from mindroom.history.runtime import ScopeSessionContext
 
@@ -62,6 +68,14 @@ def _normalized_string_tuple(values: object) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def tool_execution_call_id(tool: ToolExecution | None) -> str | None:
+    """Return one normalized tool-call identifier when the provider supplies it."""
+    if tool is None or not isinstance(tool.tool_call_id, str):
+        return None
+    call_id = tool.tool_call_id.strip()
+    return call_id or None
+
+
 def _normalized_prompt_items(values: object) -> tuple[tuple[str, str], ...]:
     if not isinstance(values, dict):
         return ()
@@ -70,6 +84,30 @@ def _normalized_prompt_items(values: object) -> tuple[tuple[str, str], ...]:
         if isinstance(key, str) and key and isinstance(value, str):
             normalized.append((key, value))
     return tuple(normalized)
+
+
+def split_interrupted_tool_trace(
+    tools: Sequence[ToolExecution] | None,
+) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
+    """Split cancelled-run tools into completed and still-interrupted traces.
+
+    Agno's cancelled non-streaming outputs do not currently expose per-tool terminal
+    state, so the only reliable signal we have is whether a tool produced a result.
+    A ``None`` result means the call never produced a completion payload and should
+    remain interrupted in replay history.
+    """
+    completed: list[ToolTraceEntry] = []
+    interrupted: list[ToolTraceEntry] = []
+    for tool in tools or ():
+        if tool.result is None and tool.tool_call_error is not True:
+            _, trace_entry = format_tool_started_event(tool)
+            if trace_entry is not None:
+                interrupted.append(trace_entry)
+            continue
+        _, trace_entry = format_tool_completed_event(tool)
+        if trace_entry is not None:
+            completed.append(trace_entry)
+    return completed, interrupted
 
 
 def _render_interrupted_tool_trace(events: Sequence[ToolTraceEntry]) -> str:

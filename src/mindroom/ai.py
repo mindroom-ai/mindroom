@@ -62,6 +62,8 @@ from mindroom.history import (
 from mindroom.history.compaction import compute_prompt_token_breakdown
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
+    split_interrupted_tool_trace,
+    tool_execution_call_id,
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -97,6 +99,7 @@ if TYPE_CHECKING:
     from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
+    from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
@@ -527,8 +530,7 @@ class _StreamingAttemptState:
     full_response: str = ""
     tool_count: int = 0
     observed_tool_calls: int = 0
-    pending_visible_tools: list[tuple[str, int]] = field(default_factory=list)
-    pending_tools: list[ToolTraceEntry] = field(default_factory=list)
+    pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
@@ -541,6 +543,14 @@ class _StreamingAttemptState:
     retry_requested: bool = False
     user_error: Exception | None = None
     stream_exception: Exception | None = None
+
+
+@dataclass
+class _PendingStreamingTool:
+    tool_name: str
+    trace_entry: ToolTraceEntry
+    tool_call_id: str | None = None
+    visible_tool_index: int | None = None
 
 
 def _canonical_provider(provider: str) -> str:
@@ -581,6 +591,32 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
         _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
         trace.append(trace_entry)
     return trace
+
+
+def _extract_cancelled_tool_trace(response: RunOutput) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
+    """Extract completed and unfinished tool traces from an interrupted RunOutput."""
+    return split_interrupted_tool_trace(response.tools)
+
+
+def _find_matching_pending_stream_tool(
+    pending_tools: list[_PendingStreamingTool],
+    tool: ToolExecution | None,
+) -> int | None:
+    """Return the newest pending tool matching a completion event."""
+    call_id = tool_execution_call_id(tool)
+    if call_id is not None:
+        for pos in range(len(pending_tools) - 1, -1, -1):
+            if pending_tools[pos].tool_call_id == call_id:
+                return pos
+    info = extract_tool_completed_info(tool)
+    if info is None:
+        return None
+    tool_name, _ = info
+    for pos in range(len(pending_tools) - 1, -1, -1):
+        pending_tool = pending_tools[pos]
+        if pending_tool.tool_call_id is None and pending_tool.tool_name == tool_name:
+            return pos
+    return None
 
 
 def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
@@ -987,15 +1023,20 @@ def _track_stream_tool_started(
     display_tool_index = state.tool_count + 1 if show_tool_calls else None
     tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=display_tool_index)
     if trace_entry is not None:
-        state.pending_tools.append(trace_entry)
+        state.pending_tools.append(
+            _PendingStreamingTool(
+                tool_name=trace_entry.tool_name,
+                trace_entry=trace_entry,
+                tool_call_id=tool_execution_call_id(event.tool),
+                visible_tool_index=display_tool_index,
+            ),
+        )
     if not show_tool_calls or display_tool_index is None:
         return
 
     state.tool_count = display_tool_index
     if tool_msg:
         state.full_response += tool_msg
-    if trace_entry is not None:
-        state.pending_visible_tools.append((trace_entry.tool_name, display_tool_index))
 
 
 def _track_stream_tool_completed(
@@ -1010,39 +1051,26 @@ def _track_stream_tool_completed(
     if info is None:
         return
     tool_name, result = info
-    pending_trace_pos = next(
-        (pos for pos in range(len(state.pending_tools) - 1, -1, -1) if state.pending_tools[pos].tool_name == tool_name),
-        None,
-    )
-    if pending_trace_pos is not None:
-        state.pending_tools.pop(pending_trace_pos)
+    pending_trace_pos = _find_matching_pending_stream_tool(state.pending_tools, event.tool)
+    pending_tool = state.pending_tools.pop(pending_trace_pos) if pending_trace_pos is not None else None
     _, completed_trace = format_tool_completed_event(event.tool)
     if completed_trace is not None:
         state.completed_tools.append(completed_trace)
     if not show_tool_calls:
         return
 
-    match_pos = next(
-        (
-            pos
-            for pos in range(len(state.pending_visible_tools) - 1, -1, -1)
-            if state.pending_visible_tools[pos][0] == tool_name
-        ),
-        None,
-    )
-    if match_pos is None:
+    if pending_tool is None or pending_tool.visible_tool_index is None:
         logger.warning(
             "Missing pending tool start in AI stream; skipping completion marker",
             tool_name=tool_name,
             agent=agent_name,
         )
         return
-    _, tool_index = state.pending_visible_tools.pop(match_pos)
     state.full_response, _ = complete_pending_tool_block(
         state.full_response,
         tool_name,
         result,
-        tool_index=tool_index,
+        tool_index=pending_tool.visible_tool_index,
     )
 
 
@@ -1580,13 +1608,13 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     response.content,
                     messages=response.messages,
                 )
-                completed_tools = _extract_tool_trace(response)
+                completed_tools, interrupted_tools = _extract_cancelled_tool_trace(response)
                 if turn_recorder is not None:
                     turn_recorder.record_interrupted(
                         run_metadata=metadata,
                         assistant_text=partial_text,
                         completed_tools=completed_tools,
-                        interrupted_tools=[],
+                        interrupted_tools=interrupted_tools,
                     )
                 if turn_recorder is None:
                     persist_interrupted_replay(
@@ -1596,7 +1624,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                         user_message=prompt,
                         partial_text=partial_text,
                         completed_tools=completed_tools,
-                        interrupted_tools=[],
+                        interrupted_tools=interrupted_tools,
                         run_metadata=metadata,
                         is_team=False,
                     )
@@ -1986,7 +2014,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 run_metadata=metadata,
                                 assistant_text=state.assistant_text,
                                 completed_tools=state.completed_tools,
-                                interrupted_tools=state.pending_tools,
+                                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
                             )
                         if run_metadata_collector is not None:
                             fallback_metrics = _build_model_request_metrics_fallback(
@@ -2017,7 +2045,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 user_message=prompt,
                                 partial_text=state.assistant_text,
                                 completed_tools=state.completed_tools,
-                                interrupted_tools=state.pending_tools,
+                                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
                                 run_metadata=metadata,
                                 is_team=False,
                             )
@@ -2081,7 +2109,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 ),
                 assistant_text=state.assistant_text,
                 completed_tools=state.completed_tools,
-                interrupted_tools=state.pending_tools,
+                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
             )
         elif not standalone_interrupted_replay_persisted:
             persist_interrupted_replay(
@@ -2091,7 +2119,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 user_message=prompt,
                 partial_text=state.assistant_text,
                 completed_tools=state.completed_tools,
-                interrupted_tools=state.pending_tools,
+                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
                 run_metadata=build_matrix_run_metadata(
                     reply_to_event_id,
                     unseen_event_ids,
