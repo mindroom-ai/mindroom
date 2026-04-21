@@ -1862,6 +1862,48 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
 
 
 @pytest.mark.asyncio
+async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt(
+    tmp_path: Path,
+) -> None:
+    """Ad hoc team responses should keep the user request when model_prompt only adds metadata."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name=ROUTER_AGENT_NAME)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new_callable=AsyncMock) as mock_team_response,
+    ):
+        mock_team_response.return_value = "Team hello"
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(
+                prompt="What is in the image?",
+                model_prompt="Available attachment IDs: att_img. Use tool calls to inspect or process them.",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id == "$response_id"
+    assert mock_team_response.await_args is not None
+    message = mock_team_response.await_args.kwargs["message"]
+    assert "What is in the image?" in message
+    assert "Available attachment IDs: att_img. Use tool calls to inspect or process them." in message
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_helper_uses_delivery_result_failure_reason_for_cancelled_stream(
     tmp_path: Path,
 ) -> None:
@@ -2036,6 +2078,26 @@ class TestUserIdPassthrough:
         assert model_prompt.endswith(
             "report\n\nAvailable attachment IDs: att_report. Use tool calls to inspect or process them.",
         )
+
+    def test_prepare_memory_and_model_context_keeps_existing_timestamped_merged_model_prompt(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Pre-merged timestamped model prompts should not duplicate the raw prompt on reuse."""
+        config = _config()
+        runtime_paths = _runtime_paths(tmp_path)
+
+        existing_model_prompt = "[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report."
+
+        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
+            "report",
+            [],
+            config=config,
+            runtime_paths=runtime_paths,
+            model_prompt=existing_model_prompt,
+        )
+
+        assert model_prompt == existing_model_prompt
 
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
