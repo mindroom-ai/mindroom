@@ -2402,6 +2402,66 @@ class TestAgentBot:
         assert event_id == "$team"
 
     @pytest.mark.asyncio
+    async def test_generate_team_response_helper_merges_raw_prompt_with_model_prompt(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Team helper must preserve the raw user prompt when model-only context is present."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
+        bot._send_response = AsyncMock(return_value="$team")
+        install_send_response_mock(bot, bot._send_response)
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        matrix_ids = config.get_ids(runtime_paths_for(config))
+        mock_team_response = AsyncMock(return_value="Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=mock_team_response,
+            ),
+        ):
+            event_id = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                thread_id=None,
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                payload=DispatchPayload(
+                    prompt="Summarize the latest invoice.",
+                    model_prompt="Available attachment IDs: att_invoice. Use tool calls to inspect or process them.",
+                ),
+                response_envelope=_hook_envelope(
+                    body="Summarize the latest invoice.",
+                    source_event_id="$team-root",
+                ),
+                correlation_id="corr-team",
+            )
+
+        assert event_id == "$team"
+        prepared_message = mock_team_response.await_args.kwargs["message"]
+        assert "Summarize the latest invoice." in prepared_message
+        assert "Available attachment IDs: att_invoice." in prepared_message
+        assert prepared_message.index("Summarize the latest invoice.") < prepared_message.index(
+            "Available attachment IDs: att_invoice.",
+        )
+
+    @pytest.mark.asyncio
     async def test_generate_team_response_helper_uses_resolved_thread_root_for_placeholder_and_edit(
         self,
         mock_agent_user: AgentMatrixUser,
