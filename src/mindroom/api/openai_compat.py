@@ -1211,6 +1211,7 @@ async def _prepare_openai_team_run_input(
         reply_to_event_id=None,
         active_event_ids=frozenset(),
         response_sender_id=None,
+        current_sender_id=None,
         compaction_outcomes_collector=None,
         configured_team_name=team_name,
         matrix_run_metadata=None,

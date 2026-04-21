@@ -301,7 +301,7 @@ class TestAIRouting:
         )
 
         with patch("mindroom.routing.get_model_instance") as mock_model:
-            mock_model.side_effect = ValueError("Model error")
+            mock_model.side_effect = Exception("Model error")
 
             agents = [MatrixID(username="mindroom_general", domain="localhost")]
             result = await suggest_agent_for_message("Test message", agents, config)

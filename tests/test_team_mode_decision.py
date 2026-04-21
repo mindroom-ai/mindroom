@@ -173,7 +173,7 @@ class TestDetermineTeamMode:
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
             # Mock the AI agent to raise an error
             mock_agent = AsyncMock()
-            mock_agent.arun.side_effect = RuntimeError("AI service unavailable")
+            mock_agent.arun.side_effect = Exception("AI service unavailable")
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await _select_team_mode_for_test(

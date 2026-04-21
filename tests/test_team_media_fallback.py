@@ -42,6 +42,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.execution_preparation import (
     PreparedExecutionContext,
+    ThreadHistoryRenderLimits,
 )
 from mindroom.history.interrupted_replay import render_interrupted_replay_content
 from mindroom.history.runtime import open_bound_scope_session_context
@@ -56,8 +57,10 @@ from mindroom.team_exact_members import (
 )
 from mindroom.teams import (
     TeamMode,
+    _ensure_request_team_knowledge_managers,
     _materialize_team_members,
     _team_response_stream_raw,
+    prepare_materialized_team_execution,
     team_response,
     team_response_stream,
 )
@@ -240,10 +243,55 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, list)
+    assert isinstance(second_prompt, str)
     assert first_prompt[-1].audio == [audio_input]
-    assert not second_prompt[-1].audio
-    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+    assert "Inline media unavailable for this model" in second_prompt
+
+
+@pytest.mark.asyncio
+async def test_team_response_retries_errored_plain_run_output_with_fresh_run_id() -> None:
+    """Inline-media team retries must also cover plain errored RunOutput fallbacks."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        side_effect=[
+            RunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
+            TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
+        ],
+    )
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    callback_run_ids: list[str] = []
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            run_id="run-123",
+            run_id_callback=callback_run_ids.append,
+        )
+
+    assert "Recovered team response" in response
+    first_call = mock_team.arun.await_args_list[0]
+    second_call = mock_team.arun.await_args_list[1]
+    assert first_call.kwargs["run_id"] == "run-123"
+    assert second_call.kwargs["run_id"] is not None
+    assert second_call.kwargs["run_id"] != "run-123"
+    assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
 
 
 @pytest.mark.asyncio
@@ -416,8 +464,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
         "Old thread context",
     ]
     prompt = mock_team.arun.await_args.args[0]
-    assert isinstance(prompt, list)
-    assert [message.content for message in prompt] == ["Analyze this."]
+    assert prompt == "Analyze this."
 
 
 @pytest.mark.asyncio
@@ -481,11 +528,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     assert "Recovered team response" in response
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_team.arun.await_args.args[0]
-    assert isinstance(prompt, list)
-    assert [message.content for message in prompt] == [
-        "user: Fresh follow-up",
-        "Analyze this.",
-    ]
+    assert prompt == "user: Fresh follow-up\n\nAnalyze this."
 
 
 @pytest.mark.asyncio
@@ -600,6 +643,121 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         assert scope_context is not None
         assert scope_context.session is not None
         assert not any(_has_queued_notice(run.messages) for run in scope_context.session.runs or [])
+
+
+@pytest.mark.asyncio
+async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_called_directly() -> None:
+    """Shared team preparation should scrub loaded queued notices even outside team_response helpers."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    fake_agent = _make_test_agent("GeneralAgent")
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-helper-scrub",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        create_session_if_missing=True,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        persisted_team = _make_test_team(name="General Team", team_id=scope_context.session.team_id)
+        persisted_team.db = scope_context.storage
+        _cleanup_and_store(
+            persisted_team,
+            TeamRunOutput(
+                run_id="run-1",
+                team_id=scope_context.session.team_id,
+                team_name="General Team",
+                session_id="session-helper-scrub",
+                messages=[_queued_notice_message()],
+                status=RunStatus.completed,
+            ),
+            scope_context.session,
+        )
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-helper-scrub",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        mock_team = _make_test_team(name="General Team", team_id=scope_context.session.team_id)
+
+        async def fake_prepare_bound_team_execution_context(**kwargs: object) -> PreparedExecutionContext:
+            prepared_scope_context = kwargs["scope_context"]
+            assert prepared_scope_context is not None
+            assert prepared_scope_context.session is not None
+            assert not any(_has_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
+            return _prepared_team_execution_context(final_prompt="Analyze this.")
+
+        with patch(
+            "mindroom.teams.prepare_bound_team_execution_context",
+            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+        ):
+            await prepare_materialized_team_execution(
+                scope_context=scope_context,
+                agents=[fake_agent],
+                team=mock_team,
+                message="Analyze this.",
+                thread_history=[],
+                config=config,
+                runtime_paths=runtime_paths,
+                active_model_name=None,
+                reply_to_event_id=None,
+                active_event_ids=frozenset(),
+                response_sender_id=None,
+                current_sender_id=None,
+                compaction_outcomes_collector=None,
+                configured_team_name=None,
+            )
+
+
+@pytest.mark.asyncio
+async def test_prepare_materialized_team_execution_forwards_explicit_thread_history_render_limits() -> None:
+    """Shared team preparation should forward caller-provided fallback-history caps."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team(name="General Team")
+
+    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> PreparedExecutionContext:
+        assert kwargs["thread_history_render_limits"] == ThreadHistoryRenderLimits(
+            max_messages=30,
+            max_message_length=200,
+            missing_sender_label="Unknown",
+        )
+        return _prepared_team_execution_context(final_prompt="Analyze this.")
+
+    with patch(
+        "mindroom.teams.prepare_bound_team_execution_context",
+        new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+    ):
+        await prepare_materialized_team_execution(
+            scope_context=None,
+            agents=[fake_agent],
+            team=mock_team,
+            message="Analyze this.",
+            thread_history=[],
+            config=config,
+            runtime_paths=runtime_paths,
+            active_model_name=None,
+            reply_to_event_id=None,
+            active_event_ids=frozenset(),
+            response_sender_id=None,
+            current_sender_id=None,
+            compaction_outcomes_collector=None,
+            configured_team_name=None,
+            thread_history_render_limits=ThreadHistoryRenderLimits(
+                max_messages=30,
+                max_message_length=200,
+                missing_sender_label="Unknown",
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -2380,8 +2538,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
         "Old thread context",
     ]
     prepared_prompt = mock_raw.await_args.kwargs["prompt"]
-    assert isinstance(prepared_prompt, list)
-    assert [message.content for message in prepared_prompt] == ["Analyze this."]
+    assert prepared_prompt == "Analyze this."
 
 
 @pytest.mark.asyncio
@@ -2452,8 +2609,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     assert len(chunks) == 1
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_raw.await_args.kwargs["prompt"]
-    assert isinstance(prompt, list)
-    assert [message.content for message in prompt] == ["user: Fresh follow-up", "Analyze this."]
+    assert prompt == "user: Fresh follow-up\n\nAnalyze this."
 
 
 @pytest.mark.asyncio
@@ -2503,8 +2659,7 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
     assert len(chunks) == 1
     assert "Streamed team response" in str(chunks[0])
     prompt = mock_raw.await_args.kwargs["prompt"]
-    assert isinstance(prompt, list)
-    assert [message.content for message in prompt] == ["Previous team reply", "Analyze this."]
+    assert prompt == "assistant: Previous team reply\n\nAnalyze this."
 
 
 def test_agno_team_message_normalization_drops_assistant_context() -> None:
@@ -2515,6 +2670,36 @@ def test_agno_team_message_normalization_drops_assistant_context() -> None:
     ]
 
     assert get_text_from_message(structured_messages) == "Current request"
+
+
+@pytest.mark.asyncio
+async def test_ensure_request_team_knowledge_managers_falls_back_on_generic_exception() -> None:
+    """Team knowledge-manager bootstrap should fail open on generic provider/setup errors."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with patch(
+        "mindroom.teams.ensure_request_knowledge_managers",
+        new=AsyncMock(side_effect=Exception("boom")),
+    ):
+        managers = await _ensure_request_team_knowledge_managers(
+            ["general"],
+            orchestrator,
+            execution_identity,
+        )
+
+    assert managers == {}
 
 
 @pytest.mark.asyncio
@@ -2724,10 +2909,9 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, list)
+    assert isinstance(second_prompt, str)
     assert first_prompt[-1].audio == [audio_input]
-    assert not second_prompt[-1].audio
-    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+    assert "Inline media unavailable for this model" in second_prompt
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered setup stream" in rendered_output
@@ -2780,10 +2964,9 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, list)
+    assert isinstance(second_prompt, str)
     assert first_prompt[-1].audio == [audio_input]
-    assert not second_prompt[-1].audio
-    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+    assert "Inline media unavailable for this model" in second_prompt
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered stream" in rendered_output

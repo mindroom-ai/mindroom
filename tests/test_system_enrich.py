@@ -440,6 +440,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             reply_to_event_id="$event",
             active_event_ids=frozenset(),
             response_sender_id="@mindroom_code:localhost",
+            current_sender_id=None,
             compaction_outcomes_collector=[],
             configured_team_name=None,
             system_enrichment_items=system_items,
@@ -512,6 +513,7 @@ async def test_prepare_materialized_team_execution_returns_public_seam_type(tmp_
             reply_to_event_id="$event",
             active_event_ids=frozenset(),
             response_sender_id="@mindroom_code:localhost",
+            current_sender_id=None,
             compaction_outcomes_collector=[],
             configured_team_name=None,
         )
