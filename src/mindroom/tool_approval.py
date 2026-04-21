@@ -1197,7 +1197,8 @@ async def evaluate_tool_approval(
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
-            msg = f"Approval script '{resolved_path}' failed: {exc!s}"
+            logger.warning("Approval script raised", script_path=str(resolved_path), exc_info=True)
+            msg = f"Approval script '{resolved_path}' failed with {type(exc).__name__}"
             raise ToolApprovalScriptError(msg) from exc
         if not isinstance(result, bool):
             msg = f"Approval script '{resolved_path}' returned a non-bool result."

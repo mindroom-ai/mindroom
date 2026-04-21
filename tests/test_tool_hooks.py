@@ -1466,6 +1466,50 @@ async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp
 
 
 @pytest.mark.asyncio
+async def test_tool_approval_script_error_text_is_sanitized_in_decline_result(tmp_path: Path) -> None:
+    """Approval script failures should expose the exception type without leaking secret values."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    script_path = tmp_path / "approval_scripts" / "broken.py"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(
+        "def check(tool_name, arguments, agent_name):\n    raise ValueError(arguments['secret'])\n",
+        encoding="utf-8",
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "rules": [{"match": "read_file", "script": "approval_scripts/broken.py"}],
+            },
+        ),
+        runtime_paths,
+    )
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    next_func = AsyncMock(return_value="should not run")
+    with tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"secret": "sk-secret-123"})
+
+    assert next_func.await_count == 0
+    assert "ValueError" in result
+    assert "sk-secret-123" not in result
+
+
+@pytest.mark.asyncio
 async def test_tool_approval_uses_transport_agent_for_detached_team_member_runs(tmp_path: Path) -> None:
     """Detached team-member approvals should send from the ingress bot, not the child agent."""
     runtime_paths = test_runtime_paths(tmp_path)
