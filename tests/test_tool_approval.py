@@ -81,6 +81,17 @@ def _runtime_bound_config(
     return bind_runtime_paths(config, runtime_paths)
 
 
+def _cinny_accepts_tool_approval_payload(payload: dict[str, object]) -> bool:
+    """Mirror Cinny's required approval-card field checks."""
+    required_keys = ("approval_id", "tool_name", "agent_name", "requested_at", "expires_at")
+    if not all(isinstance(payload.get(key), str) and payload[key].strip() for key in required_keys):
+        return False
+    if payload.get("status") not in {"pending", "approved", "denied", "expired"}:
+        return False
+    arguments = payload.get("arguments")
+    return isinstance(arguments, dict)
+
+
 def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
     bot = AgentBot(
         agent_user=AgentMatrixUser(
@@ -498,6 +509,8 @@ async def test_request_approval_sanitizes_arguments_in_matrix_event_and_persiste
     assert "sk-live-secret-token" not in persisted_text
     assert "***redacted***" in event_payload_text
     assert "***redacted***" in persisted_text
+    assert isinstance(event_payload["arguments"], dict)
+    assert _cinny_accepts_tool_approval_payload(event_payload)
     assert len(json.dumps(event_payload["arguments"], sort_keys=True)) <= 1200
     assert event_payload["arguments_truncated"] is True
 

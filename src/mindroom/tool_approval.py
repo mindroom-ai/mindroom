@@ -77,6 +77,10 @@ def _compact_preview_text(value: object) -> str:
         return str(value)
 
 
+def _json_preview_length(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+
 def _build_arguments_preview(arguments: dict[str, Any]) -> tuple[object, bool]:
     sanitized = sanitize_failure_value(arguments)
     preview_text = _compact_preview_text(sanitized)
@@ -91,6 +95,50 @@ def _build_arguments_preview(arguments: dict[str, Any]) -> tuple[object, bool]:
             break
         preview = next_preview
     return preview, True
+
+
+def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
+    if _json_preview_length(value) <= max_length:
+        return value
+    return sanitize_failure_text(_compact_preview_text(value), max_length=max_length)
+
+
+def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    sanitized = sanitize_failure_value(arguments)
+    if not isinstance(sanitized, dict):
+        wrapped = {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
+        return wrapped, True
+    if _json_preview_length(sanitized) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
+        return sanitized, False
+
+    per_value_budget = max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // max(len(sanitized), 1))
+    preview = {
+        key: _truncate_event_argument_value(value, max_length=per_value_budget) for key, value in sanitized.items()
+    }
+
+    while _json_preview_length(preview) > _MAX_ARGUMENTS_PREVIEW_CHARS:
+        shrink_key = max(preview, key=lambda candidate: len(_compact_preview_text(preview[candidate])))
+        current_value = preview[shrink_key]
+        current_text = _compact_preview_text(current_value)
+        if current_value is None or current_text == "[truncated]":
+            preview[shrink_key] = None
+        else:
+            overflow = _json_preview_length(preview) - _MAX_ARGUMENTS_PREVIEW_CHARS
+            next_max_length = max(len(current_text) - overflow - 8, len("[truncated]"))
+            next_value = sanitize_failure_text(current_text, max_length=next_max_length)
+            preview[shrink_key] = next_value if next_value != current_text else "[truncated]"
+        if all(value is None for value in preview.values()):
+            break
+
+    return preview, True
+
+
+def _event_arguments_payload(pending: PendingApproval) -> tuple[dict[str, Any], bool]:
+    if pending.arguments:
+        return _build_event_arguments_preview(pending.arguments)
+    if isinstance(pending.arguments_preview, dict):
+        return cast("dict[str, Any]", pending.arguments_preview), pending.arguments_preview_truncated
+    return {"value": pending.arguments_preview}, True
 
 
 @dataclass(frozen=True, slots=True)
@@ -860,12 +908,13 @@ class ApprovalManager:
         return f"🔒 Approval required: {tool_name}"
 
     def _pending_event_content(self, pending: PendingApproval) -> dict[str, Any]:
+        event_arguments, arguments_truncated = _event_arguments_payload(pending)
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
             "body": self._event_body(pending.tool_name, pending.status),
             "tool_name": pending.tool_name,
             "tool_call_id": pending.id,
-            "arguments": pending.arguments_preview,
+            "arguments": event_arguments,
             "agent_name": pending.agent_name,
             "status": pending.status,
             "approval_id": pending.id,
@@ -873,7 +922,7 @@ class ApprovalManager:
             "expires_at": pending.expires_at.isoformat(),
             "thread_id": pending.thread_id,
         }
-        if pending.arguments_preview_truncated:
+        if arguments_truncated:
             content["arguments_truncated"] = True
         if pending.requester_id is not None:
             content["requester_id"] = pending.requester_id
