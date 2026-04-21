@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from mindroom.agent_policy import (
-    build_agent_policy_seed,
     build_agent_policy_seeds,
-    resolve_agent_policy,
+    resolve_agent_policy_from_data,
     resolve_agent_policy_index,
     resolve_private_knowledge_base_agent,
 )
@@ -26,12 +25,10 @@ def test_resolve_agent_policy_uses_private_scope_and_private_label() -> None:
         },
     )
 
-    policy = resolve_agent_policy(
-        build_agent_policy_seed(
-            "mind",
-            config.agents["mind"],
-            default_worker_scope=config.defaults.worker_scope,
-        ),
+    policy = resolve_agent_policy_from_data(
+        "mind",
+        config.agents["mind"],
+        default_worker_scope=config.defaults.worker_scope,
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
 
@@ -45,12 +42,10 @@ def test_resolve_agent_policy_uses_private_scope_and_private_label() -> None:
 
 def test_resolve_agent_policy_inherits_default_worker_scope_without_private_workspace() -> None:
     """Shared agents inherit defaults.worker_scope without becoming private workspaces."""
-    policy = resolve_agent_policy(
-        build_agent_policy_seed(
-            "general",
-            AgentConfig(display_name="General"),
-            default_worker_scope="user",
-        ),
+    policy = resolve_agent_policy_from_data(
+        "general",
+        AgentConfig(display_name="General"),
+        default_worker_scope="user",
     )
 
     assert policy.effective_execution_scope == "user"
@@ -128,12 +123,10 @@ def test_private_knowledge_base_derives_from_policy_seed() -> None:
         },
     )
 
-    policy = resolve_agent_policy(
-        build_agent_policy_seed(
-            "mind",
-            config.agents["mind"],
-            default_worker_scope=config.defaults.worker_scope,
-        ),
+    policy = resolve_agent_policy_from_data(
+        "mind",
+        config.agents["mind"],
+        default_worker_scope=config.defaults.worker_scope,
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
 

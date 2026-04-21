@@ -67,7 +67,7 @@ def _coerce_private_scope(value: object) -> PrivateWorkerScope | None:
     return None
 
 
-def build_agent_policy_seed(
+def _build_agent_policy_seed(
     agent_name: str,
     agent_data: AgentConfig | Mapping[str, Any],
     *,
@@ -124,7 +124,7 @@ def build_agent_policy_seeds(
 ) -> dict[str, AgentPolicySeed]:
     """Build policy seeds for all configured agents."""
     return {
-        agent_name: build_agent_policy_seed(
+        agent_name: _build_agent_policy_seed(
             agent_name,
             agent_data,
             default_worker_scope=default_worker_scope,
@@ -148,7 +148,7 @@ def dashboard_credentials_supported_for_scope(worker_scope: WorkerScope | None) 
     return worker_scope in {None, "shared"}
 
 
-def resolve_agent_policy(
+def _resolve_agent_policy(
     seed: AgentPolicySeed,
     *,
     team_eligibility_reason: str | None = None,
@@ -187,8 +187,8 @@ def resolve_agent_policy_from_data(
     private_knowledge_base_id_prefix: str = DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
 ) -> ResolvedAgentPolicy:
     """Resolve one canonical agent policy from typed config or draft payload data."""
-    return resolve_agent_policy(
-        build_agent_policy_seed(
+    return _resolve_agent_policy(
+        _build_agent_policy_seed(
             agent_name,
             agent_data,
             default_worker_scope=default_worker_scope,
@@ -270,7 +270,7 @@ def get_unsupported_team_agents(
     return unsupported_agents
 
 
-def team_eligibility_reason(
+def _team_eligibility_reason(
     agent_name: str,
     *,
     private_targets: tuple[str, ...] | None,
@@ -329,9 +329,9 @@ def resolve_agent_policy_index(
         for agent_name in seeds
     }
     policies = {
-        agent_name: resolve_agent_policy(
+        agent_name: _resolve_agent_policy(
             seed,
-            team_eligibility_reason=team_eligibility_reason(
+            team_eligibility_reason=_team_eligibility_reason(
                 agent_name,
                 private_targets=private_targets_by_agent[agent_name],
             ),
@@ -359,7 +359,7 @@ def resolve_private_knowledge_base_agent(
     seed = seeds.get(agent_name)
     if seed is None:
         return None
-    policy = resolve_agent_policy(
+    policy = _resolve_agent_policy(
         seed,
         private_knowledge_base_id_prefix=private_knowledge_base_id_prefix,
     )
@@ -369,7 +369,9 @@ def resolve_private_knowledge_base_agent(
 
 
 __all__ = [
+    "AgentPolicySeed",
     "ResolvedAgentPolicy",
+    "ResolvedAgentPolicyIndex",
     "build_agent_policy_seeds",
     "dashboard_credentials_supported_for_scope",
     "get_agent_delegation_closure",

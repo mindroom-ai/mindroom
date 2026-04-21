@@ -1207,7 +1207,6 @@ from = ["mindroom.routing"]
 
 [[interfaces]]
 expose = [
-    "PreparedMaterializedTeamExecution",
     "TeamIntent",
     "TeamMemberStatus",
     "TeamMode",
@@ -1231,7 +1230,9 @@ from = ["mindroom.teams"]
 
 [[interfaces]]
 expose = [
+    "AgentPolicySeed",
     "ResolvedAgentPolicy",
+    "ResolvedAgentPolicyIndex",
     "build_agent_policy_seeds",
     "dashboard_credentials_supported_for_scope",
     "resolve_agent_policy_from_data",
