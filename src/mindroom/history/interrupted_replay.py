@@ -50,7 +50,6 @@ class InterruptedReplaySnapshot:
     source_event_ids: tuple[str, ...]
     source_event_prompts: tuple[tuple[str, str], ...]
     response_event_id: str | None
-    interruption_reason: str
 
 
 def _normalized_string_tuple(values: object) -> tuple[str, ...]:
@@ -162,7 +161,6 @@ def build_interrupted_replay_snapshot(
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
     response_event_id: str | None = None,
-    interruption_reason: str,
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state."""
     metadata = run_metadata if isinstance(run_metadata, Mapping) else {}
@@ -183,7 +181,6 @@ def build_interrupted_replay_snapshot(
         response_event_id=(
             raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
         ),
-        interruption_reason=interruption_reason,
     )
 
 
@@ -239,7 +236,6 @@ def persist_interrupted_replay(
     completed_tools: Sequence[ToolTraceEntry],
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
-    interruption_reason: str,
     is_team: bool,
 ) -> None:
     """Persist one interrupted top-level turn from trusted runtime state."""
@@ -258,7 +254,6 @@ def persist_interrupted_replay(
             interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
             response_event_id=None,
-            interruption_reason=interruption_reason,
         ),
         is_team=is_team,
     )

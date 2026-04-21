@@ -24,7 +24,6 @@ class TurnRecorder:
     assistant_text: str = ""
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
-    interruption_reason: str | None = None
     outcome: str = "pending"
     interrupted_persisted: bool = False
 
@@ -73,23 +72,21 @@ class TurnRecorder:
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
-        interruption_reason: str | None,
     ) -> None:
         """Record one interrupted top-level turn."""
         self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools(list(interrupted_tools))
-        self.mark_interrupted(interruption_reason)
+        self.mark_interrupted()
 
     def mark_completed(self) -> None:
         """Record successful completion."""
         self.outcome = "completed"
 
-    def mark_interrupted(self, reason: str | None) -> None:
-        """Record interruption with one canonical reason string."""
+    def mark_interrupted(self) -> None:
+        """Record interruption."""
         self.outcome = "interrupted"
-        self.interruption_reason = reason or "Run interrupted"
 
     def interrupted_snapshot(self) -> InterruptedReplaySnapshot:
         """Build one canonical interrupted snapshot from the recorded facts."""
@@ -100,7 +97,6 @@ class TurnRecorder:
             interrupted_tools=self.interrupted_tools,
             run_metadata=self.run_metadata,
             response_event_id=self.response_event_id,
-            interruption_reason=self.interruption_reason or "Run interrupted",
         )
 
     def claim_interrupted_persistence(self) -> bool:

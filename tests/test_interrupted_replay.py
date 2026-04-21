@@ -69,7 +69,6 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_an
         source_event_ids=(),
         source_event_prompts=(),
         response_event_id="$reply",
-        interruption_reason="user_cancelled",
     )
 
     run = build_interrupted_replay_run(
@@ -110,7 +109,6 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
         source_event_ids=(),
         source_event_prompts=(),
         response_event_id="$reply",
-        interruption_reason="user_cancelled",
     )
 
     run = build_interrupted_replay_run(
@@ -144,7 +142,6 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
             "matrix_source_event_prompts": {"$first": "first", "$anchor": "anchor"},
         },
         response_event_id="$reply",
-        interruption_reason="user_cancelled",
     )
 
     run = build_interrupted_replay_run(
@@ -203,7 +200,6 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
             completed_tools=(),
             interrupted_tools=(),
             run_metadata=None,
-            interruption_reason="user_cancelled",
         )
         persist_interrupted_replay_snapshot(
             storage=storage,
@@ -250,7 +246,7 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
             ),
         ],
     )
-    recorder.mark_interrupted("user_cancelled")
+    recorder.mark_interrupted()
 
     snapshot = recorder.interrupted_snapshot()
 
@@ -260,7 +256,6 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
     assert snapshot.source_event_id == "e1"
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
-    assert snapshot.interruption_reason == "user_cancelled"
 
 
 def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() -> None:
@@ -293,7 +288,6 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
         assistant_text="Still working",
         completed_tools=[completed_tool],
         interrupted_tools=[interrupted_tool],
-        interruption_reason="Run interrupted",
     )
 
     snapshot = recorder.interrupted_snapshot()
@@ -319,7 +313,6 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
             completed_tools=(),
             interrupted_tools=(),
             run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
-            interruption_reason="user_cancelled",
         )
 
         persist_interrupted_replay_snapshot(

@@ -1587,7 +1587,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                         assistant_text=partial_text,
                         completed_tools=completed_tools,
                         interrupted_tools=[],
-                        interruption_reason=str(response.content or "Run cancelled"),
                     )
                 if turn_recorder is None:
                     persist_interrupted_replay(
@@ -1599,7 +1598,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                         completed_tools=completed_tools,
                         interrupted_tools=[],
                         run_metadata=metadata,
-                        interruption_reason=str(response.content or "Run cancelled"),
                         is_team=False,
                     )
                     standalone_interrupted_replay_persisted = True
@@ -1629,7 +1627,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 assistant_text=turn_recorder.assistant_text,
                 completed_tools=turn_recorder.completed_tools,
                 interrupted_tools=turn_recorder.interrupted_tools,
-                interruption_reason="Run interrupted",
             )
         elif not standalone_interrupted_replay_persisted:
             persist_interrupted_replay(
@@ -1645,7 +1642,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     unseen_event_ids,
                     extra_metadata=matrix_run_metadata,
                 ),
-                interruption_reason="Run interrupted",
                 is_team=False,
             )
         raise
@@ -1991,7 +1987,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 assistant_text=state.assistant_text,
                                 completed_tools=state.completed_tools,
                                 interrupted_tools=state.pending_tools,
-                                interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
                             )
                         if run_metadata_collector is not None:
                             fallback_metrics = _build_model_request_metrics_fallback(
@@ -2024,7 +2019,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 completed_tools=state.completed_tools,
                                 interrupted_tools=state.pending_tools,
                                 run_metadata=metadata,
-                                interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
                                 is_team=False,
                             )
                             standalone_interrupted_replay_persisted = True
@@ -2088,7 +2082,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 assistant_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=state.pending_tools,
-                interruption_reason="Run interrupted",
             )
         elif not standalone_interrupted_replay_persisted:
             persist_interrupted_replay(
@@ -2104,7 +2097,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     unseen_event_ids,
                     extra_metadata=matrix_run_metadata,
                 ),
-                interruption_reason="Run interrupted",
                 is_team=False,
             )
         raise

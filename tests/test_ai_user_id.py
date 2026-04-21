@@ -408,7 +408,7 @@ def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> 
     storage = MagicMock()
     coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
     recorder = TurnRecorder(user_message="Hello")
-    recorder.mark_interrupted("Run interrupted")
+    recorder.mark_interrupted()
 
     with patch("mindroom.response_runner.persist_interrupted_replay_snapshot") as mock_persist:
         coordinator._persist_interrupted_turn(
@@ -439,7 +439,7 @@ def test_persist_interrupted_turn_closes_storage_when_write_fails(tmp_path: Path
     storage = MagicMock()
     coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
     recorder = TurnRecorder(user_message="Hello")
-    recorder.mark_interrupted("Run interrupted")
+    recorder.mark_interrupted()
 
     with (
         patch(
