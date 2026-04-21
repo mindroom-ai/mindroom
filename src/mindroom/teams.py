@@ -216,6 +216,18 @@ def format_team_response(response: TeamRunOutput | RunOutput) -> list[str]:
     return _format_contributions_recursive(response, indent=0, include_consensus=True)
 
 
+def is_errored_run_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether a team or agent fallback run ended in an error state."""
+    status = response.status.value if isinstance(response.status, RunStatus) else response.status
+    return str(status).lower() == "error"
+
+
+def is_cancelled_run_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether a team or agent fallback run ended in a cancelled state."""
+    status = response.status.value if isinstance(response.status, RunStatus) else response.status
+    return str(status).lower() == "cancelled"
+
+
 def _format_contributions_recursive(  # noqa: C901
     response: TeamRunOutput | RunOutput,
     indent: int,
@@ -1493,7 +1505,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                         logger.exception("team_response_failed", agents=agent_list)
                         return get_user_friendly_error_message(e, team_name)
 
-                    if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
+                    if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                         error_text = str(response.content or "Unknown team error")
                         if not retried_without_inline_media and should_retry_without_inline_media(
                             error_text,
@@ -1513,9 +1525,9 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                     break
 
                 assert response is not None
-                if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
+                if isinstance(response, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(response):
                     _raise_team_run_cancelled(response.content)
-                if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
+                if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                     return get_user_friendly_error_message(
                         Exception(str(response.content or "Unknown team error")),
                         team_name,
@@ -1898,6 +1910,28 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         user_id=user_id,
                     )
                     async for event in raw_stream:
+                        if isinstance(event, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(event):
+                            _raise_team_run_cancelled(event.content)
+                        if isinstance(event, (TeamRunOutput, RunOutput)) and is_errored_run_output(event):
+                            error_text = str(event.content or "Unknown team error")
+                            if (
+                                not retried_without_inline_media
+                                and not emitted_output
+                                and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                            ):
+                                logger.warning(
+                                    "Retrying team streaming without inline media after errored run output",
+                                    agents=", ".join(agent_names),
+                                    error=error_text,
+                                )
+                                attempt_prompt = _append_inline_media_fallback_to_run_input(prepared_run_input)
+                                attempt_media_inputs = MediaInputs()
+                                attempt_run_id = _next_retry_run_id(run_id)
+                                retry_requested = True
+                                break
+                            yield get_user_friendly_error_message(Exception(error_text), team_label)
+                            return
+
                         if isinstance(event, RunOutput):
                             if reply_to_event_id:
                                 _persist_bound_seen_event_ids(
@@ -1909,27 +1943,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             return
 
                         if isinstance(event, TeamRunOutput):
-                            if event.status == RunStatus.cancelled:
-                                _raise_team_run_cancelled(event.content)
-                            if event.status == RunStatus.error:
-                                error_text = str(event.content or "Unknown team error")
-                                if (
-                                    not retried_without_inline_media
-                                    and not emitted_output
-                                    and should_retry_without_inline_media(error_text, attempt_media_inputs)
-                                ):
-                                    logger.warning(
-                                        "Retrying team streaming without inline media after errored run output",
-                                        agents=", ".join(agent_names),
-                                        error=error_text,
-                                    )
-                                    attempt_prompt = _append_inline_media_fallback_to_run_input(prepared_run_input)
-                                    attempt_media_inputs = MediaInputs()
-                                    attempt_run_id = _next_retry_run_id(run_id)
-                                    retry_requested = True
-                                    break
-                                yield get_user_friendly_error_message(Exception(error_text), team_label)
-                                return
                             if reply_to_event_id:
                                 _persist_bound_seen_event_ids(
                                     scope_context=scope_context,

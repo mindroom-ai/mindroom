@@ -257,6 +257,45 @@ async def test_team_response_fallback_run_output_cleans_queued_notice_before_for
 
 
 @pytest.mark.asyncio
+async def test_team_response_fallback_run_output_error_uses_friendly_error() -> None:
+    """Errored RunOutput fallbacks should use the normal team error path."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    fallback_result = RunOutput(
+        run_id="run-123",
+        session_id="session-123",
+        agent_name="general",
+        content="validation failed in team",
+        status=RunStatus.error,
+    )
+    mock_team.arun = AsyncMock(return_value=fallback_result)
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-123",
+        )
+
+    assert response == "friendly-team-error"
+
+
+@pytest.mark.asyncio
 async def test_team_response_uses_compaction_aware_member_execution() -> None:
     """Direct team execution should prepare member history and apply queued compactions."""
     config = _build_test_config()
@@ -926,6 +965,57 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield TeamRunOutput(content="validation failed in team", status=RunStatus.error)
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+            )
+        ]
+
+    assert chunks == ["friendly-team-error"]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_returns_friendly_error_for_errored_plain_run_output() -> None:
+    """Errored RunOutput fallbacks should use the normal team error path."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield RunOutput(content="validation failed in team", status=RunStatus.error)
 
     team_agent_ids = [
         MatrixID.from_agent(

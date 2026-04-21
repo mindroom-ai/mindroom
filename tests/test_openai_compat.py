@@ -2309,6 +2309,37 @@ class TestTeamCompletion:
         assert content == "**Agent**: Recovered team response"
         assert "RunOutput(" not in content
 
+    def test_team_non_streaming_rejects_plain_run_output_error(self, team_app_client: TestClient) -> None:
+        """Errored RunOutput fallbacks should surface as API failures, not successful content."""
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = _make_test_team()
+        mock_team.arun = AsyncMock(return_value=RunOutput(status="error", content="validation failed in team"))
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+        assert response.json()["error"]["message"] == "Team execution failed"
+
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams TeamContentEvent (leader text) directly."""
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
@@ -2470,6 +2501,35 @@ class TestTeamCompletion:
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             yield TeamRunOutput(status="error", content="Team execution failed upstream")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+        assert response.json()["error"]["message"] == "Team execution failed"
+
+    def test_team_streaming_first_run_output_error_returns_500(self, team_app_client: TestClient) -> None:
+        """Streaming should treat an error-status RunOutput as a failed team execution."""
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield RunOutput(status="error", content="Team execution failed upstream")
 
         mock_team.arun = MagicMock(side_effect=mock_stream_events)
 

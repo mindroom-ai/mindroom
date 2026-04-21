@@ -43,6 +43,7 @@ from mindroom.teams import (
     TeamOutcome,
     build_materialized_team_instance,
     format_team_response,
+    is_errored_run_output,
     materialize_exact_team_members,
     prepare_materialized_team_execution,
     resolve_configured_team,
@@ -1276,6 +1277,13 @@ async def _non_stream_team_completion(
             except Exception:
                 logger.exception("Team execution failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
+            if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
+                logger.warning(
+                    "Team response returned error",
+                    team=team_name,
+                    error=str(response.content or "Unknown team error"),
+                )
+                return _error_response(500, "Team execution failed", error_type="server_error")
             response_text = (
                 _format_team_output(response) if isinstance(response, (TeamRunOutput, RunOutput)) else str(response)
             )
@@ -1445,7 +1453,7 @@ def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | RunO
     """Extract explicit error text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
-    if isinstance(event, TeamRunOutput) and str(event.status).lower() == "error":
+    if isinstance(event, (TeamRunOutput, RunOutput)) and is_errored_run_output(event):
         formatted_output = _format_team_output(event).strip()
         return formatted_output or "Unknown team error"
     return None
