@@ -295,6 +295,18 @@ class TestResolvedMessageExtraction:
 
         assert visible_body_from_event_source(event_source, "* Preview edit") == "Full edit body"
 
+    def test_visible_body_from_event_source_prefers_canonical_stream_body(self) -> None:
+        """Visible-body extraction should prefer canonical stream text over transient warmup suffixes."""
+        event_source = {
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert visible_body_from_event_source(event_source, "hello") == "hello"
+
 
 class TestDownloadMxcText:
     """Tests for _download_mxc_text function."""
@@ -428,6 +440,31 @@ class TestCanonicalContentResolution:
             "body": "Full edit body",
             "msgtype": "m.text",
             "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "web_search"}]},
+        }
+
+    @pytest.mark.asyncio
+    async def test_extract_edit_body_prefers_canonical_stream_body(self) -> None:
+        """Edit extraction should drop transient warmup suffixes when canonical stream text is present."""
+        event_source = {
+            "content": {
+                "body": "* hello",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "msgtype": "m.text",
+                    "io.mindroom.visible_body": "hello",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+        body, resolved_content = await extract_edit_body(event_source)
+
+        assert body == "hello"
+        assert resolved_content == {
+            "body": "hello",
+            "msgtype": "m.text",
+            "io.mindroom.visible_body": "hello",
         }
 
 

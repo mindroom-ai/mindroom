@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Self
+from unittest.mock import patch
 
 import pytest
 
@@ -1573,6 +1575,82 @@ def test_kubernetes_backend_ready_metadata_patch_failure_is_normalized(tmp_path:
     assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "2"
     assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "11.0"
     assert [event.phase for event in events] == ["cold_start", "failed"]
+
+
+@pytest.mark.parametrize(
+    ("failure_target", "error_message"),
+    [
+        ("sync_shared_credentials", "sync credentials failed"),
+        ("apply_service", "service apply failed"),
+    ],
+)
+def test_kubernetes_backend_prestartup_failures_are_normalized(
+    tmp_path: Path,
+    failure_target: str,
+    error_message: str,
+) -> None:
+    """Fresh startup failures before readiness polling should still persist failed worker state."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    if failure_target == "sync_shared_credentials":
+        failure_context = patch(
+            "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+            side_effect=RuntimeError(error_message),
+        )
+    else:
+
+        def apply_service_with_failure(worker_id: str) -> None:
+            _ = worker_id
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_service = apply_service_with_failure
+        failure_context = nullcontext()
+
+    events: list[WorkerReadyProgress] = []
+    with failure_context, pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=10.0,
+            progress_sink=events.append,
+        )
+
+    worker_id = backend._worker_id(_TEST_SCOPED_WORKER_KEY_A)
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == error_message
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "1"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "10.0"
+    assert [event.phase for event in events] == ["failed"]
+
+
+def test_kubernetes_backend_apply_deployment_failure_is_normalized(tmp_path: Path) -> None:
+    """Deployment apply failures should surface as WorkerBackendError and emit failed progress."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    def apply_deployment_with_failure(**_kwargs: object) -> object:
+        msg = "deployment apply failed"
+        raise RuntimeError(msg)
+
+    backend._resources.apply_deployment = apply_deployment_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match="deployment apply failed"):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=10.0,
+            progress_sink=events.append,
+        )
+
+    assert [event.phase for event in events] == ["failed"]
 
 
 def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:

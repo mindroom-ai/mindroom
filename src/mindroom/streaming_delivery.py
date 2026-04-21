@@ -282,18 +282,19 @@ async def _shutdown_stream_delivery(
         return None
     if not delivery_task.done():
         delivery_queue.put_nowait(None)
-    try:
-        await asyncio.wait_for(delivery_task, timeout=0.5)
-    except asyncio.CancelledError:
+    done, _pending = await asyncio.wait({delivery_task}, timeout=0.5)
+    if delivery_task not in done:
+        delivery_task.cancel()
+        done, _pending = await asyncio.wait({delivery_task}, timeout=0.5)
+        if delivery_task not in done:
+            return TimeoutError("Timed out shutting down stream delivery controller")
+    if delivery_task.cancelled():
         return None
-    except TimeoutError:
-        if not delivery_task.done():
-            delivery_task.cancel()
-            with suppress(asyncio.CancelledError, TimeoutError, Exception):
-                await asyncio.wait_for(delivery_task, timeout=0.5)
+    task_error = delivery_task.exception()
+    if task_error is None:
         return None
-    except Exception as exc:
-        return exc
+    if isinstance(task_error, Exception):
+        return task_error
     return None
 
 

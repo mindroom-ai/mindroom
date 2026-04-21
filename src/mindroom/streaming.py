@@ -7,7 +7,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -17,6 +17,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
@@ -78,6 +79,11 @@ class StreamingDeliveryError(Exception):
         self.tool_trace = tool_trace.copy()
 
 
+def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:
+    """Raise one wrapped non-terminal delivery error for unified rollback handling."""
+    raise _NonTerminalDeliveryError(error) from error
+
+
 def _format_stream_error_note(error: Exception) -> str:
     """Return a concise user-facing note for stream-time exceptions."""
     normalized_error = " ".join(str(error).split())
@@ -132,6 +138,25 @@ def build_restart_interrupted_body(text: str) -> str:
     return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
 
+@dataclass(frozen=True)
+class _CommittedDeliveryState:
+    """One frozen non-terminal stream state that definitely reached Matrix."""
+
+    accumulated_text: str
+    tool_trace: list[ToolTraceEntry]
+    placeholder_progress_sent: bool
+
+
+@dataclass(frozen=True)
+class _PreparedStreamingDelivery:
+    """One frozen non-terminal delivery attempt."""
+
+    content: dict[str, Any]
+    display_text: str
+    committed_state: _CommittedDeliveryState
+    had_warmup_suffix: bool
+
+
 @dataclass
 class StreamingResponse:
     """Manages a streaming response with incremental message updates."""
@@ -167,6 +192,7 @@ class StreamingResponse:
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
+    _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -307,9 +333,48 @@ class StreamingResponse:
         stream_status: str | None = None,
     ) -> bool:
         """Send new message or edit existing one."""
+        prepared_delivery = self._prepare_delivery(
+            is_final=is_final,
+            allow_empty_progress=allow_empty_progress,
+            stream_status=stream_status,
+        )
+        if prepared_delivery is None:
+            return True
+
+        is_initial_send = self.event_id is None
+        send_succeeded = await self._send_content(
+            client,
+            content=prepared_delivery.content,
+            display_text=prepared_delivery.display_text,
+            retry_on_failure=is_final,
+        )
+        if not send_succeeded:
+            if not is_final:
+                action = "send initial" if is_initial_send else "edit"
+                msg = f"Failed to {action} streaming message"
+                raise RuntimeError(msg)
+            return False
+
+        if not is_final:
+            self._warmup_state.note_nonterminal_delivery(
+                had_warmup_suffix=prepared_delivery.had_warmup_suffix,
+            )
+            self._mark_delivery_committed(prepared_delivery.committed_state)
+        else:
+            self.placeholder_progress_sent = False
+        return True
+
+    def _prepare_delivery(
+        self,
+        *,
+        is_final: bool,
+        allow_empty_progress: bool,
+        stream_status: str | None,
+    ) -> _PreparedStreamingDelivery | None:
+        """Freeze one exact outbound payload before awaiting Matrix I/O."""
         warmup_suffix_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
         if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
-            return True
+            return None
 
         assert self.target is not None
         effective_thread_id = self.target.resolved_thread_id
@@ -325,6 +390,7 @@ class StreamingResponse:
         stream_status = self._resolve_stream_status(is_final=is_final, stream_status=stream_status)
         extra_content = dict(self.extra_content or {})
         extra_content[STREAM_STATUS_KEY] = stream_status
+        extra_content[STREAM_VISIBLE_BODY_KEY] = display_text if self.accumulated_text.strip() else ""
 
         content = format_message_with_mentions(
             config=self.config,
@@ -344,31 +410,30 @@ class StreamingResponse:
             suffix_html = "".join(f"<p>{escape(line)}</p>" for line in warmup_suffix_lines)
             content["formatted_body"] = f"{content['formatted_body']}{suffix_html}"
 
-        send_succeeded = await self._send_content(
-            client,
+        return _PreparedStreamingDelivery(
             content=content,
             display_text=display_text,
-            retry_on_failure=is_final,
+            committed_state=_CommittedDeliveryState(
+                accumulated_text=self.accumulated_text if self.accumulated_text.strip() else "",
+                tool_trace=deepcopy(self.tool_trace),
+                placeholder_progress_sent=not self.accumulated_text.strip(),
+            ),
+            had_warmup_suffix=bool(warmup_suffix_lines),
         )
-        if send_succeeded:
-            if not is_final:
-                self._warmup_state.note_nonterminal_delivery(had_warmup_suffix=bool(warmup_suffix_lines))
-                self._mark_delivery_committed()
-                self.placeholder_progress_sent = not self.accumulated_text.strip()
-            else:
-                self.placeholder_progress_sent = False
-        return send_succeeded
 
-    def _mark_delivery_committed(self) -> None:
+    def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:
         """Snapshot the last non-terminal text/tool-trace state that actually reached Matrix."""
-        self._last_delivered_text = self.accumulated_text
-        self._last_delivered_tool_trace = deepcopy(self.tool_trace)
+        self._last_delivered_text = committed_state.accumulated_text
+        self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
+        self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
+        self.placeholder_progress_sent = committed_state.placeholder_progress_sent
 
     def restore_last_delivered_state(self) -> None:
         """Discard buffered state that never reached Matrix after a delivery failure."""
         self.accumulated_text = self._last_delivered_text
         self.tool_trace = deepcopy(self._last_delivered_tool_trace)
         self.chars_since_last_update = 0
+        self.placeholder_progress_sent = self._last_placeholder_progress_sent
 
     def apply_worker_progress_event(self, event: WorkerProgressEvent) -> bool:
         """Update side-band warmup state from one routed worker progress event."""
@@ -583,7 +648,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             if progress_error is not None:
                 _raise_progress_delivery_error(progress_error)
             if delivery_error is not None:
-                _raise_progress_delivery_error(delivery_error)
+                _raise_nonterminal_delivery_error(delivery_error)
         except asyncio.CancelledError as exc:
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None

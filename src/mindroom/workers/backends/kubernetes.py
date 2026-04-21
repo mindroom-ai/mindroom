@@ -373,23 +373,7 @@ class KubernetesWorkerBackend:
                     failure_reason=None,
                     status="starting",
                 )
-
-                sync_shared_credentials_to_worker(
-                    worker_key,
-                    allowed_services=self.worker_grantable_credentials,
-                    credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
-                )
-                self._resources.apply_service(worker_id)
-                deployment_apply = self._resources.apply_deployment(
-                    worker_key=worker_key,
-                    worker_id=worker_id,
-                    state_subpath=state_subpath,
-                    annotations=annotations,
-                    replicas=1,
-                    private_agent_names=spec.private_agent_names,
-                )
-                startup_triggered = should_restart or deployment_apply.recreated
-                should_report_progress = startup_triggered or existing is None or not self._deployment_ready(existing)
+                should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
                 poll_reporter: Callable[[float], None] | None = None
                 finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
                 if should_report_progress:
@@ -398,7 +382,24 @@ class KubernetesWorkerBackend:
                         backend_name=self.backend_name,
                         progress_sink=self._emit_progress,
                     )
+                deployment_apply: resources.DeploymentApplyResult | None = None
                 try:
+                    deployment_apply = self._resources.apply_deployment(
+                        worker_key=worker_key,
+                        worker_id=worker_id,
+                        state_subpath=state_subpath,
+                        annotations=annotations,
+                        replicas=1,
+                        private_agent_names=spec.private_agent_names,
+                    )
+                    startup_triggered = should_restart or deployment_apply.recreated
+                    if startup_triggered and not should_report_progress:
+                        poll_reporter, finalize_progress = _build_progress_reporter(
+                            worker_key=worker_key,
+                            backend_name=self.backend_name,
+                            progress_sink=self._emit_progress,
+                        )
+                        should_report_progress = True
                     if deployment_apply.recreated and not should_restart:
                         startup_count = (current_handle.startup_count if current_handle is not None else 0) + 1
                         annotations = resources.metadata_annotations(
@@ -413,6 +414,12 @@ class KubernetesWorkerBackend:
                             status="starting",
                         )
                         self._resources.patch_deployment(worker_id, annotations=annotations)
+                    sync_shared_credentials_to_worker(
+                        worker_key,
+                        allowed_services=self.worker_grantable_credentials,
+                        credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
+                    )
+                    self._resources.apply_service(worker_id)
                     deployment = self._resources.wait_for_ready(
                         worker_id,
                         timeout_seconds=self.config.ready_timeout_seconds,
@@ -425,12 +432,13 @@ class KubernetesWorkerBackend:
                 except Exception as exc:
                     failure_reason = str(exc)
                     finalize_progress("failed", failure_reason)
-                    self.record_failure(
-                        worker_key,
-                        failure_reason,
-                        now=timestamp,
-                        annotations_override=annotations,
-                    )
+                    if self._resources.read_deployment(worker_id) is not None:
+                        self.record_failure(
+                            worker_key,
+                            failure_reason,
+                            now=timestamp,
+                            annotations_override=annotations,
+                        )
                     if isinstance(exc, WorkerBackendError):
                         raise
                     raise WorkerBackendError(failure_reason) from exc

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 from nio import crypto
 
+from mindroom.constants import STREAM_VISIBLE_BODY_KEY
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -43,6 +44,9 @@ def _normalized_content_dict(content: object) -> dict[str, Any]:
 
 def _content_body(content: dict[str, Any], fallback_body: str) -> str:
     """Return the body from content when present, otherwise the provided fallback."""
+    visible_body = content.get(STREAM_VISIBLE_BODY_KEY)
+    if isinstance(visible_body, str):
+        return visible_body
     body = content.get("body")
     return body if isinstance(body, str) else fallback_body
 
@@ -260,6 +264,11 @@ async def extract_edit_body(
         room_id=room_id,
     )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
+    visible_body = new_content.get(STREAM_VISIBLE_BODY_KEY)
+    if isinstance(visible_body, str):
+        normalized_new_content = dict(new_content)
+        normalized_new_content["body"] = visible_body
+        return visible_body, normalized_new_content
 
     body = new_content.get("body")
     if not isinstance(body, str):

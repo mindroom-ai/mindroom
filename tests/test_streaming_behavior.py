@@ -38,6 +38,7 @@ from mindroom.streaming import (
     is_interrupted_partial_reply,
     send_streaming_response,
 )
+from mindroom.streaming_delivery import _shutdown_stream_delivery
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
@@ -1605,6 +1606,191 @@ class TestStreamingBehavior:
         assert exc_info.value.accumulated_text.startswith("**[Response interrupted by an error:")
         assert "hello" not in exc_info.value.accumulated_text
         assert "world" not in exc_info.value.accumulated_text
+
+    @pytest.mark.asyncio
+    async def test_late_delivery_failure_after_stream_completion_restores_last_delivered_state(self) -> None:
+        """A delivery failure surfaced only during shutdown should still roll back undelivered buffered text."""
+        mock_client = _make_matrix_client_mock()
+        stream_finished = asyncio.Event()
+
+        class ImmediateStreamingResponse(StreamingResponse):
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)
+                self.update_interval = 0.0
+                self.min_update_interval = 0.0
+                self.progress_update_interval = 0.0
+                self.min_char_update_interval = 0.0
+                self.update_char_threshold = 1
+                self.min_update_char_threshold = 1
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            _new_text: str,
+        ) -> DeliveredMatrixEvent:
+            await stream_finished.wait()
+            if _new_content.get("io.mindroom.stream_status") == "streaming":
+                msg = "late edit blew up"
+                raise RuntimeError(msg)
+            return DeliveredMatrixEvent(event_id="$terminal", content_sent={})
+
+        async def stream() -> AsyncIterator[str]:
+            yield "hello"
+            stream_finished.set()
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(StreamingDeliveryError, match="late edit blew up") as exc_info,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+                streaming_cls=ImmediateStreamingResponse,
+            )
+
+        assert exc_info.value.accumulated_text.startswith("**[Response interrupted by an error:")
+        assert "hello" not in exc_info.value.accumulated_text
+
+    @pytest.mark.asyncio
+    async def test_streaming_edit_returning_none_raises_delivery_error(self) -> None:
+        """A Matrix edit failure returning None must not be treated as a successful non-terminal send."""
+        mock_client = _make_matrix_client_mock()
+
+        class ImmediateStreamingResponse(StreamingResponse):
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)
+                self.update_interval = 0.0
+                self.min_update_interval = 0.0
+                self.progress_update_interval = 0.0
+                self.min_char_update_interval = 0.0
+                self.update_char_threshold = 1
+                self.min_update_char_threshold = 1
+
+        terminal_texts: list[str] = []
+        edit_results = [None, DeliveredMatrixEvent(event_id="$terminal", content_sent={})]
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent | None:
+            terminal_texts.append(new_text)
+            return edit_results.pop(0)
+
+        async def stream() -> AsyncIterator[str]:
+            yield "hello"
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(StreamingDeliveryError, match="Failed to edit streaming message") as exc_info,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+                streaming_cls=ImmediateStreamingResponse,
+            )
+
+        assert terminal_texts[-1].startswith("**[Response interrupted by an error:")
+        assert "hello" not in exc_info.value.accumulated_text
+
+    @pytest.mark.asyncio
+    async def test_send_or_edit_message_commits_frozen_preawait_snapshot(self) -> None:
+        """Successful delivery should commit the exact pre-await stream state, not later buffered mutations."""
+        mock_client = _make_matrix_client_mock()
+        runtime_paths = runtime_paths_for(self.config)
+        target = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id="$original_123",
+            room_mode=True,
+        )
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths,
+            target=target,
+            latest_thread_event_id=None,
+            room_mode=True,
+            show_tool_calls=True,
+            extra_content=None,
+        )
+        streaming.event_id = "$thinking_123"
+        streaming.apply_worker_progress_event(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=1.0,
+                ),
+            ),
+        )
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            _new_text: str,
+        ) -> DeliveredMatrixEvent:
+            streaming.accumulated_text = "hello"
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            await streaming._send_or_edit_message(mock_client, allow_empty_progress=True)
+
+        assert streaming._last_delivered_text == ""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_stream_delivery_reports_timeout_when_task_does_not_stop(self) -> None:
+        """A delivery task that ignores cancellation must surface a timeout instead of reporting clean shutdown."""
+        delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
+        task_started = asyncio.Event()
+        release_task = asyncio.Event()
+
+        async def stuck_delivery() -> None:
+            task_started.set()
+            while not release_task.is_set():
+                try:
+                    await asyncio.wait_for(release_task.wait(), timeout=3600)
+                except asyncio.CancelledError:
+                    continue
+
+        delivery_task = asyncio.create_task(stuck_delivery())
+        await task_started.wait()
+
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+
+        assert isinstance(shutdown_error, TimeoutError)
+        release_task.set()
+        await delivery_task
 
     @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:

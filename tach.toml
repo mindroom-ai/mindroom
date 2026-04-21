@@ -805,7 +805,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.message_content"
-depends_on = []
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.matrix.client_thread_history"
@@ -1080,8 +1080,28 @@ depends_on = [
 path = "mindroom.streaming"
 depends_on = [
     "mindroom.constants",
+    "mindroom.interactive",
     "mindroom.matrix.client_delivery",
-    "mindroom.orchestration.runtime", "mindroom.tool_system.events", "mindroom.tool_system.runtime_context",
+    "mindroom.matrix.mentions",
+    "mindroom.message_target",
+    "mindroom.orchestration.runtime",
+    "mindroom.streaming_delivery",
+    "mindroom.streaming_warmup",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.streaming_delivery"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.tool_system.events",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.streaming_warmup"
+depends_on = [
+    "mindroom.workers.models",
 ]
 
 [[modules]]

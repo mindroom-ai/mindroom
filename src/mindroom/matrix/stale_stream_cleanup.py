@@ -19,6 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
@@ -1063,6 +1064,8 @@ async def _edit_stale_message(
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
     extra_content = _preserved_cleanup_content(preserved_content)
+    if extra_content is not None and STREAM_VISIBLE_BODY_KEY in extra_content:
+        extra_content[STREAM_VISIBLE_BODY_KEY] = new_text
     content = format_message_with_mentions(
         config,
         runtime_paths,

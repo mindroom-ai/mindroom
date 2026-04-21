@@ -1447,6 +1447,36 @@ async def test_cleanup_repairs_pending_stream_status_on_restart_note_messages(tm
 
 
 @pytest.mark.asyncio
+async def test_cleanup_uses_canonical_stream_body_instead_of_transient_warmup_suffix(tmp_path: Path) -> None:
+    """Restart cleanup should resume from canonical stream text, not the transient worker warmup suffix."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body="hello\n\n⏳ Preparing isolated worker...",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread", "$user"),
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                "io.mindroom.visible_body": "hello",
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert len(interrupted) == 1
+    assert interrupted[0].partial_text == "hello"
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    assert cast("dict[str, object]", sent_content["m.new_content"])["body"] == build_restart_interrupted_body("hello")
+
+
+@pytest.mark.asyncio
 async def test_cleanup_preserves_tool_trace_and_ai_run_metadata(tmp_path: Path) -> None:
     """Cleanup edits should preserve Cinny-facing run metadata in both edit payload layers."""
     config = _make_config(tmp_path)
