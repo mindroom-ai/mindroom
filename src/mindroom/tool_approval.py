@@ -342,29 +342,29 @@ class ApprovalManager:
             approval_id = self._approval_id_by_event_id.get(approval_event_id)
             if approval_id is None:
                 return None
-            pending = self._pending_by_id.get(approval_id)
+            pending = self._requests_by_id.get(approval_id)
             if pending is None or pending.event_id != approval_event_id or pending.room_id != room_id:
+                return None
+            if pending.status != "pending" and pending.resolution_synced_at is not None:
                 return None
             return pending.transport_agent_name
 
-    def _anchored_pending_request(
+    def _anchored_request(
         self,
         *,
         approval_event_id: str,
         room_id: str,
-        resolved_by: str,
         transport_agent_name: str,
     ) -> PendingApproval | None:
         with self._state_lock:
             approval_id = self._approval_id_by_event_id.get(approval_event_id)
             if approval_id is None:
                 return None
-            pending = self._pending_by_id.get(approval_id)
+            pending = self._requests_by_id.get(approval_id)
             if (
                 pending is None
                 or pending.event_id != approval_event_id
                 or pending.room_id != room_id
-                or pending.approver_user_id != resolved_by
                 or pending.transport_agent_name != transport_agent_name
             ):
                 return None
@@ -594,16 +594,19 @@ class ApprovalManager:
         transport_agent_name: str,
     ) -> bool:
         """Resolve one Matrix-anchored approval action against the original approval card."""
-        pending = self._anchored_pending_request(
+        pending = self._anchored_request(
             approval_event_id=approval_event_id,
             room_id=room_id,
-            resolved_by=resolved_by,
             transport_agent_name=transport_agent_name,
         )
         if pending is None:
             return False
+        if pending.status != "pending":
+            return pending.resolution_synced_at is None
+        if pending.approver_user_id != resolved_by:
+            return False
 
-        return (
+        if (
             await self._resolve_pending(
                 pending.id,
                 status=status,
@@ -611,7 +614,14 @@ class ApprovalManager:
                 resolved_by=resolved_by,
             )
             is not None
+        ):
+            return True
+        refreshed = self._anchored_request(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
+            transport_agent_name=transport_agent_name,
         )
+        return refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None
 
     async def handle_reaction(
         self,
@@ -891,12 +901,22 @@ class ApprovalManager:
         with self._state_lock:
             pending = self._pending_by_id.pop(approval_id, None)
             if pending is None:
-                pending = self._requests_by_id.pop(approval_id, None)
-            else:
+                pending = self._requests_by_id.get(approval_id)
+            if pending is None:
+                return
+            if pending.status == "pending":
+                self._pending_by_id[approval_id] = pending
+                if pending.event_id is not None:
+                    self._approval_id_by_event_id[pending.event_id] = approval_id
+                return
+            if pending.event_id is None:
                 self._requests_by_id.pop(approval_id, None)
-            if pending is None or pending.event_id is None:
+                return
+            if pending.resolution_synced_at is None:
+                self._approval_id_by_event_id[pending.event_id] = approval_id
                 return
             self._approval_id_by_event_id.pop(pending.event_id, None)
+            self._requests_by_id.pop(approval_id, None)
 
     async def sync_unsynced_resolved(self) -> list[PendingApproval]:
         """Replay any resolved approval cards that were never edited in Matrix."""
