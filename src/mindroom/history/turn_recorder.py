@@ -30,11 +30,6 @@ class TurnRecorder:
         """Replace the current Matrix run metadata snapshot."""
         self.run_metadata = dict(metadata) if metadata is not None else None
 
-    def append_assistant_text(self, text: str) -> None:
-        """Append one assistant text delta."""
-        if text:
-            self.assistant_text += text
-
     def set_assistant_text(self, text: str) -> None:
         """Replace the canonical assistant text observed so far."""
         self.assistant_text = text

@@ -190,8 +190,7 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
         run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
     )
 
-    recorder.append_assistant_text("Half")
-    recorder.append_assistant_text(" done")
+    recorder.set_assistant_text("Half done")
     recorder.set_completed_tools(
         [
             ToolTraceEntry(

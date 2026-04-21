@@ -30,6 +30,7 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -107,8 +108,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
-
-    from agno.run.team import TeamRunOutput
 
 
 def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
@@ -202,6 +201,19 @@ def _open_agent_scope_context(
 ) -> Generator[ScopeSessionContext, None, None]:
     yield ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id=scope_id),
+        storage=storage.open(),
+        session=storage.session,
+    )
+
+
+@contextmanager
+def _open_team_scope_context(
+    storage: _SessionStorage,
+    *,
+    scope_id: str = "ultimate",
+) -> Generator[ScopeSessionContext, None, None]:
+    yield ScopeSessionContext(
+        scope=HistoryScope(kind="team", scope_id=scope_id),
         storage=storage.open(),
         session=storage.session,
     )
@@ -1778,6 +1790,84 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
     assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
+        ("assistant", "[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_original_user_message_for_cancelled_team_run(
+    tmp_path: Path,
+) -> None:
+    """Cancelled team replay should store the raw user turn, not the shaped model prompt."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+    model_prompts: list[str] = []
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        with suppress(asyncio.CancelledError):
+            await response_function("$thinking")
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.teams.Team.arun", new_callable=AsyncMock) as mock_team_arun,
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            side_effect=lambda **_kwargs: _open_team_scope_context(storage),
+        ),
+    ):
+        orchestrator = _team_orchestrator(config, runtime_paths)
+        orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=orchestrator,
+        )
+
+        async def fake_team_arun(prompt: str, **kwargs: object) -> TeamRunOutput:
+            model_prompts.append(prompt)
+            return TeamRunOutput(
+                run_id=cast("str | None", kwargs.get("run_id")),
+                team_id="ultimate",
+                session_id=cast("str | None", kwargs.get("session_id")),
+                content="Run cancelled",
+                messages=[Message(role="assistant", content="Run cancelled")],
+                status=RunStatus.cancelled,
+            )
+
+        mock_team_arun.side_effect = fake_team_arun
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    assert model_prompts
+    assert model_prompts[0] != "Hello"
+    assert model_prompts[0].startswith('User: <msg from="@alice:localhost">')
+    assert "Hello" in model_prompts[0]
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
         ("assistant", "[interrupted]"),
     ]
 

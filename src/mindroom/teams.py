@@ -1449,6 +1449,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
     media_inputs = media or MediaInputs()
+    replay_user_message = turn_recorder.user_message if turn_recorder is not None else message
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     interrupted_replay_persisted = False
@@ -1588,7 +1589,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             scope_context=scope_context,
                             session_id=persisted_session_id,
                             run_id=response.run_id or attempt_run_id or str(uuid4()),
-                            user_message=message,
+                            user_message=replay_user_message,
                             partial_text=partial_text,
                             completed_tools=completed_tools,
                             interrupted_tools=[],
@@ -1682,7 +1683,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 scope_context=scope_context,
                 session_id=session_id,
                 run_id=run_id or str(uuid4()),
-                user_message=message,
+                user_message=replay_user_message,
                 partial_text="",
                 completed_tools=[],
                 interrupted_tools=[],
@@ -1826,6 +1827,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     team_label = f"Team ({', '.join(agent_names)})"
     interrupted_replay_persisted = False
+    replay_user_message = turn_recorder.user_message if turn_recorder is not None else message
     unseen_event_ids: list[str] = []
     canonical_per_member: dict[str, str] = {}
     canonical_consensus = ""
@@ -2102,7 +2104,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     scope_context=scope_context,
                                     session_id=persisted_session_id,
                                     run_id=event.run_id or attempt_run_id or str(uuid4()),
-                                    user_message=message,
+                                    user_message=replay_user_message,
                                     partial_text=partial_text,
                                     completed_tools=completed_tool_trace,
                                     interrupted_tools=[],
@@ -2207,7 +2209,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     scope_context=scope_context,
                                     session_id=persisted_session_id,
                                     run_id=event.run_id or attempt_run_id or str(uuid4()),
-                                    user_message=message,
+                                    user_message=replay_user_message,
                                     partial_text=partial_text,
                                     completed_tools=completed_tools,
                                     interrupted_tools=interrupted_tool_trace,
@@ -2307,7 +2309,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 scope_context=scope_context,
                 session_id=session_id,
                 run_id=run_id or str(uuid4()),
-                user_message=message,
+                user_message=replay_user_message,
                 partial_text=render_canonical_partial_text(),
                 completed_tools=completed_tools,
                 interrupted_tools=[trace_entry for _, trace_entry in pending_tools],
