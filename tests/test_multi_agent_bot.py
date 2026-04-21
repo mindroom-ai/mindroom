@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import os
 import signal
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -25,6 +26,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
@@ -88,6 +90,7 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
+    _collect_plugin_root_changes,
     _run_auxiliary_task_forever,
     _SignalAwareUvicornServer,
     main,
@@ -10354,6 +10357,100 @@ class TestMultiAgentOrchestrator:
             assert _get_plugin_skill_roots() == []
         finally:
             set_plugin_skill_roots(original_plugin_skill_roots)
+
+    @pytest.mark.asyncio
+    async def test_update_config_preserves_watcher_dirty_state_for_stale_prepared_plugin_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A plugin edit during staged config reload must still be seen by the watcher."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        plugin_root = tmp_path / "plugins" / "updated"
+        plugin_root.mkdir(parents=True)
+        hooks_path = plugin_root / "hooks.py"
+        (plugin_root / "mindroom.plugin.json").write_text(
+            '{"name":"updated","hooks_module":"hooks.py","skills":[]}',
+            encoding="utf-8",
+        )
+        hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+        current_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=[],
+            ),
+            tmp_path,
+        )
+        new_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=["./plugins/updated"],
+            ),
+            tmp_path,
+        )
+
+        orchestrator.config = current_config
+        orchestrator.hook_registry = HookRegistry.empty()
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            all_new_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        original_plugin_skill_roots = _get_plugin_skill_roots()
+        original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+        original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+        original_modules = set(sys.modules)
+        set_plugin_skill_roots([])
+        try:
+
+            async def mutate_plugin_after_prepare(*_args: object, **_kwargs: object) -> set[str]:
+                hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+                return set()
+
+            with (
+                patch("mindroom.orchestrator.load_config", return_value=new_config),
+                patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+                patch.object(
+                    orchestrator,
+                    "_stop_entities_before_mcp_sync",
+                    new=AsyncMock(side_effect=mutate_plugin_after_prepare),
+                ),
+                patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+                patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+                patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+            ):
+                updated = await orchestrator.update_config()
+
+            assert updated is False
+            loaded_hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
+            assert loaded_hooks_module.VALUE == 1
+
+            changed_paths = _collect_plugin_root_changes(
+                tuple(orchestrator._plugin_watch_last_snapshot_by_root),
+                orchestrator._plugin_watch_last_snapshot_by_root,
+            )
+            assert changed_paths == {hooks_path.resolve()}
+        finally:
+            plugin_module._PLUGIN_CACHE.clear()
+            plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+            plugin_module._MODULE_IMPORT_CACHE.clear()
+            plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+            set_plugin_skill_roots(original_plugin_skill_roots)
+            for module_name in set(sys.modules) - original_modules:
+                if module_name.startswith("mindroom_plugin_"):
+                    sys.modules.pop(module_name, None)
 
     @pytest.mark.asyncio
     async def test_update_config_initializes_shared_event_cache_for_unchanged_bots(self, tmp_path: Path) -> None:
