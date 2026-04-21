@@ -106,7 +106,7 @@ class TeamMode(str, Enum):
 
 
 @dataclass(frozen=True)
-class _PreparedMaterializedTeamExecution:
+class PreparedMaterializedTeamExecution:
     """Shared prepared team execution state used by stream and non-stream paths."""
 
     messages: tuple[Message, ...]
@@ -1318,7 +1318,7 @@ async def prepare_materialized_team_execution(
     configured_team_name: str | None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
-) -> _PreparedMaterializedTeamExecution:
+) -> PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
     if system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(system_enrichment_items)
@@ -1351,7 +1351,7 @@ async def prepare_materialized_team_execution(
         prepared_execution.unseen_event_ids,
         extra_metadata=matrix_run_metadata,
     )
-    return _PreparedMaterializedTeamExecution(
+    return PreparedMaterializedTeamExecution(
         messages=prepared_execution.messages,
         run_metadata=run_metadata,
         unseen_event_ids=prepared_execution.unseen_event_ids,
@@ -2083,6 +2083,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
 
 __all__ = [
+    "PreparedMaterializedTeamExecution",
     "TeamIntent",
     "TeamMemberStatus",
     "TeamMode",

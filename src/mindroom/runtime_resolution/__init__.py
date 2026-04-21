@@ -4,6 +4,7 @@
 from .core import *
 
 __all__ = [
+    "ResolvedAgentExecution",
     "ResolvedAgentRuntime",
     "ResolvedKnowledgeBinding",
     "resolve_agent_execution",

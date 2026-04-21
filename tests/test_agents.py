@@ -796,6 +796,26 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
     assert runtime.file_memory_root is None
 
 
+def test_runtime_resolution_exports_public_resolved_agent_execution_contract(tmp_path: Path) -> None:
+    """The runtime-resolution seam should return a public result type."""
+    from mindroom import runtime_resolution  # noqa: PLC0415
+
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    assert "ResolvedAgentExecution" in runtime_resolution.__all__
+
+    resolved_execution = runtime_resolution.resolve_agent_execution(
+        "general",
+        config,
+        execution_identity=None,
+    )
+
+    assert type(resolved_execution) is runtime_resolution.ResolvedAgentExecution
+    assert resolved_execution.agent_name == "general"
+    assert resolved_execution.is_private is False
+
+
 def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp_path: Path) -> None:
     """Shared scoped agents should still resolve their worker key from execution identity."""
     runtime_paths = _runtime_paths(tmp_path)

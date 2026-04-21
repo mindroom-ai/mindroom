@@ -22,6 +22,7 @@ from .core import (
 )
 
 __all__ = [
+    "PreparedMaterializedTeamExecution",
     "TeamIntent",
     "TeamMemberStatus",
     "TeamMode",

@@ -1217,6 +1217,7 @@ from = ["mindroom.routing"]
 
 [[interfaces]]
 expose = [
+    "PreparedMaterializedTeamExecution",
     "TeamIntent",
     "TeamMemberStatus",
     "TeamMode",
@@ -1255,6 +1256,7 @@ from = ["mindroom.agent_policy"]
 
 [[interfaces]]
 expose = [
+    "ResolvedAgentExecution",
     "ResolvedAgentRuntime",
     "ResolvedKnowledgeBinding",
     "resolve_private_requester_scope_root",

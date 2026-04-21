@@ -453,6 +453,75 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
 
 
 @pytest.mark.asyncio
+async def test_prepare_materialized_team_execution_returns_public_seam_type(tmp_path: Path) -> None:
+    """The teams seam should return a public prepared-execution type."""
+    import mindroom.teams as teams_module  # noqa: PLC0415
+
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    member_agents = [_agent("code", "CodeAgent"), _agent("research", "ResearchAgent")]
+    prepared_team = Team(
+        id="team-code-research",
+        name="Code + Research",
+        members=member_agents,
+        model=Ollama(id="test-model"),
+    )
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["code", "research"],
+        agents=member_agents,
+        display_names=["CodeAgent", "ResearchAgent"],
+        materialized_agent_names={"code", "research"},
+        failed_agent_names=[],
+    )
+
+    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> _FakePreparedExecution:
+        return _FakePreparedExecution(
+            messages=(Message(role="user", content="prepared team prompt"),),
+            unseen_event_ids=[],
+            compaction_outcomes=[],
+        )
+
+    assert "PreparedMaterializedTeamExecution" in teams_module.__all__
+
+    with (
+        patch("mindroom.teams.core._create_team_instance", return_value=prepared_team),
+        patch(
+            "mindroom.teams.core.prepare_bound_team_execution_context",
+            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+        ),
+    ):
+        team = build_materialized_team_instance(
+            requested_agent_names=team_members.requested_agent_names,
+            agents=team_members.agents,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=None,
+            model_name=None,
+            configured_team_name=None,
+        )
+        prepared_execution = await prepare_materialized_team_execution(
+            scope_context=None,
+            agents=team_members.agents,
+            team=team,
+            message="Coordinate",
+            thread_history=[],
+            config=config,
+            runtime_paths=runtime_paths,
+            active_model_name=None,
+            reply_to_event_id="$event",
+            active_event_ids=frozenset(),
+            response_sender_id="@mindroom_code:localhost",
+            compaction_outcomes_collector=[],
+            configured_team_name=None,
+        )
+
+    assert type(prepared_execution) is teams_module.PreparedMaterializedTeamExecution
+    assert prepared_execution.prepared_prompt == "prepared team prompt"
+    assert prepared_execution.context_messages == ()
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Path) -> None:
     """Non-streaming agent delivery should forward system enrichment items into the AI layer."""
     bot = _make_bot(tmp_path)
