@@ -23,9 +23,9 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Anthropic | Max intelligence | Claude Opus 4.7 | `claude-opus-4-7` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-5.4 | `gpt-5.4` |
-| Google (Gemini API) | Fast / cheap text | Gemini 3.1 Flash-Lite | `gemini-3.1-flash-lite-preview` |
-| Google (Gemini API) | Strongest text / coding | Gemini 3.1 Pro | `gemini-3.1-pro-preview` |
-| Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image-preview` |
+| Google (Gemini API) | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |
+| Google (Gemini API) | Strongest text / coding | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
+| Google (Gemini API) | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
 
 For `anthropic`, prefer `claude-sonnet-4-6`, `claude-opus-4-7`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.

@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["ddgs"],
     docs_url="https://docs.agno.com/tools/toolkits/search/websearch",
+    function_names=("web_search", "search_news"),
 )
 def googlesearch_tools() -> type[WebSearchTools]:
     """Return Google Search tools for web search."""

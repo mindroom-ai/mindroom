@@ -1675,28 +1675,31 @@ async def test_skill_command_tool_dispatch_treats_loaded_and_failed_bare_functio
     assert "broken_lookup_toolkit (failed: Credentialed API key is required)" in result
 
 
-def test_resolve_tool_dispatch_target_uses_declared_function_names_when_factory_import_fails() -> None:
+@pytest.mark.parametrize(
+    ("tool_name", "function_name"),
+    [
+        ("github", "get_repository"),
+        ("googlesearch", "web_search"),
+        ("duckduckgo", "web_search"),
+    ],
+)
+def test_resolve_tool_dispatch_target_uses_declared_function_names_when_factory_import_fails(
+    tool_name: str,
+    function_name: str,
+) -> None:
     """Explicit metadata function names should still match build errors when factory discovery raises."""
     original_metadata = TOOL_METADATA.copy()
     try:
-        TOOL_METADATA["github"] = ToolMetadata(
-            name="github",
-            display_name="GitHub",
-            description="GitHub toolkit",
-            category=ToolCategory.DEVELOPMENT,
-            function_names=("get_repository",),
-        )
-
         _, _, error = _resolve_tool_dispatch_target(
             toolkits=[],
-            build_errors={"github": ImportError("missing optional dep")},
-            command_tool="get_repository",
+            build_errors={tool_name: ImportError("missing optional dep")},
+            command_tool=function_name,
         )
     finally:
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 
-    assert error == "Tool 'get_repository' failed: missing optional dep"
+    assert error == f"Tool '{function_name}' failed: missing optional dep"
 
 
 def test_resolve_tool_dispatch_target_uses_declared_function_names_for_dynamic_mcp_tools() -> None:

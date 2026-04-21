@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from mindroom.mcp.errors import MCPError
 from mindroom.mcp.toolkit import (
     MindRoomMCPToolkit,
     require_mcp_server_manager,
@@ -118,7 +119,12 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
     tool_name = mcp_tool_name(server_id)
     transport_label = server_config.transport.replace("-", " ")
     manager = require_mcp_server_manager()
-    catalog = manager.get_catalog(server_id) if manager is not None else None
+    catalog = None
+    if manager is not None and manager.has_server(server_id):
+        try:
+            catalog = manager.get_catalog(server_id)
+        except MCPError:
+            catalog = None
     return ToolMetadata(
         name=tool_name,
         display_name=f"MCP {server_id.replace('_', ' ').title()}",

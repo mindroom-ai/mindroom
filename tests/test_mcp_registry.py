@@ -14,6 +14,7 @@ from mindroom.mcp.registry import (
     _MCP_TOOL_NAMES,
     mcp_server_id_from_tool_name,
     mcp_tool_name,
+    resolved_mcp_tool_state,
     sync_mcp_tool_registry,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
@@ -86,6 +87,27 @@ def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
     assert tool_name in TOOL_METADATA
     assert tool_name in _TOOL_REGISTRY
     assert TOOL_METADATA[tool_name].agent_override_fields is not None
+
+
+def test_resolved_mcp_tool_state_ignores_unsynced_bound_manager(tmp_path: Path) -> None:
+    """Metadata resolution should stay best-effort when a manager is bound but has no catalog yet."""
+
+    class FakeManager:
+        def has_server(self, _server_id: str) -> bool:
+            return False
+
+        def get_catalog(self, server_id: str) -> object:
+            msg = f"Unknown MCP server '{server_id}'"
+            raise KeyError(msg)
+
+    config = _config(tmp_path)
+    bind_mcp_server_manager(FakeManager())
+
+    registry, metadata = resolved_mcp_tool_state(config)
+
+    assert "mcp_demo" in registry
+    assert "mcp_demo" in metadata
+    assert metadata["mcp_demo"].function_names == ()
 
 
 def test_sync_mcp_tool_registry_is_idempotent(tmp_path: Path) -> None:

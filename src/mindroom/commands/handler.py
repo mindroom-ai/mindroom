@@ -25,7 +25,7 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.metadata import TOOL_METADATA, ToolMetadata
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     runtime_context_from_dispatch_context,
@@ -371,8 +371,8 @@ def _toolkit_declared_function_names(tool_name: str) -> frozenset[str]:
     )
 
 
-def _toolkit_type_for_declared_function_names(metadata: object) -> type[Toolkit] | None:
-    factory = getattr(metadata, "factory", None)
+def _toolkit_type_for_declared_function_names(metadata: ToolMetadata) -> type[Toolkit] | None:
+    factory = metadata.factory
     if factory is None:
         return None
     try:
