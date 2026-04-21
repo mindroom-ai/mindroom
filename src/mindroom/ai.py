@@ -1766,6 +1766,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                     state.full_response = final_text
                     if state_updated is not None:
                         state_updated()
+                yield event
                 continue
 
             if isinstance(event, RunCancelledEvent):

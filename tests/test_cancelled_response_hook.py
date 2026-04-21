@@ -37,6 +37,7 @@ from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -617,3 +618,169 @@ async def test_stream_terminal_error_emits_cancelled_hook_once_for_visible_strea
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id == "$stream"
     assert cancelled_seen[0].failure_reason == "terminal_update_failed"
+
+
+@pytest.mark.asyncio
+async def test_stream_completed_terminal_update_failure_emits_cancelled_hook_once(tmp_path: Path) -> None:
+    """Completed streamed replies whose terminal update fails must preserve the prior visible stream."""
+    after_seen: list[str] = []
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def on_after(ctx: AfterResponseContext) -> None:
+        del ctx
+        after_seen.append("after")
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins([_plugin("test-stream-completed-failure", [on_after, on_cancelled])])
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    result = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$stream",
+                terminal_operation="edit",
+                terminal_result="failed",
+                terminal_status="completed",
+                rendered_body="partial",
+                visible_body_state="visible_body",
+                failure_reason="terminal_update_failed",
+            ),
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-stream-completed-failure",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert result.state == "kept_prior_visible_stream_after_completed_terminal_failure"
+    assert after_seen == []
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$stream"
+    assert cancelled_seen[0].failure_reason == "terminal_update_failed"
+
+
+@pytest.mark.asyncio
+async def test_stream_completed_placeholder_only_redacts_placeholder(tmp_path: Path) -> None:
+    """Completed placeholder-only streams must redact the visible placeholder instead of leaving Thinking...."""
+    config, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    redact_message_event = AsyncMock(return_value=True)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=redact_message_event,
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    result = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$thinking",
+                terminal_operation="edit",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body=PROGRESS_PLACEHOLDER,
+                visible_body_state="placeholder_only",
+                failure_reason=None,
+            ),
+            initial_delivery_kind="edited",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-stream-placeholder-only",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert result.state == "error_without_visible_response"
+    assert result.visible_response_event_id is None
+    redact_message_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_completed_reedit_failure_preserves_prior_visible_stream(tmp_path: Path) -> None:
+    """If a hook-mutated final re-edit fails, the already-visible streamed reply must survive canonically."""
+    after_seen: list[str] = []
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+    async def mutate_before(ctx: BeforeResponseContext) -> None:
+        ctx.draft.response_text = f"{ctx.draft.response_text}\nfooter"
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def on_after(ctx: AfterResponseContext) -> None:
+        del ctx
+        after_seen.append("after")
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins(
+        [_plugin("test-stream-reedit-failure", [mutate_before, on_after, on_cancelled])],
+    )
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    with patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=False)):
+        result = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$event"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$stream",
+                    terminal_operation="edit",
+                    terminal_result="succeeded",
+                    terminal_status="completed",
+                    rendered_body="partial",
+                    visible_body_state="visible_body",
+                    failure_reason=None,
+                ),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-stream-reedit-failure",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    assert result.state == "kept_prior_visible_stream_after_completed_terminal_failure"
+    assert after_seen == []
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$stream"

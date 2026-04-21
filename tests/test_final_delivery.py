@@ -44,6 +44,23 @@ def test_canonical_cancelled_with_visible_response_preserves_visible_event_id_wi
     assert outcome.visible_response_event_id == "$existing"
 
 
+def test_response_identity_event_id_excludes_cancelled_visible_streams_but_preserves_terminal_failures() -> None:
+    """Visible cancellation and delivered-response identity are separate downstream facts."""
+    cancelled = FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+        last_physical_stream_event_id="$stream",
+        failure_reason="cancelled_by_user",
+    )
+    error = FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
+        last_physical_stream_event_id="$stream",
+        failure_reason="boom",
+    )
+
+    assert cancelled.visible_response_event_id == "$stream"
+    assert cancelled.response_identity_event_id is None
+    assert error.visible_response_event_id == "$stream"
+    assert error.response_identity_event_id == "$stream"
+
+
 def test_coerce_final_delivery_outcome_does_not_promote_failed_visible_delivery_into_success() -> None:
     """Legacy fallback coercion must preserve terminal failure when a visible stream errored."""
     outcome = _coerce_final_delivery_outcome(

@@ -64,6 +64,7 @@ from mindroom.delivery_gateway import (
     DeliveryResult,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
+    SuppressedPlaceholderCleanupError,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState
@@ -2270,6 +2271,51 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
 
 
 @pytest.mark.asyncio
+async def test_generate_response_locked_propagates_suppressed_placeholder_cleanup_failure_after_delivery_started(
+    tmp_path: Path,
+) -> None:
+    """Delivery-started cleanup failures must still bubble so callers can keep the turn retryable."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fail_after_delivery_started(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            on_delivery_started = cast("Callable[[str | None], None]", kwargs["on_delivery_started"])
+            on_delivery_started("$placeholder")
+            message = "failed cleanup"
+            raise SuppressedPlaceholderCleanupError(message)
+
+        coordinator.process_and_respond = AsyncMock(side_effect=fail_after_delivery_started)
+
+        with pytest.raises(SuppressedPlaceholderCleanupError, match="failed cleanup"):
+            await coordinator.generate_response_locked(
+                replace(
+                    _response_request(
+                        prompt="Hello",
+                        user_id="@alice:localhost",
+                        thread_id="$thread-root",
+                    ),
+                    existing_event_id="$placeholder",
+                    existing_event_is_placeholder=True,
+                ),
+                resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            )
+
+
+@pytest.mark.asyncio
 async def test_generate_response_locked_avoids_streaming_over_existing_non_placeholder_event(tmp_path: Path) -> None:
     """Editing a real existing reply must stay on the non-streaming final-delivery path."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -3084,7 +3130,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert event_id == "$thinking"
+    assert event_id is None
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -5339,6 +5385,45 @@ class TestUserIdPassthrough:
 
         assert recorder.outcome == "completed"
         assert recorder.assistant_text == "hello from final event"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_yields_final_event_only_content_downstream(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Providers that only emit final content in RunCompletedEvent must still surface it downstream."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunCompletedEvent(
+                content="hello from final event",
+                run_id="run-final-only",
+                session_id="session1",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+            ]
+
+        assert len(chunks) == 1
+        assert isinstance(chunks[0], RunCompletedEvent)
+        assert chunks[0].content == "hello from final event"
 
     @pytest.mark.asyncio
     async def test_ai_response_metadata_uses_room_resolved_runtime_model(self, tmp_path: Path) -> None:

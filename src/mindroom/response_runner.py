@@ -85,6 +85,7 @@ from .delivery_gateway import (
     FinalizeStreamedResponseRequest,
     SendTextRequest,
     StreamingDeliveryRequest,
+    SuppressedPlaceholderCleanupError,
 )
 from .media_inputs import MediaInputs
 from .response_lifecycle import DeliveryOutcome, ResponseLifecycle
@@ -234,7 +235,7 @@ def _stream_transport_outcome_from_delivery_exception(
     )
 
 
-def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911
+def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
     delivery: FinalDeliveryOutcome | DeliveryResult | None,
     *,
     tracked_event_id: str | None = None,
@@ -272,6 +273,7 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911
         )
 
     if resolved_failure_reason is not None:
+        rendered_body, visible_body_state = _visible_body_state_for_text(delivery.response_text)
         if delivery.event_id is not None:
             if (
                 existing_event_id is not None
@@ -280,14 +282,18 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911
             ):
                 return FinalDeliveryOutcome.error_with_visible_response(
                     final_visible_event_id=delivery.event_id,
-                    final_visible_body=delivery.response_text or None,
+                    final_visible_body=rendered_body,
                     failure_reason=resolved_failure_reason,
                     option_map=delivery.option_map,
                     options_list=delivery.options_list,
                 )
+            if visible_body_state != "visible_body":
+                return FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason=resolved_failure_reason,
+                )
             return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
                 last_physical_stream_event_id=delivery.event_id,
-                final_visible_body=delivery.response_text or None,
+                final_visible_body=rendered_body,
                 failure_reason=resolved_failure_reason,
             )
         if existing_event_id is not None and not existing_event_is_placeholder:
@@ -1087,7 +1093,9 @@ class ResponseRunner:
             return "suppressed"
         if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
             return final_delivery_outcome.delivery_kind
-        if final_delivery_outcome is not None and final_delivery_outcome.logical_response_event_id is not None:
+        if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "cancelled":
+            return "cancelled"
+        if final_delivery_outcome is not None and final_delivery_outcome.response_identity_event_id is not None:
             return "visible_response_preserved"
         return "no_visible_response"
 
@@ -1111,7 +1119,7 @@ class ResponseRunner:
         )
         if outcome.suppressed:
             return None
-        return outcome.logical_response_event_id
+        return outcome.response_identity_event_id
 
     def _response_envelope_for_request(
         self,
@@ -1655,6 +1663,8 @@ class ResponseRunner:
                 ),
             )
         except Exception as error:
+            if isinstance(error, SuppressedPlaceholderCleanupError):
+                raise
             if not delivery_stage_started:
                 raise
             delivery_failure_reason = str(error)
@@ -2354,6 +2364,8 @@ class ResponseRunner:
                 )
             raise
         except Exception as error:
+            if isinstance(error, SuppressedPlaceholderCleanupError):
+                raise
             self.deps.logger.exception("Error in streaming response", error=str(error))
             return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=FinalDeliveryOutcome.error_without_visible_response(
@@ -2629,7 +2641,7 @@ class ResponseRunner:
                 self.deps.logger.debug("Skipping memory storage due to configuration error")
 
         return await lifecycle.apply_effects_safely(
-            response_event_id=final_delivery_outcome.logical_response_event_id,
+            response_event_id=final_delivery_outcome.response_identity_event_id,
             post_response_outcome=lambda: ResponseOutcome(
                 final_delivery_outcome=final_delivery_outcome,
                 session_id=session_id,
@@ -2808,6 +2820,8 @@ class ResponseRunner:
             if tracked_event_id is None:
                 tracked_event_id = run_message_id
         except Exception as error:
+            if isinstance(error, SuppressedPlaceholderCleanupError):
+                raise
             if not delivery_stage_started:
                 raise
             delivery_failure_reason = str(error)

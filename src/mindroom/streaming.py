@@ -325,14 +325,15 @@ class StreamingResponse:
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
         ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
-        has_visible_tool_output = self.show_tool_calls and self.observed_tool_calls > 0
+        observed_nonvisible_activity = (
+            self.observed_reasoning_content or self.observed_tool_calls > 0 or self.placeholder_progress_sent
+        )
         no_visible_text_error = (
             error is None
             and not restart_interrupted
             and not cancelled
             and not self.accumulated_text.strip()
-            and self.observed_reasoning_content
-            and not has_visible_tool_output
+            and observed_nonvisible_activity
         )
         if no_visible_text_error:
             self.accumulated_text = _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE

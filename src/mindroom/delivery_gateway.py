@@ -403,6 +403,65 @@ class DeliveryGateway:
             return None
         return outcome.last_physical_stream_event_id
 
+    def _completed_stream_failure_outcome(
+        self,
+        *,
+        visible_stream_event_id: str | None,
+        failure_reason: str | None,
+        streamed_text: str | None,
+        tool_trace: list[ToolTraceEntry] | None,
+        extra_content: dict[str, Any] | None,
+    ) -> FinalDeliveryOutcome:
+        """Return the canonical outcome when completed terminal delivery fails after visible streaming."""
+        if visible_stream_event_id is not None:
+            return FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
+                last_physical_stream_event_id=visible_stream_event_id,
+                final_visible_body=streamed_text or None,
+                failure_reason=failure_reason,
+                tool_trace=tool_trace or (),
+                extra_content=extra_content,
+            )
+        return FinalDeliveryOutcome.error_without_visible_response(
+            failure_reason=failure_reason,
+            tool_trace=tool_trace or (),
+            extra_content=extra_content,
+        )
+
+    async def _cleanup_completed_placeholder_only_stream(
+        self,
+        *,
+        room_id: str,
+        streamed_event_id: str | None,
+        response_kind: str,
+        response_envelope: MessageEnvelope,
+        correlation_id: str,
+        failure_reason: str,
+        tool_trace: list[ToolTraceEntry] | None,
+        extra_content: dict[str, Any] | None,
+    ) -> FinalDeliveryOutcome:
+        """Remove a completed placeholder-only streamed event before returning a no-visible-response outcome."""
+        if streamed_event_id is not None:
+            cleanup_outcome = await self._redact_visible_response_event(
+                room_id=room_id,
+                event_id=streamed_event_id,
+                response_kind=response_kind,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+                redaction_reason="Completed placeholder-only streamed response",
+                failure_reason=failure_reason,
+                tool_trace=tool_trace,
+                extra_content=extra_content,
+            )
+            if cleanup_outcome.state == "suppression_cleanup_failed":
+                raise SuppressedPlaceholderCleanupError(
+                    cleanup_outcome.failure_reason or "completed placeholder-only cleanup failed",
+                )
+        return FinalDeliveryOutcome.error_without_visible_response(
+            failure_reason=failure_reason,
+            tool_trace=tool_trace or (),
+            extra_content=extra_content,
+        )
+
     async def _redact_visible_response_event(
         self,
         *,
@@ -849,7 +908,7 @@ class DeliveryGateway:
             conversation_cache=self.deps.resolver.deps.conversation_cache,
         )
 
-    async def finalize_streamed_response(  # noqa: PLR0911
+    async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
@@ -896,6 +955,52 @@ class DeliveryGateway:
                     tool_trace=request.tool_trace or (),
                     extra_content=request.extra_content,
                 )
+            return await self.emit_terminal_outcome_hooks(
+                outcome=outcome,
+                correlation_id=request.correlation_id,
+                envelope=request.response_envelope,
+                response_kind=request.response_kind,
+            )
+
+        if stream_outcome.terminal_result != "succeeded":
+            failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
+            if stream_outcome.visible_body_state == "placeholder_only":
+                outcome = await self._cleanup_completed_placeholder_only_stream(
+                    room_id=request.target.room_id,
+                    streamed_event_id=streamed_event_id,
+                    response_kind=request.response_kind,
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id,
+                    failure_reason=failure_reason,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                )
+            else:
+                outcome = self._completed_stream_failure_outcome(
+                    visible_stream_event_id=visible_stream_event_id,
+                    failure_reason=failure_reason,
+                    streamed_text=streamed_text or None,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                )
+            return await self.emit_terminal_outcome_hooks(
+                outcome=outcome,
+                correlation_id=request.correlation_id,
+                envelope=request.response_envelope,
+                response_kind=request.response_kind,
+            )
+
+        if stream_outcome.visible_body_state == "placeholder_only":
+            outcome = await self._cleanup_completed_placeholder_only_stream(
+                room_id=request.target.room_id,
+                streamed_event_id=streamed_event_id,
+                response_kind=request.response_kind,
+                response_envelope=request.response_envelope,
+                correlation_id=request.correlation_id,
+                failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+                tool_trace=request.tool_trace,
+                extra_content=request.extra_content,
+            )
             return await self.emit_terminal_outcome_hooks(
                 outcome=outcome,
                 correlation_id=request.correlation_id,
@@ -961,7 +1066,7 @@ class DeliveryGateway:
             or draft.extra_content != request.extra_content
         )
         if needs_final_edit:
-            return await self.deliver_final(
+            final_outcome = await self.deliver_final(
                 FinalDeliveryRequest(
                     target=request.target,
                     existing_event_id=streamed_event_id,
@@ -975,6 +1080,21 @@ class DeliveryGateway:
                     existing_event_is_placeholder=True,
                 ),
             )
+            if final_outcome.state == "error_without_visible_response" and visible_stream_event_id is not None:
+                recovered_outcome = self._completed_stream_failure_outcome(
+                    visible_stream_event_id=visible_stream_event_id,
+                    failure_reason=final_outcome.failure_reason or "terminal_update_failed",
+                    streamed_text=streamed_text or None,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                )
+                return await self.emit_terminal_outcome_hooks(
+                    outcome=recovered_outcome,
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_kind=request.response_kind,
+                )
+            return final_outcome
 
         interactive_response = interactive.parse_and_format_interactive(
             streamed_text,

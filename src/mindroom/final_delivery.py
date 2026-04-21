@@ -263,19 +263,15 @@ class FinalDeliveryOutcome:
     @property
     def has_any_visible_response(self) -> bool:
         """Return whether any visible response exists, even if only a prior stream survived."""
-        return self.final_visible_event_id is not None or self.last_physical_stream_event_id is not None
+        return self.visible_response_event_id is not None
 
     @property
     def visible_response_event_id(self) -> str | None:
-        """Return the event id of the currently visible terminal event, including cancellation notes."""
-        return self.final_visible_event_id or self.last_physical_stream_event_id
-
-    @property
-    def logical_response_event_id(self) -> str | None:
-        """Return the visible response event id that downstream should preserve as the response identity."""
+        """Return the event id that is still visibly present after terminal delivery settles."""
         if self.state in {
             "final_visible_delivery",
             "cancelled_with_visible_response",
+            "cancelled_with_visible_note",
             "error_with_visible_response",
         }:
             return self.final_visible_event_id
@@ -283,14 +279,35 @@ class FinalDeliveryOutcome:
             "kept_prior_visible_stream_after_completed_terminal_failure",
             "kept_prior_visible_stream_after_cancel",
             "kept_prior_visible_stream_after_error",
+            "suppression_cleanup_failed",
         }:
             return self.last_physical_stream_event_id
         return None
 
     @property
+    def response_identity_event_id(self) -> str | None:
+        """Return the event id that should remain associated with the turn downstream."""
+        if self.state in {
+            "final_visible_delivery",
+            "error_with_visible_response",
+        }:
+            return self.final_visible_event_id
+        if self.state in {
+            "kept_prior_visible_stream_after_completed_terminal_failure",
+            "kept_prior_visible_stream_after_error",
+        }:
+            return self.last_physical_stream_event_id
+        return None
+
+    @property
+    def logical_response_event_id(self) -> str | None:
+        """Compatibility alias for the downstream response-identity event id."""
+        return self.response_identity_event_id
+
+    @property
     def event_id(self) -> str | None:
-        """Return the final logical visible response event id for compatibility callers."""
-        return self.logical_response_event_id
+        """Return the still-visible event id for compatibility callers."""
+        return self.visible_response_event_id
 
     @property
     def response_text(self) -> str:

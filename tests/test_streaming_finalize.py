@@ -16,7 +16,6 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.streaming import (
     _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
-    PROGRESS_PLACEHOLDER,
     StreamingResponse,
     send_streaming_response,
 )
@@ -112,8 +111,8 @@ async def test_transport_cancelled_terminal_update_does_not_sleep_behind_retry_b
 
 
 @pytest.mark.asyncio
-async def test_transport_placeholder_visibility_is_placeholder_only(tmp_path: Path) -> None:
-    """Adopted placeholders must remain explicit placeholder-only visibility facts."""
+async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_path: Path) -> None:
+    """Completed placeholder-backed runs with no visible text must not leave Thinking... behind."""
     config = _config(tmp_path)
     client = _client()
 
@@ -137,8 +136,9 @@ async def test_transport_placeholder_visibility_is_placeholder_only(tmp_path: Pa
         )
 
     assert outcome.last_physical_stream_event_id == "$thinking"
-    assert outcome.rendered_body == PROGRESS_PLACEHOLDER
-    assert outcome.visible_body_state == "placeholder_only"
+    assert outcome.terminal_status == "error"
+    assert outcome.rendered_body == _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+    assert outcome.visible_body_state == "visible_body"
 
 
 @pytest.mark.asyncio
@@ -206,6 +206,40 @@ async def test_transport_hidden_tool_reasoning_only_finishes_as_error(tmp_path: 
             config=config,
             runtime_paths=runtime_paths_for(config),
             response_stream=hidden_tool_reasoning_stream(),
+            existing_event_id="$placeholder",
+            adopt_existing_placeholder=True,
+            room_mode=True,
+            show_tool_calls=False,
+        )
+
+    assert outcome.terminal_status == "error"
+    assert outcome.rendered_body == _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+
+
+@pytest.mark.asyncio
+async def test_transport_hidden_tool_only_finishes_as_error(tmp_path: Path) -> None:
+    """Hidden-tool-only runs without visible text must not finish as Thinking...."""
+    config = _config(tmp_path)
+    client = _client()
+
+    async def hidden_tool_only_stream() -> AsyncIterator[object]:
+        yield ToolCallStartedEvent(tool=SimpleNamespace(tool_name="hidden"))
+        yield RunCompletedEvent()
+
+    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
+        content = _args[3]
+        return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+        outcome = await send_streaming_response(
+            client=client,
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            thread_id=None,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            response_stream=hidden_tool_only_stream(),
             existing_event_id="$placeholder",
             adopt_existing_placeholder=True,
             room_mode=True,
