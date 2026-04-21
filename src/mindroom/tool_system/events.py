@@ -479,3 +479,20 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         payload["content_truncated"] = True
 
     return {_TOOL_TRACE_KEY: payload}
+
+
+def render_tool_trace_for_context(events: list[ToolTraceEntry]) -> str:
+    """Render trace events as text for inclusion in conversation-history prompt."""
+    lines: list[str] = []
+    for event in events:
+        status = "completed" if event.type == "tool_call_completed" else "started"
+        lines.append(f"[tool:{event.tool_name} {status}]")
+        if event.args_preview:
+            lines.append(f"  args: {event.args_preview}")
+        if event.result_preview is not None:
+            lines.append(f"  result: {event.result_preview}")
+        elif status == "started":
+            lines.append("  result: <not yet returned>")
+        if event.truncated:
+            lines.append("  (truncated)")
+    return "\n".join(lines)

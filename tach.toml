@@ -25,6 +25,8 @@ path = "mindroom.ai"
 depends_on = [
     "mindroom.constants",
     "mindroom.execution_preparation",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.turn_recorder",
     "mindroom.memory", "mindroom.tool_system.events",
 ]
 
@@ -46,7 +48,7 @@ depends_on = [
     "mindroom.execution_preparation",
     "mindroom.knowledge",
     "mindroom.matrix.client_visible_messages",
-    "mindroom.routing", "mindroom.tool_system.events", "mindroom.tool_system.worker_routing",
+    "mindroom.routing", "mindroom.teams", "mindroom.tool_system.events", "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
@@ -116,7 +118,34 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.execution_preparation"
-depends_on = ["mindroom.matrix.client_visible_messages", "mindroom.streaming", "mindroom.constants"]
+depends_on = [
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.streaming",
+    "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.history.interrupted_replay"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.constants",
+    "mindroom.tool_system.events",
+]
+visibility = [
+    "mindroom.ai",
+    "mindroom.history.turn_recorder",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
+
+[[modules]]
+path = "mindroom.history.turn_recorder"
+depends_on = ["mindroom.history.interrupted_replay"]
+visibility = [
+    "mindroom.ai",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
 
 [[modules]]
 path = "mindroom.hooks.matrix_admin"
@@ -167,12 +196,15 @@ depends_on = [
     "mindroom.ai",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.turn_recorder",
     "mindroom.knowledge",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",
     "mindroom.streaming",
+    "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context", "mindroom.tool_system.worker_routing",
 ]
@@ -180,6 +212,25 @@ depends_on = [
 [[modules]]
 path = "mindroom.routing"
 depends_on = ["mindroom.matrix.client_visible_messages", "mindroom.ai"]
+
+[[modules]]
+path = "mindroom.teams"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.constants",
+    "mindroom.execution_preparation",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.turn_recorder",
+    "mindroom.knowledge",
+    "mindroom.matrix.rooms",
+    "mindroom.tool_system.events",
+]
+visibility = [
+    "mindroom.api.openai_compat",
+    "mindroom.bot",
+    "mindroom.response_runner",
+    "mindroom.turn_policy",
+]
 
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
@@ -502,6 +553,7 @@ depends_on = [
     "mindroom.post_response_effects",
     "mindroom.response_runner",
     "mindroom.scheduling",
+    "mindroom.teams",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_controller",
@@ -1225,6 +1277,21 @@ from = ["mindroom.tool_system.worker_routing"]
 
 [[interfaces]]
 expose = [
+    "InterruptedReplaySnapshot",
+    "build_interrupted_replay_snapshot",
+    "persist_interrupted_replay",
+    "persist_interrupted_replay_snapshot",
+    "split_interrupted_tool_trace",
+    "tool_execution_call_id",
+]
+from = ["mindroom.history.interrupted_replay"]
+
+[[interfaces]]
+expose = ["TurnRecorder"]
+from = ["mindroom.history.turn_recorder"]
+
+[[interfaces]]
+expose = [
     "StructuredStreamChunk",
     "ToolTraceEntry",
     "build_tool_trace_content",
@@ -1233,6 +1300,7 @@ expose = [
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
+    "render_tool_trace_for_context",
 ]
 from = ["mindroom.tool_system.events"]
 

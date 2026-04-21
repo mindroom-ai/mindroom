@@ -214,6 +214,7 @@ class StreamingDeliveryRequest:
     tool_trace_collector: list[ToolTraceEntry] | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
+    visible_event_id_callback: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -633,6 +634,7 @@ class DeliveryGateway:
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
+            visible_event_id_callback=request.visible_event_id_callback,
             latest_thread_event_id=latest_thread_event_id,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
         )

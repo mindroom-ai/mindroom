@@ -7,7 +7,7 @@ import importlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 from uuid import uuid4
 
 from agno.db.base import SessionType
@@ -60,6 +60,11 @@ from mindroom.history import (
     PreparedHistoryState,
 )
 from mindroom.history.compaction import compute_prompt_token_breakdown
+from mindroom.history.interrupted_replay import (
+    persist_interrupted_replay,
+    split_interrupted_tool_trace,
+    tool_execution_call_id,
+)
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
@@ -82,6 +87,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
+    format_tool_completed_event,
     format_tool_started_event,
 )
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
@@ -93,9 +99,11 @@ if TYPE_CHECKING:
     from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
+    from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
+    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -518,10 +526,12 @@ def _compute_compaction_token_breakdown(
 
 @dataclass
 class _StreamingAttemptState:
+    assistant_text: str = ""
     full_response: str = ""
     tool_count: int = 0
     observed_tool_calls: int = 0
-    pending_tools: list[tuple[str, int]] = field(default_factory=list)
+    pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
+    completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
     latest_request_input_tokens: int | None = None
@@ -533,6 +543,14 @@ class _StreamingAttemptState:
     retry_requested: bool = False
     user_error: Exception | None = None
     stream_exception: Exception | None = None
+
+
+@dataclass
+class _PendingStreamingTool:
+    tool_name: str
+    trace_entry: ToolTraceEntry
+    tool_call_id: str | None = None
+    visible_tool_index: int | None = None
 
 
 def _canonical_provider(provider: str) -> str:
@@ -561,6 +579,11 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
     return "\n".join(response_parts) if response_parts else ""
 
 
+def _extract_replayable_response_text(response: RunOutput) -> str:
+    """Return canonical assistant text without inline tool-rendering duplication."""
+    return _extract_response_content(response, show_tool_calls=False)
+
+
 def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
     """Extract structured tool-trace metadata from a RunOutput."""
     if not response.tools:
@@ -573,6 +596,81 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
         _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
         trace.append(trace_entry)
     return trace
+
+
+def _extract_cancelled_tool_trace(response: RunOutput) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
+    """Extract completed and unfinished tool traces from an interrupted RunOutput."""
+    return split_interrupted_tool_trace(response.tools)
+
+
+def _find_matching_pending_stream_tool(
+    pending_tools: list[_PendingStreamingTool],
+    tool: ToolExecution | None,
+) -> int | None:
+    """Return the newest pending tool matching a completion event."""
+    call_id = tool_execution_call_id(tool)
+    if call_id is not None:
+        for pos in range(len(pending_tools) - 1, -1, -1):
+            if pending_tools[pos].tool_call_id == call_id:
+                return pos
+    info = extract_tool_completed_info(tool)
+    if info is None:
+        return None
+    tool_name, _ = info
+    for pos in range(len(pending_tools) - 1, -1, -1):
+        pending_tool = pending_tools[pos]
+        if pending_tool.tool_call_id is None and pending_tool.tool_name == tool_name:
+            return pos
+    return None
+
+
+def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
+    """Return whether one streaming attempt already observed agent-visible work."""
+    return bool(state.assistant_text or state.observed_tool_calls)
+
+
+def _is_run_cancelled_boilerplate(content: str) -> bool:
+    """Return whether one string is just Agno cancellation boilerplate."""
+    normalized = content.strip().lower()
+    return normalized.startswith("run ") and "cancel" in normalized
+
+
+def _extract_interrupted_partial_text(
+    content: object,
+    *,
+    messages: list[Message] | None = None,
+) -> str:
+    """Extract assistant partial text while dropping bare cancellation boilerplate."""
+    preferred_assistant_parts = [
+        str(message.content).strip()
+        for message in messages or []
+        if (
+            isinstance(message, Message)
+            and message.role == "assistant"
+            and isinstance(message.content, str)
+            and not message.from_history
+        )
+    ]
+    assistant_parts = [
+        str(message.content).strip()
+        for message in messages or []
+        if isinstance(message, Message) and message.role == "assistant" and isinstance(message.content, str)
+    ]
+    candidate_assistant_parts = preferred_assistant_parts or assistant_parts
+    for part in reversed(candidate_assistant_parts):
+        if part and not _is_run_cancelled_boilerplate(part):
+            return part
+    if not isinstance(content, str):
+        return ""
+    stripped = content.strip()
+    if _is_run_cancelled_boilerplate(stripped):
+        return ""
+    return stripped
+
+
+def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
+    """Raise the canonical agent cancellation error."""
+    raise asyncio.CancelledError(reason or "Run cancelled")
 
 
 def _get_model_config(
@@ -921,7 +1019,7 @@ def _request_stream_retry(
     agent_name: str,
 ) -> bool:
     """Set retry flag when inline-media fallback should be attempted."""
-    if retried_without_inline_media or state.full_response:
+    if retried_without_inline_media or _stream_attempt_has_progress(state):
         # Once any stream content is emitted, retrying would duplicate partial output.
         return False
     if not should_retry_without_inline_media(error, media_inputs):
@@ -943,15 +1041,23 @@ def _track_stream_tool_started(
 ) -> None:
     """Track started tool-call metadata for streaming output."""
     state.observed_tool_calls += 1
-    if not show_tool_calls:
+    display_tool_index = state.tool_count + 1 if show_tool_calls else None
+    tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=display_tool_index)
+    if trace_entry is not None:
+        state.pending_tools.append(
+            _PendingStreamingTool(
+                tool_name=trace_entry.tool_name,
+                trace_entry=trace_entry,
+                tool_call_id=tool_execution_call_id(event.tool),
+                visible_tool_index=display_tool_index,
+            ),
+        )
+    if not show_tool_calls or display_tool_index is None:
         return
 
-    state.tool_count += 1
-    tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=state.tool_count)
+    state.tool_count = display_tool_index
     if tool_msg:
         state.full_response += tool_msg
-    if trace_entry is not None:
-        state.pending_tools.append((trace_entry.tool_name, state.tool_count))
 
 
 def _track_stream_tool_completed(
@@ -962,30 +1068,30 @@ def _track_stream_tool_completed(
     agent_name: str,
 ) -> None:
     """Track completed tool-call metadata for streaming output."""
-    if not show_tool_calls:
-        return
-
     info = extract_tool_completed_info(event.tool)
     if info is None:
         return
     tool_name, result = info
-    match_pos = next(
-        (pos for pos in range(len(state.pending_tools) - 1, -1, -1) if state.pending_tools[pos][0] == tool_name),
-        None,
-    )
-    if match_pos is None:
+    pending_trace_pos = _find_matching_pending_stream_tool(state.pending_tools, event.tool)
+    pending_tool = state.pending_tools.pop(pending_trace_pos) if pending_trace_pos is not None else None
+    _, completed_trace = format_tool_completed_event(event.tool)
+    if completed_trace is not None:
+        state.completed_tools.append(completed_trace)
+    if not show_tool_calls:
+        return
+
+    if pending_tool is None or pending_tool.visible_tool_index is None:
         logger.warning(
             "Missing pending tool start in AI stream; skipping completion marker",
             tool_name=tool_name,
             agent=agent_name,
         )
         return
-    _, tool_index = state.pending_tools.pop(match_pos)
     state.full_response, _ = complete_pending_tool_block(
         state.full_response,
         tool_name,
         result,
-        tool_index=tool_index,
+        tool_index=pending_tool.visible_tool_index,
     )
 
 
@@ -1287,6 +1393,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
@@ -1331,6 +1438,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
         model_prompt: Optional model-facing current-turn prompt additions.
+        turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
     Returns:
@@ -1347,6 +1455,9 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
+    standalone_interrupted_replay_persisted = False
+    unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
     try:
         try:
             _assert_agent_target(agent_name, config)
@@ -1409,11 +1520,12 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
+            if turn_recorder is not None:
+                turn_recorder.set_run_metadata(metadata)
 
             response: RunOutput | None = None
             attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
 
             try:
                 for retried_without_inline_media in (False, True):
@@ -1513,14 +1625,75 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     run_metadata_collector.update(run_metadata)
 
             if response.status == RunStatus.cancelled:
-                raise asyncio.CancelledError(response.content or "Run cancelled")
+                partial_text = _extract_interrupted_partial_text(
+                    response.content,
+                    messages=response.messages,
+                )
+                completed_tools, interrupted_tools = _extract_cancelled_tool_trace(response)
+                if turn_recorder is not None:
+                    turn_recorder.record_interrupted(
+                        run_metadata=metadata,
+                        assistant_text=partial_text,
+                        completed_tools=completed_tools,
+                        interrupted_tools=interrupted_tools,
+                    )
+                if turn_recorder is None:
+                    persist_interrupted_replay(
+                        scope_context=scope_context,
+                        session_id=response.session_id or session_id,
+                        run_id=response.run_id or attempt_run_id or str(uuid4()),
+                        user_message=prompt,
+                        partial_text=partial_text,
+                        completed_tools=completed_tools,
+                        interrupted_tools=interrupted_tools,
+                        run_metadata=metadata,
+                        is_team=False,
+                    )
+                    standalone_interrupted_replay_persisted = True
+                _raise_agent_run_cancelled(response.content)
             if response.status == RunStatus.error:
                 return get_user_friendly_error_message(
                     Exception(str(response.content or "Unknown agent error")),
                     agent_name,
                 )
 
-            return _extract_response_content(response, show_tool_calls=show_tool_calls)
+            response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
+            if turn_recorder is not None:
+                turn_recorder.record_completed(
+                    run_metadata=metadata,
+                    assistant_text=_extract_replayable_response_text(response),
+                    completed_tools=_extract_tool_trace(response),
+                )
+            return response_text
+    except asyncio.CancelledError:
+        if turn_recorder is not None:
+            turn_recorder.record_interrupted(
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                assistant_text=turn_recorder.assistant_text,
+                completed_tools=turn_recorder.completed_tools,
+                interrupted_tools=turn_recorder.interrupted_tools,
+            )
+        elif not standalone_interrupted_replay_persisted:
+            persist_interrupted_replay(
+                scope_context=scope_context,
+                session_id=session_id,
+                run_id=attempt_run_id or str(uuid4()),
+                user_message=prompt,
+                partial_text="",
+                completed_tools=[],
+                interrupted_tools=[],
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                is_team=False,
+            )
+        raise
     finally:
         close_agent_runtime_sqlite_dbs(
             agent,
@@ -1538,6 +1711,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     media_inputs: MediaInputs,
     retried_without_inline_media: bool,
     timing_scope: str,
+    state_updated: Callable[[], None] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
@@ -1550,7 +1724,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     if pipeline_timing is not None:
                         pipeline_timing.mark("model_first_token")
                 chunk_text = str(event.content)
+                state.assistant_text += chunk_text
                 state.full_response += chunk_text
+                if state_updated is not None:
+                    state_updated()
                 yield event
                 continue
 
@@ -1560,6 +1737,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     event,
                     show_tool_calls=show_tool_calls,
                 )
+                if state_updated is not None:
+                    state_updated()
                 yield event
                 continue
 
@@ -1570,6 +1749,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     show_tool_calls=show_tool_calls,
                     agent_name=agent_name,
                 )
+                if state_updated is not None:
+                    state_updated()
                 yield event
                 continue
 
@@ -1583,6 +1764,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
 
             if isinstance(event, RunCancelledEvent):
                 state.cancelled_run_event = event
+                if state_updated is not None:
+                    state_updated()
                 return
 
             if isinstance(event, RunErrorEvent):
@@ -1641,6 +1824,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     delegation_depth: int = 0,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
@@ -1683,6 +1867,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
         model_prompt: Optional model-facing current-turn prompt additions.
+        turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
 
     Yields:
@@ -1699,6 +1884,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
+    standalone_interrupted_replay_persisted = False
+    unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
+    state = _StreamingAttemptState()
 
     try:
         try:
@@ -1764,11 +1953,22 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
+            if turn_recorder is not None:
+                turn_recorder.set_run_metadata(metadata)
 
             attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
             state = _StreamingAttemptState()
+
+            def _sync_live_turn_recorder() -> None:
+                if turn_recorder is None:
+                    return
+                turn_recorder.sync_partial_state(
+                    run_metadata=metadata,
+                    assistant_text=state.assistant_text,
+                    completed_tools=state.completed_tools,
+                    interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
+                )
 
             try:
                 for retried_without_inline_media in (False, True):
@@ -1814,6 +2014,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             media_inputs=attempt_media_inputs,
                             retried_without_inline_media=retried_without_inline_media,
                             timing_scope=timing_scope,
+                            state_updated=_sync_live_turn_recorder,
                             pipeline_timing=pipeline_timing,
                         ):
                             yield stream_chunk
@@ -1849,6 +2050,13 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         return
 
                     if state.cancelled_run_event is not None:
+                        if turn_recorder is not None:
+                            turn_recorder.record_interrupted(
+                                run_metadata=metadata,
+                                assistant_text=state.assistant_text,
+                                completed_tools=state.completed_tools,
+                                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
+                            )
                         if run_metadata_collector is not None:
                             fallback_metrics = _build_model_request_metrics_fallback(
                                 state.request_metric_totals,
@@ -1870,7 +2078,20 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
-                        raise asyncio.CancelledError(state.cancelled_run_event.reason or "Run cancelled")
+                        if turn_recorder is None:
+                            persist_interrupted_replay(
+                                scope_context=scope_context,
+                                session_id=state.cancelled_run_event.session_id or session_id,
+                                run_id=state.cancelled_run_event.run_id or attempt_run_id or str(uuid4()),
+                                user_message=prompt,
+                                partial_text=state.assistant_text,
+                                completed_tools=state.completed_tools,
+                                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
+                                run_metadata=metadata,
+                                is_team=False,
+                            )
+                            standalone_interrupted_replay_persisted = True
+                        _raise_agent_run_cancelled(state.cancelled_run_event.reason)
 
                     break
 
@@ -1905,6 +2126,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     )
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)
+                if turn_recorder is not None:
+                    turn_recorder.record_completed(
+                        run_metadata=metadata,
+                        assistant_text=state.assistant_text,
+                        completed_tools=state.completed_tools,
+                    )
             finally:
                 cleanup_queued_notice_state(
                     run_output=None,
@@ -1913,6 +2140,35 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     session_type=SessionType.AGENT,
                     entity_name=agent_name,
                 )
+    except asyncio.CancelledError:
+        if turn_recorder is not None:
+            turn_recorder.record_interrupted(
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                assistant_text=state.assistant_text,
+                completed_tools=state.completed_tools,
+                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
+            )
+        elif not standalone_interrupted_replay_persisted:
+            persist_interrupted_replay(
+                scope_context=scope_context,
+                session_id=session_id,
+                run_id=attempt_run_id or str(uuid4()),
+                user_message=prompt,
+                partial_text=state.assistant_text,
+                completed_tools=state.completed_tools,
+                interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
+                run_metadata=build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    extra_metadata=matrix_run_metadata,
+                ),
+                is_team=False,
+            )
+        raise
     finally:
         close_agent_runtime_sqlite_dbs(
             agent,

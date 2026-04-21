@@ -32,7 +32,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     import nio
 
@@ -188,6 +188,7 @@ class StreamingResponse:
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
+    visible_event_id_callback: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -406,6 +407,8 @@ class StreamingResponse:
         if delivered is None:
             return False
         self.event_id = delivered.event_id
+        if self.visible_event_id_callback is not None:
+            self.visible_event_id_callback(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
         logger.debug("Initial streaming message sent", event_id=self.event_id)
@@ -582,6 +585,7 @@ async def send_streaming_response(
     extra_content: dict[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    visible_event_id_callback: Callable[[str], None] | None = None,
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
 ) -> tuple[str | None, str]:
@@ -611,6 +615,7 @@ async def send_streaming_response(
         interval_ramp_seconds=sc.interval_ramp_seconds,
         pipeline_timing=pipeline_timing,
         conversation_cache=conversation_cache,
+        visible_event_id_callback=visible_event_id_callback,
     )
 
     # Ensure the first chunk triggers an initial send immediately
@@ -618,6 +623,8 @@ async def send_streaming_response(
 
     if existing_event_id:
         streaming.event_id = existing_event_id
+        if visible_event_id_callback is not None:
+            visible_event_id_callback(existing_event_id)
         streaming.accumulated_text = ""
         streaming.placeholder_progress_sent = adopt_existing_placeholder
 
