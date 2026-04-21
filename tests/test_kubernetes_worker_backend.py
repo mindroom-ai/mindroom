@@ -1366,6 +1366,83 @@ def test_kubernetes_backend_skips_progress_for_warm_worker() -> None:
     assert events == []
 
 
+def test_kubernetes_backend_reports_progress_for_recreated_ready_deployment(tmp_path: Path) -> None:
+    """Recreating a ready deployment should emit cold-start progress for the real startup lifecycle."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+    _install_real_elapsed_wait_for_ready(updated_backend, ready_after_seconds=1.6)
+
+    events: list[WorkerReadyProgress] = []
+    updated_backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=11.0,
+        progress_sink=events.append,
+    )
+
+    assert [event.phase for event in events] == ["cold_start", "ready"]
+
+
+def test_kubernetes_backend_recreated_ready_deployment_refreshes_startup_metadata(tmp_path: Path) -> None:
+    """Recreating a ready deployment should refresh startup metadata instead of reusing stale values."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+    _install_real_elapsed_wait_for_ready(updated_backend, ready_after_seconds=1.6)
+
+    handle = updated_backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=11.0,
+    )
+
+    assert handle.last_started_at == 11.0
+    assert handle.startup_count == 2
+
+
 def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
     """Failed cold starts should surface a terminal failed progress event with the error."""
     backend, _apps_api, _core_api = _backend()

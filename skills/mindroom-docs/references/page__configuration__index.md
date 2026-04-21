@@ -245,7 +245,7 @@ defaults:
   #   reserve_tokens: 16384
   #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
-  show_tool_calls: true            # Default: true (show tool call details inline in responses)
+  show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])

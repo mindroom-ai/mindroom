@@ -111,7 +111,8 @@ The number in brackets (`[N]`) is a 1-indexed counter per message.
 Each marker maps to `io.mindroom.tool_trace.events[N-1]` in the message metadata.
 
 When `show_tool_calls` is disabled for an entity, tool markers are omitted from the message text and tool-trace metadata is not attached.
-The agent still shows typing activity during hidden tool calls.
+If a routed tool needs an isolated worker, streaming may still show a generic worker warmup line such as `Preparing isolated worker...`.
+That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 
 ## Cancellation and Errors
 
@@ -149,6 +150,8 @@ defaults:
 
 When `show_tool_calls` is `false`, inline tool markers (`🔧 tool_name [N]`) are omitted from the message text and `io.mindroom.tool_trace` metadata is not attached.
 The agent still shows typing activity during hidden tool calls.
+If a routed tool needs an isolated worker, users may still see generic worker progress copy such as `Preparing isolated worker...` or `Preparing isolated worker... 17s elapsed.`.
+Hidden-tool mode never includes tool identifiers or tool-trace metadata in that worker progress text.
 `show_tool_calls` can also be overridden per agent in the agent config.
 
 When `show_stop_button` is `false`, the 🛑 reaction is not added to in-progress messages.

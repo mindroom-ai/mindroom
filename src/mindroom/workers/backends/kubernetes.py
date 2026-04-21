@@ -334,7 +334,7 @@ class KubernetesWorkerBackend:
             for current_sink in self._progress_sinks.get(progress.worker_key, ()):
                 current_sink(progress)
 
-    def ensure_worker(
+    def ensure_worker(  # noqa: PLR0915
         self,
         spec: WorkerSpec,
         *,
@@ -353,7 +353,6 @@ class KubernetesWorkerBackend:
                 existing = self._resources.read_deployment(worker_id)
                 current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
                 should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
-                should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
                 startup_count = (current_handle.startup_count if current_handle is not None else 0) + int(
                     should_restart,
                 )
@@ -381,7 +380,7 @@ class KubernetesWorkerBackend:
                     credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
                 )
                 self._resources.apply_service(worker_id)
-                self._resources.apply_deployment(
+                deployment_apply = self._resources.apply_deployment(
                     worker_key=worker_key,
                     worker_id=worker_id,
                     state_subpath=state_subpath,
@@ -389,6 +388,22 @@ class KubernetesWorkerBackend:
                     replicas=1,
                     private_agent_names=spec.private_agent_names,
                 )
+                startup_triggered = should_restart or deployment_apply.recreated
+                if deployment_apply.recreated and not should_restart:
+                    startup_count = (current_handle.startup_count if current_handle is not None else 0) + 1
+                    annotations = resources.metadata_annotations(
+                        worker_key=worker_key,
+                        state_subpath=state_subpath,
+                        created_at=created_at,
+                        last_used_at=timestamp,
+                        last_started_at=timestamp,
+                        startup_count=startup_count,
+                        failure_count=current_handle.failure_count if current_handle is not None else 0,
+                        failure_reason=None,
+                        status="starting",
+                    )
+                    self._resources.patch_deployment(worker_id, annotations=annotations)
+                should_report_progress = startup_triggered or existing is None or not self._deployment_ready(existing)
                 poll_reporter: Callable[[float], None] | None = None
                 finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
                 if should_report_progress:
@@ -416,7 +431,10 @@ class KubernetesWorkerBackend:
                 final_annotations = dict(annotations)
                 final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
                 self._resources.patch_deployment(worker_id, annotations=final_annotations)
-                deployment.metadata.annotations = final_annotations
+                deployment.metadata.annotations = {
+                    **dict(deployment.metadata.annotations or {}),
+                    **final_annotations,
+                }
                 return self._handle_from_deployment(deployment, now=timestamp)
         finally:
             if progress_sink is not None:

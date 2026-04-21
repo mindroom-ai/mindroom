@@ -1308,6 +1308,123 @@ class TestStreamingBehavior:
         assert IN_PROGRESS_MARKER not in final_text
 
     @pytest.mark.asyncio
+    async def test_worker_progress_delivery_failure_raises_streaming_delivery_error(self) -> None:
+        """Worker-progress delivery errors should follow the normal streaming error contract."""
+        mock_client = _make_matrix_client_mock()
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            if "Preparing isolated worker" in new_text:
+                msg = "edit blew up"
+                raise RuntimeError(msg)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+
+        async def stream() -> AsyncIterator[str]:
+            pump = get_worker_progress_pump()
+            assert pump is not None
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+            await asyncio.sleep(0)
+            yield "hello"
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(StreamingDeliveryError, match="edit blew up") as exc_info,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+            )
+
+        assert isinstance(exc_info.value.error, RuntimeError)
+        assert str(exc_info.value.error) == "edit blew up"
+        assert exc_info.value.event_id == "$thinking_123"
+
+    @pytest.mark.asyncio
+    async def test_worker_progress_delivery_failure_still_writes_terminal_status(self) -> None:
+        """A failed warmup edit should still be followed by a terminal error-status edit."""
+        mock_client = _make_matrix_client_mock()
+        terminal_statuses: list[str] = []
+        edited_texts: list[str] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            terminal_statuses.append(str(new_content[STREAM_STATUS_KEY]))
+            edited_texts.append(new_text)
+            if "Preparing isolated worker" in new_text:
+                msg = "edit blew up"
+                raise RuntimeError(msg)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
+
+        async def stream() -> AsyncIterator[str]:
+            pump = get_worker_progress_pump()
+            assert pump is not None
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+            await asyncio.sleep(0)
+            yield "hello"
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(StreamingDeliveryError, match="edit blew up"),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+            )
+
+        assert terminal_statuses[-1] == STREAM_STATUS_ERROR
+        assert edited_texts[-1].startswith("hello\n\n**[Response interrupted by an error:")
+
+    @pytest.mark.asyncio
     async def test_worker_warmup_suffix_renders_and_clears_without_touching_accumulated_text(self) -> None:
         """Warmup notices should render as side-band text and disappear on ready."""
         mock_client = _make_matrix_client_mock()
@@ -1422,6 +1539,45 @@ class TestStreamingBehavior:
         assert "Preparing isolated worker" not in accumulated
 
     @pytest.mark.asyncio
+    async def test_hidden_tool_mode_worker_warmup_uses_generic_copy(self) -> None:
+        """Hidden-tool mode should never expose worker tool labels in warmup text."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$warmup_hidden_tools"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            show_tool_calls=False,
+        )
+        for tool_name, function_name in (("shell", "run"), ("python", "execute")):
+            streaming.apply_worker_progress_event(
+                WorkerProgressEvent(
+                    tool_name=tool_name,
+                    function_name=function_name,
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+
+        await streaming._send_or_edit_message(mock_client, allow_empty_progress=True)
+
+        body = mock_client.room_send.call_args.kwargs["content"]["body"]
+        assert "Preparing isolated worker..." in body
+        assert "shell.run" not in body
+        assert "python.execute" not in body
+
+    @pytest.mark.asyncio
     async def test_worker_warmup_suffix_renders_outside_partial_markdown(self) -> None:
         """Warmup notices should append outside partially open markdown blocks."""
         mock_client = _make_matrix_client_mock()
@@ -1455,7 +1611,7 @@ class TestStreamingBehavior:
         await streaming._send_or_edit_message(mock_client)
 
         content = mock_client.room_send.call_args.kwargs["content"]
-        warmup_text = "⏳ Preparing isolated worker for shell.run… first cold start can take up to 2 minutes."
+        warmup_text = "⏳ Preparing isolated worker for shell.run..."
         assert content["body"].endswith(f"\n\n{warmup_text}")
         assert "<pre><code" in content["formatted_body"]
         assert content["formatted_body"].endswith(f"<p>{warmup_text}</p>")

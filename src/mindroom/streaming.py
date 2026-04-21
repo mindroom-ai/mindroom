@@ -7,7 +7,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
@@ -177,8 +177,29 @@ class _ActiveWarmup:
     worker_key: str
     backend_name: str
     tool_labels: list[str]
-    started_monotonic: float
     last_event: WorkerReadyProgress
+
+
+def _render_worker_status_line(warmup: _ActiveWarmup, *, show_tool_calls: bool) -> str:
+    """Render one worker warmup line without leaking hidden tool metadata."""
+    labels = ", ".join(warmup.tool_labels)
+    if show_tool_calls and labels:
+        waiting_copy = f"Preparing isolated worker for {labels}..."
+        failure_copy = f"Worker startup failed for {labels}"
+    else:
+        waiting_copy = "Preparing isolated worker..."
+        failure_copy = "Worker startup failed"
+
+    phase = warmup.last_event.phase
+    if phase == "failed":
+        error = _shorten_warmup_error(warmup.last_event.error)
+        suffix = "" if error.endswith((".", "!", "?")) else "."
+        return f"⚠️ {failure_copy}: {error}{suffix}"
+    if phase == "cold_start":
+        return f"⏳ {waiting_copy}"
+
+    elapsed_seconds = max(1, int(warmup.last_event.elapsed_seconds))
+    return f"⏳ {waiting_copy} {elapsed_seconds}s elapsed."
 
 
 @dataclass
@@ -421,23 +442,10 @@ class StreamingResponse:
         if not self._active_warmups:
             return []
 
-        lines: list[str] = []
-        for warmup in self._active_warmups.values():
-            labels = ", ".join(warmup.tool_labels)
-            phase = warmup.last_event.phase
-            if phase == "failed":
-                error = _shorten_warmup_error(warmup.last_event.error)
-                suffix = "" if error.endswith((".", "!", "?")) else "."
-                lines.append(f"⚠️ Worker startup failed for {labels}: {error}{suffix}")
-                continue
-            if phase == "cold_start":
-                lines.append(
-                    f"⏳ Preparing isolated worker for {labels}… first cold start can take up to 2 minutes.",
-                )
-                continue
-            elapsed_seconds = max(1, int(warmup.last_event.elapsed_seconds))
-            lines.append(f"⏳ Preparing isolated worker for {labels}… {elapsed_seconds}s elapsed.")
-        return lines
+        return [
+            _render_worker_status_line(warmup, show_tool_calls=self.show_tool_calls)
+            for warmup in self._active_warmups.values()
+        ]
 
     def apply_worker_progress_event(self, event: WorkerProgressEvent) -> bool:
         """Update side-band warmup state from one routed worker progress event."""
@@ -459,7 +467,6 @@ class StreamingResponse:
                 worker_key=worker_key,
                 backend_name=progress.backend_name,
                 tool_labels=[tool_label],
-                started_monotonic=time.monotonic(),
                 last_event=progress,
             )
             return True
@@ -706,17 +713,27 @@ async def _drain_worker_progress_events(
 async def _shutdown_worker_progress_drain(
     pump: WorkerProgressPump,
     progress_task: asyncio.Task[None] | None,
-) -> None:
+) -> Exception | None:
     """Stop the worker-progress drain before terminal stream finalization."""
     pump.shutdown.set()
     if progress_task is None:
-        return
-    progress_task.cancel()
+        return None
+    if not progress_task.done():
+        progress_task.cancel()
     with suppress(asyncio.CancelledError, TimeoutError):
-        await asyncio.wait_for(progress_task, timeout=0.5)
+        try:
+            await asyncio.wait_for(progress_task, timeout=0.5)
+        except Exception as exc:
+            return exc
+    return None
 
 
-async def send_streaming_response(
+def _raise_progress_delivery_error(error: Exception) -> NoReturn:
+    """Raise a stored worker-progress delivery error from a helper."""
+    raise error
+
+
+async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
@@ -792,9 +809,18 @@ async def send_streaming_response(
         )
         try:
             await _consume_streaming_chunks(client, response_stream, streaming)
-        except asyncio.CancelledError as exc:
-            await _shutdown_worker_progress_drain(pump, progress_task)
+            progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None
+            if progress_error is not None:
+                _raise_progress_delivery_error(progress_error)
+        except asyncio.CancelledError as exc:
+            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
+            progress_task = None
+            if cleanup_error is not None:
+                logger.warning(
+                    "Worker progress drain raised during cancellation cleanup",
+                    error=str(cleanup_error),
+                )
             if is_sync_restart_cancel(exc):
                 logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
                 await streaming.finalize(client, restart_interrupted=True)
@@ -808,8 +834,13 @@ async def send_streaming_response(
             raise
         except Exception as e:
             logger.exception("Streaming response failed", error=str(e))
-            await _shutdown_worker_progress_drain(pump, progress_task)
+            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None
+            if cleanup_error is not None and cleanup_error is not e:
+                logger.warning(
+                    "Worker progress drain raised during error cleanup",
+                    error=str(cleanup_error),
+                )
             await streaming.finalize(client, error=e)
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
@@ -820,11 +851,14 @@ async def send_streaming_response(
                 tool_trace=streaming.tool_trace,
             ) from e
         else:
-            await _shutdown_worker_progress_drain(pump, progress_task)
-            progress_task = None
             await streaming.finalize(client)
         finally:
-            await _shutdown_worker_progress_drain(pump, progress_task)
+            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
+            if cleanup_error is not None:
+                logger.warning(
+                    "Worker progress drain raised during final cleanup",
+                    error=str(cleanup_error),
+                )
 
     if tool_trace_collector is not None:
         tool_trace_collector[:] = streaming.tool_trace

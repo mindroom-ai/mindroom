@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING
+import inspect
+import os
+import threading
+import time
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -12,16 +17,20 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallStartedEvent
 
+import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
-from mindroom.workers.models import WorkerReadyProgress
+from mindroom.tool_system.worker_routing import resolve_worker_target
+from mindroom.workers.models import WorkerHandle, WorkerReadyProgress
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -39,6 +48,207 @@ if TYPE_CHECKING:
 
 def _matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
+
+
+@pytest.mark.asyncio
+async def test_streaming_e2e_real_proxied_sync_tool_warmup_sequence(  # noqa: C901, PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Real proxied sync tools should surface warmup progress before the tool result completes."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_EXECUTION_MODE", "all")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+    runtime_config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            router=RouterConfig(model="default"),
+        ),
+        runtime_paths,
+    )
+    file_path = tmp_path / "demo.txt"
+    file_path.write_text("hello from file tool\n", encoding="utf-8")
+    deliveries: list[tuple[str, str, float]] = []
+    post_started = threading.Event()
+    allow_result = threading.Event()
+    released_at: list[float] = []
+
+    class FakeWorkerManager:
+        def __init__(self) -> None:
+            self.progress_sink: object | None = None
+
+        def ensure_worker(
+            self,
+            spec: object,
+            *,
+            now: float | None = None,
+            progress_sink: object = None,
+        ) -> WorkerHandle:
+            del spec, now
+            self.progress_sink = progress_sink
+            assert progress_sink is not None
+            progress_sink(
+                WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=2.0,
+                ),
+            )
+
+            def emit_waiting_progress() -> None:
+                time.sleep(0.05)
+                if self.progress_sink is None:
+                    return
+                self.progress_sink(
+                    WorkerReadyProgress(
+                        phase="waiting",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=7.0,
+                    ),
+                )
+
+            threading.Thread(target=emit_waiting_progress, daemon=True).start()
+            return WorkerHandle(
+                worker_id="worker-a",
+                worker_key="worker-a",
+                endpoint="http://worker-a/api/sandbox-runner/execute",
+                auth_token=TEST_ACCESS_TOKEN,
+                status="ready",
+                backend_name="kubernetes",
+                last_used_at=0.0,
+                created_at=0.0,
+                last_started_at=0.0,
+                debug_metadata={"api_root": "http://worker-a/api/sandbox-runner"},
+            )
+
+        def touch_worker(self, worker_key: str, *, now: float | None = None) -> None:
+            del worker_key, now
+
+        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> None:
+            del worker_key, failure_reason, now
+
+    class BlockingClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+        def post(self, url: str, *, json: dict[str, object], headers: dict[str, str]) -> object:
+            del url, json, headers
+            post_started.set()
+            allow_result.wait(timeout=1.0)
+            return SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {"ok": True, "result": "hello from file tool\n"},
+            )
+
+    class FastProgressStreamingResponse(StreamingResponse):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            self.update_interval = 0.01
+            self.min_update_interval = 0.01
+            self.progress_update_interval = 0.01
+            self.min_char_update_interval = 0.01
+            self.update_char_threshold = 10
+            self.min_update_char_threshold = 10
+
+    fake_manager = FakeWorkerManager()
+    worker_target = resolve_worker_target(
+        None,
+        "helper",
+        execution_identity=None,
+        tenant_id="tenant-123",
+        account_id="account-123",
+    )
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", lambda *_args, **_kwargs: fake_manager)
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", BlockingClient)
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_target=worker_target,
+    )
+    entrypoint = tool.get_async_functions()["read_file"].entrypoint
+    assert entrypoint is not None
+
+    def release_tool_result() -> None:
+        assert post_started.wait(timeout=1.0)
+        time.sleep(0.1)
+        released_at.append(time.monotonic())
+        allow_result.set()
+
+    release_thread = threading.Thread(target=release_tool_result, daemon=True)
+    release_thread.start()
+
+    async def record_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+    ) -> DeliveredMatrixEvent:
+        deliveries.append(("send", str(content["body"]), time.monotonic()))
+        return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
+
+    async def record_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, object],
+        new_text: str,
+    ) -> DeliveredMatrixEvent:
+        deliveries.append(("edit", new_text, time.monotonic()))
+        return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="file", tool_args={"file_name": "demo.txt"}))
+        result = entrypoint("demo.txt")
+        if inspect.isawaitable(result):
+            result = await result
+        yield str(result)
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+    ):
+        await send_streaming_response(
+            client=_matrix_client_mock(),
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=runtime_config,
+            runtime_paths=runtime_paths_for(runtime_config),
+            response_stream=stream(),
+            show_tool_calls=False,
+            streaming_cls=FastProgressStreamingResponse,
+        )
+
+    release_thread.join(timeout=1.0)
+    assert released_at
+    warmup_edits = [delivery for delivery in deliveries if "Preparing isolated worker" in delivery[1]]
+    result_deliveries = [delivery for delivery in deliveries if "hello from file tool" in delivery[1]]
+    assert warmup_edits
+    assert result_deliveries
+    assert warmup_edits[0][2] < result_deliveries[0][2]
 
 
 @pytest.mark.asyncio
@@ -162,9 +372,12 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
     assert "Preparing isolated worker" not in deliveries[0][1]
     assert deliveries[1][0] == "edit"
     assert "Preparing isolated worker" in deliveries[1][1]
-    assert "first cold start" in deliveries[1][1]
+    assert "Preparing isolated worker..." in deliveries[1][1]
+    assert "shell.run" not in deliveries[1][1]
+    assert "first cold start" not in deliveries[1][1]
     assert deliveries[2][0] == "edit"
     assert "7s elapsed" in deliveries[2][1]
+    assert "shell.run" not in deliveries[2][1]
     assert deliveries[3][0] == "edit"
     assert "Preparing isolated worker" not in deliveries[3][1]
     assert "Thinking..." in deliveries[3][1]

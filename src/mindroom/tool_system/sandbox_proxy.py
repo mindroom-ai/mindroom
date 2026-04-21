@@ -739,6 +739,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         runtime_paths=runtime_paths,
         extra_env_passthrough=extra_env_passthrough,
     )
+    original_functions = toolkit.functions
+    original_async_functions = toolkit.async_functions
     toolkit.functions = {
         function_name: _wrap_sync_function(
             function,
@@ -753,7 +755,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
-        for function_name, function in toolkit.functions.items()
+        for function_name, function in original_functions.items()
     }
     toolkit.async_functions = {
         function_name: _wrap_async_function(
@@ -769,6 +771,23 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
-        for function_name, function in toolkit.async_functions.items()
+        for function_name, function in original_async_functions.items()
     }
+    for function_name, function in original_functions.items():
+        toolkit.async_functions.setdefault(
+            function_name,
+            _wrap_async_function(
+                function,
+                tool_name,
+                function_name,
+                runtime_paths=runtime_paths,
+                credentials_manager=credentials_manager,
+                shared_storage_root_path=shared_storage_root_path,
+                tool_config_overrides=tool_config_overrides,
+                tool_init_overrides=tool_init_overrides,
+                execution_env=execution_env,
+                extra_env_passthrough=extra_env_passthrough,
+                worker_target=worker_target,
+            ),
+        )
     return toolkit

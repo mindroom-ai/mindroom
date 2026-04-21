@@ -98,7 +98,7 @@ When an agent calls tools during a streamed response, MindRoom shows inline mark
 
 The number in brackets (`[N]`) is a 1-indexed counter per message. Each marker maps to `io.mindroom.tool_trace.events[N-1]` in the message metadata.
 
-When `show_tool_calls` is disabled for an entity, tool markers are omitted from the message text and tool-trace metadata is not attached. The agent still shows typing activity during hidden tool calls.
+When `show_tool_calls` is disabled for an entity, tool markers are omitted from the message text and tool-trace metadata is not attached. If a routed tool needs an isolated worker, streaming may still show a generic worker warmup line such as `Preparing isolated worker...`. That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 
 ## Cancellation and Errors
 
@@ -132,7 +132,7 @@ defaults:
   show_stop_button: true    # Default: true — add 🛑 reaction for cancellation
 ```
 
-When `show_tool_calls` is `false`, inline tool markers (`🔧 tool_name [N]`) are omitted from the message text and `io.mindroom.tool_trace` metadata is not attached. The agent still shows typing activity during hidden tool calls. `show_tool_calls` can also be overridden per agent in the agent config.
+When `show_tool_calls` is `false`, inline tool markers (`🔧 tool_name [N]`) are omitted from the message text and `io.mindroom.tool_trace` metadata is not attached. The agent still shows typing activity during hidden tool calls. If a routed tool needs an isolated worker, users may still see generic worker progress copy such as `Preparing isolated worker...` or `Preparing isolated worker... 17s elapsed.`. Hidden-tool mode never includes tool identifiers or tool-trace metadata in that worker progress text. `show_tool_calls` can also be overridden per agent in the agent config.
 
 When `show_stop_button` is `false`, the 🛑 reaction is not added to in-progress messages. Streaming itself still works — only the cancellation affordance is removed. `show_stop_button` is a global-only setting under `defaults`.
 
