@@ -4,7 +4,7 @@ MindRoom exposes an OpenAI-compatible chat completions API so any chat frontend 
 
 ## How It Works
 
-The frontend calls `GET /v1/models` and sees your agents in the model picker. The user picks an agent and chats. The frontend sends standard OpenAI requests. MindRoom routes them to the selected agent with its supported tools, instructions, and memory. The frontend doesn't know it's talking to an agent. It's transparent.
+The frontend calls `GET /v1/models` and sees your agents in the model picker. The user picks an agent and chats. The frontend sends standard OpenAI requests; MindRoom routes them to the selected agent with all its tools, instructions, and memory. The frontend doesn't know it's talking to an agent — it's transparent.
 
 ```
 Chat Frontend (LibreChat, Open WebUI, etc.)
