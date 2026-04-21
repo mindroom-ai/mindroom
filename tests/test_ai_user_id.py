@@ -2541,7 +2541,7 @@ class TestUserIdPassthrough:
         mock_run_output.tools = None
 
         with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.core._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
             patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
@@ -2634,7 +2634,7 @@ class TestUserIdPassthrough:
 
         mock_agent.arun = MagicMock(return_value=_empty_stream())
 
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        with patch("mindroom.ai.core._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
             _ = [
