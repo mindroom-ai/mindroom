@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import threading
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from pydantic import ValidationError
 
+import mindroom.tool_approval as tool_approval_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -35,7 +37,7 @@ from mindroom.tool_approval import (
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -173,6 +175,104 @@ def _approval_room() -> MagicMock:
     room.room_id = "!room:localhost"
     room.canonical_alias = None
     return room
+
+
+class _TrackingLock:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._owner: int | None = None
+
+    def __enter__(self) -> Self:
+        self._lock.acquire()
+        self._owner = threading.get_ident()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._owner = None
+        self._lock.release()
+
+    def held_by_current_thread(self) -> bool:
+        return self._owner == threading.get_ident()
+
+
+class _LockCheckingCache(dict[tuple[str, int], object]):
+    def __init__(self, lock: _TrackingLock) -> None:
+        super().__init__()
+        self._lock = lock
+
+    def _require_lock(self) -> None:
+        assert self._lock.held_by_current_thread()
+
+    def get(self, key: tuple[str, int], default: object = None) -> object:
+        self._require_lock()
+        return super().get(key, default)
+
+    def __iter__(self) -> Iterator[tuple[str, int]]:
+        self._require_lock()
+        return super().__iter__()
+
+    def pop(self, key: tuple[str, int], default: object = None) -> object:
+        self._require_lock()
+        return super().pop(key, default)
+
+    def __setitem__(self, key: tuple[str, int], value: object) -> None:
+        self._require_lock()
+        super().__setitem__(key, value)
+
+
+def _write_approval_script(script_path: Path, *, requires_approval: bool, wave: int) -> None:
+    script_path.write_text(
+        f"def check(tool_name, arguments, agent_name):\n    return {requires_approval!r}\n",
+        encoding="utf-8",
+    )
+    current_stat = script_path.stat()
+    offset_ns = wave * 1_000_000_000
+    os.utime(
+        script_path,
+        ns=(current_stat.st_atime_ns + offset_ns, current_stat.st_mtime_ns + offset_ns),
+    )
+    importlib.invalidate_caches()
+
+
+def _run_script_approval_wave(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    expected_requires_approval: bool,
+) -> None:
+    barrier = threading.Barrier(4)
+    results: list[bool] = []
+    errors: list[BaseException] = []
+
+    def _worker(
+        worker_barrier: threading.Barrier = barrier,
+        worker_results: list[bool] = results,
+        worker_errors: list[BaseException] = errors,
+    ) -> None:
+        try:
+            worker_barrier.wait(timeout=1)
+            worker_results.append(
+                asyncio.run(
+                    evaluate_tool_approval(
+                        config,
+                        runtime_paths,
+                        "run_shell_command",
+                        {"command": "echo hi"},
+                        "code",
+                    ),
+                )[0],
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            worker_errors.append(exc)
+
+    threads = [threading.Thread(target=_worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert errors == []
+    assert results == [expected_requires_approval] * 4
 
 
 def _create_persisted_pending_request(storage_dir: Path, *, event_id: str | None = "$approval-event") -> str:
@@ -446,6 +546,33 @@ async def test_script_cache_invalidates_when_mtime_changes(tmp_path: Path) -> No
         "code",
     )
     assert second_result[0] is True
+
+
+def test_script_cache_is_thread_safe_under_concurrent_reloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent approval checks should synchronize all script-cache mutation and eviction."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    script_path = tmp_path / "approval_scripts" / "shell_review.py"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", script="approval_scripts/shell_review.py")],
+        ),
+    )
+
+    tracking_lock = _TrackingLock()
+    monkeypatch.setattr(tool_approval_module, "_SCRIPT_CACHE_LOCK", tracking_lock)
+    monkeypatch.setattr(tool_approval_module, "_SCRIPT_CACHE", _LockCheckingCache(tracking_lock))
+
+    for wave, requires_approval in enumerate((False, True, False), start=1):
+        _write_approval_script(script_path, requires_approval=requires_approval, wave=wave)
+        _run_script_approval_wave(
+            config=config,
+            runtime_paths=runtime_paths,
+            expected_requires_approval=requires_approval,
+        )
+
+    assert len(tool_approval_module._SCRIPT_CACHE) == 1
 
 
 @pytest.mark.asyncio

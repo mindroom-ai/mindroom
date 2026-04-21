@@ -51,6 +51,7 @@ _APPROVE_REACTION_KEYS = frozenset({"✅"})
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MANAGER: ApprovalManager | None = None
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
+_SCRIPT_CACHE_LOCK = threading.Lock()
 logger = get_logger(__name__)
 
 
@@ -1033,7 +1034,8 @@ def _load_script_module(
 
     mtime_ns = resolved_path.stat().st_mtime_ns
     cache_key = (str(resolved_path), mtime_ns)
-    cached_module = _SCRIPT_CACHE.get(cache_key)
+    with _SCRIPT_CACHE_LOCK:
+        cached_module = _SCRIPT_CACHE.get(cache_key)
     if cached_module is not None:
         return cached_module, resolved_path
 
@@ -1049,10 +1051,14 @@ def _load_script_module(
         msg = f"Approval script '{resolved_path}' failed to import: {exc!s}"
         raise ToolApprovalScriptError(msg) from exc
 
-    stale_keys = [key for key in _SCRIPT_CACHE if key[0] == str(resolved_path) and key != cache_key]
-    for stale_key in stale_keys:
-        _SCRIPT_CACHE.pop(stale_key, None)
-    _SCRIPT_CACHE[cache_key] = module
+    with _SCRIPT_CACHE_LOCK:
+        cached_module = _SCRIPT_CACHE.get(cache_key)
+        if cached_module is not None:
+            return cached_module, resolved_path
+        stale_keys = [key for key in _SCRIPT_CACHE if key[0] == str(resolved_path) and key != cache_key]
+        for stale_key in stale_keys:
+            _SCRIPT_CACHE.pop(stale_key, None)
+        _SCRIPT_CACHE[cache_key] = module
     return module, resolved_path
 
 
