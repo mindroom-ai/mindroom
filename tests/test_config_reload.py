@@ -214,6 +214,111 @@ async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir
 
 
 @pytest.mark.asyncio
+async def test_plugin_watcher_catches_first_save_after_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A save immediately after watcher startup should still trigger one reload."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    reload_calls: list[tuple[str, tuple[Path, ...]]] = []
+    reload_seen = asyncio.Event()
+
+    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+        reload_calls.append((source, changed_paths))
+        reload_seen.set()
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.01)
+        hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.wait_for(reload_seen.wait(), timeout=1)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    assert reload_calls == [("watcher", (hooks_path,))]
+
+
+@pytest.mark.asyncio
+async def test_plugin_watcher_catches_first_save_after_config_switch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A save under a newly configured plugin root should not be absorbed into its first baseline."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+
+    first_root = tmp_path / "plugins" / "first"
+    first_root.mkdir(parents=True)
+    (first_root / "mindroom.plugin.json").write_text(
+        '{"name": "first", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    (first_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    second_root = tmp_path / "plugins" / "second"
+    second_root.mkdir(parents=True)
+    (second_root / "mindroom.plugin.json").write_text(
+        '{"name": "second", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    second_hooks_path = second_root / "hooks.py"
+    second_hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    first_config = _runtime_bound_config(Config(plugins=["./plugins/first"]), tmp_path)
+    second_config = _runtime_bound_config(Config(plugins=["./plugins/second"]), tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(first_config))
+    orchestrator.config = first_config
+    orchestrator.running = True
+
+    reload_calls: list[tuple[str, tuple[Path, ...]]] = []
+    reload_seen = asyncio.Event()
+
+    async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = ()) -> PluginReloadResult:
+        reload_calls.append((source, changed_paths))
+        reload_seen.set()
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
+    watcher_task = asyncio.create_task(_watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.08)
+        orchestrator.config = second_config
+        await asyncio.sleep(0.01)
+        second_hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.wait_for(reload_seen.wait(), timeout=1)
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    assert len(reload_calls) == 1
+    source, changed_paths = reload_calls[0]
+    assert source == "watcher"
+    assert second_hooks_path in changed_paths
+    assert all(path.is_relative_to(second_root) for path in changed_paths)
+
+
+@pytest.mark.asyncio
 async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

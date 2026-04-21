@@ -166,15 +166,10 @@ def reload_plugins(
     *,
     skip_broken_plugins: bool = False,
 ) -> PluginReloadResult:
-    """Evict cached plugin imports and rebuild the live hook snapshot."""
-    roots = get_configured_plugin_roots(config, runtime_paths)
-    package_roots = {
-        cached.module_name.split(".", 1)[0]
-        for module_path, cached in plugin_imports._MODULE_IMPORT_CACHE.items()
-        if any(module_path.is_relative_to(root) for root in roots)
-    }
+    """Tear down the live plugin runtime and rebuild it from the current config."""
+    package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
     cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
-    _clear_plugin_reload_caches(roots)
+    _clear_plugin_reload_caches()
     _evict_synthetic_plugin_subtrees(package_roots)
     plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
     return PluginReloadResult(
@@ -217,14 +212,10 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
     return tuple(item for item in values if isinstance(item, asyncio.Task))
 
 
-def _clear_plugin_reload_caches(roots: tuple[Path, ...]) -> None:
-    """Drop manifest and module cache entries under the configured plugin roots."""
-    for manifest_path in tuple(plugin_imports._PLUGIN_CACHE):
-        if any(manifest_path.parent.is_relative_to(root) for root in roots):
-            plugin_imports._PLUGIN_CACHE.pop(manifest_path, None)
-    for module_path in tuple(plugin_imports._MODULE_IMPORT_CACHE):
-        if any(module_path.is_relative_to(root) for root in roots):
-            plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
+def _clear_plugin_reload_caches() -> None:
+    """Drop cached plugin manifests and imported plugin modules before one rebuild."""
+    plugin_imports._PLUGIN_CACHE.clear()
+    plugin_imports._MODULE_IMPORT_CACHE.clear()
 
 
 def _evict_synthetic_plugin_subtrees(package_roots: set[str]) -> None:
