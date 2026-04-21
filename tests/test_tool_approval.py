@@ -1434,6 +1434,40 @@ async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_other_bot_skips_tool_approval_reply_instead_of_treating_it_as_chat(tmp_path: Path) -> None:
+    """Replies to approval cards should not reach non-transport bots as normal chat."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    other_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    other_bot._turn_controller.handle_text_event = AsyncMock()
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    event = _reply_event(event_id="$reply", body="approve")
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(other_bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await other_bot._on_message(room, event)
+
+    assert task.done() is False
+    assert other_bot._turn_controller.handle_text_event.await_count == 0
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
+
+
+@pytest.mark.asyncio
 async def test_other_bot_rejects_requester_approval_when_local_reply_policy_denies(tmp_path: Path) -> None:
     """Approval resolution should fail when current reply permissions deny the sender."""
     runtime_paths = test_runtime_paths(tmp_path)

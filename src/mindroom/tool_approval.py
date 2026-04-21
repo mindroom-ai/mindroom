@@ -270,6 +270,22 @@ class ApprovalManager:
         with self._state_lock:
             return self._pending_by_id.get(approval_id)
 
+    def pending_transport_agent_name_for_event(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+    ) -> str | None:
+        """Return the transport bot for one pending approval card in the given room."""
+        with self._state_lock:
+            approval_id = self._approval_id_by_event_id.get(approval_event_id)
+            if approval_id is None:
+                return None
+            pending = self._pending_by_id.get(approval_id)
+            if pending is None or pending.event_id != approval_event_id or pending.room_id != room_id:
+                return None
+            return pending.transport_agent_name
+
     def _anchored_pending_request(
         self,
         *,

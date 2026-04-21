@@ -1446,6 +1446,14 @@ class AgentBot:
         reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
         if reply_to_event_id is None:
             return False
+        transport_agent_name = approval_manager.pending_transport_agent_name_for_event(
+            approval_event_id=reply_to_event_id,
+            room_id=room.room_id,
+        )
+        if transport_agent_name is None:
+            return False
+        if transport_agent_name != self.agent_name:
+            return True
 
         return await self._handle_tool_approval_action(
             room=room,
