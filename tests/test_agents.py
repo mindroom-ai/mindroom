@@ -1279,7 +1279,7 @@ def test_get_agent_unknown() -> None:
         _create_agent_for_test("unknown", config=config)
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     """Tests that learning can be disabled per agent."""
     config = _test_config()
@@ -1290,7 +1290,7 @@ def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     assert mock_storage.call_count == 1
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_storage: MagicMock) -> None:
     """Tests that defaults.learning is used when per-agent learning is omitted."""
     config = _test_config()
@@ -1319,7 +1319,7 @@ def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # no
     assert agent.learning.user_memory.mode is LearningMode.AGENTIC
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     """Tests that learning mode falls back to defaults when agent config is None."""
     config = _test_config()
@@ -1340,7 +1340,7 @@ def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     assert mock_storage.call_count == 2
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Session and learning databases should live under the canonical agent state root."""
     config = _test_config()
@@ -1352,7 +1352,7 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Worker scope should not change the canonical session and learning paths."""
     config = _test_config()
@@ -1378,7 +1378,7 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     mock_storage: MagicMock,
     tmp_path: Path,
@@ -1742,7 +1742,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_tools(
     mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
@@ -1775,7 +1775,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_state(
     mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
@@ -2906,7 +2906,7 @@ def test_create_agent_shares_culture_manager_for_same_culture(
     model.id = "gpt-4o-mini"
     runtime_paths = _runtime_paths(tmp_path)
     bound_config = _bind_runtime_paths(config, runtime_paths)
-    with patch("mindroom.ai.get_model_instance", return_value=model):
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
         _create_agent_for_test(
             "agent_one",
             config=bound_config,
@@ -2972,7 +2972,7 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     model = MagicMock()
     model.id = "gpt-4o-mini"
     runtime_paths = _runtime_paths(tmp_path)
-    with patch("mindroom.ai.get_model_instance", return_value=model) as mock_get_model_instance:
+    with patch("mindroom.model_loading.get_model_instance", return_value=model) as mock_get_model_instance:
         _create_agent_for_test(
             "agent_one",
             config=_bind_runtime_paths(config, runtime_paths),
@@ -2983,7 +2983,7 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     call_args = mock_get_model_instance.call_args
     assert call_args.args[2] == "m1"  # model_name
     assert mock_agent_class.call_count == 1
-    assert mock_storage.call_count >= 2
+    assert mock_storage.call_count == 1
     assert mock_culture_manager_class.call_args is not None
     assert mock_culture_manager_class.call_args.kwargs["model"] is model
 
@@ -3048,7 +3048,7 @@ def test_create_private_agent_scopes_culture_storage_per_requester(
         session_id=None,
     )
 
-    with patch("mindroom.ai.get_model_instance", return_value=model):
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
         _create_agent_for_test(
             "general",
             config=bound_config,
@@ -3136,7 +3136,7 @@ def test_private_agents_share_culture_manager_within_same_requester_scope(
     created_culture_manager = MagicMock(name="shared_private_culture_manager")
     mock_culture_manager_class.return_value = created_culture_manager
 
-    with patch("mindroom.ai.get_model_instance", return_value=model):
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
         _create_agent_for_test(
             "agent_one",
             config=bound_config,
@@ -3222,7 +3222,7 @@ def test_private_user_agent_agents_share_culture_manager_within_same_requester_s
     created_culture_manager = MagicMock(name="shared_private_culture_manager")
     mock_culture_manager_class.return_value = created_culture_manager
 
-    with patch("mindroom.ai.get_model_instance", return_value=model):
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
         _create_agent_for_test(
             "agent_one",
             config=bound_config,

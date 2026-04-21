@@ -323,7 +323,7 @@ def resolve_request_credentials_target(
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
     _reject_raw_worker_targeting(request)
-    runtime_paths = config_lifecycle.api_runtime_paths(request)
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
 
     base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
     if execution_scope_override_provided is None:

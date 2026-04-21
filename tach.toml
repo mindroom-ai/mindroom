@@ -105,6 +105,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
+    "mindroom.response_runner",
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.topic_generator",
@@ -402,6 +403,7 @@ path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.ai_runtime",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.history.interrupted_replay",
@@ -1257,10 +1259,6 @@ from = ["mindroom.runtime_resolution"]
 [[interfaces]]
 expose = [
     "AIStreamChunk",
-    "append_inline_media_fallback_to_run_input",
-    "queued_message_signal_context",
-    "scrub_queued_notice_session_context",
-    "install_queued_message_notice_hook",
     "get_model_instance",
     "build_matrix_run_metadata",
     "ai_response",

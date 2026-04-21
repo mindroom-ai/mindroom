@@ -17,9 +17,9 @@ from mindroom.agents import get_agent_session, get_team_session, show_tool_calls
 from mindroom.ai import (
     ai_response,
     build_matrix_run_metadata,
-    queued_message_signal_context,
     stream_agent_response,
 )
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,

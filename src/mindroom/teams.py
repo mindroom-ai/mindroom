@@ -31,10 +31,13 @@ from mindroom.agents import create_agent, get_team_session
 from mindroom.ai import (
     build_matrix_run_metadata,
     get_model_instance,
+)
+from mindroom.ai_runtime import (
+    attach_media_to_run_input,
+    cleanup_queued_notice_state,
     install_queued_message_notice_hook,
     scrub_queued_notice_session_context,
 )
-from mindroom.ai_runtime import attach_media_to_run_input, cleanup_queued_notice_state
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message

@@ -43,6 +43,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.execution_preparation import (
     PreparedExecutionContext,
     ThreadHistoryRenderLimits,
+    prepare_bound_team_execution_context,
 )
 from mindroom.history.interrupted_replay import render_interrupted_replay_content
 from mindroom.history.runtime import open_bound_scope_session_context
@@ -849,6 +850,62 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
                 missing_sender_label="Unknown",
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimmed_fallback_prompt() -> None:
+    """Fallback planning should use the team renderer after applying thread-history caps."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team(name="General Team")
+    captured_prompts: list[tuple[str, str | None]] = []
+
+    def fake_estimate_static_tokens(
+        team: AgnoTeam,
+        *,
+        full_prompt: str,
+        fallback_full_prompt: str | None = None,
+    ) -> int:
+        assert team is mock_team
+        captured_prompts.append((full_prompt, fallback_full_prompt))
+        return 0
+
+    with patch(
+        "mindroom.execution_preparation.estimate_preparation_static_tokens_for_team",
+        side_effect=fake_estimate_static_tokens,
+    ):
+        prepared = await prepare_bound_team_execution_context(
+            scope_context=None,
+            agents=[fake_agent],
+            team=mock_team,
+            prompt="Analyze this.",
+            thread_history=[
+                make_visible_message(event_id="event-1", sender="user", body="Older user message"),
+                make_visible_message(
+                    event_id="event-2",
+                    sender="@mindroom_team:example.org",
+                    body="Previous team reply",
+                ),
+            ],
+            runtime_paths=runtime_paths,
+            config=config,
+            team_name=None,
+            active_model_name=None,
+            active_context_window=None,
+            response_sender_id="@mindroom_team:example.org",
+            thread_history_render_limits=ThreadHistoryRenderLimits(
+                max_messages=1,
+                max_message_length=200,
+                missing_sender_label="Unknown",
+            ),
+        )
+
+    assert tuple((message.role, message.content) for message in prepared.messages) == (
+        ("assistant", "Previous team reply"),
+        ("user", "Analyze this."),
+    )
+    assert captured_prompts == [("Analyze this.", "assistant: Previous team reply\n\nAnalyze this.")]
 
 
 @pytest.mark.asyncio

@@ -212,6 +212,44 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     assert "copy_run_input" not in ai_module.__all__
     assert "cleanup_queued_notice_state" not in ai_module.__all__
     assert "cached_agent_run" not in ai_module.__all__
+    assert "append_inline_media_fallback_to_run_input" not in ai_module.__all__
+    assert "install_queued_message_notice_hook" not in ai_module.__all__
+    assert "queued_message_signal_context" not in ai_module.__all__
+    assert "scrub_queued_notice_session_context" not in ai_module.__all__
+    assert "append_inline_media_fallback_to_run_input" not in vars(ai_module)
+    assert "install_queued_message_notice_hook" not in vars(ai_module)
+    assert "queued_message_signal_context" not in vars(ai_module)
+    assert "scrub_queued_notice_session_context" not in vars(ai_module)
+
+
+def test_ai_runtime_helpers_stay_owned_by_ai_runtime_module() -> None:
+    """Internal runtime-helper consumers should import those helpers from ai_runtime, not from ai."""
+    expected_runtime_imports = {
+        Path("src/mindroom/response_runner.py"): {"queued_message_signal_context"},
+        Path("src/mindroom/teams.py"): {
+            "install_queued_message_notice_hook",
+            "scrub_queued_notice_session_context",
+        },
+    }
+
+    for module_path, helper_names in expected_runtime_imports.items():
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        ai_imports = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "mindroom.ai"
+            for alias in node.names
+        }
+        ai_runtime_imports = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "mindroom.ai_runtime"
+            for alias in node.names
+        }
+        assert not (ai_imports & helper_names), f"{module_path} still imports runtime helpers from mindroom.ai"
+        assert helper_names <= ai_runtime_imports, (
+            f"{module_path} should import runtime helpers from mindroom.ai_runtime"
+        )
 
 
 def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:
@@ -273,6 +311,10 @@ def test_tach_seam_map_does_not_codify_known_domain_cycles() -> None:
     assert "copy_run_input" not in ai_interface
     assert "cleanup_queued_notice_state" not in ai_interface
     assert "cached_agent_run" not in ai_interface
+    assert "append_inline_media_fallback_to_run_input" not in ai_interface
+    assert "queued_message_signal_context" not in ai_interface
+    assert "scrub_queued_notice_session_context" not in ai_interface
+    assert "install_queued_message_notice_hook" not in ai_interface
 
 
 class TestAIRouting:

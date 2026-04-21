@@ -25,14 +25,19 @@ from agno.run.base import RunStatus
 from mindroom.agents import create_agent
 from mindroom.ai_runtime import (
     ModelRunInput,
-    append_inline_media_fallback_to_run_input,
     attach_media_to_run_input,
     cached_agent_run,
     cleanup_queued_notice_state,
     copy_run_input,
-    install_queued_message_notice_hook,
-    queued_message_signal_context,
-    scrub_queued_notice_session_context,
+)
+from mindroom.ai_runtime import (
+    append_inline_media_fallback_to_run_input as _append_inline_media_fallback_to_run_input,
+)
+from mindroom.ai_runtime import (
+    install_queued_message_notice_hook as _install_queued_message_notice_hook,
+)
+from mindroom.ai_runtime import (
+    scrub_queued_notice_session_context as _scrub_queued_notice_session_context,
 )
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -103,12 +108,8 @@ logger = get_logger(__name__)
 __all__ = [
     "AIStreamChunk",
     "ai_response",
-    "append_inline_media_fallback_to_run_input",
     "build_matrix_run_metadata",
     "get_model_instance",
-    "install_queued_message_notice_hook",
-    "queued_message_signal_context",
-    "scrub_queued_notice_session_context",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -995,7 +996,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             execution_identity=execution_identity,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            scrub_queued_notice_session_context(
+            _scrub_queued_notice_session_context(
                 scope_context=scope_context,
                 entity_name=agent_name,
             )
@@ -1036,7 +1037,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
             if agent.model is not None:
-                install_queued_message_notice_hook(agent.model)
+                _install_queued_message_notice_hook(agent.model)
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1089,7 +1090,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=str(e),
                             )
-                            attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1108,7 +1109,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=error_text,
                             )
-                            attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1427,7 +1428,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             execution_identity=execution_identity,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            scrub_queued_notice_session_context(
+            _scrub_queued_notice_session_context(
                 scope_context=scope_context,
                 entity_name=agent_name,
             )
@@ -1469,7 +1470,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
             if agent.model is not None:
-                install_queued_message_notice_hook(agent.model)
+                _install_queued_message_notice_hook(agent.model)
 
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1550,7 +1551,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             log_message="Retrying streaming AI response without inline media after validation error",
                             agent_name=agent_name,
                         ):
-                            attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1559,7 +1560,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         return
 
                     if state.retry_requested:
-                        attempt_prompt = append_inline_media_fallback_to_run_input(run_input)
+                        attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
                         attempt_media_inputs = MediaInputs()
                         attempt_run_id = _next_retry_run_id(run_id)
                         continue
