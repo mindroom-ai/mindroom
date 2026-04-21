@@ -1,0 +1,162 @@
+"""Simple AI routing for multi-agent threads."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from agno.agent import Agent
+from pydantic import BaseModel, Field
+
+from mindroom.agents import describe_agent
+from mindroom.ai import get_model_instance
+from mindroom.logging_config import get_logger
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
+from mindroom.matrix.identity import MatrixID
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
+
+
+class _AgentSuggestion(BaseModel):
+    """Structured output for agent routing decisions."""
+
+    agent_name: str = Field(description="The name of the agent that should respond")
+    reasoning: str = Field(description="Brief explanation of why this agent was chosen")
+
+
+async def suggest_agent(
+    message: str,
+    available_agent_names: list[str],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    thread_context: Sequence[ResolvedVisibleMessage] | None = None,
+) -> str | None:
+    """Use AI to suggest which agent should respond to a message.
+
+    This is the core routing logic, independent of any transport layer.
+
+    Args:
+        message: The user message to route.
+        available_agent_names: Plain agent names (e.g. ["code", "research"]).
+        config: Application configuration.
+        runtime_paths: Explicit runtime context for model and Matrix identity resolution.
+        thread_context: Optional recent messages for context.
+            Each message should expose visible sender/body fields.
+
+    Returns:
+        The suggested agent name, or None if routing fails.
+
+    """
+    try:
+        # Build agent descriptions
+        agent_descriptions = []
+        for agent_name in available_agent_names:
+            description = describe_agent(agent_name, config)
+            agent_descriptions.append(f"{agent_name}:\n  {description}")
+
+        agents_info = "\n\n".join(agent_descriptions)
+
+        prompt = f"""Decide which agent should respond to this message.
+
+Available agents and their capabilities:
+
+{agents_info}
+
+Message: "{message}"
+
+Choose the most appropriate agent based on their role, tools, and instructions."""
+
+        if thread_context:
+            context = "Previous messages:\n"
+            for msg in thread_context[-3:]:  # Last 3 messages
+                sender = msg.sender
+                body = msg.body[:100]
+                context += f"{sender}: {body}\n"
+            prompt = context + "\n" + prompt
+
+        # Get router model from config
+        router_model_name = config.router.model
+
+        model = get_model_instance(config, runtime_paths, router_model_name)
+        logger.info(
+            "using_router_model",
+            model_name=router_model_name,
+            model_class=model.__class__.__name__,
+            model_id=model.id,
+        )
+
+        agent = Agent(
+            name="Router",
+            role="Route messages to appropriate agents",
+            model=model,
+            output_schema=_AgentSuggestion,
+        )
+
+        response = await agent.arun(prompt, session_id="routing")
+        suggestion = response.content
+
+        # With output_schema, we should always get the correct type
+        if not isinstance(suggestion, _AgentSuggestion):
+            logger.error(
+                "Unexpected response type from AI routing",
+                expected="AgentSuggestion",
+                actual=type(suggestion).__name__,
+            )
+            return None
+
+        # The AI should only suggest agents from the available list
+        if suggestion.agent_name not in available_agent_names:
+            logger.warning(
+                "AI suggested invalid agent",
+                suggested=suggestion.agent_name,
+                available=available_agent_names,
+            )
+            return None
+
+        logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)
+    except (RuntimeError, ValueError) as e:
+        # Log error and return None - the router will fall back to not routing
+        logger.exception("Routing failed", error=str(e))
+        return None
+    else:
+        return suggestion.agent_name
+
+
+async def suggest_agent_for_message(
+    message: str,
+    available_agents: list[MatrixID],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    thread_context: Sequence[ResolvedVisibleMessage] | None = None,
+) -> str | None:
+    """Use AI to suggest which agent should respond to a message.
+
+    Matrix-aware wrapper around suggest_agent() that converts MatrixID
+    objects to plain agent names and resolves sender identities in
+    thread context.
+    """
+    agent_names = [name for mid in available_agents if (name := mid.agent_name(config, runtime_paths)) is not None]
+
+    # Resolve Matrix sender IDs to readable names for thread context
+    resolved_context = None
+    if thread_context:
+        resolved_context = []
+        for msg in thread_context:
+            sender = msg.sender
+            if sender.startswith("@") and ":" in sender:
+                sender_id = MatrixID.parse(sender)
+                sender = sender_id.agent_name(config, runtime_paths) or sender_id.domain
+            resolved_context.append(replace_visible_message(msg, sender=sender))
+
+    return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)
+
+
+__all__ = [
+    "suggest_agent",
+    "suggest_agent_for_message",
+]
