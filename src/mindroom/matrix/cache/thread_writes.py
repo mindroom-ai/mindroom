@@ -297,7 +297,7 @@ class ThreadOutboundWritePolicy:
                     name="matrix_cache_notify_outbound_event",
                     cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
                     failure_message="Ignoring outbound cache bookkeeping failure after successful send",
-                    log_context={"event_id": event_id, "thread_id": direct_thread_id},
+                    log_context={"event_id": event_id},
                 )
                 return
             self._schedule_fail_open_room_update(
