@@ -1236,6 +1236,25 @@ async def test_synced_resolved_approval_is_evicted_from_live_indexes(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_synced_resolved_approval_deletes_persisted_file(tmp_path: Path) -> None:
+    """Synced approval resolutions should remove their persisted JSON record from disk."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock(return_value=True)
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    request_path = runtime_paths.storage_root / "approvals" / f"{pending.id}.json"
+    assert request_path.exists()
+
+    await store.approve(pending.id, resolved_by="@user:localhost")
+    decision = await task
+
+    assert decision.status == "approved"
+    assert request_path.exists() is False
+
+
+@pytest.mark.asyncio
 async def test_programmatic_approve_requires_original_requester(tmp_path: Path) -> None:
     """Programmatic approval should reject non-requester actors."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1394,8 +1413,7 @@ async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expire
     assert editor.await_args.args[:3] == ("!room:localhost", "$approval-event", "code")
     assert editor.await_args.args[3]["status"] == "expired"
     assert editor.await_args.args[3]["thread_id"] == "$thread"
-    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
-    assert payload["resolution_synced_at"] is not None
+    assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
 
 
 @pytest.mark.asyncio

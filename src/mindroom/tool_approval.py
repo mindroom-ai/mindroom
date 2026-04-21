@@ -320,6 +320,9 @@ class ApprovalManager:
             tmp_path = Path(handle.name)
         safe_replace(tmp_path, target_path)
 
+    def _delete_request_file(self, approval_id: str) -> None:
+        self._request_path(approval_id).unlink(missing_ok=True)
+
     def _store_request(self, pending: PendingApproval) -> None:
         with self._state_lock:
             self._requests_by_id[pending.id] = pending
@@ -899,6 +902,7 @@ class ApprovalManager:
             raise
 
     def _discard(self, approval_id: str) -> None:
+        delete_request_file = False
         with self._state_lock:
             pending = self._pending_by_id.pop(approval_id, None)
             if pending is None:
@@ -918,6 +922,9 @@ class ApprovalManager:
                 return
             self._approval_id_by_event_id.pop(pending.event_id, None)
             self._requests_by_id.pop(approval_id, None)
+            delete_request_file = True
+        if delete_request_file:
+            self._delete_request_file(approval_id)
 
     async def sync_unsynced_resolved(self) -> list[PendingApproval]:
         """Replay any resolved approval cards that were never edited in Matrix."""
