@@ -130,6 +130,19 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
         if all(value is None for value in preview.values()):
             break
 
+    while _json_preview_length(preview) > _MAX_ARGUMENTS_PREVIEW_CHARS and preview:
+        drop_key = max(preview, key=len)
+        preview.pop(drop_key)
+
+    if not preview:
+        summary = {
+            "_summary": sanitize_failure_text(
+                f"{len(sanitized)} arguments omitted because the preview exceeded the size limit.",
+                max_length=max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // 2),
+            ),
+        }
+        return summary, True
+
     return preview, True
 
 

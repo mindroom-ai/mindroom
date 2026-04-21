@@ -538,6 +538,29 @@ async def test_request_approval_sanitizes_arguments_in_matrix_event_and_persiste
 
 
 @pytest.mark.asyncio
+async def test_request_approval_caps_key_heavy_arguments_in_matrix_event(tmp_path: Path) -> None:
+    """Key-heavy argument payloads should still stay within the event preview budget."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    key_heavy_arguments = {f"key_{index:03d}_{'x' * 16}": "v" for index in range(200)}
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments=key_heavy_arguments,
+    )
+
+    assert pending is not None
+    event_payload = sender.await_args.args[3]
+    assert isinstance(event_payload["arguments"], dict)
+    assert len(json.dumps(event_payload["arguments"], sort_keys=True)) <= 1200
+
+    await store.approve(pending.id, resolved_by="@user:localhost")
+    await task
+
+
+@pytest.mark.asyncio
 async def test_request_approval_denies_with_reason(tmp_path: Path) -> None:
     """Denials should unblock the waiting tool call and include the denial reason."""
     runtime_paths = test_runtime_paths(tmp_path)
