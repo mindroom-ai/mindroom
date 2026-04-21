@@ -19,6 +19,7 @@ from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 from agno.team import Team as AgnoTeam
 from agno.team._run import _cleanup_and_store
+from agno.utils.message import get_text_from_message
 
 from mindroom.agents import create_agent
 from mindroom.ai import QUEUED_MESSAGE_NOTICE_TEXT
@@ -205,10 +206,9 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, list)
+    assert isinstance(second_prompt, str)
     assert first_prompt[-1].audio == [audio_input]
-    assert not second_prompt[-1].audio
-    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+    assert "Inline media unavailable for this model" in second_prompt
 
 
 @pytest.mark.asyncio
@@ -378,9 +378,8 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
         "Old thread context",
     ]
     prompt = mock_team.arun.await_args.args[0]
-    assert isinstance(prompt, list)
-    assert len(prompt) == 1
-    assert prompt[0].content == "Analyze this."
+    assert isinstance(prompt, str)
+    assert prompt == "Analyze this."
 
 
 @pytest.mark.asyncio
@@ -443,10 +442,8 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     assert "Recovered team response" in response
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_team.arun.await_args.args[0]
-    assert isinstance(prompt, list)
-    assert [message.role for message in prompt] == ["user", "user"]
-    assert prompt[0].content == "user: Fresh follow-up"
-    assert prompt[1].content == "Analyze this."
+    assert isinstance(prompt, str)
+    assert prompt == "user: Fresh follow-up\n\nAnalyze this."
 
 
 @pytest.mark.asyncio
@@ -1284,8 +1281,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
         "Old thread context",
     ]
     prepared_prompt = mock_raw.await_args.kwargs["prompt"]
-    assert isinstance(prepared_prompt, list)
-    assert [message.content for message in prepared_prompt] == ["Analyze this."]
+    assert prepared_prompt == "Analyze this."
 
 
 @pytest.mark.asyncio
@@ -1355,10 +1351,65 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
     assert len(chunks) == 1
     assert mock_prepare.await_args.kwargs["team"] is mock_team
     prompt = mock_raw.await_args.kwargs["prompt"]
-    assert isinstance(prompt, list)
-    assert [message.role for message in prompt] == ["user", "user"]
-    assert prompt[0].content == "user: Fresh follow-up"
-    assert prompt[1].content == "Analyze this."
+    assert prompt == "user: Fresh follow-up\n\nAnalyze this."
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_preserves_assistant_context_in_team_prompt() -> None:
+    """Streaming team runs should pass the rendered assistant context string to Agno teams."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team(name="team")
+
+    async def raw_stream() -> AsyncIterator[object]:
+        yield TeamRunOutput(content="Streamed team response")
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch(
+            "mindroom.teams._team_response_stream_raw",
+            new_callable=AsyncMock,
+            return_value=raw_stream(),
+        ) as mock_raw,
+    ):
+        mock_prepare.return_value = _prepared_team_execution_context(
+            final_prompt="Analyze this.",
+            replays_persisted_history=True,
+            context_messages=(Message(role="assistant", content="Previous team reply"),),
+        )
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                session_id="session-123",
+                response_sender_id="@mindroom_team:example.org",
+            )
+        ]
+
+    assert len(chunks) == 1
+    assert "Streamed team response" in str(chunks[0])
+    assert mock_raw.await_args.kwargs["prompt"] == "Previous team reply\n\nAnalyze this."
+
+
+def test_agno_team_message_normalization_drops_assistant_context() -> None:
+    """Agno team list[Message] inputs flatten to user text only, so team callers must pass a string."""
+    structured_messages = [
+        Message(role="assistant", content="Previous team reply"),
+        Message(role="user", content="Current request"),
+    ]
+
+    assert get_text_from_message(structured_messages) == "Current request"
 
 
 @pytest.mark.asyncio
@@ -1563,10 +1614,9 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, list)
+    assert isinstance(second_prompt, str)
     assert first_prompt[-1].audio == [audio_input]
-    assert not second_prompt[-1].audio
-    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+    assert "Inline media unavailable for this model" in second_prompt
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered setup stream" in rendered_output
@@ -1618,10 +1668,9 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     first_prompt = first_call.args[0]
     second_prompt = second_call.args[0]
     assert isinstance(first_prompt, list)
-    assert isinstance(second_prompt, list)
+    assert isinstance(second_prompt, str)
     assert first_prompt[-1].audio == [audio_input]
-    assert not second_prompt[-1].audio
-    assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+    assert "Inline media unavailable for this model" in second_prompt
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered stream" in rendered_output

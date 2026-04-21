@@ -84,10 +84,6 @@ def _prepared_team_execution_context(
     )
 
 
-def _message_summaries(messages: list[Message]) -> list[tuple[str, str | None]]:
-    return [(message.role, str(message.content) if message.content is not None else None) for message in messages]
-
-
 @pytest.fixture
 def test_config() -> Config:
     """Create a minimal test config with a few agents."""
@@ -2275,7 +2271,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
         run_input = mock_team.arun.call_args.args[0]
-        assert _message_summaries(run_input) == [("user", "Build a feature")]
+        assert run_input == "Build a feature"
 
     def test_team_non_streaming_formats_plain_run_output_fallback(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should format plain RunOutput fallbacks like the main runtime."""
@@ -2433,7 +2429,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         run_input = mock_team.arun.call_args.args[0]
-        assert _message_summaries(run_input) == [("user", "Build it")]
+        assert run_input == "Build it"
 
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
@@ -2827,7 +2823,7 @@ class TestTeamCompletion:
             ),
             patch(
                 "mindroom.api.openai_compat._prepare_openai_team_run_input",
-                new=AsyncMock(return_value=[Message(role="user", content="Build it")]),
+                new=AsyncMock(return_value="Build it"),
             ),
         ):
             response = await openai_compat._stream_team_completion(
@@ -3319,11 +3315,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         run_input = mock_team.arun.call_args.args[0]
-        assert _message_summaries(run_input) == [
-            ("user", "user: Start"),
-            ("user", "assistant: Ack"),
-            ("user", "Follow-up"),
-        ]
+        assert run_input == "user: Start\n\nassistant: Ack\n\nFollow-up"
 
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(
         self,
@@ -3378,7 +3370,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
         run_input = mock_team.arun.call_args.args[0]
-        assert _message_summaries(run_input) == [("user", "Follow-up")]
+        assert run_input == "Follow-up"
 
     def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
         """Persisted team history should suppress request-history stuffing in the streaming path too."""
@@ -3426,7 +3418,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
         run_input = mock_team.arun.call_args.args[0]
-        assert _message_summaries(run_input) == [("user", "Follow-up")]
+        assert run_input == "Follow-up"
 
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""

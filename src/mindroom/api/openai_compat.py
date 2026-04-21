@@ -72,7 +72,6 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
-    from agno.models.message import Message
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
@@ -1198,8 +1197,8 @@ async def _prepare_openai_team_run_input(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-) -> list[Message]:
-    """Prepare the canonical run input for one OpenAI-compatible team run."""
+) -> str:
+    """Prepare the canonical prompt text for one OpenAI-compatible team run."""
     prepared_execution = await prepare_materialized_team_execution(
         scope_context=scope_context,
         agents=agents,
@@ -1217,7 +1216,7 @@ async def _prepare_openai_team_run_input(
         matrix_run_metadata=None,
         system_enrichment_items=(),
     )
-    return list(prepared_execution.messages)
+    return prepared_execution.prepared_prompt
 
 
 async def _non_stream_team_completion(

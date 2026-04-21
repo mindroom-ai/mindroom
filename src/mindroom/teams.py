@@ -29,9 +29,7 @@ from pydantic import BaseModel, Field
 
 from mindroom.agents import create_agent, enable_all_history_replay, get_team_session
 from mindroom.ai import (
-    _append_inline_media_fallback_to_run_input,
     _attach_media_to_run_input,
-    _copy_run_input,
     build_matrix_run_metadata,
     cleanup_queued_notice_state,
     get_model_instance,
@@ -43,7 +41,6 @@ from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     prepare_bound_team_execution_context,
-    render_prepared_messages_text,
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -57,7 +54,7 @@ from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeManager, ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
-from mindroom.media_fallback import should_retry_without_inline_media
+from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
     ResolvedExactTeamMembers,
@@ -108,19 +105,9 @@ class TeamMode(str, Enum):
 class _PreparedMaterializedTeamExecution:
     """Shared prepared team execution state used by stream and non-stream paths."""
 
-    messages: tuple[Message, ...]
+    prepared_prompt: str
     run_metadata: dict[str, Any] | None
     unseen_event_ids: list[str]
-
-    @property
-    def prepared_prompt(self) -> str:
-        """Return the prompt-visible text derived from canonical live messages."""
-        return render_prepared_messages_text(self.messages)
-
-    @property
-    def context_messages(self) -> tuple[Message, ...]:
-        """Return replayed context messages without the current user turn."""
-        return self.messages[:-1]
 
 
 def _next_retry_run_id(run_id: str | None) -> str | None:
@@ -1357,7 +1344,7 @@ async def prepare_materialized_team_execution(
         extra_metadata=matrix_run_metadata,
     )
     return _PreparedMaterializedTeamExecution(
-        messages=prepared_execution.messages,
+        prepared_prompt=prepared_execution.final_prompt,
         run_metadata=run_metadata,
         unseen_event_ids=prepared_execution.unseen_event_ids,
     )
@@ -1456,20 +1443,23 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 system_enrichment_items=system_enrichment_items,
                 current_sender_id=user_id,
             )
-            prompt = prepared_execution.prepared_prompt
-            run_input = prepared_execution.messages
+            prepared_prompt = prepared_execution.prepared_prompt
             run_metadata = prepared_execution.run_metadata
             logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
-            logger.info("team_prompt_preview", agents=agent_list, prompt_preview=prompt[:500])
+            logger.info("team_prompt_preview", agents=agent_list, prompt_preview=prepared_prompt[:500])
 
             async def _run(
-                current_prompt: Sequence[Message],
+                current_prompt: str,
                 current_media_inputs: MediaInputs,
                 current_run_id: str | None,
             ) -> object:
                 if run_id_callback is not None and current_run_id is not None:
                     run_id_callback(current_run_id)
-                prepared_input = _attach_media_to_run_input(current_prompt, current_media_inputs)
+                prepared_input = (
+                    _attach_media_to_run_input(current_prompt, current_media_inputs)
+                    if current_media_inputs.has_any()
+                    else current_prompt
+                )
                 return await team.arun(
                     prepared_input,
                     session_id=session_id,
@@ -1479,7 +1469,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 )
 
             response: object | None = None
-            attempt_prompt = _copy_run_input(run_input)
+            attempt_prompt = prepared_prompt
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
             try:
@@ -1497,7 +1487,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 agents=agent_list,
                                 error=str(e),
                             )
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1516,7 +1506,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 agents=agent_list,
                                 error=error_text,
                             )
-                            attempt_prompt = _append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
                             continue
@@ -1595,7 +1585,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 async def _team_response_stream_raw(
     team: Team,
     team_members: ResolvedExactTeamMembers,
-    prompt: Sequence[Message],
+    prompt: str,
     metadata: dict[str, Any] | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
@@ -1625,8 +1615,12 @@ async def _team_response_stream_raw(
     for agent in agents:
         logger.debug("team_member", agent=agent.name)
 
-    def _start_stream(current_prompt: Sequence[Message], current_media_inputs: MediaInputs) -> AsyncIterator[Any]:
-        prepared_input = _attach_media_to_run_input(current_prompt, current_media_inputs)
+    def _start_stream(current_prompt: str, current_media_inputs: MediaInputs) -> AsyncIterator[Any]:
+        prepared_input = (
+            _attach_media_to_run_input(current_prompt, current_media_inputs)
+            if current_media_inputs.has_any()
+            else current_prompt
+        )
         return team.arun(
             prepared_input,
             stream=True,
@@ -1749,12 +1743,12 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 system_enrichment_items=system_enrichment_items,
                 current_sender_id=user_id,
             )
-            prepared_run_input = prepared_execution.messages
+            prepared_run_input = prepared_execution.prepared_prompt
             unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
             media_inputs = media or MediaInputs()
-            attempt_prompt = _copy_run_input(prepared_run_input)
+            attempt_prompt = prepared_run_input
             attempt_media_inputs = media_inputs
             attempt_run_id = run_id
 
@@ -1924,7 +1918,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     agents=", ".join(agent_names),
                                     error=error_text,
                                 )
-                                attempt_prompt = _append_inline_media_fallback_to_run_input(prepared_run_input)
+                                attempt_prompt = append_inline_media_fallback_prompt(prepared_run_input)
                                 attempt_media_inputs = MediaInputs()
                                 attempt_run_id = _next_retry_run_id(run_id)
                                 retry_requested = True
@@ -1968,7 +1962,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     agents=", ".join(agent_names),
                                     error=error_text,
                                 )
-                                attempt_prompt = _append_inline_media_fallback_to_run_input(prepared_run_input)
+                                attempt_prompt = append_inline_media_fallback_prompt(prepared_run_input)
                                 attempt_media_inputs = MediaInputs()
                                 attempt_run_id = _next_retry_run_id(run_id)
                                 retry_requested = True
