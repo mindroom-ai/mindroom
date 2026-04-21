@@ -220,6 +220,7 @@ class MultiAgentOrchestrator:
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
+    _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
     def __post_init__(self) -> None:
@@ -726,6 +727,15 @@ class MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.hook_registry = hook_registry
 
+    def _sync_plugin_watch_roots(self, config: Config | None = None) -> tuple[Path, ...]:
+        """Align watcher baselines with the currently configured plugin roots."""
+        active_config = self.config if config is None else config
+        configured_roots = (
+            get_configured_plugin_roots(active_config, self.runtime_paths) if active_config is not None else ()
+        )
+        _sync_plugin_root_snapshots(configured_roots, self._plugin_watch_last_snapshot_by_root)
+        return configured_roots
+
     async def reload_plugins_now(
         self,
         *,
@@ -1221,6 +1231,7 @@ class MultiAgentOrchestrator:
 
         # Only apply the new config after validation and account checks succeed.
         self.config = new_config
+        self._sync_plugin_watch_roots(new_config)
         self._activate_hook_registry(new_hook_registry)
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
         await self._sync_event_cache_service(new_config)
@@ -1583,7 +1594,7 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
 
 async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
     """Watch configured plugin roots and hot-reload them after debounced edits."""
-    last_snapshot_by_root: dict[Path, dict[Path, int]] = {}
+    last_snapshot_by_root = orchestrator._plugin_watch_last_snapshot_by_root
     pending_changes: set[Path] = set()
     last_change_at: float | None = None
     loop = asyncio.get_running_loop()
@@ -1591,10 +1602,7 @@ async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
     while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
 
-    config = orchestrator.config
-    if config is not None:
-        configured_roots = get_configured_plugin_roots(config, orchestrator.runtime_paths)
-        _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
+    configured_roots = orchestrator._sync_plugin_watch_roots()
 
     while orchestrator.running:
         await asyncio.sleep(file_watcher._WATCH_SCAN_INTERVAL_SECONDS)
@@ -1604,16 +1612,8 @@ async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
             if config is None:
                 continue
 
-            configured_roots = get_configured_plugin_roots(config, orchestrator.runtime_paths)
-            pending_changes = _filter_pending_plugin_changes(
-                pending_changes,
-                configured_roots,
-                last_snapshot_by_root,
-            )
-            seeded_paths = _seed_new_plugin_root_changes(configured_roots, last_snapshot_by_root)
-            if seeded_paths:
-                pending_changes.update(seeded_paths)
-                last_change_at = loop.time()
+            configured_roots = orchestrator._sync_plugin_watch_roots(config)
+            pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
             changed_paths = _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
 
             if changed_paths:
@@ -1640,13 +1640,8 @@ async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
 def _filter_pending_plugin_changes(
     pending_changes: set[Path],
     configured_roots: tuple[Path, ...],
-    last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> set[Path]:
-    """Drop pending changes and watcher snapshots for roots no longer configured."""
-    configured_root_set = set(configured_roots)
-    for root in tuple(last_snapshot_by_root):
-        if root not in configured_root_set:
-            last_snapshot_by_root.pop(root, None)
+    """Drop pending changes for roots that are no longer configured."""
     return {path for path in pending_changes if _path_is_under_any_root(path, configured_roots)}
 
 
@@ -1666,19 +1661,19 @@ def _collect_plugin_root_changes(
     return changed_paths
 
 
-def _seed_new_plugin_root_changes(
+def _sync_plugin_root_snapshots(
     configured_roots: tuple[Path, ...],
     last_snapshot_by_root: dict[Path, dict[Path, int]],
-) -> set[Path]:
-    """Capture one initial snapshot for newly configured roots and treat it as pending work."""
-    seeded_paths: set[Path] = set()
+) -> None:
+    """Drop removed roots and seed baselines for newly configured ones."""
+    configured_root_set = set(configured_roots)
+    for root in tuple(last_snapshot_by_root):
+        if root not in configured_root_set:
+            last_snapshot_by_root.pop(root, None)
     for root in configured_roots:
         if root in last_snapshot_by_root:
             continue
-        current_snapshot = file_watcher._tree_snapshot(root)
-        last_snapshot_by_root[root] = current_snapshot
-        seeded_paths.update(current_snapshot)
-    return seeded_paths
+        last_snapshot_by_root[root] = file_watcher._tree_snapshot(root)
 
 
 def _path_is_under_any_root(path: Path, roots: tuple[Path, ...]) -> bool:
