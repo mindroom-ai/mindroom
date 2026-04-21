@@ -14,6 +14,7 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.session.agent import AgentSession
 
+from mindroom import model_loading
 from mindroom.agents import create_session_storage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
@@ -501,9 +502,6 @@ async def _extract_memory_summary(
     execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> str | None:
-    # Deferred to avoid circular import: mindroom.ai imports from the mindroom.memory facade.
-    from mindroom.ai import get_model_instance  # noqa: PLC0415
-
     extractor = config.memory.auto_flush.extractor
     if not lines:
         return None
@@ -534,7 +532,7 @@ async def _extract_memory_summary(
     )
 
     model_name = config.get_entity_model_name(agent_name)
-    model = get_model_instance(config, runtime_paths, model_name)
+    model = model_loading.get_model_instance(config, runtime_paths, model_name)
     extractor_agent = Agent(
         name="MemoryAutoFlushExtractor",
         role="Extract durable memory statements for long-term memory storage.",

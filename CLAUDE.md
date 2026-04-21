@@ -54,6 +54,7 @@ For Google image work, use the official product name from the docs even if older
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent agent selection when no agent is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
+| `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
@@ -61,7 +62,11 @@ For Google image work, use the official product name from the docs even if older
 | `scheduling.py` | Cron and natural-language task scheduling |
 | `tools/` | 100+ tool integrations |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
-| `ai.py` | AI model instantiation, caching, and response generation |
+| `ai.py` | AI response generation, streaming, and Matrix run metadata |
+| `model_loading.py` | Model instantiation and provider-specific loader selection |
+| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |

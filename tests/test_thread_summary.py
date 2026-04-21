@@ -1357,7 +1357,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="🧵 ISSUE-133 prompt preserved")
 
         with (
-            patch("mindroom.thread_summary.get_model_instance", return_value=mock_model),
+            patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
             patch("mindroom.thread_summary.Agent") as mock_agent_cls,
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)) as mock_run,
         ):
@@ -1394,7 +1394,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="🧪 ISSUE-148 matrix cache invalidate-and-refetch live test")
 
         with (
-            patch("mindroom.thread_summary.get_model_instance", return_value=mock_model),
+            patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
         ):
@@ -1425,7 +1425,7 @@ class TestGenerateSummary:
         try:
             with (
                 caplog.at_level("WARNING", logger="mindroom.thread_summary"),
-                patch("mindroom.thread_summary.get_model_instance", return_value=mock_model),
+                patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
                 patch("mindroom.thread_summary.Agent"),
                 patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
             ):
@@ -1462,7 +1462,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="\U0001f527 Auth deployment discussed and approved")
 
         with (
-            patch("mindroom.thread_summary.get_model_instance"),
+            patch("mindroom.model_loading.get_model_instance"),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", return_value=mock_response),
         ):
@@ -1479,7 +1479,7 @@ class TestGenerateSummary:
         mock_response.content = None
 
         with (
-            patch("mindroom.thread_summary.get_model_instance"),
+            patch("mindroom.model_loading.get_model_instance"),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", return_value=mock_response),
         ):

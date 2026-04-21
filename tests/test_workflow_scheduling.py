@@ -154,7 +154,7 @@ class TestScheduledWorkflow:
 class TestParseWorkflowSchedule:
     """Test parse_workflow_schedule function."""
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_research_email_workflow(
         self,
@@ -189,7 +189,7 @@ class TestParseWorkflowSchedule:
         assert "@research" in result.message
         assert "@email_assistant" in result.message
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_simple_reminder(
         self,
@@ -220,7 +220,7 @@ class TestParseWorkflowSchedule:
         assert result.schedule_type == "once"
         assert result.message == "Check the deployment status"
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_daily_task(self, mock_agent_class: Mock, mock_get_model: Mock, mock_config: MagicMock) -> None:  # noqa: ARG002
         """Test parsing daily recurring task."""
@@ -247,7 +247,7 @@ class TestParseWorkflowSchedule:
         assert result.cron_schedule.to_cron_string() == "0 9 * * *"
         assert "@finance" in result.message
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_error_handling(
         self,
@@ -271,7 +271,7 @@ class TestParseWorkflowSchedule:
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_formats_available_agents_without_double_at(
         self,
@@ -307,7 +307,7 @@ class TestParseWorkflowSchedule:
         assert "Available agents: @general, @research, @mindroom_finance, @mindroom_analyst" in prompt
         assert "@@" not in prompt
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_missing_fields_fallbacks(
         self,
@@ -360,7 +360,7 @@ class TestParseWorkflowSchedule:
         assert result_cron.schedule_type == "cron"
         assert result_cron.cron_schedule is not None
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_conditional_schedule_rejects_non_polling_cron(
         self,

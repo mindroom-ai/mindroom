@@ -759,7 +759,7 @@ def test_create_agent_uses_session_loaded_dynamic_toolkits_and_injects_prompt_bl
     model.id = "gpt-4o-mini"
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.agents.Agent") as mock_agent_class,
     ):
         create_agent(
@@ -816,7 +816,7 @@ def test_create_agent_without_session_id_skips_dynamic_tools_and_prompt_block(tm
     model.id = "gpt-4o-mini"
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.agents.Agent") as mock_agent_class,
     ):
         create_agent(
@@ -852,7 +852,7 @@ def test_create_agent_reuses_saved_in_memory_toolkits_across_calls(tmp_path: Pat
     save_loaded_toolkits_for_session(session_id="session-1", loaded_toolkits=["research"])
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.agents.Agent") as mock_agent_class,
     ):
         create_agent(
@@ -888,7 +888,7 @@ def test_create_agent_uses_dynamic_runtime_worker_routing(tmp_path: Path) -> Non
         return toolkit
 
     with (
-        patch("mindroom.ai.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.agents.build_agent_toolkit", side_effect=_fake_toolkit) as mock_build_agent_toolkit,
         patch("mindroom.agents.prepend_tool_hook_bridge", side_effect=lambda toolkit, _bridge: toolkit),
         patch("mindroom.agents.Agent"),
@@ -985,9 +985,13 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
             new_callable=AsyncMock,
             return_value=MemoryPromptParts(),
         ),
-        patch("mindroom.ai.prepare_agent_execution_context", new_callable=AsyncMock, return_value=prepared_execution),
-        patch("mindroom.ai.get_model_instance", return_value=model),
-        patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
+        patch(
+            "mindroom.ai.prepare_agent_execution_context",
+            new_callable=AsyncMock,
+            return_value=prepared_execution,
+        ),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
     ):
         response = await ai_response(
             agent_name="code",

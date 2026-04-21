@@ -132,6 +132,6 @@ def build_hook_matrix_admin(
     runtime_paths: RuntimePaths,
 ) -> HookMatrixAdmin:
     """Lazily import the concrete matrix admin builder to avoid package cycles."""
-    from .matrix_admin import build_hook_matrix_admin as _build_hook_matrix_admin  # noqa: PLC0415
+    from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
 
-    return _build_hook_matrix_admin(client, runtime_paths)
+    return build_hook_matrix_admin(client, runtime_paths)

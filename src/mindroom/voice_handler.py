@@ -13,7 +13,7 @@ import httpx
 from agno.agent import Agent
 from agno.media import Audio
 
-from mindroom.ai import get_model_instance
+from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.constants import (
@@ -457,7 +457,7 @@ Transcription: "{transcription}"
 Output the formatted message only, no explanation:"""
 
         # Get the AI model to process the transcription
-        model = get_model_instance(config, runtime_paths, config.voice.intelligence.model)
+        model = model_loading.get_model_instance(config, runtime_paths, config.voice.intelligence.model)
 
         # Create an agent for voice command processing
         agent = Agent(

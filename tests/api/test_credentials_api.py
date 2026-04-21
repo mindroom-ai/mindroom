@@ -290,7 +290,6 @@ class TestCredentialsAPI:
 
     def test_resolve_request_credentials_target_keeps_one_runtime_for_identity(
         self,
-        monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         """Credential targeting should derive worker identity from the same bound runtime it validated."""
@@ -317,16 +316,22 @@ class TestCredentialsAPI:
         config = _config_with_worker_scope("shared")
         base_manager = MagicMock()
         base_manager.for_worker.return_value = MagicMock()
-        runtime_lookup = MagicMock(side_effect=[runtime_a, runtime_b])
-        monkeypatch.setattr("mindroom.api.main.api_runtime_paths", runtime_lookup)
         _publish_committed_runtime_config(app, config)
 
+        def _swap_runtime_on_manager_lookup(runtime_paths: object) -> MagicMock:
+            assert runtime_paths == runtime_a
+            initialize_api_app(app, runtime_b)
+            _publish_committed_runtime_config(app, config)
+            return base_manager
+
         with (
-            patch("mindroom.api.credentials.get_runtime_credentials_manager", return_value=base_manager),
+            patch(
+                "mindroom.api.credentials.get_runtime_credentials_manager",
+                side_effect=_swap_runtime_on_manager_lookup,
+            ),
         ):
             target = credentials_api.resolve_request_credentials_target(request, agent_name="general")
 
-        assert runtime_lookup.call_count == 1
         assert target.runtime_paths == runtime_a
         assert target.execution_identity is not None
         assert target.execution_identity.tenant_id == "tenant-a"

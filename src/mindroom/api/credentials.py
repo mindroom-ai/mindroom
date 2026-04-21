@@ -322,10 +322,8 @@ def resolve_request_credentials_target(
     execution_scope_override: WorkerScope | None = None,
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     _reject_raw_worker_targeting(request)
-    runtime_paths = api_runtime_paths(request)
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
 
     base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
     if execution_scope_override_provided is None:
